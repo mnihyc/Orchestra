@@ -744,6 +744,10 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             }
         }
         Command::FsWrite(_)
+        | Command::FsRelayReceive(_)
+        | Command::FsRelayVerify(_)
+        | Command::FsRelayPrepare(_)
+        | Command::FsRelayCommit(_)
         | Command::FsMkdir(_)
         | Command::FsDataImport(_)
         | Command::FsRename(_)
@@ -1559,6 +1563,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,

@@ -48,6 +48,19 @@ describe('catalogued choices in the common setting editor', () => {
     } finally { await setLocale('en'); }
   });
 
+  it.each([['en', 'Relayed', 'Cached'], ['zh-CN', '中转', '缓存']] as const)('names the two states of the file relay switch in %s', async (locale, relayed, cached) => {
+    await setLocale(locale);
+    try {
+      const shape = shapeOf({ type: 'boolean' });
+      for (const [value, word, other] of [[true, relayed, cached], [false, cached, relayed]] as const) {
+        const view = show(<SettingChoiceContext.Provider value="storage.relay_transfers"><ValueControl shape={shape} value={value} onChange={() => undefined} label="File relay" say={(name) => i18n.t(`settings.editor.words.${name}`)} /></SettingChoiceContext.Provider>);
+        expect(screen.getByText(word)).toBeVisible();
+        expect(screen.queryByText(other)).not.toBeInTheDocument();
+        view.unmount();
+      }
+    } finally { await setLocale('en'); }
+  });
+
   it('keeps choice context through a nested policy object', () => {
     const shape = shapeOf({ type: 'object', properties: {
       decision: { type: 'string', enum: ['allow', 'ask', 'deny'] },

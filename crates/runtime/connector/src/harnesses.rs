@@ -69,6 +69,14 @@ fn runtime_environment_name(provider: Id, agent: Id) -> String {
     format!("harness-runtime-{provider}-{agent}")
 }
 
+/// Native sign-ins live with the environment home, separately from replaceable connector identity.
+fn environment_connection_home(root: &Path, provider: Id, agent: Id) -> PathBuf {
+    root.join(".orch")
+        .join("provider-connections")
+        .join(provider.to_string())
+        .join(agent.to_string())
+}
+
 fn process_environment(services: &Services, mut start: AdapterStart) -> AdapterStart {
     if services.policy.policy().is_none() {
         // A managed unit has one environment and needs no peer token. Refresh the local URL
@@ -1281,6 +1289,42 @@ impl Hosting {
     ) -> Result<Option<PathBuf>, CommandError> {
         let services = &self.ctx.services;
         let source = Self::home_source(request, profile);
+        if request
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.environment_home)
+        {
+            if !services.policy.is_managed()
+                || !services
+                    .config
+                    .connector
+                    .roles
+                    .iter()
+                    .any(|role| role == "environment")
+            {
+                return Err(unavailable(
+                    "this connector has no managed environment home",
+                ));
+            }
+            if let Some(orch_agent_contract::facts::EnvironmentDataSource::ExistingDirectory {
+                path,
+            }) = &source
+            {
+                let path = PathBuf::from(path);
+                crate::policy::writable_environment_directory(&path)?;
+                return Ok(Some(path));
+            }
+            let root = std::env::var_os("ORCH_HOME_DIR")
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    unavailable("this environment has not reported its persistent home")
+                })?;
+            return Ok(Some(environment_connection_home(
+                &root,
+                request.provider_id,
+                request.agent_id,
+            )));
+        }
         if let Ok(mapped) = std::env::var("ORCH_HARNESS_HOME") {
             let actual: orch_agent_contract::facts::EnvironmentDataSource =
                 std::env::var("ORCH_HARNESS_HOME_SOURCE")
@@ -1914,6 +1958,25 @@ impl Hosting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_connections_keep_distinct_native_homes_on_the_environment_home_volume() {
+        let provider = orch_types::new_id();
+        let agent = orch_types::new_id();
+        let root = Path::new("/persistent/environment-home");
+        let home = environment_connection_home(root, provider, agent);
+        assert!(home.starts_with(root));
+        assert_eq!(home, environment_connection_home(root, provider, agent));
+        assert_ne!(
+            home,
+            environment_connection_home(root, orch_types::new_id(), agent)
+        );
+        assert_ne!(
+            home,
+            environment_connection_home(root, provider, orch_types::new_id())
+        );
+        assert!(!home.starts_with("/connector-state"));
+    }
 
     fn idle_lane() -> OpenSession {
         OpenSession {

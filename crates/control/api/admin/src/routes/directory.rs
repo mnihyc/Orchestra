@@ -1502,7 +1502,7 @@ async fn service_token_create_in(
     ctx: Ctx,
     body: orch_api_contract::auth::ApiTokenCreateBody,
 ) -> ApiResult<Answer<orch_api_contract::auth::TokenCreateResponse>> {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_token, token_hash};
     use crate::routes::auth::tokens;
     use crate::sign_in::fresh::{self, Purpose};
     let authed = std::sync::Arc::clone(ctx.user()?);
@@ -1570,7 +1570,7 @@ async fn service_token_create_in(
             .await?;
     }
     let token_id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(token_id);
     let name = asked.name.clone();
     identity::create_api_token_scoped(
         &mut tx,

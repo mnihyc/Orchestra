@@ -799,6 +799,7 @@ impl TestApp {
                                 )
                                 .await?;
                             }
+                            orch_db::queries::provider_relay::command_done(&mut tx,machine,row.id,now).await?;
                             sqlx::query("UPDATE commands SET stop_confirmed_at=$2 WHERE id=$1 AND machine_id=$3 AND stop_confirmed_at IS NULL")
                                 .bind(row.id).bind(now).bind(machine).execute(&mut *tx).await?;
                             tx.commit().await.map_err(orch_db::DbError::from)?;

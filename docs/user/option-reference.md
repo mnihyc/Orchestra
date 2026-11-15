@@ -1,8 +1,8 @@
 ---
 group: providers
-screens: [/help, /thread/$threadId, /resources/providers/$id]
+screens: [/help, /thread/$threadId, /resources/providers/$id, /settings/interface, /topic/$topicId]
 keywords: [reference, settings, options, states, errors, 参考, 设置, 选项, 状态, 错误]
-summary: Every request option a provider endpoint accepts, and what it changes.
+summary: Shipped request, interface and provider options, and what they change.
 ---
 
 # Option field reference
@@ -13,8 +13,60 @@ An option is offered only where its interface or program declares it. Provider l
 
 | Reference | Meaning |
 | --- | --- |
+| `option:UploadSessionPutReply.expires_at` | The idle expiry retained by the receiving carrier after the acknowledged prefix. Progress renews the captured interval; a later default edit does not change an existing session. |
+| `option:UploadSessionCreateBody.to` | The workspace destination selected before any bytes are sent. Omission retains a private upload on the API. File relay chooses the native carrier; the actual machine and incarnation stay bound until this session ends. |
+| `option:UploadDestination.environment_id` | The logical destination environment. Its current Files management and remote-write policy still govern staging and publication. |
+| `option:UploadDestination.path` | The initial workspace-relative path, including the file name. Replace and Keep both choose the final checked path after upload. |
+| `option:UploadDestination.thread` | An optional thread beside which the person is working. It supplies no permission to write the environment. |
+| `option:UploadedBlob.relay` | The verified native upload session when content is staged only at its destination. It grants no retained private attachment source; absence means ordinary stored upload custody. |
+| `option:UploadSessionCompletion.file` | The actual verified file receipt in the ready alternative. Pending verification has no file receipt. |
+| `option:UploadSessionCompletion.retry_after_ms` | The resolved file-relay retry pause before checking native verification again. Asking again does not resend accepted bytes. |
+| `option:EnvironmentUploadWriteBody.relay` | The verified native session for this workspace write. The job prepares without the environment key, then publishes after checking the target version; omission uses an authorized retained blob. |
+| `option:FetchState.reason` | Why the selected file cannot be read: offline for a live relay, offline_not_cached for cached mode without a retained version, ignored, too_large or not_found. Pending source hashing stays fetching until its native completion or failure. |
+| `option:CredentialForm.expires` | An access-token copy expires at the time its issuer reports for that copy, even when no fixed duration is declared. It carries no renewal credential. |
+| `option:ArrangementConsentForm.expires` | The shared credential has an expiry reported by its sign-in; an absent fixed lifetime is not a promise that it lasts indefinitely. |
+| `option:TokenCreated.token` | The API key secret, shown once: opat_, the key’s own 32 lowercase UUID hex digits, an underscore, 43 unpadded base64url characters holding 256 random secret bits, and a six-character zero-padded Base62 CRC-32/ISO-HDLC checksum over all preceding text. Older opaque forms are refused. |
+| `option:TokenCreateReceipt.token` | The same canonical identity-bound API key as TokenCreated.token, shown once in an acknowledgement; null on a repeated creation. |
+| `option:CreateProvider.runtime_location` | The connection location: a new container using its host/template choices, a person’s machine, or an existing environment the caller may use. Environment connections follow its availability and persistent home. |
+| `option:ProviderConnectionLocation.kind` | container, machine or environment selects one location through the same control. |
+| `option:ProviderConnectionLocation.machine_id` | The selected machine for a machine location; its declared connection services and current Use authority apply. |
+| `option:ProviderConnectionLocation.environment_id` | The selected logical environment. Its current own connector supplies the connection after a move or rebuild; credentials placed there are readable to its agents and terminal users. |
+| `option:ProviderSetup.environments` | Existing environments the caller may use, with actual connector services; unavailable choices retain their reason. |
+| `option:ProviderSetupEnvironment.environment` | The environment name and current state for the connection location choice. |
+| `option:ProviderSetupEnvironment.connector` | The current own connector and declared services; absent when no own connector exists. |
+| `option:Provider.connection_environment` | The environment keeping this connection, including stopped or removed state. A separately selected credential keeper remains independent. |
+| `option:ProviderListQuery.connection_environment_id` | List readable providers whose connection belongs to this environment. |
+| `option:AgentRuntime.environment_home` | Keep an environment-hosted connection’s own harness home under that environment’s persistent home, so ordinary home transfer carries it. An explicitly chosen existing directory remains explicit. |
+| `option:FileRenameResult.kept_entries` | Entries observed left at the source after a cross-filesystem move, including their containing directories. Only copied entries whose identity and version still match are removed, children first; ignored, new or changed entries stay. An unreadable subtree counts once. Filesystems without stable file identities keep the source copy. |
+| `option:ProviderStartStopBody.force` | Stop a provider even while its own work is stuck. Other work and running turns can still require a separate decision. The record stops at once; the host is told again until it confirms. |
+| `option:HostRuntimeStopBody.force` | Apply the same forced-stop behavior to a provider runtime from its host page. Environment runtimes do not support this option and return an explicit refusal. |
+| `option:HostRuntimeDeleteQuery.force` | End the provider’s own work that prevents deletion, then remove its runtime with the chosen volume treatment. Work that has committed and a replaced runtime keep their explicit safeguards. |
+| `option:ProviderRuntime.detail` | The reason for the runtime’s current state. A forced stop says that host confirmation is pending, then becomes the ordinary person-requested stop once the host confirms. Host-supplied diagnostics remain the host’s own words. |
+| `option:PersonalState.sidebar.open_links` | The person’s Open links in choice, kept with sidebar state: automatic by default, this or new. Automatic keeps each destination in one view; this replaces the current view and new opens a view. An already open target is focused. Choose it in Interface or a tab menu; explicit clones and browser modifier clicks keep their usual behavior. |
+| `option:TopicSearch.q` | The thread-name search on a topic’s Overview and Threads tab. It filters the visible live collection, travels in the topic address and is not retained as a device default. |
+| `option:codex.cyber_access_program` | The Codex access program offered by the model and enabled for the provider. The selected name reaches the native turn unchanged, including names outside the Daybreak family. Normal model/account eligibility and provider access still apply. |
+| `option:InputScheduleCreateBody.plan` | The authored Plan choice of every future occurrence. Required at creation; true requests a planning turn and false requests work. It is kept when the occurrence is accepted, including when an ordinary mode boundary makes it wait. |
+| `option:InputScheduleCreateBody.delivery` | Required queue, steer or interrupt choice for future input. Saved and rechecked through the ordinary input writer when due; creating a schedule does not deliver it immediately. |
+| `option:InputScheduleUpdateBody.plan` | An explicit Plan change is an author-only, revision-checked definition edit. Omission keeps the reviewed choice. |
+| `option:InputScheduleUpdateBody.delivery` | An explicit queue, steer or interrupt change is an author-only, revision-checked definition edit. Omission keeps the reviewed choice; pausing or resuming alone does not replace it. |
+| `option:ThreadGoalUpdateBody.action` | Pause, resume, or accept an unchecked completion report. Accept is the person's explicit Mark met decision; Resume on an unchecked report means Keep working and claims no verification. |
+| `option:AgentProfile.config.native_result_wait_ms` | Codex's optional retained-result wait in milliseconds. Omission uses the registered system default, fitted within the engine's interrupt window. A profile's explicit valid wait is kept or refused with its reason. |
+| `option:AgentProfile.config.native_result_buffer_bytes` | Codex's optional byte budget for ordered later input during an evidence read. Omission uses the registered system default. Pressure ends optional proof without dropping input or stopping another session. |
+| `option:SessionSettings.web_action_wait_secs` | The resolved inherited native web-row wait sent to an agent session. Codex uses receipt time and retains ownership for a late real end; the wait never interrupts the turn. |
+| `option:SessionOpen.web_action_wait_secs` | Required resolved web-row wait on the connector's session-open command, carried into the session settings and its reopen fingerprint. |
+| `option:x_turn_end_delays.delays.*.default_setting` | The program's declared system registry key supplying an omitted profile wait in milliseconds. The engine resolves it and fits that default under its interrupt window; an explicit profile wait is not shortened. |
+| `option:x_turn_end_delays.delays.*.pending_buffer` | A program's declaration of optional ordered-input buffering during its evidence wait. Pressure must end optional evidence and continue the input, rather than drop or refuse frames. |
+| `option:x_turn_end_delays.delays.*.pending_buffer.pointer` | JSON pointer to this byte budget in the program profile's configuration. An explicit valid profile value is retained. |
+| `option:x_turn_end_delays.delays.*.pending_buffer.default_bytes` | The program's fallback byte default. The engine supplies the declared registered system default when the profile leaves the pointer unset. |
+| `option:x_turn_end_delays.delays.*.pending_buffer.default_setting` | The declared system registry key for the pending-input byte default. It must name an available unsigned integer setting. |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
+| `option:EverythingListQuery.resource_rows` | Return compact table rows and the readable sharing summary once per home in the page. Full configuration is read from each resource when opened. |
+| `option:EverythingListQuery.resource_details` | Return full resource views when table rows are not requested. This is used by choices that draw the full configuration. |
+| `option:ThreadOpeningGetQuery.limit` | Positive item count for this opening, overriding the resolved threads.opening_items default. Older items remain available through history cursors. |
+| `option:ThreadOpeningGetQuery.continuation_id` | Choose the history continuation for this read without changing which continuation executes. |
+| `option:ThreadOpeningGetQuery.projection_revision` | Name the known history projection. A stale value returns the native reset with sync.complete=false and the current selector, which can be used to open a fresh window. |
+| `option:ThreadModelParameter.options_partial` | True when additional model choices are deferred. Read the full thread parameters when opening the model chooser. |
 | `option:AccessOptions.models` | The models. |
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |
@@ -25,6 +77,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |
@@ -96,3 +149,47 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:providers.presets.*.credential_hints.*.prefix` | The plain public beginning of a key format. Matching only proposes a choice; the complete key stays in the form until Save. |
 | `option:providers.presets.*.credential_hints.*.role` | The proposed role: model access or an admin credential for the facts source. A role the client does not recognize requires an explicit supported choice. |
 | `option:providers.presets.*.credential_hints.*.field` | Optional declared secret-field name for the proposed admin credential in the selected facts source. It is kept separate from model access and must be offered by that source. |
+| `option:TranslationOptions.allowed` | Whether a selected pairing may use format conversion under its current place policy. |
+| `option:TranslationOptions.output_tokens` | The captured fallback output allowance when neither the request nor the offering supplies one. |
+| `option:ProtocolTranslation.from` | The caller or harness interface of the selected conversion. |
+| `option:ProtocolTranslation.to` | The actual outgoing upstream interface. |
+| `option:ProtocolTranslation.title` | The converter name shown with the selected pairing. |
+| `option:ProtocolTranslation.losses` | Declared preserved, approximated and omitted behavior for this conversion. |
+| `option:ConversionLosses.preserved` | Behavior whose meaning is preserved across the interfaces. |
+| `option:ConversionLosses.approximated` | Behavior carried in an equivalent or reduced form, including custom tool grammars and caching. |
+| `option:ConversionLosses.dropped` | Features with no translated equivalent; these are disclosed before choosing the pairing. |
+| `option:Isolation.translation` | The selected conversion and its fidelity, when reported; absence is direct or unreported. |
+| `option:Resolution.translation` | The actual generation conversion captured with the capability resolution. |
+| `option:Provider.translated_protocols` | Additional converted interfaces offered by the provider, separate from its native endpoints. |
+| `option:UpstreamSide.model` | Captured model declarations and reported output maximum for this exact translated request. |
+| `option:UpstreamSide.output_tokens` | Captured fallback output allowance used only if the request and offering have none. |
+| `option:UpstreamSide.session` | Opaque stable session cache key; it contains no original session identity or person. |
+| `option:ProviderStart.translation_output_tokens` | The resolved translated-output default captured when the provider is started. |
+| `option:Provider.relay` | The key provider’s explicit public relay choice, shown only to its current configuration reader. |
+| `option:ProviderRelayOptions.enabled` | Permit direct model API calls; off by default. |
+| `option:ProviderRelayOptions.models` | Exact enabled model names opened to public calls; empty opens none. |
+| `option:ProviderRelay.lease` | The one admitted model lease for this public call; no model credential. |
+| `option:ProviderRelay.relay_id` | Command-bound memory exchange, first for the request and then its response. |
+| `option:ProviderRelay.path` | The interface’s allowed request path below the public SDK base. |
+| `option:ProviderRelay.headers` | Admitted interface headers without the Orch credential. |
+| `option:ProviderRelay.request_bytes` | Exact normalized request length, used to bound the input phase. |
+| `option:ProviderRelay.request_hash` | Request digest verified before any upstream call. |
+| `option:ProviderRelay.idle_secs` | Captured silence allowance of the memory exchange. |
+| `option:ProviderRelay.retry_ms` | Captured transient retry interval. |
+| `option:ProviderRelayHead.status` | Actual upstream HTTP status. |
+| `option:ProviderRelayHead.headers` | Repeated response header octets, with connection, credential and cookie headers removed. |
+| `option:ProviderRelay.max_request_bytes` | The captured public request setting also limits the outgoing native request, so raising it needs no separate connector setting. |
+| `state:UsagePurpose.relay` | Direct model API calls through a key provider, counted for their actual caller. Empty cap purpose filters include Relay. |
+| `option:ProviderRelay.start` | Current provider configuration and credential references delivered only to the keeping connector; no Orch API credential or model input. |
+| `option:ProviderUpdateBody.relay` | Replace a key provider’s public relay switch and exact opened models; the normal revision and configuration reader apply. |
+
+| `option:ModelParameters.request_options.common` | One vendor-neutral schema for declared cache and schema-output options, composed through the same endpoint, group and model layers. |
+| `option:ModelGroupOptions.request_options.common` | The common feature rules of an existing named model group. |
+| `option:EndpointOptions.request_options.common` | Common feature rules on the actually selected native endpoint. |
+| `option:common.cache` | Declared key/retention controls. Each interface supplies its native fields; unsupported members or retention values are refused with their reason. |
+| `option:common.structured_output` | Declared output schema, with optional name and strictness where the native interface represents them. |
+| `option:LeaseOpen.request_options.common` | Explicit thread choices from the same common schema; they override overlapping format-specific choices and do not reopen a blocked value. |
+| `option:FeatureBinding` | A wire format’s data mapping from a common feature to native JSON paths, discriminators and creation defaults. |
+| `option:FeatureField` | A canonical feature member’s native pointer, intrinsic value schema, available choices and factual default. |
+
+| `option:common.structured_output.name` | Logical schema name retained with the common choice; interfaces with a schema-name field also send it. |

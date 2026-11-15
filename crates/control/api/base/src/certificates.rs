@@ -1181,6 +1181,11 @@ impl CertificateService {
             // The unit it was made for is gone: the token opens nothing any more.
             return Err(EnrollRefusal::Gone.into());
         }
+        if let Some(runtime) = runtime {
+            // A unit made on the volume of an earlier one puts the earlier machine aside and enrolls as a new one;
+            // the server says which machine now belongs to which unit.
+            tracing::info!(%runtime, machine = %enrolled.machine_id, "the connector of a unit enrolled as a new machine of that unit");
+        }
         let summary = format!("Machine {name} enrolled");
         let mut enrolled_entry = Entry::new(
             Actor::User(row.created_by),

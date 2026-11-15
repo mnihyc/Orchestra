@@ -55,3 +55,18 @@ it.each(['en', 'zh-CN'] as const)('edits the existing case-insensitive public he
   await userEvent.clear(input); await userEvent.type(input, 'new-beta');
   expect(written).toHaveBeenCalledWith({ 'Anthropic-Beta': 'new-beta', 'X-Custom': 'keep' });
 });
+
+it.each(['en','zh-CN'] as const)('edits a common cache rule once while keeping each native format rule in %s',async(locale)=>{
+  await setLocale(locale);
+  const user=userEvent.setup();
+  show(<Editor initial={JSON.stringify({'openai-responses':{properties:{temperature:{type:'number'}}},'anthropic-messages':{properties:{speed:{enum:['standard']}}}})}/>);
+  await user.click(screen.getByRole('combobox',{name:i18n.t('providerFields.protocol')}));
+  await user.click(screen.getByRole('option',{name:i18n.t('providerFeatures.common')}));
+  const cache=i18n.t('providerFields.fields.commonCache');
+  await user.click(screen.getByRole('combobox',{name:i18n.t('providerFields.ruleFor',{name:cache})}));
+  await user.click(screen.getByRole('option',{name:i18n.t('providerFields.block')}));
+  const saved=JSON.parse(changed.mock.lastCall?.[0]??'{}') as Record<string,unknown>;
+  expect(saved['openai-responses']).toEqual({properties:{temperature:{type:'number'}}});
+  expect(saved['anthropic-messages']).toEqual({properties:{speed:{enum:['standard']}}});
+  expect(saved.common).toMatchObject({properties:{cache:false}});
+});

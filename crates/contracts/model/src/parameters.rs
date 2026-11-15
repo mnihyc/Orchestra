@@ -270,7 +270,7 @@ pub fn resolve(
 
 /// Fill only absent properties. Explicit null is a value; a default never overwrites a choice.
 /// A const also supplies an absent fixed value, so omission cannot defer it to an upstream default.
-fn schema_defaults(schema: &Json, value: &mut Json) {
+pub(crate) fn schema_defaults(schema: &Json, value: &mut Json) {
     fill_schema_defaults(
         schema,
         schema,
@@ -305,7 +305,7 @@ fn schema_start<'a>(
 }
 
 /// A replacement is explicit; plain const/default schemas retain their existing refusal semantics.
-fn schema_replacement<'a>(
+pub(crate) fn schema_replacement<'a>(
     root: &'a Json,
     rule: &'a Json,
     seen: &mut std::collections::BTreeSet<String>,
@@ -325,7 +325,7 @@ fn schema_replacement<'a>(
     replacement
 }
 
-fn fill_schema_defaults(
+pub(crate) fn fill_schema_defaults(
     root: &Json,
     schema: &Json,
     value: &mut Json,
@@ -383,6 +383,254 @@ fn fill_schema_defaults(
             fill_schema_defaults(root, rule, value, seen);
         }
     }
+}
+
+/// The public relay accepts declared model options, alongside the format's own input and delivery members.
+/// The ordinary outgoing validator still applies every original schema and model ceiling to their values.
+pub fn check_relay_options(
+    protocol: &str,
+    model: &ModelParameters,
+    body: &[u8],
+) -> Result<(), &'static str> {
+    let payload: Json =
+        serde_json::from_slice(body).map_err(|_| "model request must be an object")?;
+    let members = payload
+        .as_object()
+        .ok_or("model request must be an object")?;
+    let schema = constraints(protocol, model);
+    for key in members.keys() {
+        let structural = matches!(
+            key.as_str(),
+            "model"
+                | "input"
+                | "inputs"
+                | "instructions"
+                | "system"
+                | "messages"
+                | "prompt"
+                | "max_output_tokens"
+                | "max_tokens"
+                | "max_completion_tokens"
+                | "stream"
+                | "stream_options"
+                | "tools"
+                | "tool_choice"
+                | "parallel_tool_calls"
+                | "include"
+                | "store"
+                | "previous_response_id"
+                | "conversation"
+                | "background"
+                | "dimensions"
+                | "prompt_cache_key"
+        );
+        if !structural
+            && (!declares_member(
+                &schema,
+                &schema,
+                key,
+                &mut std::collections::BTreeSet::new(),
+            ) || !declares_value(
+                &schema,
+                &schema,
+                key,
+                &members[key],
+                &mut std::collections::BTreeSet::new(),
+            ))
+        {
+            return Err(
+                "this request includes an option the provider has not declared for this interface",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn declares_member<'a>(
+    root: &'a Json,
+    node: &'a Json,
+    key: &str,
+    visited: &mut std::collections::BTreeSet<&'a str>,
+) -> bool {
+    if node == &Json::Bool(true) {
+        return true;
+    }
+    if node
+        .get("properties")
+        .is_some_and(|properties| properties.get(key).is_some())
+        || node
+            .get("required")
+            .and_then(Json::as_array)
+            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(key)))
+        || node
+            .get("additionalProperties")
+            .is_some_and(|rule| rule == &Json::Bool(true) || rule.is_object())
+    {
+        return true;
+    }
+    if let Some(patterns) = node.get("patternProperties").and_then(Json::as_object) {
+        for pattern in patterns.keys() {
+            if orch_types::schema::validate(
+                &json!({"type":"string","pattern":pattern}),
+                &json!(key),
+            )
+            .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+    if let Some(reference) = node.get("$ref").and_then(Json::as_str)
+        && visited.insert(reference)
+        && let Some(target) = reference
+            .strip_prefix('#')
+            .and_then(|pointer| root.pointer(pointer))
+        && declares_member(root, target, key, visited)
+    {
+        return true;
+    }
+    for join in ["allOf", "anyOf", "oneOf"] {
+        if node
+            .get(join)
+            .and_then(Json::as_array)
+            .is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|node| declares_member(root, node, key, visited))
+            })
+        {
+            return true;
+        }
+    }
+    for branch in ["if", "then", "else"] {
+        if node
+            .get(branch)
+            .is_some_and(|node| declares_member(root, node, key, visited))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn declared_contents<'a>(
+    root: &'a Json,
+    rule: &'a Json,
+    value: &Json,
+    seen: &mut std::collections::BTreeSet<&'a str>,
+) -> bool {
+    if value.is_object() {
+        let container = [
+            "properties",
+            "patternProperties",
+            "additionalProperties",
+            "$ref",
+            "allOf",
+            "anyOf",
+            "oneOf",
+        ]
+        .iter()
+        .any(|key| rule.get(*key).is_some());
+        if !container {
+            return true;
+        }
+        return value.as_object().is_some_and(|members| {
+            members
+                .iter()
+                .all(|(key, value)| declares_value(root, rule, key, value, &mut seen.clone()))
+        });
+    }
+    if let (Some(values), Some(items)) = (value.as_array(), rule.get("items")) {
+        return values
+            .iter()
+            .all(|value| declared_contents(root, items, value, &mut seen.clone()));
+    }
+    if let Some(reference) = rule.get("$ref").and_then(Json::as_str)
+        && seen.insert(reference)
+        && let Some(next) = reference
+            .strip_prefix('#')
+            .and_then(|path| root.pointer(path))
+    {
+        return declared_contents(root, next, value, seen);
+    }
+    true
+}
+fn declares_value<'a>(
+    root: &'a Json,
+    node: &'a Json,
+    key: &str,
+    value: &Json,
+    seen: &mut std::collections::BTreeSet<&'a str>,
+) -> bool {
+    if node == &Json::Bool(true) {
+        return true;
+    }
+    let mut named = false;
+    if let Some(rule) = node
+        .get("properties")
+        .and_then(|properties| properties.get(key))
+    {
+        named = true;
+        if declared_contents(root, rule, value, &mut seen.clone()) {
+            return true;
+        }
+    }
+    if let Some(patterns) = node.get("patternProperties").and_then(Json::as_object) {
+        for (pattern, rule) in patterns {
+            if orch_types::schema::validate(
+                &json!({"type":"string","pattern":pattern}),
+                &json!(key),
+            )
+            .is_ok()
+            {
+                named = true;
+                if declared_contents(root, rule, value, &mut seen.clone()) {
+                    return true;
+                }
+            }
+        }
+    }
+    if !named {
+        if node
+            .get("required")
+            .and_then(Json::as_array)
+            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(key)))
+        {
+            return true;
+        }
+        if let Some(rule) = node.get("additionalProperties")
+            && (rule == &Json::Bool(true) || rule.is_object())
+            && declared_contents(root, rule, value, &mut seen.clone())
+        {
+            return true;
+        }
+    }
+    if let Some(reference) = node.get("$ref").and_then(Json::as_str)
+        && seen.insert(reference)
+        && let Some(next) = reference
+            .strip_prefix('#')
+            .and_then(|path| root.pointer(path))
+        && declares_value(root, next, key, value, seen)
+    {
+        return true;
+    }
+    for join in ["allOf", "anyOf", "oneOf"] {
+        if node
+            .get(join)
+            .and_then(Json::as_array)
+            .is_some_and(|rules| {
+                rules
+                    .iter()
+                    .any(|rule| declares_value(root, rule, key, value, &mut seen.clone()))
+            })
+        {
+            return true;
+        }
+    }
+    ["if", "then", "else"].iter().any(|branch| {
+        node.get(*branch)
+            .is_some_and(|rule| declares_value(root, rule, key, value, &mut seen.clone()))
+    })
 }
 
 /// Validate actual resolved values, never attempt to prove that one schema implies another.
@@ -466,6 +714,9 @@ pub fn constraints(protocol: &str, model: &ModelParameters) -> Json {
         if let Some(rule) = rule.as_object_mut() {
             let nested = rule.entry("properties").or_insert_with(|| json!({}));
             if let Some(nested) = nested.as_object_mut() {
+                nested
+                    .entry(cache.kind_field)
+                    .or_insert_with(|| json!({"type":"string","enum":[cache.kind]}));
                 let mut values = vec![json!(cache.ordinary)];
                 values.extend(
                     model
@@ -799,6 +1050,25 @@ pub fn outgoing(
     model: &ModelParameters,
     body: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
+    if crate::protocol::SUPPORTED.contains(&protocol) {
+        let prepared = crate::features::prepare(
+            protocol,
+            &crate::features::builtin(protocol),
+            model,
+            body,
+            None,
+        )
+        .map_err(|_| "common request features are outside the declared schema or this format")?;
+        return outgoing_native(protocol, prepared.model.as_ref(), prepared.body.as_ref());
+    }
+    outgoing_native(protocol, model, body)
+}
+
+fn outgoing_native(
+    protocol: &str,
+    model: &ModelParameters,
+    body: &[u8],
+) -> Result<Vec<u8>, &'static str> {
     let payload: Json =
         serde_json::from_slice(body).map_err(|_| "model request must be an object")?;
     let members = payload
@@ -966,7 +1236,9 @@ pub fn outgoing_at(
     let model = applicable.as_ref();
     let format = parameter_format(protocol);
     let compact = path.ends_with("/responses/compact") && format.program.is_some();
-    let count_tokens = path.ends_with("/messages/count_tokens") && format.tier.is_some();
+    let count_tokens = (path.ends_with("/messages/count_tokens")
+        || path.ends_with("/responses/input_tokens"))
+        && format.tier.is_some();
     if compact || count_tokens {
         let mut parameters = model.clone();
         parameters.default_effort = None;
@@ -1511,8 +1783,178 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn public_relay_keeps_protocol_input_and_only_accepts_declared_model_options() {
+        let model = ModelParameters {
+            request_options: Some([("openai-responses".into(), json!({
+                "type":"object",
+                "$defs":{"options":{"properties":{"temperature":{"type":"number","maximum":1}}}},
+                "allOf":[{"$ref":"#/$defs/options"}],
+                "patternProperties":{"^extension_":{"type":"boolean"}}
+            }))].into()),
+            ..ModelParameters::default()
+        };
+        assert!(check_relay_options("openai-responses",&model,
+            br#"{"model":"chosen","input":"hello","stream":true,"max_output_tokens":8192,"temperature":0.2,"extension_trace":true}"#).is_ok());
+        assert!(
+            check_relay_options(
+                "openai-responses",
+                &model,
+                br#"{"model":"chosen","input":"hello","routing_override":"another"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            check_relay_options(
+                "openai-responses",
+                &ModelParameters::default(),
+                br#"{"model":"chosen","input":"hello","temperature":0.2}"#
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn declaring_an_effort_container_does_not_open_undeclared_siblings_but_metadata_stays_opaque() {
+        let model:ModelParameters=serde_json::from_value(json!({"efforts":["high"],"request_options":{"anthropic-messages":{"properties":{"metadata":{"type":"object"}}}}})).unwrap();
+        assert!(check_relay_options("anthropic-messages",&model,br#"{"model":"chosen","messages":[],"output_config":{"effort":"high","extra_paid_option":true}}"#).is_err());
+        assert!(
+            check_relay_options(
+                "anthropic-messages",
+                &model,
+                br#"{"model":"chosen","messages":[],"metadata":{"arbitrary":{"client":"note"}}}"#
+            )
+            .is_ok()
+        );
+    }
 }
 
 #[cfg(test)]
 #[path = "parameters/native_image_rules.rs"]
 mod native_image_rules;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+mod common_feature_cases {
+    use super::*;
+    use crate::features::{apply, builtin};
+    #[test]
+    fn one_common_output_declaration_maps_the_three_native_text_formats_and_keeps_explicit_choices()
+    {
+        let model:ModelParameters=serde_json::from_value(json!({"request_options":{"common":{"type":"object","properties":{
+            "structured_output":{"type":"object","properties":{"schema":{"type":"object"},"name":{"type":"string"},"strict":{"type":"boolean"}}}
+        }}}})).unwrap();
+        let choices = json!({"structured_output":{"schema":{"type":"object","properties":{"answer":{"type":"string"}}}}});
+        for (format, pointer) in [
+            ("openai-responses", "/text/format/schema"),
+            ("openai-chat", "/response_format/json_schema/schema"),
+            ("anthropic-messages", "/output_config/format/schema"),
+        ] {
+            let body = apply(
+                &builtin(format),
+                &model,
+                br#"{"model":"chosen"}"#,
+                Some(&choices),
+            )
+            .unwrap();
+            let body: Json = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body.pointer(pointer),
+                Some(&choices["structured_output"]["schema"])
+            );
+        }
+        let mut model = model;
+        model
+            .request_options
+            .as_mut()
+            .unwrap()
+            .get_mut("common")
+            .unwrap()["properties"]["structured_output"]["properties"]["name"]["default"] =
+            json!("answer");
+        let body=apply(&builtin("openai-responses"),&model,br#"{"model":"chosen","text":{"format":{"type":"json_schema","name":"explicit","schema":{"type":"object"},"strict":false}}}"#,None).unwrap();
+        let body: Json = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["text"]["format"]["name"], "explicit");
+        assert_eq!(body["text"]["format"]["strict"], false);
+    }
+    #[test]
+    fn common_cache_rules_check_every_directive_and_report_an_unrepresentable_key() {
+        let model:ModelParameters=serde_json::from_value(json!({"cache_lifetimes":["1h"],"request_options":{"common":{"properties":{"cache":{"type":"object","properties":{"retention":{"enum":["5m"]}}}}}}})).unwrap();
+        let body=br#"{"model":"chosen","messages":[{"role":"user","content":[{"type":"text","text":"one","cache_control":{"type":"ephemeral","ttl":"5m"}},{"type":"text","text":"two","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}"#;
+        assert!(apply(&builtin("anthropic-messages"), &model, body, None).is_err());
+        let model: ModelParameters = serde_json::from_value(
+            json!({"request_options":{"common":{"properties":{"cache":{"type":"object"}}}}}),
+        )
+        .unwrap();
+        let error = apply(
+            &builtin("anthropic-messages"),
+            &model,
+            br#"{"model":"chosen"}"#,
+            Some(&json!({"cache":{"key":"private-key-name"}})),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("key"));
+    }
+    #[test]
+    fn an_extension_maps_its_common_values_without_a_new_builtin_format_branch() {
+        use crate::features::{FeatureBinding, FeatureField, prepare};
+        let model:ModelParameters=serde_json::from_value(json!({"request_options":{"common":{"properties":{"cache":{"type":"object","properties":{"retention":{"enum":["private"]}}}}}}})).unwrap();
+        let binding = FeatureBinding {
+            feature: "cache".into(),
+            paths: vec!["/options".into()],
+            fields: vec![FeatureField {
+                common: "retention".into(),
+                path: Some("/reuse".into()),
+                default: None,
+                choices: Some(vec![json!("private")]),
+                schema: json!({"type":"string"}),
+            }],
+            discriminator: json!({}),
+            native_defaults: json!({}),
+        };
+        let prepared = prepare(
+            "controlled-extension",
+            &[binding],
+            &model,
+            br#"{"model":"chosen"}"#,
+            Some(&json!({"cache":{"retention":"private"}})),
+        )
+        .unwrap();
+        let body: Json = serde_json::from_slice(prepared.body.as_ref()).unwrap();
+        assert_eq!(body["options"]["reuse"], "private");
+        assert!(prepared.model.option_schema("common").is_none());
+    }
+    #[test]
+    fn a_common_declaration_cannot_reopen_a_native_block_or_enable_output_by_naming_it() {
+        use crate::features::prepare;
+        let model:ModelParameters=serde_json::from_value(json!({"request_options":{
+            "common":{"properties":{"structured_output":{"type":"object","properties":{"schema":{"type":"object"},"name":{"type":"string","default":"result"}}}}},
+            "openai-responses":{"properties":{"text":false}}
+        }})).unwrap();
+        let prepared = prepare(
+            "openai-responses",
+            &builtin("openai-responses"),
+            &model,
+            br#"{"model":"chosen"}"#,
+            None,
+        )
+        .unwrap();
+        let body: Json = serde_json::from_slice(prepared.body.as_ref()).unwrap();
+        assert!(body.get("text").is_none());
+        let prepared = prepare(
+            "openai-responses",
+            &builtin("openai-responses"),
+            &model,
+            br#"{"model":"chosen"}"#,
+            Some(&json!({"structured_output":{"schema":{"type":"object"}}})),
+        )
+        .unwrap();
+        assert!(
+            outgoing(
+                "openai-responses",
+                prepared.model.as_ref(),
+                prepared.body.as_ref()
+            )
+            .is_err()
+        );
+    }
+}

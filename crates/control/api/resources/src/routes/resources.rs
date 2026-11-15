@@ -364,6 +364,7 @@ pub mod provider_sources;
 #[path = "resources/provider_updates.rs"]
 pub mod provider_updates;
 
+mod provider_relay;
 #[path = "resources/providers.rs"]
 pub mod providers;
 
