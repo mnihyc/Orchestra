@@ -922,6 +922,7 @@ impl Fixture {
             rows::insert_command(
                 &mut conn,
                 &rows::NewCommand {
+                    content_transit: false,
                     id,
                     machine_id: self.machine,
                     kind: CommandKind::FsWrite.as_str(),
@@ -934,6 +935,7 @@ impl Fixture {
             .await?
         );
         Ok(StoredCommand {
+            content_transit: false,
             authority: None,
             id: Some(id),
             machine: self.machine,
@@ -1050,6 +1052,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
         plan: false,
     })?;
     let original = StoredCommand {
+        content_transit: false,
         authority: None,
         id: Some(id),
         machine: fixture.machine,
@@ -1063,6 +1066,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
         rows::insert_command(
             &mut conn,
             &rows::NewCommand {
+                content_transit: false,
                 id,
                 machine_id: original.machine,
                 kind: &original.kind,

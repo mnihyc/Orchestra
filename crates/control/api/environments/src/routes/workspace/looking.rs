@@ -307,6 +307,14 @@ async fn archive_entry(
         ));
     }
     let machine = live::require_live(&ctx, &mut conn, &door.env).await?;
+    let relayed =
+        orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+            .await;
+    drop(conn);
+    let preview = i64::try_from(ctx.app.config.limits.preview_bytes).unwrap_or(i64::MAX);
+    if relayed {
+        return files::relay::archive(&ctx, door, machine, path, entry, preview).await;
+    }
     let read = live::run(
         &ctx,
         machine,
@@ -319,7 +327,6 @@ async fn archive_entry(
     )
     .await
     .map_err(|failure| failure.problem(Doing::Reading))?;
-    let preview = i64::try_from(ctx.app.config.limits.preview_bytes).unwrap_or(i64::MAX);
     if read.blob.size > preview {
         return Err(ApiError::new(
             ErrorCode::RequestTooLarge,
@@ -327,6 +334,7 @@ async fn archive_entry(
         )
         .with("limit", preview));
     }
+    let mut conn = ctx.app.db.acquire().await?;
     orch_db::queries::storage::register_blob(&mut conn, &read.blob.hash, read.blob.size, ctx.now)
         .await?;
     drop(conn);

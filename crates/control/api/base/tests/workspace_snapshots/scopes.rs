@@ -672,13 +672,19 @@ struct OpenGate {
 
 #[async_trait::async_trait]
 impl BlobStore for OpenGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         if *hash == self.hash {
@@ -697,8 +703,13 @@ impl BlobStore for OpenGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 
@@ -771,6 +782,7 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
     commands::insert_command(
         &mut conn,
         &commands::NewCommand {
+            content_transit: false,
             id: command,
             machine_id: site.machine,
             kind: CommandKind::FsRecord.as_str(),

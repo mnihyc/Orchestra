@@ -4,7 +4,7 @@
  * A failed task keeps its session for Retry. Cancel stops requests and never publishes a partial file.
  */
 import { ApiError, api, client, ok } from '@/api/client';
-import type { ChatPart, ContentPart, DocumentFile, ImageMediaType, UploadedBlob, UploadSessionCreateReply } from '@/generated/api-types';
+import type { ChatPart, ContentPart, DocumentFile, ImageMediaType, UploadedBlob, UploadDestination, UploadSessionCreateReply, UploadSessionPutReply } from '@/generated/api-types';
 import { NetworkError, READ_RETRY_PAUSES_MS } from '@/lib/requests';
 
 /** Start with half a mebibyte so a slow connection can report progress before sending the maximum. */
@@ -17,7 +17,7 @@ const PIECE_MIN_BYTES = 64 * 1024;
 /** The three requests an upload needs; tests can replace the transport with a lossy line. */
 export interface UploadTransport {
   begin: (file: File, signal: AbortSignal) => Promise<UploadSessionCreateReply>;
-  put: (id: string, offset: number, bytes: Blob, signal: AbortSignal) => Promise<number>;
+  put: (id: string, offset: number, bytes: Blob, signal: AbortSignal) => Promise<UploadSessionPutReply>;
   complete: (id: string, signal: AbortSignal) => Promise<UploadedBlob>;
   cancel?: (id: string) => Promise<void>;
   release?: (blob: string) => Promise<void>;
@@ -25,20 +25,32 @@ export interface UploadTransport {
 }
 
 const transport: UploadTransport = {
-  begin: (file, signal) => ok(api.POST('/uploads/sessions', { body: { name: file.name, size: file.size, ...(file.type === '' ? {} : { media_type: file.type }) }, signal })),
+  begin: (file, signal) => beginUpload(file, signal),
   put: async (id, offset, bytes, signal) => (await ok(api.PUT('/uploads/sessions/{upload_id}', {
     params: { path: { upload_id: id }, query: { offset } },
     // Binary bodies are strings in OpenAPI; the serializer sends this slice as bytes without buffering it.
     body: '', bodySerializer: () => bytes, headers: { 'Content-Type': 'application/octet-stream' }, signal,
-  }))).received,
-  complete: (id, signal) => ok(api.POST('/uploads/sessions/{upload_id}/complete', { params: { path: { upload_id: id } }, signal })),
+  }))),
+  complete: async (id, signal) => {
+    for (;;) {
+      signal.throwIfAborted();
+      const result = await ok(api.POST('/uploads/sessions/{upload_id}/complete', { params: { path: { upload_id: id } }, signal }));
+      if (result.state === 'ready') return result.file;
+      await pause(result.retry_after_ms, signal);
+    }
+  },
   cancel: async (id) => { await ok(api.DELETE('/uploads/sessions/{upload_id}', { params: { path: { upload_id: id } } })); },
   release: releaseUpload,
 };
 
-function browserTransport(): UploadTransport {
+function beginUpload(file: File, signal: AbortSignal, to?: UploadDestination): Promise<UploadSessionCreateReply> {
+  return ok(api.POST('/uploads/sessions', { body: { name: file.name, size: file.size,
+    ...(file.type === '' ? {} : { media_type: file.type }), ...(to === undefined ? {} : { to }) }, signal }));
+}
+
+function browserTransport(to?: UploadDestination): UploadTransport {
   const reader = client.session.getState().readerVersion;
-  return { ...transport, current: () => client.session.getState().readerVersion === reader };
+  return { ...transport, begin: (file, signal) => beginUpload(file, signal, to), current: () => client.session.getState().readerVersion === reader };
 }
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {
@@ -66,15 +78,15 @@ export class UploadTask {
   readonly file: File;
   private readonly requests: UploadTransport;
 
-  constructor(file: File, requests: UploadTransport = browserTransport()) {
-    this.file = file; this.requests = requests;
+  constructor(file: File, requests?: UploadTransport, to?: UploadDestination) {
+    this.file = file; this.requests = requests ?? browserTransport(to);
   }
 
   /** The receipt lets a cancelled workspace batch report measured partial progress. */
   get uploadId(): string | null { return this.session?.upload_id ?? null; }
 
-  run(signal: AbortSignal, progress: (received: number) => void = () => undefined): Promise<UploadedBlob> {
-    this.pending = this.upload(signal, progress);
+  run(signal: AbortSignal, progress: (received: number) => void = () => undefined, phase: (value: 'uploading' | 'verifying') => void = () => undefined): Promise<UploadedBlob> {
+    this.pending = this.upload(signal, progress, phase);
     return this.pending;
   }
 
@@ -84,16 +96,20 @@ export class UploadTask {
     if (this.requests.current?.() === false) return;
     if (this.completed !== null) {
       // A shared grant may also be needed by another upload of the same bytes.
-      if (options.keepCompleted !== true) await this.requests.release?.(this.completed.blob);
+      if (options.keepCompleted !== true) {
+        if (this.completed.relay !== undefined && this.completed.relay !== null) await this.requests.cancel?.(this.completed.relay);
+        else await this.requests.release?.(this.completed.blob);
+      }
     } else if (this.session !== null) await this.requests.cancel?.(this.session.upload_id);
+    if (options.keepCompleted !== true) { this.session = null; this.completed = null; this.received = 0; this.completing = false; }
   }
 
-  private async upload(signal: AbortSignal, progress: (received: number) => void): Promise<UploadedBlob> {
+  private async upload(signal: AbortSignal, progress: (received: number) => void, phase: (value: 'uploading' | 'verifying') => void): Promise<UploadedBlob> {
     signal.throwIfAborted();
     if (this.requests.current?.() === false) throw new DOMException('Upload reader changed', 'AbortError');
     if (this.completed !== null) return this.completed;
-    // Completion closes its session. If its answer was lost, a fresh upload finds the same hash safely.
-    if (this.completing || (this.session !== null && Date.parse(this.session.expires_at) <= Date.now())) {
+    // Verification keeps the same session and actual prefix when its response is lost.
+    if (!this.completing && this.session !== null && Date.parse(this.session.expires_at) <= Date.now()) {
       this.session = null;
       this.received = 0;
       this.completing = false;
@@ -103,6 +119,7 @@ export class UploadTask {
     if (!Number.isSafeInteger(maximum) || maximum <= 0) throw new Error('Invalid upload piece size');
     let pieceSize = Math.min(maximum, FIRST_PIECE_BYTES);
     let failures = 0;
+    phase('uploading');
     progress(this.received);
     while (this.received < this.file.size) {
       signal.throwIfAborted();
@@ -111,7 +128,9 @@ export class UploadTask {
       const piece = this.file.slice(offset, Math.min(offset + pieceSize, this.file.size));
       const started = performance.now();
       try {
-        const received = await this.requests.put(this.session.upload_id, offset, piece, signal);
+        const accepted = await this.requests.put(this.session.upload_id, offset, piece, signal);
+        const received = accepted.received;
+        this.session.expires_at = accepted.expires_at;
         if (!Number.isSafeInteger(received) || received <= offset || received > this.file.size) throw new Error('Invalid upload offset');
         this.received = received;
         progress(received);
@@ -135,7 +154,21 @@ export class UploadTask {
     signal.throwIfAborted();
     if (this.requests.current?.() === false) throw new DOMException('Upload reader changed', 'AbortError');
     this.completing = true;
-    this.completed = await this.requests.complete(this.session.upload_id, signal);
+    phase('verifying');
+    try { this.completed = await this.requests.complete(this.session.upload_id, signal); }
+    catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof ApiError && (error.is('not_found') || error.is('gone'))) {
+        this.session = null; this.received = 0; this.completing = false;
+        return this.upload(signal, progress, phase);
+      }
+      const received = error instanceof ApiError && error.is('upload.offset') ? error.problem.received : undefined;
+      if (typeof received === 'number' && Number.isSafeInteger(received) && received >= 0 && received < this.file.size) {
+        this.received = received; this.completing = false;
+        return this.upload(signal, progress, phase);
+      }
+      throw error;
+    }
     signal.throwIfAborted();
     return this.completed;
   }

@@ -317,6 +317,7 @@ impl SnapshotCommand {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

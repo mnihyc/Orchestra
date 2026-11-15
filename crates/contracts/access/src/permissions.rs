@@ -677,6 +677,8 @@ permissions! {
         "View Provider", "See the provider in lists, with its status, plan and limits, and what each thread used of it.";
     ProviderUse = "provider.use", Provider, Use, PROVIDER, NOBODY,
         "Use Provider", "Run turns and enabled services on the provider, within the entry's model, service and effort lists.";
+    ProviderRelay = "provider.relay", Provider, Advanced, PROVIDER, NOBODY,
+        "Relay Provider", "Make direct model API calls through an enabled key provider, within the entry's model and effort lists.";
     ProviderManage = "provider.manage", Provider, Manage, PROVIDER, NOBODY,
         "Manage Provider", "Sign the provider in and out, rotate its key, say which models and arrangements it allows, run and update its runtime, and enable, disable and delete it.";
     ProviderBypass = "provider.bypass", Provider, Advanced, PROVIDER, NOBODY,
@@ -824,6 +826,12 @@ const fn with(needs: Permission, offer: Offer) -> GoesWith {
 }
 
 impl Permission {
+    /// Provider model permissions use one entry parser and the same scope/effort checks.
+    #[must_use]
+    pub const fn has_provider_options(self) -> bool {
+        matches!(self, Self::ProviderUse | Self::ProviderRelay)
+    }
+
     /// Whether it exists on a thing of kind `object`.
     #[must_use]
     pub fn exists_on(self, object: ObjectKind) -> bool {
@@ -838,6 +846,7 @@ impl Permission {
     #[must_use]
     pub const fn with(self) -> Option<Permission> {
         match self {
+            Self::ProviderRelay => Some(Self::ProviderManage),
             Self::ThreadFork | Self::ThreadArchive => Some(Self::ThreadManage),
             Self::TopicArchive => Some(Self::TopicManage),
             // Making things inside is a part of contributing to the place, and can be given alone.
@@ -981,7 +990,11 @@ impl Permission {
     pub const fn takes_options(self) -> bool {
         matches!(
             self,
-            Self::ProviderUse | Self::HostUse | Self::MachineUse | Self::TemplateUse
+            Self::ProviderUse
+                | Self::ProviderRelay
+                | Self::HostUse
+                | Self::MachineUse
+                | Self::TemplateUse
         )
     }
 
@@ -990,7 +1003,7 @@ impl Permission {
     #[must_use]
     pub fn options_schema(self) -> Option<Json> {
         let schema = match self {
-            Self::ProviderUse => schemars::schema_for!(ProviderUse),
+            Self::ProviderUse | Self::ProviderRelay => schemars::schema_for!(ProviderUse),
             Self::HostUse | Self::MachineUse => schemars::schema_for!(HostUse),
             Self::TemplateUse => schemars::schema_for!(TemplateUse),
             _ => return None,
@@ -1637,7 +1650,7 @@ impl Options {
             read: Vec::new(),
         };
         let parsed = match permission {
-            Permission::ProviderUse => Self::ProviderUse(ProviderUse {
+            Permission::ProviderUse | Permission::ProviderRelay => Self::ProviderUse(ProviderUse {
                 models: reader.texts("models"),
                 services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
@@ -2654,7 +2667,7 @@ mod tests {
             "nor is one door at its Manage"
         );
         assert_eq!(
-            Choice::highest(ObjectKind::Provider, &[P::ProviderUse]),
+            Choice::highest(ObjectKind::Provider, &[P::ProviderUse, P::ProviderRelay]),
             Some(Choice::FullInteract)
         );
         assert_eq!(

@@ -20,7 +20,7 @@ use orch_api_contract::{
         SummaryTarget,
     },
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{
     access,
     identity::{self, NewApiToken},
@@ -32,11 +32,12 @@ use serde_json::json;
 async fn key(desk: &Desk, target: Id) -> String {
     let scope:orch_access_contract::key_scope::KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"topic","id":target,"reach":"self"},"resources":["topic"],"allow":[{"operation":"SummaryGet","actions":["read"]}]}]})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "Summary paragraph",
             token_hash: &token_hash(&secret),
@@ -706,8 +707,8 @@ async fn a_real_document_scoped_refresh_retains_its_original_http_token_and_clos
         .bind(scene.on.provider).bind(json!([{"protocol":"openai-responses","base_url":"https://fixture.example.invalid/v1","options":{"auth":"none"}}])).bind(scene.rig.machine_id).execute(scene.rig.db.pool()).await.unwrap();
     let scope:orch_access_contract::key_scope::KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"document","id":document.base.id,"reach":"self"},"resources":["document"],"allow":[{"operation":"SummaryRefresh","actions":["read","write"]}]}]})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let token = new_id();
+    let secret = new_api_token(token);
     identity::create_api_token_scoped(
         &mut *scene.rig.world.conn().await,
         &NewApiToken {

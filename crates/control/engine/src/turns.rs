@@ -856,7 +856,7 @@ impl Engine {
                             path: orch_agent_contract::session::INSTRUCTION_ROOT_MARKER.to_owned(),
                         },
                     )?;
-                    match crate::commands::run(self.inner.commands.as_ref(), marker).await? {
+                    match self.run_noted(thread_id, marker).await? {
                         Outcome::Succeeded(_) => body.instruction_root_marker = true,
                         Outcome::Failed(ref failure)
                             if failure.code == "policy.remote_write_disabled" => {}
@@ -1322,6 +1322,7 @@ impl Engine {
             + chrono::Duration::from_std(self.inner.config.start_timeout)
                 .unwrap_or_else(|_| chrono::Duration::zero());
         let command = Outgoing {
+            content_transit: false,
             authority: None,
             id,
             machine: row.machine_id,
@@ -1381,6 +1382,7 @@ impl Engine {
         orch_db::queries::link::insert_command(
             &mut tx,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -1541,7 +1543,7 @@ impl Engine {
                 path,
             },
         )?;
-        let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
+        let outcome = self.run_noted(snap.thread.node_id, command).await?;
         if !matches!(outcome, Outcome::Succeeded(_)) {
             tracing::info!(thread = %snap.thread.node_id, ?outcome, "the directory of the thread could not be made; the turn goes on");
         }
@@ -3095,8 +3097,10 @@ impl Engine {
                     // is the thread's own (its binding, its place) and still there.
                     thread_state::BLOCKED => {
                         let recovered_source = row.blocked_reason.as_deref() == Some("error")
-                            && row.blocked_detail.as_deref()
-                                == Some(crate::preparation::SOURCE_FAILED)
+                            && row
+                                .blocked_detail
+                                .as_deref()
+                                .is_some_and(crate::preparation::is_source_failed_detail)
                             && crate::source::ready(&row)?;
                         (row.blocked_reason.as_deref() != Some("error") || recovered_source)
                             && row.current_turn_id.is_none()
@@ -3433,6 +3437,8 @@ pub struct OwnUse<'a> {
 /// What a model call Orch made for itself was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnPurpose {
+    /// A direct model API call governed by the provider's original root org.
+    Relay,
     /// A personal question: its topic operand is the fixed governing root org.
     Ask,
     /// A title, a description, tags or a handoff: put down to its topic and thread.
@@ -3468,7 +3474,10 @@ impl Engine {
         context: Option<(Id, Id)>,
     ) -> Result<bool, EngineError> {
         use orch_db::usage::ledger::{SummaryAttribution, summary_place};
-        let (org, project) = if matches!(own.purpose, OwnPurpose::Embeddings | OwnPurpose::Ask) {
+        let (org, project) = if matches!(
+            own.purpose,
+            OwnPurpose::Embeddings | OwnPurpose::Ask | OwnPurpose::Relay
+        ) {
             (own.topic, own.topic)
         } else {
             let Some(place) = summary_place(conn, own.topic).await? else {
@@ -3520,9 +3529,10 @@ impl Engine {
             OwnPurpose::PageFetch => "page_fetch",
             OwnPurpose::ImageGeneration => "image_generation",
             OwnPurpose::Ask => purpose::ASK,
+            OwnPurpose::Relay => purpose::RELAY,
         };
         let rate = crate::caps::own_rate(conn, own.provider, own.model).await?;
-        let rate_place = if own.purpose == OwnPurpose::Ask {
+        let rate_place = if matches!(own.purpose, OwnPurpose::Ask | OwnPurpose::Relay) {
             own.topic
         } else {
             own.thread.unwrap_or(own.topic)

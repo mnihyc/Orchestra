@@ -35,6 +35,7 @@ import { UnitCommandFailure } from '@/features/resources/UnitConfiguration';
 import { EnvironmentDoor } from '@/features/resources/environments/Doors';
 import { HarnessTrustSection } from '@/features/resources/environments/HarnessTrust';
 import { AgentReach } from '@/features/resources/environments/AgentReach';
+import { EnvironmentProviderConnections } from './ProviderConnections';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
 import { EnvironmentReadinessNotice } from '@/features/resources/SandboxReadiness';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
@@ -187,6 +188,7 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
         />
       </Section>
       <ResourceDetails><AgentReach environment={environment} /></ResourceDetails>
+      <ResourceDetails label={t('providerCreation.environmentConnections')}>{()=> <EnvironmentProviderConnections environmentId={environment.id}/>}</ResourceDetails>
     </div>
   );
 }

@@ -226,6 +226,7 @@ enum Bytes {
 struct Fetched {
     input: Input,
     bytes: Bytes,
+    _publications: Vec<orch_blob_contract::store::Stored>,
 }
 
 enum Work {
@@ -472,6 +473,7 @@ impl<M: Mode> effects::Initial for Skills<M> {
     ) -> BoxFuture<'a, ApiResult<Fetched>> {
         Box::pin(async move {
             current(ctx, caller)?;
+            let mut publications = Vec::new();
             let bytes = match &input.content {
                 Content::Version(version) => {
                     check_files(
@@ -554,6 +556,7 @@ impl<M: Mode> effects::Initial for Skills<M> {
                                 current(ctx, caller)?;
                                 copied.blob = meta.hash;
                                 copied.size = meta.size;
+                                publications.push(meta);
                             }
                         }
                         made.push(copied);
@@ -562,7 +565,11 @@ impl<M: Mode> effects::Initial for Skills<M> {
                     Bytes::Draft(made)
                 }
             };
-            Ok(Fetched { input, bytes })
+            Ok(Fetched {
+                input,
+                bytes,
+                _publications: publications,
+            })
         })
     }
 }

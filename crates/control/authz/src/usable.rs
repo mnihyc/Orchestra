@@ -232,6 +232,23 @@ pub fn access(
     let Some(permission) = use_permission(resource.kind) else {
         return Ok(Err(Access::None));
     };
+    access_for(frame, resource, site, work, kept_to_its_owner, permission)
+}
+
+/// The same resource-entry evaluator for an independently granted provider model act.
+pub fn access_for(
+    frame: &Frame<'_>,
+    resource: &Resource,
+    site: &Site,
+    work: Option<&[Id]>,
+    kept_to_its_owner: bool,
+    permission: Permission,
+) -> Result<Result<Use, Access>, Error> {
+    if use_permission(resource.kind) != Some(permission)
+        && !(resource.kind == ResourceKind::Provider && permission == Permission::ProviderRelay)
+    {
+        return Ok(Err(Access::None));
+    }
     let principal = frame.principal();
     let caller = principal.caller();
     let mut site = site.clone();
@@ -303,7 +320,7 @@ pub fn access(
         .iter()
         .any(|way| matches!(way, Through::Owner | Through::SystemAdmin));
     let mut each = Vec::new();
-    if permission == Permission::ProviderUse && !unlimited {
+    if permission.has_provider_options() && !unlimited {
         for found in &in_use {
             each.push(Allowance {
                 entry: Some(found.entry.id),
@@ -336,7 +353,7 @@ pub fn access(
 /// The allowances of a use that no entry narrows: one, of no entry, for a provider; none for a
 /// resource whose options are not decided one entry at a time.
 fn unlimited_each(permission: Permission) -> Vec<Allowance> {
-    if permission == Permission::ProviderUse {
+    if permission.has_provider_options() {
         vec![Allowance {
             entry: None,
             provider: ProviderUse::unlimited(),

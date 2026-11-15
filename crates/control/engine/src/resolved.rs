@@ -87,6 +87,8 @@ pub struct Resolved {
     pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// Whether background task completion may start an admitted continuation.
     pub background_wake: bool,
+    /// How long a native web action may remain without a reported end.
+    pub web_action_wait_secs: u64,
     /// Whether native image generation is explicitly enabled here.
     pub image_generation: Option<bool>,
     /// The features that are on, by name.
@@ -113,6 +115,10 @@ pub struct Resolved {
     pub binding_prefer: Vec<ArrangementType>,
     /// The arrangement types a scope allows; none while no scope limits them.
     pub binding_allowed: Option<Vec<ArrangementType>>,
+    /// Whether this place permits a translated model pairing.
+    pub translation_allowed: bool,
+    /// Actual place that supplied this policy, absent for the system/default.
+    pub translation_scope: Option<Id>,
     /// How many calls of Orch's tools the agent may make in a minute, as the guide to them says.
     pub tool_calls_per_minute: Option<i64>,
     /// How many announcements an hour the agent may send, as the tool guide says.
@@ -196,6 +202,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::AGENT_PARAMS,
         keys::AGENT_FEATURES,
         keys::THREADS_BACKGROUND_WAKE,
+        keys::AGENTS_WEB_ACTION_WAIT_SECS,
         keys::AGENTS_IMAGE_GENERATION,
         keys::AGENTS_PROMPT_CACHE_TTL,
         keys::AGENT_INSTRUCTIONS,
@@ -210,6 +217,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::COLLAB_ATTRIBUTION,
         keys::THREAD_CWD,
         keys::BINDING_PREFER,
+        keys::PROVIDERS_TRANSLATION,
         keys::BINDING_ALLOWED,
         keys::ORCH_TOOLS_CALLS_PER_MINUTE,
         keys::ORCH_TOOLS_SEARCH_QUERY_CHARS,
@@ -236,6 +244,8 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         prompt_cache_ttl: value(&snapshot, keys::AGENTS_PROMPT_CACHE_TTL)?,
         background_wake: value::<String>(&snapshot, keys::THREADS_BACKGROUND_WAKE)?.as_deref()
             != Some("off"),
+        web_action_wait_secs: value(&snapshot, keys::AGENTS_WEB_ACTION_WAIT_SECS)?
+            .ok_or_else(|| EngineError::unreadable("the web action wait has no default"))?,
         image_generation: value::<String>(&snapshot, keys::AGENTS_IMAGE_GENERATION)?
             .map(|value| value == "on"),
         features: value(&snapshot, keys::AGENT_FEATURES)?.unwrap_or_default(),
@@ -264,6 +274,13 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         cwd: value(&snapshot, keys::THREAD_CWD)?.unwrap_or_default(),
         binding_prefer: types(&snapshot, keys::BINDING_PREFER)?.unwrap_or_default(),
         binding_allowed: types(&snapshot, keys::BINDING_ALLOWED)?,
+        translation_allowed: value(&snapshot, keys::PROVIDERS_TRANSLATION)?.unwrap_or(true),
+        translation_scope: snapshot
+            .resolve(def(keys::PROVIDERS_TRANSLATION)?)
+            .parts
+            .into_iter()
+            .find(|part| part.value == Json::Bool(false))
+            .and_then(|part| part.source.node),
         tool_calls_per_minute: value(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
         announcements_per_hour: value(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
         thread_messages_per_hour: value(&snapshot, keys::BROADCAST_THREAD_MESSAGES_PER_HOUR)?,

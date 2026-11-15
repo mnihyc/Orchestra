@@ -612,6 +612,9 @@ pub struct Environment {
     reporters: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+/// How often a recording that waits for its baseline looks again.
+const FILE_STATES_POLL: Duration = Duration::from_millis(100);
+
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Environment")
@@ -937,6 +940,8 @@ impl Environment {
     /// Turns what the watch says into the state of the index, the ignore rules and the directories
     /// somebody has open.
     async fn changed(self: &Arc<Self>, change: Change) {
+        // Until the baselines are brought up to date for this batch, a recording waits for it.
+        let refreshing = self.file_states.as_ref().map(|states| states.begin_work());
         let directory_loss = matches!(&change, Change::Rescan | Change::Unavailable);
         let (paths, mut rescan) = match change {
             Change::Paths(paths) => (paths, false),
@@ -1024,6 +1029,7 @@ impl Environment {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "the index could not be brought up to date"),
         }
+        drop(refreshing);
         if !directory_loss {
             self.notify_directories(&paths, rescan).await;
         }
@@ -1032,7 +1038,10 @@ impl Environment {
     /// Prepares requested file-state baselines off the path that records or starts a turn.
     fn seed_file_states(self: &Arc<Self>) {
         let environment = Arc::clone(self);
+        // Noted before the task starts, so that a recording that looks right now sees the work.
+        let work = self.file_states.as_ref().map(|states| states.begin_work());
         let task = tokio::spawn(async move {
+            let _work = work;
             if let Err(error) = environment.prepare_file_states().await {
                 tracing::warn!(%error, environment=%environment.id, "recorded file coverage could not be prepared");
             }
@@ -1324,6 +1333,7 @@ struct HostInner {
     clock: Arc<dyn Clock>,
     reports: Reports,
     directory_pages: Arc<crate::directory_pages::DirectoryPages>,
+    relay_roots: Arc<crate::relay_roots::Roots>,
     blobs: Arc<dyn BlobSink>,
     gates: Arc<GateState>,
     executors: Vec<ExecutorFactory>,
@@ -1372,6 +1382,11 @@ impl EnvHost {
             settings.data_dir.join(".orch-tmp-directory-pages"),
             Arc::clone(&clock),
         ));
+        let relay_roots = crate::relay_roots::Roots::new(
+            &settings.data_dir,
+            Arc::clone(&clock),
+            settings.limits.clone(),
+        );
         Self {
             inner: Arc::new(HostInner {
                 #[cfg(all(test, target_os = "linux"))]
@@ -1380,6 +1395,7 @@ impl EnvHost {
                 clock,
                 reports,
                 directory_pages,
+                relay_roots,
                 blobs,
                 gates,
                 executors,
@@ -1923,6 +1939,112 @@ impl EnvHost {
         files.fetch(&path, body.expect, body.max_bytes, sink).await
     }
 
+    /// Runs native upload expiry maintenance, inspecting only each environment's own upload metadata.
+    pub async fn prune_file_relays(&self) {
+        if let Err(error) = self.inner.relay_roots.prune().await {
+            tracing::warn!(%error,"known native upload roots await cleanup");
+        }
+    }
+
+    /// Describes a transit file without moving any of its content to server storage.
+    pub async fn fs_relay_describe(
+        &self,
+        body: &orch_link_contract::commands::FsRelayDescribe,
+    ) -> Result<FsFetchResult> {
+        let environment = self.environment(body.environment_id)?;
+        let files = environment.files_of(body.mount.as_deref())?;
+        files.relay_describe(&files.parse(&body.path)?).await
+    }
+
+    /// Sends the opened content version directly to the browser's ranged response.
+    pub async fn fs_relay_send(
+        &self,
+        body: &orch_link_contract::commands::FsRelaySend,
+        sink: &dyn crate::blobs::RelaySink,
+    ) -> Result<()> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files_of(body.mount.as_deref())?
+            .relay_send(body, sink)
+            .await
+    }
+
+    /// Receives a browser upload into the destination's own resumable temporary file.
+    pub async fn fs_relay_receive(
+        &self,
+        body: &orch_link_contract::commands::FsRelayReceive,
+        source: &dyn crate::blobs::RelaySource,
+    ) -> Result<orch_link_contract::commands::FsRelayProgress> {
+        let environment = self.environment(body.environment_id)?;
+        self.inner.relay_roots.remember(&environment.files).await?;
+        environment
+            .files
+            .relay_receive(body, source, Arc::clone(&self.inner.clock))
+            .await
+    }
+
+    /// Verifies the complete private upload without extending a browser piece request.
+    pub async fn fs_relay_verify(
+        &self,
+        body: &orch_link_contract::commands::FsRelayVerify,
+    ) -> Result<orch_link_contract::commands::FsRelayVerified> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_verify(
+                body.session_id,
+                &body.receive_path,
+                Arc::clone(&self.inner.clock),
+                body.retention_secs,
+            )
+            .await
+    }
+
+    /// Prepares a received file beside its chosen destination while other environment work continues.
+    pub async fn fs_relay_prepare(
+        &self,
+        body: &orch_link_contract::commands::FsRelayPrepare,
+    ) -> Result<()> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_prepare(
+                body.session_id,
+                &body.receive_path,
+                &body.path,
+                Arc::clone(&self.inner.clock),
+                body.work.as_ref(),
+            )
+            .await
+    }
+
+    /// Publishes only a complete upload and keeps its temporary file when the destination changed.
+    pub async fn fs_relay_commit(
+        &self,
+        body: &orch_link_contract::commands::FsRelayCommit,
+    ) -> Result<FileStat> {
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_commit(body, Arc::clone(&self.inner.clock))
+            .await
+    }
+
+    /// Cancels the native temporary files of one upload without changing a committed destination.
+    pub async fn fs_relay_abort(
+        &self,
+        body: &orch_link_contract::commands::FsRelayAbort,
+    ) -> Result<()> {
+        if let Some(files) = self.inner.relay_roots.find(body.session_id).await? {
+            return files.relay_abort(body.session_id, &body.receive_path).await;
+        }
+        let environment = self.environment(body.environment_id)?;
+        environment
+            .files
+            .relay_abort(body.session_id, &body.receive_path)
+            .await
+    }
+
     /// `fs.write`: writes a file from stored content, if it is still the version the writer saw.
     pub async fn fs_write(&self, body: &FsWrite, source: &dyn BlobSource) -> Result<FileStat> {
         let environment = self.environment(body.environment_id)?;
@@ -1962,7 +2084,10 @@ impl EnvHost {
     }
 
     /// `fs.rename`: renames or moves a file or a directory.
-    pub async fn fs_rename(&self, body: &FsRename) -> Result<FileStat> {
+    pub async fn fs_rename(
+        &self,
+        body: &FsRename,
+    ) -> Result<orch_api_contract::workspace::FileRenameResult> {
         let environment = self.environment(body.environment_id)?;
         let files = environment.files.clone();
         let (from, to) = (files.parse(&body.from)?, files.parse(&body.to)?);
@@ -2015,6 +2140,30 @@ impl EnvHost {
         let hash = Hash::of(&bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         put_bytes(sink, hash, bytes).await?;
+        Ok(FsArchiveReadResult {
+            blob: BlobRef { hash, size },
+        })
+    }
+
+    /// Decodes a bounded archive entry and carries it only through its command's memory relay.
+    pub async fn fs_relay_archive_read(
+        &self,
+        body: &orch_link_contract::commands::FsRelayArchiveRead,
+        sink: &dyn crate::blobs::RelaySink,
+    ) -> Result<FsArchiveReadResult> {
+        let environment = self.environment(body.environment_id)?;
+        let files = environment.files.clone();
+        let path = files.parse(&body.path)?;
+        let entry = body.entry.clone();
+        let limit = u64::try_from(body.max_bytes)
+            .map_err(|_| HostError::Unsupported("a preview bound cannot be negative".into()))?;
+        let bytes = blocking(move || files.archive_read_bounded(&path, &entry, limit)).await?;
+        let hash = Hash::of(&bytes);
+        let size = i64::try_from(bytes.len())
+            .map_err(|_| HostError::Unsupported("the entry size cannot be represented".into()))?;
+        sink.send(size, &mut MemoryReader::new(bytes))
+            .await
+            .map_err(|error| HostError::Content(error.to_string()))?;
         Ok(FsArchiveReadResult {
             blob: BlobRef { hash, size },
         })
@@ -2233,6 +2382,7 @@ impl EnvHost {
             body,
             orch_types::new_id(),
             Time::new(until),
+            Time::new(until),
             tokio_util::sync::CancellationToken::new(),
         )
         .await?
@@ -2240,13 +2390,40 @@ impl EnvHost {
         .await
     }
 
+    /// Waits until `ready_by` for the baseline of `directory` to be ready, as long as background work that
+    /// brings it up to date is going on: when none is left and the baseline is not ready, nothing more is
+    /// coming, and the recording answers what it has.
+    async fn wait_for_file_states(
+        &self,
+        states: &Arc<crate::file_states::FileStates>,
+        directory: &RelPath,
+        ready_by: Time,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        while states.needs_preparing(directory) && states.work_in_flight() {
+            if self.inner.clock.time() >= ready_by {
+                return Ok(());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(HostError::Cancelled),
+                () = tokio::time::sleep(FILE_STATES_POLL) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Seals local state, its immutable upload source and retention before the serial key is released.
     /// The command owner signals cancellation and joins this future; it must not detach blocking work.
+    ///
+    /// A baseline that is not ready is never walked or hashed here: the pass that makes it ready runs in
+    /// the background, and this waits for it only until `ready_by`, then answers that the files are not
+    /// ready. `until` is the end of the protection of what is captured.
     pub async fn fs_record_capture(
         &self,
         body: &orch_link_contract::source::FsRecord,
         operation: Id,
         until: Time,
+        ready_by: Time,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::file_states::CapturedState> {
         if cancel.is_cancelled() {
@@ -2287,14 +2464,21 @@ impl EnvHost {
             {
                 // A new directory and a re-enabled policy need their indexed baseline before
                 // this immutable identity is answered. Otherwise a scheduling race permanently
-                // freezes not_ready even though the worker completes a moment later.
+                // freezes not_ready even though the worker completes a moment later. The pass that
+                // makes it ready runs in the background (this command only waits for it, up to
+                // `ready_by`), so a large directory never holds the turn or the environment's line.
+                let scope = directory.clone();
                 let kept = states.clone();
                 let policy = crate::state_store::RecordPolicy {
                     record_days: body.record_days,
                     max_bytes: body.max_bytes,
                 };
                 blocking(move || kept.store().keep_policy(&directory, policy)).await?;
-                environment.prepare_file_states().await?;
+                if needs_seed || !states.work_in_flight() {
+                    environment.seed_file_states();
+                }
+                self.wait_for_file_states(&states, &scope, ready_by, &cancel)
+                    .await?;
             }
         }
         if cancel.is_cancelled() {
@@ -3822,6 +4006,8 @@ async fn attach(
         settings.limits.clone(),
         Arc::clone(&host.gates),
     );
+
+    files.start_relay_cleanup(Arc::clone(&host.clock));
 
     // The tree: indexed, or listed live. A walk that outlasts the wait goes on by itself.
     let index = Arc::new(Index::with_scan_limit(

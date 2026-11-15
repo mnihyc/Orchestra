@@ -27,13 +27,13 @@ struct Key {
 }
 async fn key(room: &Room, user: Id, rules: Vec<Value>) -> Key {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let scope = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     create_api_token_scoped(
         &mut *room.world.conn().await,
         &NewApiToken {
@@ -803,18 +803,19 @@ async fn stored_draft_bytes_keep_existing_upload_and_protected_source_boundaries
 
 #[tokio::test]
 async fn native_legacy_chat_view_keeps_state_and_own_draft_read_without_adding_send() {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     let room = Room::new().await;
     let parts = vec![text(
         "An existing private draft before narrower legacy access",
     )];
     ok(save(&room, &room.bea.token, room.chat, parts.clone(), None).await);
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     create_api_token(
         &mut *room.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.bea.id(),
             name: "Legacy ChatView boundary",
             token_hash: &token_hash(&secret),

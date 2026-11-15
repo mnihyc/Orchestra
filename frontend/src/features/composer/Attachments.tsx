@@ -15,7 +15,7 @@ import { FileAttachment } from '@/features/files/FileChip';
 import { FileGuideHint } from '@/features/files/FileGuideHint';
 import { blobSource } from '@/features/files/source';
 import { FilePathAttachment } from '@/features/files/FileLink';
-import { Menu } from '@/ui/Menu';
+import { Menu, type MenuEntry } from '@/ui/Menu';
 import type { ChatPart, ContentPart } from '@/generated/api-types';
 import type { QueuedUpload } from '@/lib/useUploads';
 import { ByteSize } from '@/ui/ByteSize';
@@ -34,13 +34,15 @@ import { UploadHelp } from '@/features/composer/UploadHelp';
 import { JobActivityLine } from '@/features/change/Progress';
 export { carriesFiles } from '@/lib/drop';
 
-export function AttachButton({ onPress, label, disabled = false, onFile, onDocument, fileReason = false, help = 'message-files' }: { onPress: () => void; label?: string; disabled?: boolean; onFile?: () => void; onDocument?: () => void; fileReason?: string | false; help?: 'message-files' | 'documents' }) {
+/** The plus of the box: what is added to a message, and the other acts of the box that a slash command also opens (a goal, a side question), each entered here and by its command and by no third way. */
+export function AttachButton({ onPress, label, disabled = false, onFile, onDocument, fileReason = false, help = 'message-files', extras = [] }: { onPress: () => void; label?: string; disabled?: boolean; onFile?: () => void; onDocument?: () => void; fileReason?: string | false; help?: 'message-files' | 'documents'; extras?: readonly MenuEntry[] }) {
   const { t } = useTranslation();
   const name = label ?? t(onFile !== undefined && onDocument !== undefined ? 'composer.plus.label' : 'composer.attach');
   const button = onFile !== undefined && onDocument !== undefined ? <Menu label={name} side="top" trigger={<IconButton size="sm" label={name} icon={<Plus aria-hidden />} disabled={disabled} />} entries={[
     { id: 'upload', label: t('composer.plus.upload'), onSelect: onPress },
     { id: 'file', label: t('composer.plus.file'), disabled: fileReason, onSelect: onFile },
     { id: 'document', label: t('composer.plus.document'), onSelect: onDocument },
+    ...(extras.length === 0 ? [] : [{ type: 'separator', id: 'acts-separator' } as MenuEntry, ...extras]),
   ]} /> : <IconButton size="sm" label={name} icon={<Paperclip aria-hidden />} disabled={disabled} onClick={onPress} />;
   return <span className="inline-flex items-center gap-0.5">{button}<UploadHelp topic={help} /></span>;
 }
@@ -87,7 +89,7 @@ function QueuedAttachment({ row, queue }: { row: QueuedUpload; queue: UploadQueu
           {paste === undefined ? <span className={row.kind === 'pasted_text' ? 'max-w-full truncate' : 'min-w-0 flex-1 truncate'}>{row.kind === 'pasted_text' ? t('uploads.pastedText') : row.file.name}</span> : <button type="button" className="focus-inset max-w-full truncate text-left" aria-expanded={open} onClick={() => setOpen(!open)}>{t('uploads.pastedText')}</button>}
           {row.characters !== undefined && <span className="text-text-muted tabular-nums">{t('uploads.characters', { count: row.characters, number: formatNumber(row.characters, locale) })}</span>}
           {row.phase !== 'uploading' && !(row.phase === 'writing' && row.work !== undefined) && <ByteSize bytes={row.file.size} />}
-          {native !== undefined ? null : row.phase === 'uploading' ? <span role="status" className="shrink-0 text-text-muted tabular-nums">{t('uploads.bytes', { received: formatBytes(row.received, locale), total: formatBytes(row.file.size, locale) })}</span> : row.phase === 'waiting' ? <span className="text-text-muted">{t('uploads.queued')}</span> : row.phase === 'writing' || row.phase === 'stopping' ? <span role="status" className="text-text-muted">{t(row.phase === 'stopping' ? 'liveWork.stopping' : 'uploads.queued')}</span> : <IconButton size="sm" label={t('uploads.retry', { name: row.kind === 'pasted_text' ? t('uploads.pastedText') : row.file.name })} blocked={typeof queue.retryReason === 'string'} reason={typeof queue.retryReason === 'string' ? queue.retryReason : undefined} icon={<RotateCcw aria-hidden />} onClick={() => queue.retry(row.id)} />}
+          {native !== undefined ? null : row.phase === 'uploading' ? <span role="status" className="shrink-0 text-text-muted tabular-nums">{t('uploads.bytes', { received: formatBytes(row.received, locale), total: formatBytes(row.file.size, locale) })}</span> : row.phase === 'verifying' ? <span role="status" className="text-text-muted">{t('uploads.checking')}</span> : row.phase === 'waiting' ? <span className="text-text-muted">{t('uploads.queued')}</span> : row.phase === 'writing' || row.phase === 'stopping' ? <span role="status" className="text-text-muted">{t(row.phase === 'stopping' ? 'liveWork.stopping' : 'uploads.queued')}</span> : <IconButton size="sm" label={t('uploads.retry', { name: row.kind === 'pasted_text' ? t('uploads.pastedText') : row.file.name })} blocked={typeof queue.retryReason === 'string'} reason={typeof queue.retryReason === 'string' ? queue.retryReason : undefined} icon={<RotateCcw aria-hidden />} onClick={() => queue.retry(row.id)} />}
           <IconButton size="sm" label={t(row.phase === 'failed' ? 'uploads.remove' : 'uploads.cancel', { name: row.kind === 'pasted_text' ? t('uploads.pastedText') : row.file.name })} disabled={row.phase === 'stopping'} icon={<X aria-hidden />} onClick={() => queue.remove(row.id)} />
           {paste !== undefined && <Button size="sm" variant="ghost" disabled={text.isFetching} onClick={asText}>{t('uploads.pasteAsText')}</Button>}
         </div>

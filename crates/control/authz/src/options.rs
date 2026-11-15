@@ -32,7 +32,9 @@ use crate::Error;
 #[must_use]
 pub fn unlimited(permission: Permission) -> Options {
     match permission {
-        Permission::ProviderUse => Options::ProviderUse(ProviderUse::default()),
+        Permission::ProviderUse | Permission::ProviderRelay => {
+            Options::ProviderUse(ProviderUse::default())
+        }
         Permission::HostUse => Options::HostUse(HostUse::default()),
         Permission::TemplateUse => Options::TemplateUse(TemplateUse::default()),
         _ => Options::None,
