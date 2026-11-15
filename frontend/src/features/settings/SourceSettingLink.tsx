@@ -1,4 +1,5 @@
 /** A short setting-source link uses the served identity and the existing exact-setting destination. */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useRef } from 'react';
@@ -12,7 +13,7 @@ import { Button } from '@/ui/Button';
 import { useErrorText } from '@/ui/errorText';
 import { toast } from '@/ui/Toast';
 
-export function SourceSettingLink({ source, def, target, fallback, locked = false, inherited = false, text }: {
+export function SourceSettingLink({ source, def, target, fallback, locked = false, inherited = false, text, defaultToSystem = false }: {
   source: SettingSource;
   def: Pick<SettingDef, 'key' | 'class'>;
   target?: SettingsTarget;
@@ -21,6 +22,8 @@ export function SourceSettingLink({ source, def, target, fallback, locked = fals
   inherited?: boolean;
   /** A related-place reference uses the same canonical source-setting destination with its own name. */
   text?: string;
+  /** A captured compiled default can open its existing system control without claiming a system override. */
+  defaultToSystem?: boolean;
 }) {
   const { t } = useTranslation();
   const client = useQueryClient();
@@ -39,7 +42,7 @@ export function SourceSettingLink({ source, def, target, fallback, locked = fals
   const resolve = useMutation({ mutationFn: async (request: { version: number; at: string; source: SettingSource; def: Pick<SettingDef, 'key' | 'class'>; target: SettingsTarget | undefined }) => {
     const from = request.source.node;
     if (from?.kind !== 'org' || from.redacted || from.name === null) throw new Error(t('settings.compact.sourceUnavailable'));
-    const current = await client.query({ ...nodeQuery(from.id), staleTime: 0 });
+    const current = await client.query({ ...nodeQuery(from.id), ...READ_NOW });
     const href = current.kind === 'org' ? sourceSettingHref(request.source, request.def, request.target, current.address) : null;
     if (href === null) throw new Error(t('settings.compact.sourceUnavailable'));
     return href;
@@ -48,8 +51,9 @@ export function SourceSettingLink({ source, def, target, fallback, locked = fals
   });
   if (node !== null && (node.redacted || node.name === null)) return <span>{t('settings.compact.hiddenSource')}</span>;
   const place = node?.name ?? (source.scope === 'system' ? t('settings.editor.from.system') : source.scope === 'default' ? t('settings.editor.from.default') : fallback);
-  const href = sourceSettingHref(source, def, target, address);
-  const label = text ?? t(locked ? 'settings.compact.lockedOn' : inherited ? 'settings.compact.inheritedFrom' : 'settings.compact.setOn', { place });
+  const href = sourceSettingHref(source, def, target, address) ?? (defaultToSystem && source.scope === 'default' ? `/admin/settings?setting=${encodeURIComponent(def.key)}` : null);
+  const label = text ?? (defaultToSystem && source.scope === 'default' ? t('settings.editor.from.default')
+    : t(locked ? 'settings.compact.lockedOn' : inherited ? 'settings.compact.inheritedFrom' : 'settings.compact.setOn', { place }));
   if (href !== null) return <a href={href} className="focus-inset min-w-0 rounded-md wrap-anywhere text-accent-text underline underline-offset-2">{label}</a>;
   return visibleOrg ? <Button role="link" variant="ghost" size="sm" pending={resolve.isPending} className="h-auto min-h-6 min-w-0 max-w-full px-0 text-xs text-accent-text underline underline-offset-2"
     onClick={() => resolve.mutate({ version: version.current, at: location.href, source, def, target })}><span className="min-w-0 text-left wrap-anywhere whitespace-normal">{label}</span></Button> : <span>{label}</span>;

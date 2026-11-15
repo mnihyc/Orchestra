@@ -26,6 +26,265 @@ fn option(id: &str) -> ApprovalDecision {
     })
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_is_answered_and_delivered_while_another_change_holds_the_thread() {
+    let world = World::new().await;
+    let thread = world.thread("Decide while a change waits").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "held-decision"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let decided = tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("the answer never waits for the thread row")
+    .unwrap();
+    assert_eq!(decided.state, "approved");
+    world.wait_ran(CommandKind::ApprovalResolve, 1).await;
+    holder.commit().await.unwrap();
+    world.wait_state(thread, "running").await;
+    common::eventually("the timeline carries the decision", || async {
+        world
+            .scalar::<String>(
+                "SELECT status FROM items WHERE id=(SELECT item_id FROM approvals WHERE id=$1)",
+                approval,
+            )
+            .await
+            == "approved"
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_people_deciding_a_busy_thread_get_one_winner_without_waiting_for_it() {
+    let world = World::new().await;
+    let bob = world.person("bob").await;
+    world.give(bob, "admin").await;
+    let thread = world.thread("Two decisions while busy").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "two-decisions"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let engine = world.engine();
+    let ada = Caller::session(world.ada);
+    let bob = Caller::session(bob);
+    let allow = option("allow_once");
+    let deny = option("deny");
+    let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            engine.decide_approval(&ada, approval, &allow),
+            engine.decide_approval(&bob, approval, &deny)
+        )
+    })
+    .await
+    .expect("both people get their answer while the row stays held");
+    let results = [first, second];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| matches!(error, ApprovalError::AlreadyDecided))
+    );
+    holder.commit().await.unwrap();
+    world.wait_ran(CommandKind::ApprovalResolve, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_and_a_stop_are_both_taken_while_the_thread_is_busy() {
+    let world = World::tuned(|config| config.interrupt_force = Duration::from_secs(30)).await;
+    let thread = world.thread("Decide and stop while busy").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "decision-and-stop"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let engine = world.engine();
+    let caller = Caller::session(world.ada);
+    let allow = option("allow_once");
+    let (decision, stop) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            engine.decide_approval(&caller, approval, &allow),
+            engine.stop_thread(&caller, thread, Some(start.turn_id))
+        )
+    })
+    .await
+    .expect("neither action waits for the row");
+    assert_eq!(decision.unwrap().state, "approved");
+    stop.unwrap();
+    holder.commit().await.unwrap();
+    common::eventually("the harness is asked to stop", || async {
+        world.commands.issued_of("turn.interrupt") == 1
+    })
+    .await;
+    assert!(world.sync(thread).await.thread.queue.held);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recorded_decision_settles_once_after_the_server_starts_again() {
+    let world = World::new().await;
+    let thread = world.thread("Recover a recorded decision").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(
+            thread,
+            command_asked(start.turn_id, "decision-before-restart"),
+        )
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("recorded before the row is free")
+    .unwrap();
+    world.restart_api().await;
+    holder.commit().await.unwrap();
+    world.wait_state(thread, "running").await;
+    common::eventually("settlement survives restart", || async {
+        world
+            .scalar::<bool>(
+                "SELECT decision_settlement IS NULL FROM approvals WHERE id=$1",
+                approval,
+            )
+            .await
+    })
+    .await;
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT status FROM items WHERE id=(SELECT item_id FROM approvals WHERE id=$1)",
+                approval
+            )
+            .await,
+        "approved"
+    );
+    assert_eq!(world.scalar::<i64>("SELECT count(*) FROM audit_log WHERE action='approval.decided' AND details->>'approval'=$1::uuid::text", approval).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_and_another_persons_send_and_edit_are_answered_while_recipient_settlement_waits()
+ {
+    let world = World::new().await;
+    let thread = world.thread("Decide while notices wait").await;
+    let bob = world.person("bob").await;
+    world.give(bob, "interactor").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "notice-contention"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE notifications IN SHARE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let decided = tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("notices are settled after the answer")
+    .unwrap();
+    assert_eq!(decided.state, "approved");
+    common::eventually("recipient settlement reached its table blocker", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='notifications'::regclass AND NOT granted)")
+            .fetch_one(world.pool.pool()).await.unwrap()
+    }).await;
+    let caller = Caller::session(bob);
+    let sent = tokio::time::timeout(
+        Duration::from_secs(3),
+        world
+            .engine()
+            .submit_input(&caller, thread, queued("Another person's pending work")),
+    )
+    .await
+    .expect("recipient contention holds no thread row needed by Send")
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().edit_input(
+            &caller,
+            thread,
+            sent.input.id,
+            Some(vec![orch_api_contract::threads::ContentPart::Text {
+                text: "Edited while notices wait".to_owned(),
+            }]),
+            None,
+        ),
+    )
+    .await
+    .expect("recipient contention holds no thread row needed by Edit")
+    .unwrap();
+    let repeated = tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("recipient contention holds no approval row needed by another decision");
+    assert!(matches!(repeated, Err(ApprovalError::AlreadyDecided)));
+    let sync = world.sync(thread).await;
+    assert!(sync.inputs.iter().any(|input| input.id == sent.input.id
+        && format!("{:?}", input.content).contains("Edited while notices wait")));
+    holder.commit().await.unwrap();
+    common::eventually("all recipient copies are settled", || async {
+        world.scalar::<bool>("SELECT NOT EXISTS(SELECT 1 FROM notifications WHERE approval_id=$1 AND data->>'_orch_approval_settled' IS DISTINCT FROM 'true')", approval).await
+    }).await;
+    world.wait_state(thread, "running").await;
+}
+
 fn plan_asked(turn: Id, reference: &str, plan: &str) -> Event {
     let Event::ApprovalRequested(mut asked) = command_asked(turn, reference) else {
         unreachable!("the helper creates an approval request")
@@ -578,6 +837,12 @@ async fn questions_in_admitted_modes_deliver_only_the_winning_answer_and_auto_ke
             serde_json::to_value(&delivered.decision).unwrap(),
             won.decision.clone().unwrap()
         );
+        common::eventually("the accepted answer reaches the timeline", || async {
+            world.sync(thread).await.items.iter().any(|item| {
+                item.kind() == ItemKind::Approval && item.status == ItemStatus::Answered
+            })
+        })
+        .await;
         let synced = world.sync(thread).await;
         assert_eq!(synced.thread.pending_approvals, 0);
         assert_eq!(
@@ -674,6 +939,81 @@ fn person_question(turn: Id, reference: &str, source: Option<&str>) -> Event {
 }
 fn person_answer() -> ApprovalDecision {
     serde_json::from_value(json!({"answers":{"branch":["main"]}})).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_old_committed_answer_reaches_the_harness_after_a_controller_restart() {
+    let world = World::new().await;
+    let thread = world.thread("An answer kept through an outage").await;
+    let (start, _) = world.running_turn(thread, "Ask").await;
+    world
+        .say(
+            thread,
+            person_question(start.turn_id, "answer-after-outage", None),
+        )
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    world.engine().stop();
+    // Commit through the production writer without spawning a worker, as a crash after commit leaves it.
+    let mut tx = world.pool.begin().await.unwrap();
+    assert!(
+        orch_db::queries::approvals::decide(
+            &mut tx,
+            approval,
+            "answered",
+            Some(world.ada),
+            &json!({"answers":{"branch":["main"]}}),
+            world.clock.now() - chrono::Duration::days(1),
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(world.ran(CommandKind::ApprovalResolve), 0);
+    let pending: serde_json::Value = world
+        .scalar(
+            "SELECT decision_delivery FROM approvals WHERE id=$1",
+            approval,
+        )
+        .await;
+    assert_eq!(pending["state"], "pending");
+    assert!(pending["last_attempt_at"].is_null());
+    world.restart_api().await;
+    world.wait_ran(CommandKind::ApprovalResolve, 1).await;
+    let commands = world.seen.of_kind(CommandKind::ApprovalResolve);
+    let Command::ApprovalResolve(told) = &commands[0] else {
+        panic!("the retained answer is delivered");
+    };
+    assert_eq!(told.request_ref, "answer-after-outage");
+    assert_eq!(
+        serde_json::to_value(&told.decision).unwrap(),
+        json!({"answers":{"branch":["main"]}})
+    );
+    common::eventually(
+        "the native acknowledgement completes its retained delivery",
+        || async {
+            let applied: serde_json::Value = world
+                .scalar(
+                    "SELECT decision_delivery FROM approvals WHERE id=$1",
+                    approval,
+                )
+                .await;
+            applied["state"] == "applied" && applied["last_attempt_at"].as_str().is_some()
+        },
+    )
+    .await;
+    world.restart_api().await;
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(world.ran(CommandKind::ApprovalResolve), 1);
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await,
+        "answered"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -117,6 +117,8 @@ CREATE TABLE usage_caps (
 CREATE INDEX usage_caps_node_idx ON usage_caps USING btree (node_id) WHERE enabled;
 
 CREATE INDEX usage_caps_provider_idx ON usage_caps USING btree (provider_id) WHERE enabled;
+CREATE INDEX usage_caps_policy_node_idx ON usage_caps(node_id);
+CREATE INDEX usage_caps_policy_provider_idx ON usage_caps(provider_id) WHERE provider_id IS NOT NULL;
 
 CREATE TABLE usage_change_state (
     singleton boolean NOT NULL,
