@@ -234,6 +234,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
     assert_eq!(initial.value, Some(json!(7)));
     assert!(!initial.writable);
     let value = NodeSettingSetBody {
+        model_choice: None,
         value: json!(0),
         locked: None,
         expected_revision: Some(0),
@@ -268,6 +269,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     let bad = NodeSettingSetBody {
+        model_choice: None,
         value: json!(-1),
         locked: None,
         expected_revision: Some(revision),
@@ -1890,7 +1892,7 @@ fn host_enrollment_request(
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Node],
     }
 }

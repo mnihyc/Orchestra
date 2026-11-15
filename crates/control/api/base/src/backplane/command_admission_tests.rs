@@ -423,6 +423,7 @@ impl CommandHandler for Native {
                 self.writes.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandResult::FsWrite(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.rsplit('/').next().unwrap_or_default().into(),
                             path: body.path,
@@ -591,6 +592,7 @@ impl CommandHandler for Native {
                 }
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.clone(),
                             path: body.path,
@@ -616,6 +618,8 @@ impl CommandHandler for Native {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -728,7 +732,7 @@ fn peer(
                                             &gateway,
                                             machine,
                                             session,
-                                            UpFrame::CmdAck(CmdAck { id }),
+                                            UpFrame::CmdAck(CmdAck { id, key_phase: orch_link_contract::commands::CommandKeyPhase::Queued }),
                                         )
                                         .await;
                                         // Only an explicitly declared mirror gate needs an

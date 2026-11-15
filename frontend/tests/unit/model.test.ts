@@ -23,6 +23,13 @@ const OFFERED_ONLY: ModelParameters = {
 };
 
 describe("a model's entry as a form", () => {
+  it('keeps unknown image support unknown and saves an explicit off choice as false', () => {
+    expect(formOf({}).images).toBeNull();
+    expect(parametersOf(formOf({}), {}).input_images).toBeUndefined();
+    const known = { input_images: true };
+    expect(parametersOf({ ...formOf(known), images: false }, known).input_images).toBe(false);
+  });
+
   it('keeps what the source offered and switches nothing on by itself', () => {
     const saved = parametersOf(formOf(OFFERED_ONLY), OFFERED_ONLY);
     expect(saved.offered).toEqual(OFFERED_ONLY.offered);
@@ -257,7 +264,7 @@ describe('what a thread runs with', () => {
     expect(speed).toMatchObject({ force: null, chosen: null, from: 'chosen', stale: false });
     expect(access).toMatchObject({ force: null, from: 'chosen' });
     expect(withChoice({}, speed!, null)).toEqual({ service_tier: null });
-    expect(withChoice({ service_tier: null }, speed!, 'fast')).toEqual({});
+    expect(withChoice({ service_tier: null }, speed!, 'fast')).toEqual({ service_tier: 'fast' });
   });
 
   it('has no speed, access or context for a model whose managers switched none on', () => {
@@ -297,11 +304,11 @@ describe('a change of model', () => {
 describe('a choice', () => {
   const [speed, , context] = all(SOL, { service_tier: 'fast' });
 
-  it('is written as the thread\'s own, and choosing what the model starts with puts the thread back to following it', () => {
+  it('keeps each choice explicit even when it equals the model default', () => {
     expect(withChoice({}, speed!, 'fast')).toEqual({ service_tier: 'fast' });
-    expect(withChoice({ service_tier: 'fast', other: 1 }, speed!, null)).toEqual({ other: 1 });
+    expect(withChoice({ service_tier: 'fast', other: 1 }, speed!, null)).toEqual({ service_tier: null, other: 1 });
     expect(withChoice({}, context!, 400_000)).toEqual({ context: 400_000 });
-    expect(withChoice({ context: 400_000 }, context!, 1_000_000)).toEqual({});
+    expect(withChoice({ context: 400_000 }, context!, 1_000_000)).toEqual({ context: 1_000_000 });
   });
 
   it('is credited to whoever last changed it, as far as the lines of the history say', () => {
@@ -380,4 +387,20 @@ describe("what a turn ran with, as its footer says it", () => {
     expect(ranWithParts({ service_tier: 'priority' }, defs, 'sol', options, 'en-US')).toEqual(['priority']);
     expect(ranWithParts({ service_tier: 'fast' }, defs, 'gone', options, 'en-US')).toEqual(['fast']);
   });
+});
+
+it('lets explicit Standard, None and the model context override different inherited choices', () => {
+  const data = parametersFor(SOL, [{ def: SPEED }, { def: ACCESS }, { def: CONTEXT }]);
+  const above = { service_tier: 'fast', cyber_access_program: 'Daybreak Blue', context: 400_000 };
+  data.parameters = data.parameters.map((view) => ({ ...view, value: above[view.key as keyof typeof above], source: { scope: 'topic', node: null } }));
+  const states = statesOf(data, {}, t);
+  for (const [kind, value] of [['speed', null], ['access', null], ['context', 1_000_000]] as const) {
+    const state = states.find((state) => state.kind === kind);
+    if (state === undefined) throw new Error('The inherited native choice is declared');
+    expect(state.from).toBe('above');
+    const own = withChoice({}, state, value);
+    expect(own).toEqual({ [state.key]: value });
+    const after = statesOf(data, own, t).find((next) => next.kind === kind);
+    expect(after).toMatchObject({ force: value, from: 'chosen', stale: false });
+  }
 });
