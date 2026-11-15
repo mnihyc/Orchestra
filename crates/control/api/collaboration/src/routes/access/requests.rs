@@ -138,6 +138,7 @@ fn ask_of(index: usize, item: &api::AccessRequestItem, caller: Id) -> ApiResult<
         options: item.options.as_ref().map(|options| AskedOptions {
             models: options.models.clone(),
             services: options.services.clone(),
+            purposes: options.purposes.clone(),
             efforts: options.efforts.clone(),
         }),
         whom,
@@ -430,6 +431,7 @@ pub async fn views_of(
                     options: asked.options.as_ref().map(|options| api::AccessOptions {
                         models: options.models.clone(),
                         services: options.services.clone(),
+                        purposes: options.purposes.clone(),
                         efforts: options.efforts.clone(),
                         r#where: None,
                     }),

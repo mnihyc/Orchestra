@@ -12,7 +12,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 export function MentionAgentAccess({ id, onClose }: { id: string; onClose: () => void }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const query = useQuery({ ...nodeQuery(id), staleTime:0 });
+  const query = useQuery({ ...nodeQuery(id) });
   const thread = query.data?.kind === 'thread' ? query.data : null;
   const refresh = () => { void query.refetch(); void client.invalidateQueries({queryKey:['chat-mentions']}); };
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={t('access.request.title')} size="sm">

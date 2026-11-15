@@ -1,4 +1,5 @@
 /** A short setting-source link uses the served identity and the existing exact-setting destination. */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useRef } from 'react';
@@ -39,7 +40,7 @@ export function SourceSettingLink({ source, def, target, fallback, locked = fals
   const resolve = useMutation({ mutationFn: async (request: { version: number; at: string; source: SettingSource; def: Pick<SettingDef, 'key' | 'class'>; target: SettingsTarget | undefined }) => {
     const from = request.source.node;
     if (from?.kind !== 'org' || from.redacted || from.name === null) throw new Error(t('settings.compact.sourceUnavailable'));
-    const current = await client.query({ ...nodeQuery(from.id), staleTime: 0 });
+    const current = await client.query({ ...nodeQuery(from.id), ...READ_NOW });
     const href = current.kind === 'org' ? sourceSettingHref(request.source, request.def, request.target, current.address) : null;
     if (href === null) throw new Error(t('settings.compact.sourceUnavailable'));
     return href;
