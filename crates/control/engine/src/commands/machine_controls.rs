@@ -146,6 +146,29 @@ impl Operation for Roles {
         })
     }
 }
+
+#[derive(Clone, PartialEq, Eq)]
+struct Gateway;
+impl Operation for Gateway {
+    const ROUTE: Route = orch_api_contract::gateways::MachineGatewaySet::ROUTE;
+    const DECLARATION: &'static Declaration<Role> = &declarations::GATEWAY;
+    const KIND: CommandKind = CommandKind::MachineGatewaySet;
+    const EXCLUSIVE: bool = true;
+    const REQUIRE_VIEW: bool = false;
+    fn valid_body(body: &Json) -> bool {
+        serde_json::from_value::<orch_link_contract::commands::MachineGatewaySet>(body.clone())
+            .is_ok_and(|request| match request.choice.selection {
+                orch_link_contract::gateways::GatewaySelection::Automatic => {
+                    request.choice.gateway_id.is_none()
+                }
+                orch_link_contract::gateways::GatewaySelection::Selected => request
+                    .choice
+                    .gateway_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty()),
+            })
+    }
+}
 #[derive(Clone, PartialEq, Eq)]
 struct PolicyChange;
 impl Operation for PolicyChange {
@@ -584,6 +607,11 @@ native_command!(
     MachineRolesAuthority,
     Roles,
     "Private delegated-role provenance, with its exact original operation and physical source."
+);
+native_command!(
+    MachineGatewayAuthority,
+    Gateway,
+    "Private primary gateway selection provenance, retaining its exact operation and physical source."
 );
 
 native_command!(

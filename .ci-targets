@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test kmounts_files --test mount_duplicates --test hosts --test resource_facts --test installation_records
+test -p orch-engine --test cache_cleanup
+test -p orch-db --test loss_resources
+web typecheck
+web lint
+web test -- tests/component/cleanup-plan.test.tsx tests/component/resource-impact.test.tsx tests/component/storage.test.tsx tests/component/mount-location-status.test.tsx tests/component/resource-management-visibility.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

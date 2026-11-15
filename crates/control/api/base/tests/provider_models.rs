@@ -654,7 +654,7 @@ async fn accepting_two_reported_names_that_collide_refuses_the_batch_without_los
 }
 
 #[tokio::test]
-async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enabled() {
+async fn accepted_suggestions_are_added_with_what_they_offer_switched_on() {
     let world = world().await;
     let c = company(&world).await;
     let machine = machine_forwarding_to(&world, c.boss.id(), &["https://api.example.com/v1"]).await;
@@ -713,9 +713,22 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         Some(&["low".to_owned(), "high".to_owned()][..])
     );
     assert_eq!(sol.parameters.context_window, Some(400_000));
+    assert_eq!(
+        sol.parameters.service_tiers,
+        Some(vec![ServiceTier {
+            id: "fast".into(),
+            label: "Fast".into()
+        }]),
+        "the organization's shipped choice switches on what a suggestion offers"
+    );
+    assert_eq!(
+        sol.parameters.access_programs,
+        Some(vec!["early".to_owned()])
+    );
     assert!(
-        sol.parameters.service_tiers.is_none() && sol.parameters.access_programs.is_none(),
-        "none enabled"
+        sol.parameters.default_service_tier.is_none()
+            && sol.parameters.default_access_program.is_none(),
+        "a thread still starts with the ordinary speed and no program"
     );
     let offered = sol.parameters.offered.clone().unwrap();
     assert_eq!(

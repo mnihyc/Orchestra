@@ -38,12 +38,31 @@ export function checksOf(job: Job): string[] {
 const COPY_PHASES = new Set(['copy', 'files', 'upload', 'download', 'materialize', 'restore', 'apply', 'write', 'volumes', 'hash']);
 const SEPARATOR = ' · ';
 
+const SERVER_UPDATE_STAGES: Record<string, string | undefined> = {
+  queued: 'serverUpdate.stages.queued',
+  fetching: 'serverUpdate.stages.fetching',
+  verifying: 'serverUpdate.stages.verifying',
+  applying: 'serverUpdate.stages.applying',
+  stopping: 'serverUpdate.stages.stopping',
+  dumping: 'serverUpdate.stages.dumping',
+  activating: 'serverUpdate.stages.activating',
+  starting: 'serverUpdate.stages.starting',
+  checking: 'serverUpdate.stages.checking',
+  rolling_back: 'serverUpdate.stages.rolling_back',
+  recovering: 'serverUpdate.stages.recovering',
+  updated: 'serverUpdate.stages.updated',
+  rolled_back: 'serverUpdate.stages.rolled_back',
+  failed: 'serverUpdate.stages.failed',
+};
+
 /** The running phase and its live counters, as compact fragments. */
 export function useLine(job: Job, transfer?: TransferFacts): string {
   const { t } = useTranslation();
   const format = useFormatContext();
   const { locale } = format;
   const progress = job.progress;
+  const serverStage = progress.message === null ? undefined : SERVER_UPDATE_STAGES[progress.message];
+  if (job.kind === 'server_update' && serverStage !== undefined) return t(serverStage);
   if (job.state === 'cancelled' || job.state === 'failed' || job.state === 'succeeded' || job.state === 'lost') return t(`source.job.${job.state}`);
   if (progress.activity?.stopping === true) return t('liveWork.stopping');
   if (job.state === 'queued') return t('change.progress.queued');
@@ -120,6 +139,7 @@ export interface ProgressProps {
 
 export function JobProgress({ job, heading, reconnecting, className, phaseLabel, transfer }: ProgressProps) {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const checks = checksOf(job);
   const verifying = job.progress.phase === 'verify' && job.state === 'running';
   return (
@@ -127,7 +147,7 @@ export function JobProgress({ job, heading, reconnecting, className, phaseLabel,
       <div className="flex items-baseline justify-between gap-3">
         <div className="flex min-w-0 items-center gap-1"><h3 className="text-base font-semibold text-text">{heading}</h3><Hint id="live-work" popover /></div>
         <span className="text-base font-medium text-text tabular-nums" data-job-percent>
-          {job.progress.percent} %
+          {formatNumber(job.progress.percent, locale)} %
         </span>
       </div>
       <Meter look="progress" value={job.progress.percent} label={heading} />
