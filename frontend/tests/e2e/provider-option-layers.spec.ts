@@ -27,7 +27,10 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       const frontier = groups.getByRole('listitem').filter({ hasText: 'frontier' });
       await frontier.getByRole('button', { name: words.models.groups.options, exact: true }).click();
       const dialog = page.getByRole('dialog', { name: groupTitle });
-      const field = dialog.getByRole('textbox', { name: words.providerOptions.schemaTitle, exact: true });
+      await dialog.locator('summary').filter({ hasText: words.providerOptions.schemaTitle }).click();
+      const groupRaw = dialog.locator('[data-option-schema-editor] details');
+      if (await groupRaw.getAttribute('open') === null) await groupRaw.locator('summary').click();
+      const field = dialog.getByRole('textbox', { name: words.providerFields.raw, exact: true });
       const schema = { 'openai-responses': { type: 'object', properties: { temperature: { type: 'number', maximum: width === 400 ? 0.4 : 0.5 } } } };
       await field.fill('{bad');
       await expect(dialog.getByRole('button', { name: words.resources.edit.save, exact: true })).toHaveAttribute('aria-disabled', 'true');
@@ -49,7 +52,10 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       await expect(dialog).toHaveCount(0);
       await frontier.getByRole('button', { name: words.models.groups.options, exact: true }).click();
       const again = page.getByRole('dialog', { name: groupTitle });
-      expect(JSON.parse(await again.getByRole('textbox', { name: words.providerOptions.schemaTitle, exact: true }).inputValue())).toEqual(schema);
+      await again.locator('summary').filter({ hasText: words.providerOptions.schemaTitle }).click();
+      const againRaw = again.locator('[data-option-schema-editor] details');
+      if (await againRaw.getAttribute('open') === null) await againRaw.locator('summary').click();
+      expect(JSON.parse(await again.getByRole('textbox', { name: words.providerFields.raw, exact: true }).inputValue())).toEqual(schema);
       await again.getByRole('button', { name: words.common.cancel, exact: true }).click();
 
       // The same model editor keeps its own declaration and the actual membership control.
@@ -58,7 +64,8 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       await page.getByRole('menuitem', { name: words.models.list.edit, exact: true }).click();
       const modelEditor = page.getByRole('dialog', { name: words.models.editor.title, exact: true });
       // Documented controls lead; the unchanged full schema remains behind Raw JSON.
-      const modelOptions = modelEditor.getByRole('group', { name: words.providerOptions.schemaTitle, exact: true });
+      await modelEditor.locator('summary').filter({ hasText: words.providerOptions.schemaTitle }).click();
+      const modelOptions = modelEditor.locator('[data-option-schema-editor]');
       await modelOptions.locator('summary').filter({ hasText: words.providerFields.raw }).click();
       await expect(modelOptions.getByRole('textbox', { name: words.providerFields.raw, exact: true })).toBeVisible();
       await expect(modelEditor.getByRole('button', { name: words.models.groups.optionsGuide, exact: true })).toHaveAttribute('data-help-heading', 'request-options');
@@ -70,8 +77,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       // Endpoint declarations use the same manager field through its actual descriptor.
       await page.goto(`/resources/providers/${PROVIDER}?tab=key`);
       const endpoints = page.getByRole('region', { name: words.providers.key.endpoints, exact: true });
-      const advanced = endpoints.locator('details').first();
-      if (await advanced.getAttribute('open') === null) await advanced.locator('summary').click();
+      await endpoints.locator('summary').filter({ hasText: words.providerOptions.schemaTitle }).click();
       const endpointOptions = endpoints.locator('[data-option-schema-editor]');
       const raw = endpointOptions.locator('details');
       if (await raw.getAttribute('open') === null) await raw.locator('summary').click();

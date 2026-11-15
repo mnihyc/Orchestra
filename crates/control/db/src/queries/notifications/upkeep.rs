@@ -495,16 +495,12 @@ async fn purge_members(
 /// Removes the raw events older than `cutoff` from the partitions that are
 /// only partly old, up to a bounded number of rows; the partitions that are
 /// wholly old are dropped apart (`migrations::drop_partitions_before`).
-pub async fn trim_raw_events(conn: &mut Conn, cutoff: DateTime<Utc>) -> Result<u64, DbError> {
-    Ok(sqlx::query(
-        "DELETE FROM raw_events WHERE (segment_id, n, at) IN
-            (SELECT segment_id, n, at FROM raw_events WHERE at < $1 LIMIT $2)",
-    )
-    .bind(cutoff)
-    .bind(RAW_EVENT_ROWS_PER_RUN)
-    .execute(conn)
-    .await?
-    .rows_affected())
+pub async fn trim_raw_events(
+    conn: &mut Conn,
+    cutoff: DateTime<Utc>,
+    at: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    crate::queries::raw_events::trim_before(conn, cutoff, at, RAW_EVENT_ROWS_PER_RUN).await
 }
 
 /// The first day before `before` that has a minute whose hour is not folded
