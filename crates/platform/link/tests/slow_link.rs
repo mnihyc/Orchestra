@@ -494,7 +494,7 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     };
     let reply = EnrollReply {
@@ -510,7 +510,7 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
             name: "Orch".to_owned(),
             public_url: "https://orch.example.com".to_owned(),
         },
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
     };
     let up = serde_json::to_vec(&request).unwrap().len() as f64;
     let down = serde_json::to_vec(&reply).unwrap().len() as f64;
