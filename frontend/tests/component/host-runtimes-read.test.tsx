@@ -7,7 +7,7 @@ import type { Host,Runtime } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { show } from './support';
 const read=vi.hoisted(()=>vi.fn<()=>Promise<Runtime[]>>());
-vi.mock('@/api/resources',()=>({hostRuntimesQuery:()=>({queryKey:['host-runtimes','host'],queryFn:read}),removeHostRuntime:vi.fn(),stopHostRuntime:vi.fn()}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),hostRuntimesQuery:()=>({queryKey:['host-runtimes','host'],queryFn:read}),removeHostRuntime:vi.fn(),stopHostRuntime:vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 it('names the failed read and offers Retry, then shows the recovered stored state',async()=>{
   read.mockRejectedValueOnce(new Error('The stored runtime report could not be read.')).mockResolvedValueOnce([]);

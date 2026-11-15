@@ -120,6 +120,8 @@ pub use orch_api_base::routes::nodes::view::ReferenceDisclosure;
 pub use orch_api_base::routes::nodes::view::ReferenceAuthority;
 
 pub use orch_api_base::routes::nodes::view::named_admin_access;
+#[path = "automatic_fields.rs"]
+mod automatic_fields;
 /// A word of one contract as the same word of another.
 fn same<A: Serialize, B: DeserializeOwned>(word: &A) -> Option<B> {
     serde_json::to_value(word)
@@ -748,6 +750,7 @@ async fn build_with_name_sources(
     for detail in &used {
         people.push(detail.owner_id);
         people.extend(detail.archived_by);
+        people.extend(automatic_fields::people(detail));
     }
     let people = user_refs(conn, &people).await?;
     let mut on_the_ways: Vec<Id> = used
@@ -782,6 +785,9 @@ async fn build_with_name_sources(
             .filter_map(|place| standing.refs.get(place).cloned())
             .collect();
         let access = access_of(&standing, site, &detail.path, &subscriptions);
+        let automatic_fields = viewable(&standing, site)
+            .then(|| automatic_fields::project(detail, &path, &people))
+            .flatten();
         let common = Common {
             id,
             detail,
@@ -792,6 +798,7 @@ async fn build_with_name_sources(
             archived: site.is_archived(),
             archived_by: detail.archived_by.and_then(|by| people.get(&by).cloned()),
             access,
+            automatic_fields,
             tags: tags_of(detail.id, &extras, &standing),
         };
         let node = match node_kind(&detail.kind) {
@@ -895,6 +902,7 @@ struct Common<'a> {
     archived: bool,
     archived_by: Option<UserRef>,
     access: Access,
+    automatic_fields: Option<orch_api_contract::summary_facts::AutomaticFields>,
     tags: Vec<Tag>,
 }
 
@@ -919,6 +927,7 @@ impl Common<'_> {
             tags: self.tags.clone(),
             tags_source: source(detail.tags_source.as_deref().unwrap_or("auto")),
             auto_updated_at: detail.auto_updated_at.map(time),
+            automatic_fields: self.automatic_fields.clone(),
             page: self.page,
             chat_id: detail.chat_id.unwrap_or_else(Id::nil),
             archived: self.archived,

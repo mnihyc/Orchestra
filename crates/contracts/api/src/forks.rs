@@ -68,6 +68,9 @@ pub struct ReportDropped {
 /// What was kept, converted and dropped when a history travelled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HistoryReport {
+    /// Actual bounded handoff observations, independent of estimated history and transcript coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Box<crate::summary_facts::HandoffResult>>,
     /// How well it was kept.
     pub fidelity: Fidelity,
     /// How many items there were.
@@ -580,6 +583,15 @@ pub enum PrivateViewLeftBecause {
 /// The files a plan copies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FilesPlan {
+    /// Source policy chosen by this actual workspace read/copy operation; absent for an unreported old plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_policy: Option<crate::workspace::FileSourcePolicy>,
+    /// Whole-root policy of an actually measured home copy, separate from workspace exclusions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_policy: Option<crate::workspace::FileSourcePolicy>,
+    /// Whole-root policy of an actually measured recorded-data copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_states_policy: Option<crate::workspace::FileSourcePolicy>,
     /// Owned installed-file layers carried by an environment move; the full archive also includes its base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_image_bytes: Option<i64>,
