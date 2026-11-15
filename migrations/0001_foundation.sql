@@ -937,6 +937,41 @@ BEGIN
 END
 $$;
 
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
+END
+$$;
+
 CREATE FUNCTION public.orch_item_internal_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -2819,5 +2854,12 @@ BEGIN
   INSERT INTO thread_history_cut_row_counts(cut_id,kind,row_count,max_ordinal)
     SELECT cut,r.kind,count(*)::bigint,max(r.ordinal) FROM thread_history_cut_rows r WHERE r.cut_id=cut
     GROUP BY r.kind ON CONFLICT DO NOTHING;
+  INSERT INTO thread_history_cut_turn_bytes(cut_id,turn_id,payload_bytes)
+    SELECT cut,m.turn_id,sum(CASE WHEN m.body IS NOT NULL THEN COALESCE((m.body->>'payload_bytes')::bigint,octet_length((m.body->'payload')::text))
+        WHEN m.revision_seq IS NOT NULL THEN COALESCE((r.body->>'payload_bytes')::bigint,octet_length((r.body->'payload')::text))
+        ELSE i.payload_bytes END)::bigint
+    FROM thread_history_cut_members(cut) m LEFT JOIN items i ON i.id=m.item_id AND m.body IS NULL
+    LEFT JOIN thread_item_revisions r ON r.item_id=m.item_id AND r.seq_updated=m.revision_seq
+    WHERE m.turn_id IS NOT NULL GROUP BY m.turn_id ON CONFLICT DO NOTHING;
 END
 $$;

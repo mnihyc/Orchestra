@@ -458,6 +458,7 @@ pub(crate) struct Backward<'a> {
     ended: bool,
     neutral_room: Option<usize>,
     neutral_overflow: bool,
+    turn_read_bytes: Option<i64>,
 }
 
 impl<'a> Backward<'a> {
@@ -491,6 +492,7 @@ impl<'a> Backward<'a> {
             ended: false,
             neutral_room: None,
             neutral_overflow: false,
+            turn_read_bytes: None,
         })
     }
 
@@ -498,6 +500,12 @@ impl<'a> Backward<'a> {
     /// completed turns remain available; the unfinished turn and the older range are left out, as the carry requires.
     pub(crate) fn with_neutral_bound(mut self, bytes: usize) -> Self {
         self.neutral_room = Some(bytes);
+        self
+    }
+
+    /// Handoff-only frozen size guard, applied before the source supplier decodes a turn's items.
+    pub(crate) fn with_turn_read_limit(mut self, bytes: i64) -> Self {
+        self.turn_read_bytes = Some(bytes);
         self
     }
 
@@ -570,7 +578,19 @@ impl<'a> Backward<'a> {
     ) -> Result<Vec<Bundle>, EngineError> {
         while self.ready.len() < most && !self.ended {
             if self.unread.is_empty() {
-                let page = self.source.items_before(conn, self.before).await?;
+                let page =
+                    if let (Source::Cut(cut), Some(bytes)) = (self.source, self.turn_read_bytes) {
+                        cuts::summary_items_before(
+                            conn,
+                            cut.id,
+                            self.before
+                                .map_or(i64::MAX, |before| before.saturating_sub(1)),
+                            bytes,
+                        )
+                        .await?
+                    } else {
+                        self.source.items_before(conn, self.before).await?
+                    };
                 self.reads.item_pages += 1;
                 self.reads.items += page.len() as u64;
                 self.reads.peak_held = self.reads.peak_held.max(page.len() + self.held());

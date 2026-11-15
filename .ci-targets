@@ -1,0 +1,8 @@
+fmt
+test -p orch-summarizer-contract --lib
+test -p orch-summarizer-model --lib
+test -p orch-db --test resource_summaries
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test goals --test resource_summaries --test forks
+test -p orch-api-core --lib
+test -p orch-api-core --test summaries --test resource_summaries

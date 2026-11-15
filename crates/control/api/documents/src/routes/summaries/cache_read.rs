@@ -103,6 +103,22 @@ pub(super) async fn producer(
             provider: None,
             offering: None,
         };
+        // An admitted model name is a result fact; its account/configuration still needs Read.
+        view.offering = cache
+            .producer
+            .as_ref()
+            .and_then(|producer| producer.get("model_name"))
+            .and_then(Json::as_str)
+            .map(str::to_owned);
+        if let Some(name) = cache
+            .producer
+            .as_ref()
+            .and_then(|producer| producer.get("model_display"))
+            .and_then(Json::as_str)
+            .or(view.offering.as_deref())
+        {
+            view.title = name.to_owned();
+        }
         let id = cache
             .producer
             .as_ref()
