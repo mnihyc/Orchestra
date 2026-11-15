@@ -75,6 +75,8 @@ pub struct Rig {
     /// The connector's way to the content of the system: a test changes its shape (a line that is slow, one that
     /// recovers) while a command is under way. It lasts across starts of the connector.
     pub link: ShapedBlobs,
+    /// A command-bound memory endpoint for native pass-through cases.
+    pub blob_endpoint: Option<Arc<dyn orch_link::content::BlobEndpoint>>,
     pub provider: Id,
     pub agent: Id,
     pub config: ConnectorConfig,
@@ -175,6 +177,7 @@ impl Rig {
             data: tempfile::tempdir().unwrap(),
             machine_id,
             link: ShapedBlobs::new(Arc::clone(&blobs), None, i64::MAX),
+            blob_endpoint: None,
             blobs,
             provider: new_id(),
             agent: new_id(),
@@ -228,7 +231,11 @@ impl Rig {
             },
             adapters: self.adapters.clone(),
             tools_dir: self.tools_dir.clone(),
-            blobs: Some(Arc::new(self.link.clone())),
+            blobs: Some(
+                self.blob_endpoint
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(self.link.clone())),
+            ),
         }
     }
 
@@ -332,7 +339,7 @@ impl Rig {
             "workspace_root": directory, "instruction_root_marker": false,
             "directory": directory, "cwd": directory, "mounts": [],
             "model": "fake-large", "effort": "medium", "params": {},
-            "approval_mode": "on_request", "sandbox_mode": "workspace",
+            "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace",
             "instructions": "You are working inside Orch.", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": self.provider },

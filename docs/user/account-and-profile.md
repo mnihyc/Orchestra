@@ -47,6 +47,15 @@ the browser's As admin private-access override is not delegated. A write-only
 operation returns an acknowledgement without existing content. A newly issued
 secret remains available once in that acknowledgement.
 
+New API keys use `opat_<key id>_<secret><checksum>`: the key’s own UUID as 32
+lowercase hexadecimal characters, a 256-bit secret as 43 unpadded base64url
+characters, and six Base62 checksum characters (`0–9`, `A–Z`, `a–z`). The
+checksum is CRC-32/ISO-HDLC over everything before it, encoded with leading
+zeroes. Invalid encodings are rejected before a database lookup; a valid
+checksum grants no access. Older opaque API keys are not accepted by this
+version; create new keys after upgrading. Browser sessions keep their own
+credential format.
+
 Recent activity shows up to 100 calls from the last seven days, with operation,
 target, status and timing. Resource names and source addresses follow the reader's
 current access. Request bodies, response contents and secrets are not kept there.

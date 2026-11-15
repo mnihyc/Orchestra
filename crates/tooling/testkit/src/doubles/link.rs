@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use orch_link::controller::{ControllerLink, ControllerOutputs, Notice};
 use orch_link::framing::{
-    Connection, Message, MessageSink, MessageSource, PeerInfo, TransportError,
+    Connection, Message, MessageSink, MessageSource, PeerInfo, Refused, TransportError,
 };
 use orch_link::reconnect::{DialError, Dialer};
 use orch_link::session::{GatewayConfig, SessionAuthority, SessionEvent, SessionSender, accept};
@@ -69,8 +69,8 @@ pub enum Action {
 #[derive(Debug, Clone)]
 struct Rule {
     direction: Direction,
-    /// The `t` of a text frame, or `data` for tunnel data; any frame when
-    /// `None`.
+    /// The `t` of a text frame, `part` for a part of a large message, or `data`
+    /// for tunnel data; any frame when `None`.
     frame: Option<String>,
     /// When set, the frame must carry this event of this durable stream.
     event: Option<(String, Seq)>,
@@ -289,10 +289,15 @@ fn carries_event(message: &Message, stream: &str, seq: Seq) -> bool {
     }
 }
 
-/// The kind of a message, as rules name it: the `t` of a text frame, `data`
-/// for binary.
+/// The kind of a message, as rules name it: the `t` of a text frame, `part`
+/// for a part of a large message, `data` for other binary.
 fn kind_of(message: &Message) -> String {
     match message {
+        Message::Binary(bytes)
+            if bytes.first() == Some(&orch_link_contract::frames::PartFrame::KIND) =>
+        {
+            "part".to_owned()
+        }
         Message::Binary(_) => "data".to_owned(),
         Message::Text(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -945,18 +950,28 @@ impl Dialer for HubDialer {
     }
 }
 
-/// Carries what the system sends a machine to the machine's session.
+/// Carries what the system sends a machine to the machine's session. A command that the session cannot
+/// carry is failed at once with the reason, as a gateway tells the system.
 async fn carry_down(
     hub: Arc<HubInner>,
     machine_id: Id,
     mut down: mpsc::UnboundedReceiver<DownFrame>,
 ) {
     while let Some(frame) = down.recv().await {
-        let sender = lock(&hub.machines)
-            .get(&machine_id)
-            .and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone()));
+        let (sender, controller) = {
+            let machines = lock(&hub.machines);
+            let slot = machines.get(&machine_id);
+            (
+                slot.and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone())),
+                slot.map(|slot| slot.controller.clone()),
+            )
+        };
         if let Some(sender) = sender {
-            let _ = match frame {
+            let command = match &frame {
+                DownFrame::Cmd(cmd) => Some(cmd.id),
+                _ => None,
+            };
+            let sent = match frame {
                 DownFrame::Cmd(cmd) => sender.send(Frame::Cmd(cmd)),
                 DownFrame::CmdCancel(cancel) => sender.send(Frame::CmdCancel(cancel)),
                 DownFrame::Ack(ack) => sender.send(Frame::Ack(ack)),
@@ -976,6 +991,13 @@ async fn carry_down(
                 }
                 DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
             };
+            if let (Err(Refused::TooLarge { bytes, limit }), Some(id), Some(controller)) =
+                (sent, command, controller)
+            {
+                controller
+                    .commands()
+                    .refuse_unaccepted(id, &orch_link::commands::command_too_large(bytes, limit));
+            }
         }
     }
 }

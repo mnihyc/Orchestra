@@ -228,7 +228,7 @@ impl Protocols {
         mut self,
         translators: Vec<Arc<dyn translator::ProtocolTranslator>>,
     ) -> Self {
-        self.translators = translators;
+        self.translators.extend(translators);
         self
     }
 
@@ -676,19 +676,46 @@ impl Forwarder {
                 )
                 .await;
         }
-        self.forward(request, below_session, lease).await
+        self.forward(request, below_session, lease, None, None)
+            .await
+    }
+
+    /// Uses the same admission, credential presentation, conversion and usage path for one
+    /// controller-owned call. The native command's source owns the supplied lease and request.
+    pub(crate) async fn serve_relay(
+        self: &Arc<Self>,
+        request: Request<Full<Bytes>>,
+        lease: Arc<Lease>,
+        max_request_bytes: u64,
+        provider: Arc<ProviderEntry>,
+    ) -> Response<Body> {
+        let path = request.uri().path().to_owned();
+        self.forward(
+            request,
+            &path,
+            Some(lease),
+            Some(max_request_bytes),
+            Some(provider),
+        )
+        .await
     }
 
     #[allow(
         clippy::too_many_lines,
         reason = "the steps of a forwarded call are one sequence, read best in one place and in order"
     )]
-    async fn forward(
+    async fn forward<B>(
         self: &Arc<Self>,
-        request: Request<Incoming>,
+        request: Request<B>,
         below_session: &str,
         lease: Option<Arc<Lease>>,
-    ) -> Response<Body> {
+        public_request_limit: Option<u64>,
+        provider_override: Option<Arc<ProviderEntry>>,
+    ) -> Response<Body>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         let (parts, body) = request.into_parts();
         let entry = lease
             .as_ref()
@@ -747,7 +774,8 @@ impl Forwarder {
                 ),
             );
         }
-        let limit = usize::try_from(self.max_request_bytes).unwrap_or(usize::MAX);
+        let limit = usize::try_from(public_request_limit.unwrap_or(self.max_request_bytes))
+            .unwrap_or(usize::MAX);
         let body = match Limited::new(body, limit).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_) => {
@@ -831,7 +859,8 @@ impl Forwarder {
         }
 
         // 5. The provider and the endpoint that speaks the call's protocol.
-        let Some(provider) = self.providers.get(lease.provider_id()) else {
+        let Some(provider) = provider_override.or_else(|| self.providers.get(lease.provider_id()))
+        else {
             return self.refuse(
                 Some(entry),
                 Refusal::new(
@@ -902,20 +931,34 @@ impl Forwarder {
             let upstream = translator::UpstreamSide {
                 base_url: endpoint.base_url().to_string(),
                 options: serde_json::to_value(endpoint.options()).unwrap_or_default(),
+                model: lease.model_parameters(&model).cloned(),
+                output_tokens: provider.translation_output_tokens(),
+                session: Some(orch_types::Hash::of(lease.thread_id().as_bytes()).to_string()),
                 credential: (presenter == translator::Presenter::Translator
                     && provider.presenter().is_none())
                 .then(|| credential.clone())
                 .flatten(),
             };
             let translated = tokio::task::spawn_blocking(move || {
+                let response = conversion.response_for(&path, &sent_body, &upstream)?;
                 conversion
                     .translate_request(&path, sent_body, &upstream)
-                    .map(|request| (request, conversion.response_translator()))
+                    .map(|request| (request, response))
             })
             .await;
             let (request, response) = match translated {
                 Ok(Ok(result)) => result,
-                _ => {
+                Ok(Err(error)) => {
+                    return self.refuse(
+                        Some(entry),
+                        Refusal::new(
+                            StatusCode::BAD_REQUEST,
+                            code::PROTOCOL_NOT_SERVED,
+                            error.to_string(),
+                        ),
+                    );
+                }
+                Err(_) => {
                     return self.refuse(
                         Some(entry),
                         Refusal::new(
@@ -967,7 +1010,9 @@ impl Forwarder {
             method = translated_method;
             sent_path = request.path;
             sent_body = request.body;
-            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX)
+                > public_request_limit.unwrap_or(self.max_request_bytes)
+            {
                 return self.refuse(
                     Some(entry),
                     Refusal::new(
@@ -1019,6 +1064,35 @@ impl Forwarder {
         let model_parameters =
             self.declared_parameters(endpoint_protocol, endpoint, &model, model_parameters);
         let endpoint_entry = self.protocols.get(endpoint_protocol);
+        if public_request_limit.is_some() {
+            let checked = (|| {
+                let bindings = endpoint_entry.map_or_else(
+                    || orch_model_contract::features::builtin(endpoint_protocol),
+                    |entry| entry.protocol.request_features(),
+                );
+                let prepared = orch_model_contract::features::prepare(
+                    endpoint_protocol,
+                    &bindings,
+                    &model_parameters,
+                    &sent_body,
+                    lease.request_options(orch_model_contract::features::COMMON),
+                )
+                .map_err(|error| error.to_string())?;
+                orch_model_contract::parameters::check_relay_options(
+                    endpoint_protocol,
+                    prepared.model.as_ref(),
+                    prepared.body.as_ref(),
+                )
+                .map_err(str::to_owned)
+            })();
+            if let Err(reason) = checked {
+                return self.refuse(
+                    Some(entry),
+                    Refusal::new(StatusCode::BAD_REQUEST, code::REQUEST_REFUSED, reason),
+                );
+            }
+        }
+
         if !endpoint.options().params.is_empty() {
             let applied = match endpoint_entry {
                 Some(wire) => orch_model_contract::parameters::apply_request_for_model(
@@ -1045,7 +1119,9 @@ impl Forwarder {
                     );
                 }
             };
-            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX)
+                > public_request_limit.unwrap_or(self.max_request_bytes)
+            {
                 return self.refuse(
                     Some(entry),
                     Refusal::new(
@@ -1108,13 +1184,38 @@ impl Forwarder {
         }
         // Every final payload is checked after translation and every overlay, including translators
         // whose target format has no built-in implementation. A legacy lease cannot prove a ceiling.
-        sent_body = match orch_model_contract::parameters::outgoing_with_access_program(
-            endpoint_protocol,
-            &sent_path,
-            &model_parameters,
-            &sent_body,
-            lease.access_program(),
-        ) {
+        let finalized = (|| {
+            let common = lease.request_options(orch_model_contract::features::COMMON);
+            if let Some(common) = common {
+                orch_model_contract::parameters::thread::selected(
+                    orch_model_contract::features::COMMON,
+                    &model_parameters,
+                    common,
+                )
+                .map_err(str::to_owned)?;
+            }
+            let bindings = endpoint_entry.map_or_else(
+                || orch_model_contract::features::builtin(endpoint_protocol),
+                |entry| entry.protocol.request_features(),
+            );
+            let prepared = orch_model_contract::features::prepare(
+                endpoint_protocol,
+                &bindings,
+                &model_parameters,
+                &sent_body,
+                common,
+            )
+            .map_err(|error| error.to_string())?;
+            orch_model_contract::parameters::outgoing_with_access_program(
+                endpoint_protocol,
+                &sent_path,
+                prepared.model.as_ref(),
+                prepared.body.as_ref(),
+                lease.access_program(),
+            )
+            .map_err(str::to_owned)
+        })();
+        sent_body = match finalized {
             Ok(body) => Bytes::from(body),
             Err(reason) => {
                 self.denied(&lease, &model, code::REQUEST_REFUSED).await;
@@ -1124,7 +1225,9 @@ impl Forwarder {
                 );
             }
         };
-        if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+        if u64::try_from(sent_body.len()).unwrap_or(u64::MAX)
+            > public_request_limit.unwrap_or(self.max_request_bytes)
+        {
             return self.refuse(
                 Some(entry),
                 Refusal::new(

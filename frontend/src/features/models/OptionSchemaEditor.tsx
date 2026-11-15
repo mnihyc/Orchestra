@@ -107,12 +107,12 @@ export function OptionSchemaEditor({ value, onChange, protocols, disabled = fals
   const textarea = useRef<HTMLTextAreaElement>(null);
   let document: Record<string, unknown> | undefined;
   try { const parsed: unknown = value.trim() === '' ? {} : JSON.parse(value); if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) document = parsed as Record<string, unknown>; } catch { /* The raw draft remains intact. */ }
-  const available = [...new Set([...protocols, ...Object.keys(document ?? {}).filter((name) => name !== 'native')])];
+  const available = [...new Set([...protocols, 'common', ...Object.keys(document ?? {}).filter((name) => name !== 'native')])];
   const protocol = available.includes(selected) ? selected : available[0] ?? '';
   const fields = documentedOptions(protocol);
   const openRaw = () => { setRawOpen(true); requestAnimationFrame(() => textarea.current?.focus()); };
   return <div className="flex min-w-0 flex-col gap-3" data-option-schema-editor>
-    {available.length > 0 && <Select<string> size="sm" label={t('providerFields.protocol')} value={protocol} options={available.map((format) => ({ value: format, label: format }))} disabled={disabled} onValueChange={setSelected} />}
+    {available.length > 0 && <Select<string> size="sm" label={t('providerFields.protocol')} value={protocol} options={available.map((format) => ({ value: format, label: format === 'common' ? t('providerFeatures.common') : format }))} disabled={disabled} onValueChange={setSelected} />}
     {document === undefined ? <InlineAlert tone="danger">{t('providerOptions.invalidSchema')}</InlineAlert> : fields.length === 0 ? null
       : <ul className="flex min-w-0 flex-col">{fields.map((option) => <OptionRow key={`${protocol}:${option.path.join('.')}`} option={option} property={optionProperty(document, protocol, option.path)} disabled={disabled}
         raw={openRaw} change={(rule) => { const next = setOptionProperty(document, protocol, option.path, rule); if (next.ok) onChange(JSON.stringify(next.value, null, 2)); else openRaw(); }} />)}</ul>}

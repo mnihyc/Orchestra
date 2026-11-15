@@ -87,6 +87,8 @@ pub(crate) struct ParameterFormat {
 pub(crate) struct CacheFormat {
     pub field: &'static str,
     pub lifetime: &'static str,
+    pub kind_field: &'static str,
+    pub kind: &'static str,
     pub ordinary: &'static str,
     pub lifetimes: &'static [&'static str],
     pub pointers: &'static [&'static str],
@@ -115,6 +117,8 @@ pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
             cache: Some(CacheFormat {
                 field: "cache_control",
                 lifetime: "ttl",
+                kind_field: "type",
+                kind: "ephemeral",
                 ordinary: "5m",
                 lifetimes: &["5m", "1h"],
                 pointers: &[
@@ -137,8 +141,10 @@ pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
 }
 
 /// The requests that `openai-responses` lets through, below the upstream base.
-pub const OPENAI_RESPONSES_REQUESTS: [(&str, &str); 3] = [
+pub const OPENAI_RESPONSES_REQUESTS: [(&str, &str); 5] = [
     ("POST", "/responses"),
+    ("POST", "/responses/compact"),
+    ("POST", "/responses/input_tokens"),
     ("GET", "/models"),
     ("POST", "/alpha/search"),
 ];
@@ -317,6 +323,11 @@ pub trait WireProtocol: Send + Sync + 'static {
     /// The primary and every possible alternative, in their original order.
     fn model_candidates(&self, path: &str, body: &[u8]) -> Result<Vec<String>, &'static str> {
         model_candidates(self.model_of(path, body), body, self.model_lists())
+    }
+
+    /// Data bindings for vendor-neutral declarations on the existing common option layer.
+    fn request_features(&self) -> Vec<crate::features::FeatureBinding> {
+        crate::features::builtin(self.name())
     }
 
     /// What an endpoint of this protocol may configure beyond its base URL, in the shape every form uses.
@@ -585,7 +596,8 @@ mod tests {
     fn only_the_requests_a_protocol_names_pass_through_and_the_query_is_no_part_of_the_path() {
         let p = Plain;
         assert!(p.allowed(&Method::POST, "/responses"));
-        assert!(!p.allowed(&Method::POST, "/responses/compact"));
+        assert!(p.allowed(&Method::POST, "/responses/compact"));
+        assert!(p.allowed(&Method::POST, "/responses/input_tokens"));
         assert!(p.allowed(&Method::GET, "/models"));
         assert!(p.allowed(&Method::GET, "/models?limit=5"));
         assert!(!p.allowed(&Method::GET, "/responses"), "the method counts");

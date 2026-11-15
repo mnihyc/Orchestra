@@ -1077,8 +1077,8 @@ pub mod workspace {
         pub change: Json,
     }
 
-    /// The latest change to each path that the file-change tool calls of the threads in an
-    /// environment reported: those of one thread, of one turn, or of every thread there.
+    /// The latest reported change per path, using a turn's diff snapshot where one is available.
+    /// An exact item still returns that item's historical file changes.
     pub async fn latest_changes(
         conn: &mut Conn,
         environment: Id,
@@ -1090,14 +1090,28 @@ pub mod workspace {
             "SELECT DISTINCT ON (c.change ->> 'path') i.id, i.thread_id, i.updated_at, c.change
                FROM items i
                JOIN threads t ON t.node_id = i.thread_id
-              CROSS JOIN LATERAL jsonb_array_elements(i.payload #> '{tool,changes}') WITH ORDINALITY AS c(change, n)
+              CROSS JOIN LATERAL jsonb_array_elements(CASE
+                WHEN i.kind='marker' AND i.payload#>>'{data,change}'='turn_diff'
+                  AND jsonb_typeof(i.payload#>'{data,value,changes}')='array'
+                  THEN i.payload#>'{data,value,changes}'
+                WHEN jsonb_typeof(i.payload#>'{tool,changes}')='array' THEN i.payload#>'{tool,changes}'
+                ELSE '[]'::jsonb END) WITH ORDINALITY AS c(change, n)
               WHERE t.environment_id = $1
-                AND i.kind = 'tool_call' AND i.payload #>> '{tool,kind}' = 'file_change'
-                AND jsonb_typeof(i.payload #> '{tool,changes}') = 'array'
+                AND ((i.kind='marker' AND i.payload->>'marker'='harness_changed'
+                      AND i.payload#>>'{data,change}'='turn_diff'
+                      AND jsonb_typeof(i.payload#>'{data,value,changes}')='array')
+                  OR (i.kind='tool_call' AND i.payload#>>'{tool,kind}'='file_change'
+                      AND jsonb_typeof(i.payload#>'{tool,changes}')='array'
+                      AND ($4::uuid IS NOT NULL OR NOT EXISTS (
+                        SELECT 1 FROM items snapshot WHERE snapshot.turn_id=i.turn_id
+                          AND snapshot.segment_id=i.segment_id AND snapshot.stream=i.stream
+                          AND snapshot.kind='marker' AND snapshot.payload->>'marker'='harness_changed'
+                          AND snapshot.payload#>>'{data,change}'='turn_diff'
+                          AND jsonb_typeof(snapshot.payload#>'{data,value,changes}')='array'))))
                 AND ($2::uuid IS NULL OR i.thread_id = $2)
                 AND ($3::uuid IS NULL OR i.turn_id = $3)
                 AND ($4::uuid IS NULL OR i.id = $4)
-              ORDER BY c.change ->> 'path', i.seq_created DESC, c.n DESC",
+              ORDER BY c.change ->> 'path', i.updated_at DESC, i.seq_updated DESC, c.n DESC",
         )
         .bind(environment)
         .bind(thread)
@@ -1726,6 +1740,31 @@ pub mod hosting {
         )
         .bind(id)
         .bind(at)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether the host said, the last time it spoke of this runtime, that it holds no unit for it: a unit
+    /// that is stopped and missing is made again by the next start, not started.
+    pub async fn unit_missing(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(loss_missing, false) FROM runtimes WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(conn)
+        .await?
+        .unwrap_or(false))
+    }
+
+    /// Writes down whether the host holds no unit for this runtime: it said so in what it reported, or it answered
+    /// the stop of the unit with "no such unit".
+    pub async fn set_unit_missing(conn: &mut Conn, id: Id, missing: bool) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE runtimes SET loss_missing = $2 WHERE id = $1 AND loss_missing IS DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(missing)
         .execute(conn)
         .await?;
         Ok(())

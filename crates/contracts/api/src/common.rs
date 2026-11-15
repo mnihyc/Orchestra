@@ -438,6 +438,7 @@ error_codes! {
     SharingExternalForbidden = 403, "sharing.external_forbidden", "Somebody from outside may not be named here";
     ProviderSubscriptionNotAllowed = 403, "provider.subscription_not_allowed", "Subscriptions of this harness are not allowed here";
     ProviderNotAllowed = 403, "provider.not_allowed", "The provider is not allowed here";
+    ProviderRelayUnavailable = 403, "provider.relay_unavailable", "Provider Relay is unavailable";
     ProviderSubscriptionNotShared = 403, "provider.subscription_not_shared", "A subscription of this harness stays with its owner";
     WorkspaceRemoteWriteDisabled = 403, "workspace.remote_write_disabled", "Files are not written from here";
     PolicyRemoteWriteDisabled = 403, "policy.remote_write_disabled", "This machine keeps file writes off";

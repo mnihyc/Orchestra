@@ -70,7 +70,7 @@ fn lets_run(
     groups: &[String],
     effort: Option<&str>,
 ) -> bool {
-    if permission != Permission::ProviderUse {
+    if !permission.has_provider_options() {
         return true;
     }
     let granted: ProviderUse = options::read(permission, entry)
@@ -359,7 +359,7 @@ fn can_give(
     {
         return false;
     }
-    if permission != Permission::ProviderUse {
+    if !permission.has_provider_options() {
         return true;
     }
     let Ok(Ok(grant)) = usable::access(frame, resource, site, None, false) else {

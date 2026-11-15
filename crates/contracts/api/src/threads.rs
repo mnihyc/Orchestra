@@ -351,10 +351,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +829,12 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -1678,8 +1695,11 @@ pub struct ToolCallPayload {
     pub started_at: Time,
     /// How long it took, once it ended.
     pub duration_ms: Option<i64>,
-    /// The identical call exactly as the harness issued it.
-    pub raw: RawCall,
+    /// The identical call exactly as the harness issued it. A thread's timeline does not carry it (it is the
+    /// same content as `tool`, and as long); it is read apart by `GET /threads/{id}/items/{item_id}/raw`, and
+    /// stands in an export of the whole record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawCall>,
 }
 
 /// A request for approval. Harness cards carry their current projection for this reader,
@@ -3018,6 +3038,11 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many included files the turn changed, whoever changed them: the difference of the files recorded
+    /// before it and the files observed at its end. `null` while either is missing (the files were not
+    /// recorded, or the end has not been observed yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
@@ -3304,10 +3329,6 @@ pub struct ThreadOpening {
     pub parameters: Option<crate::settings::ThreadParameters>,
     /// The native limits for a new input; absent only when unavailable to this reader.
     pub limits: Option<ThreadLimits>,
-    /// The settings, including each setting's own writability and source.
-    pub settings: Vec<crate::settings::ResolvedSetting>,
-    /// The initial bounded outline page, from the same conversation cut as sync.
-    pub outline: ThreadOutlinePage,
     /// The current tool carrier observation; omitted for a retained conversation view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<crate::nodes::OverviewPart<crate::gateways::ThreadTunnelGatewayStatus>>,
@@ -3630,7 +3651,7 @@ pub struct ThreadOpeningGetQuery {
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_revision: Option<i64>,
-    /// Items in the initial window; the same bounds as [`ThreadSyncGetQuery::limit`].
+    /// Items in the initial window; the resolved `threads.opening_items` default when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -3943,7 +3964,7 @@ pub struct ThreadInterruptBody {
 /// An image or a file that was uploaded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UploadedBlob {
-    /// Its hash, which the server computed.
+    /// Its verified content hash, computed by the receiving destination.
     pub blob: Hash,
     /// Its size in bytes.
     pub size: i64,
@@ -3951,6 +3972,9 @@ pub struct UploadedBlob {
     pub media_type: String,
     /// Its name.
     pub name: String,
+    /// The native upload session when these bytes are staged at a workspace destination rather than retained by the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<Id>,
 }
 
 /// Which existing upload source owns the metadata and bytes.
@@ -4042,6 +4066,42 @@ pub struct UploadSessionCreateBody {
     /// Its type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    /// An explicit workspace destination; omission creates an ordinary retained private upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<UploadDestination>,
+}
+
+/// The selected workspace path, bound to its actual location when the upload is admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UploadDestination {
+    /// The logical environment whose current Files authority is required.
+    pub environment_id: Id,
+    /// The initial workspace-relative destination, including the file name.
+    pub path: String,
+    /// The thread beside which the person is working; this grants no environment authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<Id>,
+}
+
+/// A verified upload, or the native verification still running under its own captured deadline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UploadSessionCompletion {
+    /// The receiving destination verified the complete content.
+    Ready { file: UploadedBlob },
+    /// Full-file checking continues; asking again never resends a completed piece.
+    Verifying { retry_after_ms: u64 },
+}
+impl UploadSessionCompletion {
+    /// Takes the actual completed file; pending verification is never a file receipt.
+    #[must_use]
+    pub fn into_file(self) -> Option<UploadedBlob> {
+        match self {
+            Self::Ready { file } => Some(file),
+            Self::Verifying { .. } => None,
+        }
+    }
 }
 
 /// An upload in pieces that was begun.
@@ -4051,7 +4111,7 @@ pub struct UploadSessionCreateReply {
     pub upload_id: Id,
     /// The size of a piece, which is `crate::common::UPLOAD_CHUNK_BYTES`.
     pub chunk_bytes: i64,
-    /// When the session ends.
+    /// When this upload becomes idle long enough to expire; acknowledged progress renews it.
     pub expires_at: Time,
 }
 
@@ -4064,11 +4124,13 @@ pub struct UploadSessionPutQuery {
     pub offset: i64,
 }
 
-/// How much of an upload the server holds.
+/// The durable prefix acknowledged by the selected receiving carrier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UploadSessionPutReply {
     /// The bytes received so far.
     pub received: i64,
+    /// The idle lease actually retained after this acknowledged prefix.
+    pub expires_at: Time,
 }
 
 /// An upload that is attached to a thread from a session of pieces, instead
@@ -4365,6 +4427,28 @@ crate::endpoints! {
                 )],
             },
         ]);
+    /// Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.
+    ThreadItemRawGet: GET "/threads/{id}/items/{item_id}/raw", Permission("thread.view"), query continuations::ThreadReadSelector, none, json RawCall, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a piece of a command's output as plain text, with its total length in a header.
     ThreadItemOutputGet: GET "/threads/{id}/items/{item_id}/output", Permission("thread.view"), query ThreadItemOutputGetQuery, none, raw, 200,
         operation Op::variants(&[
@@ -4597,13 +4681,22 @@ crate::endpoints! {
         operation Op::receipt(&Op::single(Write, &[Identity(I::Upload)], Target::CurrentAccount));
     /// Begins an upload in pieces.
     UploadSessionCreate: POST "/uploads/sessions", User, none, json UploadSessionCreateBody, json UploadSessionCreateReply, 200,
-        operation Op::receipt(&Op::single(Write, &[Identity(I::Upload)], Target::CurrentAccount));
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Identity(I::Upload)], Target::CurrentAccount),
+            Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("upload_environments")),
+        ]));
     /// Sends one piece of an upload, at the offset where the last one ended.
     UploadSessionPut: PUT "/uploads/sessions/{upload_id}", Rule("the person who began the upload"), query UploadSessionPutQuery, bytes, json UploadSessionPutReply, 200,
-        operation Op::receipt(&Op::single(Write, &[Identity(I::Upload)], Target::Path("upload_id")));
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Identity(I::Upload)], Target::Path("upload_id")),
+            Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("upload_environments")),
+        ]));
     /// Ends an upload in pieces; the server computes the hash.
-    UploadSessionComplete: POST "/uploads/sessions/{upload_id}/complete", Rule("the person who began the upload"), none, none, json UploadedBlob, 200,
-        operation Op::single(Write, &[Identity(I::Upload)], Target::Path("upload_id"));
+    UploadSessionComplete: POST "/uploads/sessions/{upload_id}/complete", Rule("the person who began the upload"), none, none, json UploadSessionCompletion, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Identity(I::Upload)], Target::Path("upload_id")),
+            Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("upload_environments")),
+        ]);
     /// Cancels an unfinished upload owned by the caller and discards its partial bytes.
     UploadSessionDelete: DELETE "/uploads/sessions/{upload_id}", Rule("the person who began the upload"), none, none, none, 204,
         operation Op::single(Write, &[Identity(I::Upload)], Target::Path("upload_id"));
