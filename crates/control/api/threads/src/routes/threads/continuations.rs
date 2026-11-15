@@ -119,7 +119,10 @@ fn failure_facts(error: &orch_engine::error::EngineError) -> FailureFacts {
             }
             DbError::Rule { constraint } => (None, Some(constraint.as_str())),
             DbError::Retry => (None, None),
-            DbError::Other(error) => match error.as_database_error() {
+            DbError::Other(error)
+            | DbError::Timeout {
+                source: orch_db::pool::DatabaseTimeout { source: error, .. },
+            } => match error.as_database_error() {
                 Some(database) => (
                     database
                         .code()
