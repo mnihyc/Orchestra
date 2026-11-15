@@ -1157,6 +1157,10 @@ pub struct CreateThread {
     /// Prepare the repository when the directory is missing on any machine, unless explicitly false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepare_source: Option<bool>,
+    /// File edits saved before a new workspace exists. Creation applies them conditionally
+    /// after source preparation and before the agent's first input, then consumes this plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_edits: Vec<crate::source::WorkspaceFileEdit>,
     /// An own branch and unused worktree directory in an existing environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::source::WorktreeChoice>,

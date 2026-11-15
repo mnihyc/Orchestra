@@ -424,6 +424,67 @@ async fn late_completions_count_once_while_open_and_months_old_replay_cannot_rec
 }
 
 #[tokio::test]
+async fn changing_only_the_model_transport_keeps_the_servers_and_skills_already_in_the_program() {
+    let world = World::new().await;
+    let thread = world.thread("Transport does not replace tools").await;
+    let (started, _) = world.running_turn(thread, "work").await;
+    let segment = world.segment_of(thread).await;
+    let before = new_id();
+    let after = new_id();
+    let skill = new_id();
+    let at = world.clock.now();
+    let mut conn = world.pool.acquire().await.unwrap();
+    sqlx::query("UPDATE segments SET delivered_resources=NULL WHERE id=$1")
+        .bind(segment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for (revision, transport_only, server) in [(1_i64, false, before), (2_i64, true, after)] {
+        let command = new_id();
+        let body = serde_json::json!({"segment_id":segment,"transport_only":transport_only,"mcp":[{"name":"tools","server_id":server}],"skills":if transport_only {serde_json::json!([])}else{serde_json::json!([{"version_id":skill}])}});
+        sqlx::query("INSERT INTO commands(id,machine_id,kind,body,state,deadline_at,session_fact_revision) VALUES($1,$2,'session.open',$3,'succeeded',$4,$5)")
+            .bind(command).bind(world.machine_id).bind(&body).bind(at).bind(revision)
+            .execute(&mut *conn).await.unwrap();
+        orch_db::queries::session_dependencies::record(
+            &mut conn,
+            command,
+            "session.open",
+            &body,
+            at,
+            at,
+        )
+        .await
+        .unwrap();
+    }
+    let delivered: serde_json::Value =
+        sqlx::query_scalar("SELECT delivered_resources FROM segments WHERE id=$1")
+            .bind(segment)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(delivered["mcp"], serde_json::json!([before]));
+    assert_eq!(delivered["skills"], serde_json::json!([skill]));
+    sqlx::query("UPDATE turns SET resource_delivery=NULL WHERE id=$1")
+        .bind(started.turn_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    orch_engine::resource_facts::library::capture_turn(&mut conn, started.turn_id)
+        .await
+        .unwrap();
+    let captured: serde_json::Value =
+        sqlx::query_scalar("SELECT resource_delivery FROM turns WHERE id=$1")
+            .bind(started.turn_id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(
+        captured,
+        serde_json::json!([{"name":"tools","server_id":before}])
+    );
+}
+
+#[tokio::test]
 async fn a_tool_completion_uses_the_servers_frozen_identity_after_a_session_reload() {
     let world = World::new().await;
     let thread = world.thread("Frozen tool attribution").await;
@@ -443,11 +504,11 @@ async fn a_tool_completion_uses_the_servers_frozen_identity_after_a_session_relo
         .execute(&mut *conn)
         .await
         .unwrap();
-    sqlx::query("UPDATE segments SET delivered_resources=jsonb_build_object('command',$2::uuid) WHERE id=$1").bind(segment).bind(command).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE segments SET delivered_resources=jsonb_build_object('command',$2::uuid,'mcp_names',$3::jsonb) WHERE id=$1").bind(segment).bind(command).bind(serde_json::json!([{"name":"tools","server_id":before}])).execute(&mut *conn).await.unwrap();
     orch_engine::resource_facts::library::capture_turn(&mut conn, started.turn_id)
         .await
         .unwrap();
-    sqlx::query("UPDATE segments SET delivered_resources=jsonb_build_object('command',$2::uuid) WHERE id=$1").bind(segment).bind(later).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE segments SET delivered_resources=jsonb_build_object('command',$2::uuid,'mcp_names',$3::jsonb) WHERE id=$1").bind(segment).bind(later).bind(serde_json::json!([{"name":"tools","server_id":after}])).execute(&mut *conn).await.unwrap();
     sqlx::query("DELETE FROM commands WHERE id=$1")
         .bind(command)
         .execute(&mut *conn)

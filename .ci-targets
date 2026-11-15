@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test threads_start_source --test thread_creator_initial_files_scopes --test workspace_source --test workspace_source_scopes --test workspace_snapshots
+test -p orch-api-core --test kmounts_mcp --test mcp_reader_scopes --test mcp_duplicates --test hosted_environments
+test -p orch-api-core --test forks -- moving_routes::
+test -p orch-adapter-claude-code --lib
