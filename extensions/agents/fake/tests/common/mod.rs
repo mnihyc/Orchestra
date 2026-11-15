@@ -241,6 +241,7 @@ impl Fake {
     pub fn spec(&self, mode: SessionMode) -> SessionSpec {
         let directory = self.work_path();
         SessionSpec {
+            opening_id: orch_types::new_id(),
             settings: SessionSettings {
                 native_model: None,
                 agent_id: self.agent,

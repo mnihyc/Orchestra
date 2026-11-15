@@ -684,9 +684,31 @@ impl Engine {
             tracing::warn!(%thread_id, %segment_id, "events of a segment the thread does not have");
             return Ok(());
         };
-        // Events from the machine of a thread that was blocked as offline are
-        // the machine's return.
-        if thread.current_segment_id == Some(segment.id)
+        let recorded =
+            orch_db::queries::session_dependencies::recorded_opening(unit.conn, segment.id).await?;
+        let current =
+            orch_db::queries::session_dependencies::current_opening(unit.conn, segment.id).await?;
+        let mut decoded = Vec::with_capacity(events.len());
+        for event in events {
+            match Event::decode(&event.kind, event.body.clone()) {
+                Ok(Event::SessionOpened(opened)) if Some(opened.opening_id) != current => {}
+                Ok(Event::SessionLost(lost)) if Some(lost.opening_id) != recorded => {}
+                Ok(event_of) => decoded.push((event, event_of)),
+                Err(error) => {
+                    tracing::warn!(%error,event=%describe(event),"an event of a session does not read")
+                }
+            }
+        }
+        if decoded.is_empty() {
+            return Ok(());
+        }
+        // A withdrawn opening can finish its physical facts without restoring the current thread.
+        let restores = decoded.iter().any(|(_, event)| match event {
+            Event::SessionLost(lost) => Some(lost.opening_id) == current,
+            _ => true,
+        });
+        if restores
+            && thread.current_segment_id == Some(segment.id)
             && thread.active_continuation_id == segment.continuation_id
         {
             self.restore_in(unit, &thread).await?;
@@ -697,15 +719,6 @@ impl Engine {
             frames: crate::raw_events::Keeper::new(&thread, segment.id),
             segment,
         };
-        let mut decoded = Vec::with_capacity(events.len());
-        for event in events {
-            match Event::decode(&event.kind, event.body.clone()) {
-                Ok(event_of) => decoded.push((event, event_of)),
-                Err(error) => {
-                    tracing::warn!(%error, event = %describe(event), "an event of a session does not read");
-                }
-            }
-        }
         // Whatever else the session says reads its items with all the text they were told.
         let mut written = false;
         for (event, decoded) in joined_deltas(decoded) {
@@ -846,6 +859,12 @@ impl Engine {
         batch: &Batch,
         opened: &SessionOpened,
     ) -> Result<(), EngineError> {
+        if orch_db::queries::session_dependencies::current_opening(unit.conn, batch.segment.id)
+            .await?
+            != Some(opened.opening_id)
+        {
+            return Ok(());
+        }
         let held = threads::segment(&mut *unit.conn, batch.segment.id)
             .await?
             .and_then(|segment| segment.native_session_ref);
@@ -938,15 +957,28 @@ impl Engine {
         batch: &Batch,
         lost: &SessionLost,
     ) -> Result<(), EngineError> {
+        let observed = unit.now();
+        let Some(was_live) = orch_db::queries::session_dependencies::lost(
+            unit.conn,
+            batch.segment.id,
+            lost.opening_id,
+            observed,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
         crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
         // A per-conversation CLI can end while its adapter remains able to serve other conversations.
-        sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
+        if was_live && !lost.expected {
+            sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
             .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&lost.reason)
             .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        }
         lock(&self.inner.sessions).closed(batch.segment.id);
         let thread = self.thread_row(unit, batch.thread_id).await?;
         let Some(turn) = threads::active_turn(&mut *unit.conn, batch.thread_id).await? else {
-            if thread.current_segment_id == Some(batch.segment.id) {
+            if was_live && !lost.expected && thread.current_segment_id == Some(batch.segment.id) {
                 add_error_item(
                     unit,
                     batch.thread_id,
@@ -967,7 +999,7 @@ impl Engine {
         let mut failure = error_json("session_lost", &message, true);
         // An unconfirmed start keeps its existing manual decision: the native process
         // may already have taken that prompt. A confirmed turn uses ordinary recovery.
-        let recovery = if turn.state == turn_state::RUNNING {
+        let recovery = if was_live && turn.state == turn_state::RUNNING {
             self.recover_agent_in(unit, &thread, &turn, &failure)
                 .await?
         } else {

@@ -5,6 +5,7 @@
  * name of the source leads to the original for those who may open it and is plain text for the rest.
  * A copy does not change when its original does, and reading it needs no access to the original.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { useQuery } from '@tanstack/react-query';
 import { CornerUpRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -69,7 +70,7 @@ function Source({ part }: { part: ForwardedPart }) {
       {target === null ? (
         <span className="truncate font-medium text-text">{label}</span>
       ) : (
-        <a
+        <PathLink
           href={target}
           onClick={(event) => {
             if (!isPlainClick(event)) return;
@@ -79,7 +80,7 @@ function Source({ part }: { part: ForwardedPart }) {
           className="truncate font-medium text-accent-text hover:underline"
         >
           {label}
-        </a>
+        </PathLink>
       )}
     </p>
   );
