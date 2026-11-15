@@ -86,3 +86,12 @@ it('honours archived places and the no-thread/no-chat tree choices without rehom
   expect(lay(groups, { threads: false }).some((row) => row.item.type === 'group')).toBe(false);
   expect(lay(groups, { chatRows: false }).some((row) => row.item.type === 'group')).toBe(false);
 });
+
+
+it('does not revive a withheld node chat from its former local unread and mention state', () => {
+  const rows=places().map((row)=>row.id==='topic'?{...row,chat:{id:'chat-topic',seq:null as unknown as number}}:row);
+  const held={states:new Map([['chat-topic',state('chat-topic',{last_read_seq:0,mentions_unread:3})]]),latest:new Map([['chat-topic',{seq:20}]])};
+  const shown=buildRows(tree(rows),'root',new Set(),'en',{chatRows:true,chats:held});
+  expect(shown.find((row)=>row.id==='project')?.item).toMatchObject({unread:false,mentions:0});
+  expect(shown.some((row)=>row.item.type==='chat')).toBe(false);
+});
