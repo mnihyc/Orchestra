@@ -68,6 +68,8 @@ pub struct Record {
     pub kind: RuntimeKind,
     /// The driver that made its unit.
     pub driver: String,
+    /// The actual installation label from the runtime's admitted request.
+    pub system: String,
     /// The unit, as the driver named it.
     pub unit: UnitRef,
     /// The names of the volumes its unit stands on. Two units on one volume never run at once.
@@ -137,6 +139,9 @@ struct File {
     systems: BTreeSet<String>,
     #[serde(default)]
     runtimes: BTreeMap<Id, Record>,
+    /// Actual capability units and processes, never copied input, sign-in or source authority.
+    #[serde(default)]
+    programs: BTreeMap<Id, crate::program_work::Record>,
     #[serde(default)]
     images: BTreeMap<String, ImageNote>,
     /// Policies acknowledged by this node, including failed requests that keep an old open unit stopped.
@@ -449,6 +454,191 @@ impl Ledger {
         self.lock().runtimes.get(&runtime_id).cloned()
     }
 
+    /// Keep only the exact admitted placement over its actual owned parent. Reentry never replaces it.
+    pub fn retain_program(
+        &self,
+        admission: &orch_link_contract::program_work::Admission,
+    ) -> Result<Option<crate::program_work::Record>, LedgerError> {
+        let mut state = self.lock();
+        let Some(parent) = state.runtimes.get(&admission.parent) else {
+            return Ok(None);
+        };
+        if parent.system.is_empty() || state.runtimes.contains_key(&admission.work) {
+            return Ok(None);
+        }
+        if let Some(kept) = state.programs.get(&admission.work) {
+            return Ok((kept.admission == *admission).then(|| kept.clone()));
+        }
+        let record = crate::program_work::Record {
+            admission: admission.clone(),
+            driver: parent.driver.clone(),
+            provider: parent.unit.clone(),
+            system: parent.system.clone(),
+            unit: None,
+            input: None,
+            processes: BTreeMap::new(),
+            retired: false,
+            cleaned: false,
+        };
+        state.programs.insert(admission.work, record.clone());
+        if let Err(error) = self.save(&state) {
+            state.programs.remove(&admission.work);
+            return Err(error);
+        }
+        Ok(Some(record))
+    }
+
+    /// The physical work journal. Its ids supply no principal or permission.
+    #[must_use]
+    pub fn program(&self, work: Id) -> Option<crate::program_work::Record> {
+        self.lock().programs.get(&work).cloned()
+    }
+
+    pub(crate) fn programs(&self) -> Vec<crate::program_work::Record> {
+        self.lock().programs.values().cloned().collect()
+    }
+
+    /// Bind a prepared unit and frozen input once, without changing the accepted placement.
+    pub fn bind_program_unit(
+        &self,
+        work: Id,
+        unit: &UnitRef,
+        input: Hash,
+    ) -> Result<bool, LedgerError> {
+        let mut state = self.lock();
+        let Some(kept) = state.programs.get_mut(&work) else {
+            return Ok(false);
+        };
+        let before = kept.clone();
+        if kept.retired
+            || unit.runtime_id != work
+            || kept.unit.as_ref().is_some_and(|previous| previous != unit)
+            || kept.input.is_some_and(|previous| previous != input)
+        {
+            return Ok(false);
+        }
+        kept.unit = Some(unit.clone());
+        kept.input = Some(input);
+        if let Err(error) = self.save(&state) {
+            state.programs.insert(work, before);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// A node journals the real driver invocation before it can start; a retry keeps that exact identity.
+    pub fn retain_program_process(
+        &self,
+        work: Id,
+        invocation: Id,
+        reference: &str,
+        input: Hash,
+    ) -> Result<bool, LedgerError> {
+        let mut state = self.lock();
+        let Some(kept) = state.programs.get_mut(&work) else {
+            return Ok(false);
+        };
+        let before = kept.clone();
+        if kept.retired
+            || kept.unit.is_none()
+            || reference.is_empty()
+            || kept
+                .processes
+                .get(&invocation)
+                .is_some_and(|previous| previous.reference != reference || previous.input != input)
+        {
+            return Ok(false);
+        }
+        kept.processes.insert(
+            invocation,
+            crate::program_work::Process {
+                reference: reference.to_owned(),
+                input,
+            },
+        );
+        if let Err(error) = self.save(&state) {
+            state.programs.insert(work, before);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// Retiring work never changes another unit or removes its ordinary helper history.
+    pub fn retire_program(&self, work: Id) -> Result<bool, LedgerError> {
+        let mut state = self.lock();
+        let Some(kept) = state.programs.get_mut(&work) else {
+            return Ok(false);
+        };
+        let before = kept.clone();
+        if kept.retired {
+            return Ok(true);
+        }
+        kept.retired = true;
+        if let Err(error) = self.save(&state) {
+            state.programs.insert(work, before);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// A successful owned cleanup keeps a short terminal fence, without retaining runtime history forever.
+    pub(crate) fn finish_program_unit(
+        &self,
+        work: Id,
+        unit: Option<&UnitRef>,
+    ) -> Result<bool, LedgerError> {
+        let mut state = self.lock();
+        let Some(kept) = state.programs.get_mut(&work) else {
+            return Ok(false);
+        };
+        if !kept.retired || kept.unit.as_ref() != unit {
+            return Ok(false);
+        }
+        let before = kept.clone();
+        kept.unit = None;
+        kept.processes.clear();
+        kept.cleaned = true;
+        if let Err(error) = self.save(&state) {
+            state.programs.insert(work, before);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// Expired terminal fences are removed in one journal write, independently of the source directory's size.
+    pub(crate) fn prune_programs(&self, now: Time) -> Result<usize, LedgerError> {
+        let mut state = self.lock();
+        let removed: Vec<_> = state
+            .programs
+            .iter()
+            .filter(|(_, record)| {
+                record.retired && record.cleaned && record.admission.deadline <= now
+            })
+            .map(|(id, record)| (*id, record.clone()))
+            .collect();
+        if removed.is_empty() {
+            return Ok(0);
+        }
+        for (id, _) in &removed {
+            state.programs.remove(id);
+        }
+        if let Err(error) = self.save(&state) {
+            state.programs.extend(removed);
+            return Err(error);
+        }
+        Ok(removed.len())
+    }
+
+    /// Physical units remain known across restart until their exact cleanup completes.
+    #[must_use]
+    pub fn program_units(&self) -> Vec<UnitRef> {
+        self.lock()
+            .programs
+            .values()
+            .filter_map(|record| record.unit.clone())
+            .collect()
+    }
+
     /// The record of the runtime whose unit has this name.
     #[must_use]
     pub fn by_unit_name(&self, name: &str) -> Option<Record> {
@@ -714,6 +904,7 @@ mod tests {
             runtime_id: id,
             kind: RuntimeKind::Environment,
             driver: "memory".to_owned(),
+            system: "prod".into(),
             unit: UnitRef {
                 reference: "r".to_owned(),
                 name: format!("orch-environment-{}", &id.simple().to_string()[..12]),
@@ -746,6 +937,220 @@ mod tests {
         assert_eq!(again.get(gone.runtime_id), None);
         assert_eq!(again.systems(), ["prod"]);
         assert_eq!(again.by_unit_name(&kept.unit.name), Some(kept));
+    }
+
+    #[test]
+    fn a_program_keeps_its_admitted_parent_helper_and_process_identity_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(dir.path()).unwrap();
+        let parent = record(&["provider-state"]);
+        let admission = orch_link_contract::program_work::Admission {
+            work: new_id(),
+            helper: new_id(),
+            peer: new_id(),
+            parent: parent.runtime_id,
+            template: serde_json::json!({"image":"prepared-program-base"}),
+            tools: vec![],
+            endpoints: vec![],
+            deadline: "2026-10-11T12:10:00.000Z".parse().unwrap(),
+        };
+        assert!(
+            ledger.retain_program(&admission).unwrap().is_none(),
+            "an unknown physical parent supplies no work placement"
+        );
+        let driver = parent.driver.clone();
+        let provider_unit = parent.unit.clone();
+        ledger.insert(parent).unwrap();
+        assert_eq!(
+            ledger
+                .retain_program(&admission)
+                .unwrap()
+                .unwrap()
+                .admission,
+            admission
+        );
+        let mut other = admission.clone();
+        other.helper = new_id();
+        assert!(ledger.retain_program(&other).unwrap().is_none());
+        other = admission.clone();
+        other.peer = new_id();
+        assert!(ledger.retain_program(&other).unwrap().is_none());
+        let invocation = new_id();
+        let process_input = Hash::of(b"selected executable and frozen process options");
+        assert!(
+            !ledger
+                .retain_program_process(admission.work, invocation, "before-unit", process_input)
+                .unwrap()
+        );
+        let unit = UnitRef {
+            reference: "prepared-work-unit".into(),
+            name: format!("orch-work-{}", admission.work.simple()),
+            runtime_id: admission.work,
+            kind: RuntimeKind::Provider,
+        };
+        let input = Hash::of(b"frozen material identity");
+        assert!(
+            ledger
+                .bind_program_unit(admission.work, &unit, input)
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .bind_program_unit(admission.work, &unit, Hash::of(b"different material"))
+                .unwrap()
+        );
+        assert!(
+            ledger
+                .retain_program_process(
+                    admission.work,
+                    invocation,
+                    "actual-driver-exec",
+                    process_input
+                )
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .retain_program_process(admission.work, invocation, "a-second-exec", process_input)
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .retain_program_process(
+                    admission.work,
+                    invocation,
+                    "actual-driver-exec",
+                    Hash::of(b"different options")
+                )
+                .unwrap()
+        );
+        drop(ledger);
+        let again = Ledger::open(dir.path()).unwrap();
+        let kept = again.program(admission.work).unwrap();
+        assert_eq!(kept.admission, admission);
+        assert_eq!(
+            kept.provider, provider_unit,
+            "a replaced parent cannot redirect frozen work to its new physical unit"
+        );
+        assert_eq!(
+            kept.driver, driver,
+            "cleanup keeps the actual driver even if its parent is later removed"
+        );
+        assert_eq!(
+            kept.processes
+                .get(&invocation)
+                .map(|process| process.reference.as_str()),
+            Some("actual-driver-exec")
+        );
+        assert_eq!(
+            kept.processes.get(&invocation).map(|process| process.input),
+            Some(process_input)
+        );
+        assert!(again.retire_program(admission.work).unwrap());
+        assert!(again.retain_program(&admission).unwrap().unwrap().retired);
+        assert!(
+            !again
+                .retain_program_process(admission.work, new_id(), "after-stop", process_input)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn an_unwritten_program_fact_is_not_kept_in_memory_as_an_execution_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(dir.path()).unwrap();
+        let parent = record(&["provider-state"]);
+        ledger.insert(parent.clone()).unwrap();
+        let admission = orch_link_contract::program_work::Admission {
+            work: new_id(),
+            helper: new_id(),
+            peer: new_id(),
+            parent: parent.runtime_id,
+            template: serde_json::json!({}),
+            tools: vec![],
+            endpoints: vec![],
+            deadline: "2026-10-11T12:10:00Z".parse().unwrap(),
+        };
+        // This fixture makes only this ledger's destination unwritable without removing its real directory.
+        let stopped = dir.path().join("state-before-failure");
+        std::fs::rename(dir.path().join("state"), &stopped).unwrap();
+        std::fs::write(dir.path().join("state"), b"not a directory").unwrap();
+        assert!(ledger.retain_program(&admission).is_err());
+        assert!(ledger.program(admission.work).is_none());
+        std::fs::rename(
+            dir.path().join("state"),
+            dir.path().join("failed-destination"),
+        )
+        .unwrap();
+        std::fs::rename(&stopped, dir.path().join("state")).unwrap();
+        ledger.retain_program(&admission).unwrap().unwrap();
+        let unit = UnitRef {
+            reference: "prepared-work".into(),
+            name: "prepared-work".into(),
+            runtime_id: admission.work,
+            kind: RuntimeKind::Provider,
+        };
+        let input = Hash::of(b"material");
+        let before = ledger.program(admission.work).unwrap();
+        std::fs::rename(dir.path().join("state"), &stopped).unwrap();
+        std::fs::write(dir.path().join("state"), b"not a directory").unwrap();
+        assert!(
+            ledger
+                .bind_program_unit(admission.work, &unit, input)
+                .is_err()
+        );
+        assert_eq!(ledger.program(admission.work), Some(before));
+    }
+
+    #[test]
+    fn expired_programs_keep_only_unfinished_cleanup_and_never_remove_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(dir.path()).unwrap();
+        let parent = record(&["provider-state"]);
+        ledger.insert(parent.clone()).unwrap();
+        let deadline = "2026-10-11T12:10:00Z".parse().unwrap();
+        let mut works = Vec::new();
+        for _ in 0..2 {
+            let admission = orch_link_contract::program_work::Admission {
+                work: new_id(),
+                helper: new_id(),
+                peer: new_id(),
+                parent: parent.runtime_id,
+                template: serde_json::json!({}),
+                tools: vec![],
+                endpoints: vec![],
+                deadline,
+            };
+            ledger.retain_program(&admission).unwrap().unwrap();
+            let unit = UnitRef {
+                reference: admission.work.to_string(),
+                name: admission.work.to_string(),
+                runtime_id: admission.work,
+                kind: RuntimeKind::Provider,
+            };
+            assert!(
+                ledger
+                    .bind_program_unit(admission.work, &unit, Hash::of(b"material"))
+                    .unwrap()
+            );
+            assert!(ledger.retire_program(admission.work).unwrap());
+            works.push((admission, unit));
+        }
+        assert!(
+            ledger
+                .finish_program_unit(works[0].0.work, Some(&works[0].1))
+                .unwrap()
+        );
+        assert_eq!(
+            ledger
+                .prune_programs("2026-10-11T12:09:59Z".parse().unwrap())
+                .unwrap(),
+            0
+        );
+        assert_eq!(ledger.prune_programs(deadline).unwrap(), 1);
+        assert!(ledger.program(works[0].0.work).is_none());
+        assert!(ledger.program(works[1].0.work).unwrap().unit.is_some());
+        assert_eq!(ledger.get(parent.runtime_id), Some(parent));
     }
 
     #[test]

@@ -295,7 +295,7 @@ async fn read_view(
     let checked =
         cache_read::guard(conn, &principal, target, plan, wanted, cache, slots[1]).await?;
     let cache = checked.cache;
-    let inputs = checked.inputs;
+    let mut inputs = checked.inputs;
     let inspecting = checked.inspecting;
     let fresh = if let Some(cache) = &cache {
         let cursor = if matches!(target, SummaryTarget::ChatTitle { .. }) {
@@ -341,6 +341,16 @@ async fn read_view(
     };
     let (producer, mut providers) =
         cache_read::producer(conn, &principal, plan, cache.as_ref(), slots[2]).await?;
+    let program = cache_read::program(
+        conn,
+        &principal,
+        plan,
+        latest.as_ref(),
+        slots,
+        &mut inputs,
+        &mut providers,
+    )
+    .await?;
     let manual = if policy.producer.is_none() {
         Some(
             resource::manual_default(conn, &principal, identity.place(), ctx.app.clock.time())
@@ -364,7 +374,7 @@ async fn read_view(
     let preview_producer = policy.producer.as_ref().or(manual_producer.as_ref());
     let default_provider = preview_producer
         .filter(|producer| producer.kind == "model")
-        .and_then(|producer| producer.config.get("provider_id"))
+        .and_then(|producer| producer.config.pointer("/backend/offering/provider"))
         .and_then(Json::as_str)
         .and_then(|id| id.parse::<Id>().ok());
     let default_fact = match default_provider {
@@ -434,6 +444,7 @@ async fn read_view(
         state,
         text: cache.as_ref().and_then(|row| row.text.clone()),
         producer,
+        program,
         manual_problem: manual.and_then(|manual| manual.problem),
         wait: follow.wait,
         poll_after_ms: follow.poll_after_ms,
@@ -641,7 +652,12 @@ impl effects::Effect for Refresher {
                 }
             }
             if let Some(model) = &body.model
-                && (model.model.trim().is_empty()
+                && (model.backend.route.trim().is_empty()
+                    || model
+                        .backend
+                        .offering
+                        .as_ref()
+                        .is_none_or(|offering| offering.offering.trim().is_empty())
                     || model
                         .params
                         .as_ref()
@@ -669,8 +685,7 @@ impl effects::Effect for Refresher {
                 .map_err(ApiError::engine)?;
                 let config=picked.config.ok_or_else(||ApiError::new(ErrorCode::ProviderUnavailable,if picked.problem==Some(orch_api_contract::summaries::SummaryManualProblem::CapReached) {"A usage cap has no room for summaries"} else {"No permitted API model is available; check provider access and model allowlists"}))?;
                 Some(orch_api_contract::summaries::SummaryModelChoice {
-                    provider_id: config.provider_id,
-                    model: config.model_name,
+                    backend: config.backend,
                     params: Some(config.params),
                 })
             } else {
@@ -715,6 +730,11 @@ impl effects::Effect for Refresher {
             )
             .await
             .map_err(ApiError::engine)?;
+            let offering = value
+                .selected
+                .config
+                .offering()
+                .map_err(ApiError::internal)?;
             if !ctx
                 .app
                 .engine
@@ -722,8 +742,8 @@ impl effects::Effect for Refresher {
                     conn,
                     &orch_engine::caps::OwnCapAsk {
                         place: value.selected.material.identity.place(),
-                        provider: value.selected.config.provider_id,
-                        model: &value.selected.config.model_name,
+                        provider: offering.provider,
+                        model: &offering.offering,
                         tier: None,
                         purpose: "summary",
                         person: Some(principal.caller().user()),
@@ -758,8 +778,12 @@ impl effects::ApplyOwned for Refresher {
             let http = native::http_origin::capture_operation(ctx, &mut tx, &origin).await?;
             let accepted = serde_json::to_value(http.origin()).map_err(ApiError::internal)?;
             let arguments = serde_json::to_value(&value.body).map_err(ApiError::internal)?;
-            let source = json!({"target":target,"range":value.selected.material.range,"snapshot":value.selected.material.snapshot,"policy":value.selected.policy.fingerprint,"http":http,
-                "model":{"provider_id":value.selected.config.provider_id,"model":value.selected.config.model_name,"params":value.selected.config.params}});
+            let selection = value
+                .selected
+                .backend_selection()
+                .map_err(ApiError::engine)?;
+            let source = json!({"target":target,"range":value.selected.pinned_range(),"snapshot":value.selected.material.snapshot,"policy":value.selected.policy.fingerprint,"http":http,
+                "selection":selection});
             before.check()?;
             let cache = rows::ensure(
                 &mut tx,

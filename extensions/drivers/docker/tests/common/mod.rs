@@ -319,6 +319,19 @@ impl Lab {
         ]);
     }
 
+    /// Track one bare work unit and its private proxy graph even when a later assertion fails.
+    pub fn track_work(&self, work: orch_types::Id) {
+        let name = format!("orch-work-{}", work.simple());
+        let mut made = self.made.lock().unwrap();
+        made.containers.extend([
+            name.clone(),
+            format!("{name}-proxy"),
+            format!("{name}-addresses"),
+        ]);
+        made.networks
+            .extend([format!("{name}-net"), format!("{name}-out")]);
+    }
+
     /// Records a volume the test made by itself.
     pub fn track_volume(&self, name: &str) {
         self.made.lock().unwrap().volumes.push(name.to_owned());

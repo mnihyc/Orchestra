@@ -2880,6 +2880,7 @@ impl Engine {
             input_id: Id::nil(),
             before_snapshot_id: None,
             files_end_manifest: None,
+            files_changed: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -3013,7 +3014,7 @@ impl Engine {
             )
             .await?;
         snapshot.native_model =
-            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
+            Box::pin(self.capture_native_model(conn, &mut snapshot, allowed)).await?;
         Ok(snapshot)
     }
 }

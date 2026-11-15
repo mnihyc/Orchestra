@@ -565,6 +565,7 @@ mod tests {
             runtime_id: id,
             kind: RuntimeKind::Environment,
             driver: "memory".into(),
+            system: "test".into(),
             unit: UnitRef {
                 reference: String::new(),
                 name: id.to_string(),

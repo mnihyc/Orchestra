@@ -681,6 +681,7 @@ impl Runtimes {
                     runtime_id,
                     kind: unit.kind,
                     driver,
+                    system: String::new(),
                     unit,
                     volumes: Vec::new(),
                     token: None,
@@ -941,6 +942,7 @@ impl Runtimes {
             runtime_id: spec.runtime_id,
             kind: spec.kind,
             driver: spec.driver.clone(),
+            system: spec.labels.get(LABEL_SYSTEM).cloned().unwrap_or_default(),
             unit: unit.clone(),
             volumes: spec
                 .volumes
