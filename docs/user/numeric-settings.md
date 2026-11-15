@@ -25,7 +25,9 @@ the setting before changing it:
 - **Wait:** zero does not wait for running turns.
 - **File preview context:** zero shows the referenced line without extra lines.
 
-Use **Reset to inherited** to remove your local choice. The field then shows
-the value the place or resource follows; entering zero is a different choice.
+Choose **Here** to edit an inherited number. Choose **As Acme decides** (named
+for its actual source) to remove your local choice and follow that value again.
+**Reset to inherited** in the row menu does the same thing. Entering zero is a
+different choice.
 
 For automatic retention, read [Storage cleanup](storage-cleanup.md).
