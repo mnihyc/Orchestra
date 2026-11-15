@@ -45,6 +45,17 @@ pub struct MachineUpdateFailed {
     pub detail: String,
 }
 
+/// A durable report from the exact bundled node that owns this update job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeServerUpdate {
+    /// The exact native command whose prepared helper supplied this observation.
+    pub command_id: Id,
+    /// The admitted job, independent of a connector or API process lifetime.
+    pub job_id: Id,
+    /// The existing updater's safe factual phase and outcome.
+    pub observation: orch_api_contract::admin::ServerUpdateObservation,
+}
+
 // ---------------------------------------------------------------- catalogue
 
 /// Whether an event is kept until the system has taken it in.
@@ -187,6 +198,8 @@ event_kinds! {
     NodeNetwork = "node.network", Durable, [Node];
     /// What a host has and can make.
     NodeFacts = "node.facts", Durable, [Node];
+    /// Progress of the one release updater on the bundled server node.
+    NodeServerUpdate = "node.server.update", Durable, [Node];
     /// The owned kept-image inventory at one node-local epoch, including archived files.
     NodeKeptImages = "node.kept-images", Durable, [Node];
     /// What a host uses.
@@ -349,6 +362,7 @@ payloads! {
         NodeNetwork(NodeNetwork) = "node.network";
         /// What a host has and can make.
         NodeFacts(NodeFacts) = "node.facts";
+        NodeServerUpdate(NodeServerUpdate) = "node.server.update";
         /// Owned images and the epoch of the complete inventory.
         NodeKeptImages(NodeKeptImages) = "node.kept-images";
         /// What a host uses.

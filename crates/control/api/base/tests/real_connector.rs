@@ -378,7 +378,8 @@ struct Sent {
 struct SealingCommands {
     machines: Mutex<HashMap<Id, (ControllerLink, RecipientKey)>>,
     secrets: StoredSecrets,
-    tickets: Tickets,
+    db: orch_db::Db,
+    authority: Link,
     sent: Mutex<HashMap<Id, Sent>>,
     order: Mutex<Vec<(Id, String)>>,
     clock: Arc<dyn Clock>,
@@ -482,6 +483,40 @@ impl Commands for SealingCommands {
                 .map_err(|error| CommandsError::Other(error.to_string()))?;
             sealed.insert(id, text);
         }
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
+        let frozen = {
+            let mut conn = self
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            let serial = command.key.wire();
+            orch_db::queries::link::insert_command(
+                &mut conn,
+                &orch_db::queries::link::NewCommand {
+                    id: command.id,
+                    machine_id: command.machine,
+                    kind: command.kind.as_str(),
+                    body: &command.body,
+                    serial_key: serial.as_deref(),
+                    deadline_at: command.deadline.map_or_else(
+                        || {
+                            self.clock.now()
+                                + chrono::Duration::seconds(i64::from(command.kind.deadline_secs()))
+                        },
+                        |time| time.get(),
+                    ),
+                },
+                self.clock.now(),
+            )
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, command.id)
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?
+        };
         resolve_references(&mut body, &mut |reference| match reference {
             Reference::Secret(id) => sealed
                 .get(&id)
@@ -490,9 +525,19 @@ impl Commands for SealingCommands {
             Reference::Ticket(more) => {
                 let wanted: TicketWanted = serde_json::from_value(Json::Object(more.clone()))
                     .map_err(|error| error.to_string())?;
-                self.tickets
-                    .for_request(&wanted, command.machine)
-                    .map_err(|error| error.to_string())
+                if let Some(facts) = &frozen {
+                    let scope = Tickets::command_scope(facts, &wanted, command.machine)
+                        .map_err(|error| error.to_string())?;
+                    self.authority
+                        .tickets()
+                        .for_session_request(&wanted, command.machine, &scope)
+                        .map_err(|error| error.to_string())
+                } else {
+                    self.authority
+                        .tickets()
+                        .for_request(&wanted, command.machine)
+                        .map_err(|error| error.to_string())
+                }
             }
         })
         .map_err(CommandsError::Other)?;
@@ -507,9 +552,6 @@ impl Commands for SealingCommands {
             deadline,
             body,
         };
-        if let Some(check) = before {
-            check().map_err(CommandsError::BeforeEffect)?;
-        }
         lock(&self.order).push((command.machine, cmd.kind.clone()));
         let handle = link.commands().issue(cmd.clone());
         lock(&self.sent).insert(
@@ -785,10 +827,13 @@ impl Cluster {
         // and link delivery must use that same clock, rather than the fixture's fixed date.
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let master = MasterKey::new([5; 32]);
+        let authority = Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
+            .expect("a link without gateways can be made");
         let commands = Arc::new(SealingCommands {
             machines: Mutex::new(HashMap::new()),
             secrets: StoredSecrets::new(db.clone(), master.clone()),
-            tickets: Tickets::generate(Arc::clone(&clock)),
+            db: db.clone(),
+            authority: authority.clone(),
             sent: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             clock: Arc::clone(&clock),
@@ -808,8 +853,7 @@ impl Cluster {
             db: db.clone(),
             config: Arc::clone(&old.config),
             clock: Arc::clone(&clock),
-            link: Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
-                .expect("a link without gateways can be made"),
+            link: authority.clone(),
             engine: engine.clone(),
             realtime: orch_api_core::realtime::Realtime::new(&db, &clock, &old.config),
             build: BuildInfo::new("api", "0.0.0-test", "", "1"),
@@ -833,7 +877,13 @@ impl Cluster {
         // The system on the loopback; its relay believes the signatures of the tickets the engine's
         // commands carry.
         let (system, enrollment_port) = start_system().await;
-        system.hub.set_ticket_verifier(commands.tickets.verifier());
+        system
+            .hub
+            .set_ticket_verifier(authority.tickets().verifier());
+        system.hub.set_tool_authority(move |query| {
+            let authority = authority.clone();
+            async move { authority.authorize_tool_session(&query).await }
+        });
 
         // The connector is enrolled with a token, as a person would, and told what its owner allows.
         let binary = connector_binary();
@@ -1396,6 +1446,7 @@ impl Cluster {
             .publish(
                 &Stream::Machine,
                 &Event::MachineFacts(MachineFacts {
+                    server_update: None,
                     data_directory: None,
                     gateway: None,
                     role_management: None,
