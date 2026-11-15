@@ -15,6 +15,7 @@ use orch_engine::commands::{
 use orch_link_contract::commands::{CommandError, CommandKind, ErrorCode};
 use orch_link_contract::events::TurnOutcome;
 use orch_types::{Clock, Id};
+use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -136,6 +137,7 @@ async fn an_unexpected_session_exit_fails_the_running_turn_and_retains_its_reaso
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: reason.into(),
                 },
             ),
@@ -210,6 +212,7 @@ async fn a_session_lost_before_the_turn_begins_keeps_its_input_for_retry() {
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: "the session exited".into(),
                 },
             ),
@@ -608,6 +611,7 @@ async fn an_idle_session_exit_still_leaves_its_reason_in_the_conversation() {
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: "idle server exited unexpectedly".into(),
                 },
             ),
@@ -1004,4 +1008,30 @@ async fn a_turn_the_harness_took_and_never_began_is_given_up_and_the_next_start_
     meanwhile(Duration::from_millis(300)).await;
     assert_eq!(world.turn_starts(thread).len(), 3);
     assert_eq!(world.input_state(first.input.id).await.0, "delivered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unavailable_restart_recovery_preserves_the_admitted_turn_without_retrying_its_input() {
+    let world = World::new().await;
+    let thread = world.thread("Retained native work").await;
+    let (turn, _) = world.running_turn(thread, "Admitted exactly once").await;
+    world.say(thread,orch_link_contract::events::Event::decode("session.lost",json!({"reason":"Native history remains, but its admitted turn cannot be reattached yet","uncertain":true})).unwrap()).await;
+    world.wait_state(thread, "blocked").await;
+    let state: String = world
+        .scalar("SELECT state FROM turns WHERE id=$1", turn.turn_id)
+        .await;
+    assert_eq!(state, "running");
+    assert_eq!(
+        turns_of(&world, thread).await.len(),
+        1,
+        "no implicit replay or fresh turn"
+    );
+    let reason: Option<String> = world
+        .scalar(
+            "SELECT blocked_detail FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    assert!(reason.unwrap().contains("history remains"));
+    world.shutdown().await;
 }

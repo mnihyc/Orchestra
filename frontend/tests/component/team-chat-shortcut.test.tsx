@@ -10,8 +10,8 @@ import { ViewOpeningContext, ViewRouteContext } from '@/features/workbench/viewO
 import { show } from './support';
 
 const world = vi.hoisted(() => ({ reveal: vi.fn(), takeQuotes: vi.fn() }));
-vi.mock('@/features/workbench/openView', () => ({ revealView: world.reveal }));
-vi.mock('@/realtime/stores/chat', () => ({ useChatUnread: () => ({ unread: false, mentions: 0 }) }));
+vi.mock('@/features/workbench/openView', async (loadOriginal) => ({ ...await loadOriginal<object>(), revealView: world.reveal }));
+vi.mock('@/realtime/stores/chat', async (loadOriginal) => ({ ...await loadOriginal<object>(), useChatUnread: () => ({ unread: false, mentions: 0 }) }));
 
 function Composer({ ready }: { ready: boolean }) {
   const input = useRef<HTMLInputElement>(null);

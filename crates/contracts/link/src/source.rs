@@ -324,6 +324,8 @@ pub enum RecordKind {
     Turn,
     /// Complete undo files immediately before one restore.
     Restore,
+    /// Job-owned complete Current files, independent of automatic history policy.
+    Source,
 }
 
 /// Records from the complete index and watcher changes, never by scanning on a turn's path.
@@ -342,6 +344,8 @@ pub struct FsRecord {
     pub record_days: i64,
     /// The frozen included-byte bound.
     pub max_bytes: i64,
+    /// A chosen wait or an explicit whole-file action waits for initial indexing too.
+    pub wait_for_indexing: bool,
 }
 
 /// Whether a recording can be used as a whole directory.
@@ -357,6 +361,8 @@ pub enum RecordState {
 /// A recorded state's safe metadata; raw objects stay with the environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsRecordResult {
+    /// Initial indexing progress when the turn starts with per-file restore instead.
+    pub indexing: Option<crate::events::IndexingProgress>,
     /// Whether a whole state was kept.
     pub state: RecordState,
     /// Its immutable store tree identifier, not an API BLAKE3 identifier.
@@ -496,21 +502,31 @@ pub struct FsRestoreResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceObserve {
+    /// None freezes the prepared end reference and observed paths; Some publishes that exact sealed observation.
+    pub sealed: Option<WorkspaceObserveResult>,
     /// The owning environment.
     pub environment_id: Id,
     /// The thread whose directory was observed.
     pub thread_id: Id,
     /// The ended turn, when one exists.
     pub turn_id: Option<Id>,
+    /// The recording whose starting watcher cursor belongs to this turn.
+    pub before_snapshot_id: Option<Id>,
     /// The workspace-relative directory.
     pub directory: String,
 }
 
-/// Complete end hashes, or unknown coverage on a live or not-ready tree.
+/// Complete end hashes and journal paths have independent coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceObserveResult {
-    /// The uploaded common end manifest, or null when it cannot be complete.
+    /// A local immutable patch over prepared metadata, materialized only by the sealed background publication.
+    pub end_patch_blob: Option<Hash>,
+    /// The prepared common end manifest, uploaded by the sealed publication request; null when unavailable.
     pub end_manifest_blob: Option<Hash>,
+    /// Distinct directory-relative paths since the before recording, or unknown after lost notices.
+    pub changed_paths: Option<Vec<String>>,
+    /// Whether native coverage was complete throughout this interval; false means observed paths only.
+    pub changed_paths_complete: bool,
 }
 
 /// The prepared source's safe metadata.
