@@ -198,6 +198,10 @@ pub fn mount(registry: &mut Registry) {
         .creation(EnvironmentFileCopy, copy::binding())
         .creation(EnvironmentFileMkdir, mkdir::binding())
         .creation(EnvironmentUploadWrite, upload_creation::binding())
+        .on(
+            orch_api_contract::workspace::EnvironmentFileTransferGet,
+            transfer_get,
+        )
         .on(EnvironmentFileList, list)
         .on(EnvironmentFileStat, stat)
         .on_raw(EnvironmentFilePreviewGet, preview_get)
@@ -225,19 +229,38 @@ pub fn mount(registry: &mut Registry) {
         .on(EnvironmentFileDelete, delete);
 }
 
+/// One bounded on-intent read; no native probe, publication or cleanup is started here.
+async fn transfer_get(
+    ctx: Ctx,
+    query: orch_api_contract::environment::ThroughThreadQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::workspace::FileTransferReply> {
+    let (mut tx, _) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let door = door::open(&ctx, &mut tx, query.thread).await?;
+    let transfer = storage::source_transfer(&mut tx, door.env.id).await?.map(|mut value| {
+        let source = value.get("retention_default").and_then(serde_json::Value::as_bool).map(|default| serde_json::json!({"scope":if default { "default" } else { "system" },"node":null}));
+        value["retention_source"] = source.unwrap_or(serde_json::Value::Null);
+        serde_json::from_value(value).map_err(ApiError::internal)
+    }).transpose()?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(orch_api_contract::workspace::FileTransferReply { transfer })
+}
+
 // ---------------------------------------------------------------- listing
 
 /// A directory, live when its machine is there and from the last list of the tree otherwise.
 async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<DirListing> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let door = door::open(&ctx, &mut conn, query.thread).await?;
+    let policy = orch_engine::environments::workspace_limits(&mut conn, door.env.id)
+        .await
+        .map_err(ApiError::internal)?;
     let limit = query
         .limit
-        .unwrap_or(orch_link_contract::commands::FS_LIST_MAX_ENTRIES)
-        .min(orch_link_contract::commands::FS_LIST_MAX_ENTRIES);
+        .unwrap_or(u32::try_from(policy.directory_entries).unwrap_or(u32::MAX));
     if limit == 0 {
         return Err(ApiError::invalid("limit", "must be at least 1"));
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    let door = door::open(&ctx, &mut conn, query.thread).await?;
     let path = paths::clean("path", &query.path, true)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
     let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
@@ -264,7 +287,7 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
     let cursor = binding.cursor(query.cursor.as_deref(), ctx.app.clock.time())?;
     // Native reads and blob loads hold neither a transaction nor this pooled connection.
     drop(conn);
-    let (entries, truncated, metadata) = match source {
+    let (entries, truncated, metadata, facts) = match source {
         pages::Source::Live => {
             let native_cursor = cursor
                 .as_ref()
@@ -303,15 +326,14 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
                     failure.problem(Doing::Reading)
                 }
             })?;
-            if listed.entries.len() > orch_link_contract::commands::FS_LIST_MAX_ENTRIES as usize
-                || serde_json::to_vec(&listed)
-                    .map_err(ApiError::internal)?
-                    .len()
-                    > 2 * 1024 * 1024
+            if serde_json::to_vec(&listed)
+                .map_err(ApiError::internal)?
+                .len()
+                > 2 * 1024 * 1024
             {
                 return Err(ApiError::new(
                     ErrorCode::RequestTooLarge,
-                    "The connector's directory page exceeds its row or byte bound.",
+                    "The connector's directory page exceeds its byte allowance.",
                 ));
             }
             if listed.page.is_some()
@@ -344,12 +366,13 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
             };
             if let (Some(cursor), Some(metadata)) = (&cursor, &metadata)
                 && (cursor.revision != metadata.revision
-                    || cursor.as_of != metadata.as_of
+                    || (cursor.observed_from.is_some() && metadata.as_of < cursor.as_of)
+                    || (cursor.observed_from.is_none() && cursor.as_of != metadata.as_of)
                     || cursor.observed_from != metadata.observed_from)
             {
                 return Err(pages::stale());
             }
-            (listed.entries, listed.truncated, metadata)
+            (listed.entries, listed.truncated, metadata, listed.facts)
         }
         pages::Source::Manifest { blob } => {
             let tree = ctx
@@ -370,14 +393,25 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
             let (entries, next) = window.finish();
             let as_of = Time::new(door.env.manifest_at.ok_or_else(pages::stale)?);
             let metadata = binding.metadata(revision, next, as_of, ctx.app.clock.time())?;
-            (entries, metadata.next_cursor.is_some(), Some(metadata))
+            (
+                entries,
+                metadata.next_cursor.is_some(),
+                Some(metadata),
+                retained_facts(&ctx, &door, &path).await?,
+            )
         }
         pages::Source::Opened => {
             let (entries, metadata) = opened_page(&ctx, &binding, cursor.as_ref(), limit).await?;
-            (entries, metadata.next_cursor.is_some(), Some(metadata))
+            (
+                entries,
+                metadata.next_cursor.is_some(),
+                Some(metadata),
+                None,
+            )
         }
     };
     let mut reply = DirListing {
+        facts,
         path,
         mount,
         source: if binding.source == pages::Source::Live {
@@ -590,7 +624,8 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
     if found.entry.kind != DirEntryKind::File {
         return Err(ApiError::not_found());
     }
-    let limit = crate::previews::source_limit(&ctx).await?;
+    let policy = crate::previews::policy(&ctx).await?;
+    let limit = policy.source_bytes();
     if found.entry.size > limit {
         return crate::previews::unavailable(
             &ctx,
@@ -598,6 +633,8 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
             &found.media_type,
             found.is_text,
             true,
+            policy,
+            found.facts,
         )
         .await;
     }
@@ -652,6 +689,8 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
                 &found.media_type,
                 found.is_text,
                 false,
+                policy,
+                found.facts,
             )
             .await;
         }
@@ -688,10 +727,49 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
             &found.media_type,
             found.is_text,
             false,
+            policy,
+            found.facts,
         )
         .await;
     };
-    crate::previews::serve(&ctx, &hash, &found.entry.name, &found.media_type).await
+    crate::previews::serve_source(
+        &ctx,
+        &hash,
+        &found.entry.name,
+        &found.media_type,
+        policy,
+        found.facts,
+    )
+    .await
+}
+
+/// Only root exclusion provenance was captured with a whole manifest; child-local rules stay unreported.
+async fn retained_facts(
+    ctx: &Ctx,
+    door: &Door,
+    path: &str,
+) -> ApiResult<Option<orch_api_contract::workspace::FileSourceFacts>> {
+    let Some(blob) = door.env.manifest_blob else {
+        return Ok(None);
+    };
+    let mut conn = ctx.app.db.acquire().await?;
+    let facts = orch_db::queries::environments::workspace::manifest_source_facts(
+        &mut conn,
+        door.env.id,
+        &blob,
+    )
+    .await?;
+    facts
+        .map(|facts| {
+            let mut facts: orch_api_contract::workspace::FileSourceFacts =
+                serde_json::from_value(facts).map_err(ApiError::internal)?;
+            facts.watch = None;
+            if !path.is_empty() {
+                facts.inclusion = None;
+            }
+            Ok(facts)
+        })
+        .transpose()
 }
 
 /// What the last list of the tree says of a path.
@@ -720,9 +798,11 @@ async fn offline_stat(ctx: &Ctx, door: &Door, path: &str) -> ApiResult<FileStat>
             link_target: None,
             cached: false,
         };
-        return Ok(listing::file_stat(root, None));
+        let mut stat = listing::file_stat(root, None);
+        stat.facts = retained_facts(ctx, door, path).await?;
+        return Ok(stat);
     }
-    match tree.get(path) {
+    let mut stat = match tree.get(path) {
         Some(entry) => Ok(listing::file_stat(listing::dir_entry(entry), entry.hash)),
         None if tree.has_below(path) => {
             let made = listing::from_manifest(&tree, paths::parent_of(path))
@@ -731,7 +811,9 @@ async fn offline_stat(ctx: &Ctx, door: &Door, path: &str) -> ApiResult<FileStat>
             Ok(listing::file_stat(made, None))
         }
         None => Err(ApiError::not_found()),
-    }
+    }?;
+    stat.facts = retained_facts(ctx, door, path).await?;
+    Ok(stat)
 }
 
 // ---------------------------------------------------------------- bringing a file to the store

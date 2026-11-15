@@ -393,7 +393,7 @@ test.describe('an org’s settings', () => {
     await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'general'));
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
-    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Outside Orch']);
+    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Email and channels']);
     await expectAccessibleSettled(page);
 
     // The departments are listed with what each holds, and one opens its own settings.
