@@ -194,6 +194,8 @@ pub enum Feed {
         /// The resource.
         id: Id,
     },
+    /// The provider facts a visible thread draws, without the provider page's models or configuration.
+    ProviderRow(Id),
 }
 
 impl Feed {
@@ -223,7 +225,8 @@ impl Feed {
             | Self::EnvBrowsers(_)
             | Self::EnvDisplays(_)
             | Self::EnvDir { .. }
-            | Self::Resource { .. } => FeedKind::Ephemeral,
+            | Self::Resource { .. }
+            | Self::ProviderRow(_) => FeedKind::Ephemeral,
         }
     }
 
@@ -305,6 +308,7 @@ impl std::fmt::Display for Feed {
                 write!(f, "env:{environment_id}:dir:{}", PATH_CODING.encode(path))
             }
             Self::Resource { kind, id } => write!(f, "resource:{}:{id}", kind.as_str()),
+            Self::ProviderRow(id) => write!(f, "provider-row:{id}"),
         }
     }
 }
@@ -420,6 +424,7 @@ impl std::str::FromStr for Feed {
                     Some(_) => return Err(bad()),
                 }
             }
+            "provider-row" => Self::ProviderRow(id(parts.next())?),
             "resource" => {
                 let kind = parts.next().and_then(ResourceKind::parse).ok_or_else(bad)?;
                 Self::Resource {
@@ -820,6 +825,16 @@ pub enum ResourceEvent {
     },
 }
 
+/// Current authorized first-paint facts, never a full provider-page DTO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "what", rename_all = "snake_case")]
+pub enum ProviderRowEvent {
+    Changed {
+        /// None withdraws the old facts after their native View authority is lost.
+        provider: Option<Box<orch_api_contract::settings::ThreadProvider>>,
+    },
+}
+
 const fn view_not_revoked(value: &bool) -> bool {
     !*value
 }
@@ -1033,6 +1048,7 @@ pub enum EventData {
     Background(orch_api_contract::background::ThreadBackground),
     /// Of a resource's.
     Resource(ResourceEvent),
+    ProviderRow(ProviderRowEvent),
 }
 
 impl EventData {
@@ -1063,6 +1079,7 @@ impl EventData {
             Feed::ThreadRaw(_) => read(data).map(Self::Raw),
             Feed::ThreadBackground(_) => read(data).map(Self::Background),
             Feed::Resource { .. } => read(data).map(Self::Resource),
+            Feed::ProviderRow(_) => read(data).map(Self::ProviderRow),
             Feed::Thread(_) | Feed::Topic(_) | Feed::Org(_) | Feed::Env(_) => {
                 Err(DataError::NotCarried(feed.to_string()))
             }
@@ -1090,6 +1107,7 @@ impl EventData {
             Self::Raw(data) => object_of(data),
             Self::Background(data) => object_of(data),
             Self::Resource(data) => object_of(data),
+            Self::ProviderRow(data) => object_of(data),
         }
     }
 }
@@ -1272,6 +1290,7 @@ mod tests {
             (Feed::ThreadGit(id()), format!("thread:{A}:git")),
             (Feed::Job(id()), format!("job:{A}")),
             (Feed::Fork(id()), format!("fork:{A}")),
+            (Feed::ProviderRow(id()), format!("provider-row:{A}")),
             (Feed::Topic(id()), format!("topic:{A}")),
             (Feed::Org(id()), format!("org:{A}")),
             (Feed::User, "user".to_owned()),
@@ -1872,6 +1891,20 @@ mod tests {
         // Only ever sent as true.
         assert!(serde_json::from_value::<Offline>(json!({ "offline": false })).is_err());
         assert!(EventData::decode(&Feed::EnvStats(id()), json!({ "offline": false })).is_err());
+    }
+
+    #[test]
+    fn a_provider_row_withdraws_only_its_authorized_first_screen_facts() {
+        let feed = Feed::ProviderRow(id());
+        assert_eq!(feed.kind(), FeedKind::Ephemeral);
+        let data = json!({"what":"changed","provider":null});
+        let read = EventData::decode(&feed, data.clone()).unwrap();
+        assert!(matches!(
+            &read,
+            EventData::ProviderRow(ProviderRowEvent::Changed { provider: None })
+        ));
+        assert_eq!(Json::Object(read.to_object().unwrap()), data);
+        assert!(EventData::decode(&feed, json!({"what":"login","state":{}})).is_err());
     }
 
     #[test]

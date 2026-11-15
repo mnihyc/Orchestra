@@ -1524,6 +1524,7 @@ fn creator_body(plan: &Plan, job: Id, kind: &str, body: &Json) -> Result<bool, E
                     environment_id: plan.environment,
                     snapshot_id,
                     directory: worktree.choice.repository_dir.clone(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: *record_days,
                     max_bytes: *max_bytes
@@ -1666,7 +1667,24 @@ impl Preparing {
                 authority,
             ));
         }
-        job.command(command).await
+        // The thread that waits for this preparation is told which command it waits for, and what holds it
+        // up when other work stands in the machine's line before it.
+        let Some(thread) = self.plan.thread else {
+            return job.command(command).await;
+        };
+        let (id, kind) = (command.id, command.kind);
+        match self
+            .engine
+            .waiting_noted(thread, id, kind, None, job.command(command))
+            .await
+        {
+            crate::start_wait::Waited::Done(answer) => answer,
+            crate::start_wait::Waited::Tired => Err(Failure::new(
+                "timeout",
+                "The machine did not finish the operation before its deadline. Retry the job.",
+            )
+            .into()),
+        }
     }
 
     /// Pins the current source attempt after the caller has locked its authoritative job claim.
@@ -2007,6 +2025,7 @@ impl Preparing {
                                     environment_id: self.plan.environment,
                                     snapshot_id: snapshot,
                                     directory: body.choice.repository_dir.clone(),
+                                    wait_for_indexing: true,
                                     kind: RecordKind::Turn,
                                     record_days: *record_days,
                                     max_bytes: *max_bytes,
@@ -2753,6 +2772,34 @@ pub(crate) async fn undo_provision_sources(job: &Job, why: &Stop) -> Result<(), 
     Ok(())
 }
 
+/// Why a preparation failed, as the thread's source says it: the code the failure carries when it is a plain
+/// code, which the page turns into words and the act that fits (the machine's own sentence is on the job);
+/// a refusal to write files is one reason whichever door refused; anything else is the general one.
+fn failure_reason(why: &Stop) -> String {
+    match why {
+        Stop::Failed(failure)
+            if matches!(
+                failure.code.as_str(),
+                "workspace.remote_write_disabled" | "policy.remote_write_disabled"
+            ) =>
+        {
+            "workspace.remote_write_disabled".to_owned()
+        }
+        Stop::Failed(failure)
+            if !failure.code.is_empty()
+                && failure.code.len() <= 64
+                && failure.code.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            failure.code.clone()
+        }
+        _ => "workspace.source_failed".to_owned(),
+    }
+}
+
 #[async_trait]
 impl Phased for Preparing {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
@@ -2899,10 +2946,7 @@ impl Phased for Preparing {
                 let job_ref = reference(&owner);
                 let mut unit = Unit::new(&mut tx, job.now());
                 let info = SourceInfo { kind: if worktree.is_some() { SourceKind::Worktree } else if frozen.repository_url.is_some() { SourceKind::Repository } else { SourceKind::Directory }, directory: directory.clone(), repository_url: frozen.repository_url.clone(),
-                    branch: frozen.branch.clone(), head: None, state: SourceState::Failed, job: Some(job_ref), reason: Some(match why {
-                        Stop::Failed(failure) if matches!(failure.code.as_str(), "workspace.remote_write_disabled" | "policy.remote_write_disabled") => "workspace.remote_write_disabled",
-                        _ => "workspace.source_failed",
-                    }.to_owned()) };
+                    branch: frozen.branch.clone(), head: None, state: SourceState::Failed, job: Some(job_ref), reason: Some(failure_reason(why)) };
                 let seq = unit.stamp(thread).await?;
                 source::set_source(&mut *unit.conn, thread, &with_creator_origin(json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
                     "caller": self.plan.caller, "token": self.plan.token, "credential_home": row.source.as_ref().and_then(|source|source.get("credential_home")).cloned().unwrap_or_else(||json!(row.topic_id)),
@@ -2939,6 +2983,33 @@ mod publication_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_preparation_keeps_the_code_it_failed_with_for_the_page_to_explain() {
+        let failed = |code: &str| Stop::Failed(Failure::new(code, "a sentence of the machine"));
+        assert_eq!(failure_reason(&failed("timeout")), "timeout");
+        assert_eq!(failure_reason(&failed("not_found")), "not_found");
+        assert_eq!(
+            failure_reason(&failed("workspace.source_conflict")),
+            "workspace.source_conflict"
+        );
+        // A refusal to write files is one reason, whichever door refused.
+        for code in [
+            "policy.remote_write_disabled",
+            "workspace.remote_write_disabled",
+        ] {
+            assert_eq!(
+                failure_reason(&failed(code)),
+                "workspace.remote_write_disabled"
+            );
+        }
+        // Anything that is not a plain code, and anything that is not a failure, is the general reason.
+        for odd in ["", "Some Words: here", "a/path", &"x".repeat(65)] {
+            assert_eq!(failure_reason(&failed(odd)), "workspace.source_failed");
+        }
+        assert_eq!(failure_reason(&Stop::Cancelled), "workspace.source_failed");
+        assert_eq!(failure_reason(&Stop::Lost), "workspace.source_failed");
+    }
 
     #[tokio::test]
     #[allow(clippy::unwrap_used, reason = "a control fails by panicking")]

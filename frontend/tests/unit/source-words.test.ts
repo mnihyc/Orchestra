@@ -15,6 +15,8 @@ it.each(['en', 'zh-CN'] as const)('uses catalogue sentences for every recording 
       ['live_tree', 'source.restore.why.liveTree'], ['not_ready', 'source.restore.why.notReady'],
       ['store_unavailable', 'source.restore.why.storeUnavailable'], ['too_large', 'source.restore.why.tooLarge'],
       ['off', 'source.restore.why.recordingOff'], ['offline', 'source.restore.why.offline'],
+      ['cancelled', 'source.restore.why.cancelled'], ['indexing', 'source.restore.why.indexing'],
+      ['changed_during_recording', 'source.restore.why.changedDuring'], ['unreadable', 'source.restore.why.unreadable'],
       ['future_recording_failure', 'source.restore.why.other'],
     ] as const) {
       const words = unrecordedReason(i18n.t, snapshot({ state: 'unavailable', unavailable_reason: reason }));
@@ -24,6 +26,15 @@ it.each(['en', 'zh-CN'] as const)('uses catalogue sentences for every recording 
     }
     expect(workReason(i18n.t, 'future_work_failure')).toBe(i18n.t('source.work.reasons.unavailable'));
     expect(sourceFailure(i18n.t, 'future_source_failure')).toBe(i18n.t('source.prepare.failureReason'));
+  } finally { await setLocale('en'); }
+});
+
+it.each(['en', 'zh-CN'] as const)('explains a source timeout without inventing a competing task or failed phase in %s', async (locale) => {
+  await setLocale(locale);
+  try {
+    expect(sourceFailure(i18n.t, 'timeout')).toBe(locale === 'en'
+      ? "Source preparation did not finish in time. Review the job's progress, then choose Prepare again."
+      : '源准备未能及时完成。查看任务进度，然后选择“重新准备”。');
   } finally { await setLocale('en'); }
 });
 

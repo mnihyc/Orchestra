@@ -120,6 +120,8 @@ pub struct CommandRow {
     /// Where it stands: `queued`, `sent`, `accepted`, `succeeded`,
     /// `failed`, `expired` or `cancelled`.
     pub state: String,
+    /// Queued, running with its key, or released, as the link acknowledgement reports.
+    pub key_phase: i16,
     /// What the machine answered, once it succeeded; none again once the
     /// answer of a read was cleared because the one who asked had it.
     pub result: Option<Json>,
@@ -154,7 +156,7 @@ impl CommandRow {
 /// The columns of a command, in the order [`CommandRow`] has them.
 macro_rules! command_columns {
     () => {
-        "id, machine_id, kind, body, serial_key, state, result, error, attempts, deadline_at, created_at, updated_at"
+        "id, machine_id, kind, body, serial_key, state, key_phase, result, error, attempts, deadline_at, created_at, updated_at"
     };
 }
 
@@ -419,15 +421,19 @@ pub async fn mark_queued(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<b
 
 /// Notes that the machine wrote the command down.
 pub async fn mark_accepted(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<bool, DbError> {
-    let changed = sqlx::query(
-        "UPDATE commands SET state = 'accepted', updated_at = $2
-          WHERE id = $1 AND state IN ('queued', 'sent')",
-    )
-    .bind(id)
-    .bind(at)
-    .execute(conn)
-    .await?
-    .rows_affected();
+    mark_accepted_phase(conn, id, 0, at).await
+}
+
+/// Key phases advance independently of the terminal result; replay cannot reacquire a released key.
+pub async fn mark_accepted_phase(
+    conn: &mut Conn,
+    id: Id,
+    phase: i16,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let changed = sqlx::query("UPDATE commands SET state = 'accepted', key_phase = GREATEST(key_phase, $3), updated_at = $2
+        WHERE id = $1 AND (state IN ('queued', 'sent') OR state = 'accepted' AND key_phase < $3)")
+        .bind(id).bind(at).bind(phase).execute(conn).await?.rows_affected();
     Ok(changed > 0)
 }
 
@@ -475,6 +481,28 @@ pub async fn finish_command(
         crate::queries::session_dependencies::record(conn, id, kind, body, *issued, at).await?;
     }
     Ok(changed.is_some())
+}
+
+/// The command that holds `command` up: the oldest other command, with the same machine and the same serial
+/// key, that the machine reports as running while this command is still queued. Its kind, and when it was
+/// made. None for a command without a key, one the machine has not taken yet (it waits for the machine, not
+/// for other work), and one that is over.
+pub async fn held_up_by(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted' AND me.key_phase = 0
+            AND ahead.id <> me.id AND ahead.state = 'accepted' AND ahead.key_phase = 1
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// Expires the commands that no machine took before their deadline, on any
@@ -703,6 +731,49 @@ mod tests {
             serial_key: None,
             deadline_at: deadline,
         }
+    }
+
+    #[tokio::test]
+    async fn an_uploading_recording_no_longer_holds_the_next_recordings_patience() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let owner = machine(&mut conn).await;
+        let now = clock::start();
+        let body = json!({});
+        let mut first = new_command(owner, &body, now + Duration::seconds(30));
+        first.kind = "fs.record";
+        first.serial_key = Some("environment");
+        let mut next = new_command(owner, &body, now + Duration::seconds(30));
+        next.serial_key = first.serial_key;
+        insert_command(&mut conn, &first, now).await.unwrap();
+        insert_command(&mut conn, &next, now + Duration::seconds(1))
+            .await
+            .unwrap();
+        mark_accepted_phase(&mut conn, first.id, 1, now)
+            .await
+            .unwrap();
+        mark_accepted(&mut conn, next.id, now).await.unwrap();
+        assert!(held_up_by(&mut conn, next.id).await.unwrap().is_some());
+        mark_accepted_phase(&mut conn, first.id, 2, now)
+            .await
+            .unwrap();
+        assert!(
+            held_up_by(&mut conn, next.id).await.unwrap().is_none(),
+            "the older upload no longer owns the environment key"
+        );
+        assert!(
+            !mark_accepted_phase(&mut conn, first.id, 0, now)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            command(&mut conn, first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .key_phase,
+            2
+        );
     }
 
     #[tokio::test]
