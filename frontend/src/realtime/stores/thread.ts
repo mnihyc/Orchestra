@@ -11,8 +11,9 @@
  *
  * Components read through the hooks at the end. The writers are for the live connection alone.
  */
+import { mergeStopping } from '@/lib/threadStopping';
 import { currentThreadDisplay } from '@/lib/threadDisplay';
-import type { ThreadDisplay } from '@/generated/api-types';
+import type { ThreadDisplay, ThreadStopping } from '@/generated/api-types';
 import { useStore } from 'zustand';
 import { create } from 'zustand';
 
@@ -144,8 +145,18 @@ export const EMPTY_VIEW: ThreadView = {
 
 const MAIN_STREAM = 'main';
 
-/** Orders two queue positions, which are decimal strings of any length. */
+/** Orders two queue positions, which are decimal strings of any length. A message put first takes the place one below the first that waits,
+ * so a position can be zero or negative: the sign is read before the length is, or the second message put first would stand last. */
 export function comparePositions(one: string, other: string): number {
+  const below = one.startsWith('-');
+  const otherBelow = other.startsWith('-');
+  if (below !== otherBelow) return below ? -1 : 1;
+  const order = comparePlaces(below ? one.slice(1) : one, otherBelow ? other.slice(1) : other);
+  return order === 0 || !below ? order : -order;
+}
+
+/** Orders two unsigned decimal strings. */
+function comparePlaces(one: string, other: string): number {
   const [wholeOne = '0', fractionOne = ''] = one.split('.');
   const [wholeOther = '0', fractionOther = ''] = other.split('.');
   const left = wholeOne.replace(/^0+(?=\d)/, '');
@@ -192,13 +203,16 @@ export function applyRows(view: ThreadView, rows: ThreadRows): ThreadView {
   if (rows.thread !== undefined && rows.thread !== null) {
     const held = next.thread;
     const newer = held === null || rows.thread.seq > held.seq || (rows.thread.seq === held.seq && rows.thread.revision > held.revision);
+    const stopping = mergeStopping(held?.stopping, rows.thread.stopping);
     if (newer) {
       const turnId = rows.thread.current_turn_id;
       const display = currentThreadDisplay(rows.thread.display, held?.display);
       update({
-        thread: display === undefined || display === rows.thread.display ? rows.thread : { ...rows.thread, display },
+        thread: { ...rows.thread, stopping, ...(display === undefined ? {} : { display }) },
         ...(next.outputCounts.turnId === turnId ? {} : { outputCounts: newOutputCounts(turnId) }),
       });
+    } else if (stopping !== (held.stopping ?? null)) {
+      update({ thread: { ...held, stopping } });
     }
   }
 
@@ -541,6 +555,12 @@ export function threadReadOnly(view: ThreadView): boolean {
     || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
 }
 
+/** Stop names current work and needs no history revision, even while that history reloads. */
+export function threadStopReadOnly(view: ThreadView): boolean {
+  return view.closed !== null || view.read !== null && (view.read.selection !== null
+    || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
+}
+
 /** Read readiness is not native preparation status; viewedPrompt supplies that independent fact. */
 export function threadReadState(view: ThreadView): {
   selection: string | null;
@@ -697,6 +717,16 @@ export const threadWriter = {
       }
       const next = applyRows(view, admitted);
       return next.error === null || next.read?.ready === false ? next : { ...next, error: null };
+    });
+  },
+
+  /** Stop observations remain valid through a reload; a replacement reader or selected history cannot receive an old answer. */
+  stopping(threadId: ThreadReadTarget, state: ThreadStopping, captured?: ThreadReadCapture): void {
+    update(threadId, (view) => {
+      if (view.thread === null || view.closed !== null || captured !== undefined && (!sameThreadRead(captured.ref, threadId)
+        || view.read === null || view.read.reader !== captured.scope.reader || view.read.selection !== captured.scope.selection)) return view;
+      const stopping = mergeStopping(view.thread.stopping, state);
+      return stopping === (view.thread.stopping ?? null) ? view : { ...view, thread: { ...view.thread, stopping } };
     });
   },
 
