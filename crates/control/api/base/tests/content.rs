@@ -550,12 +550,10 @@ async fn content_that_is_not_in_the_store_is_not_found() {
     assert_eq!(answer.status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
+/// Puts in the store the list of a tree whose one file is `file`, as an export or a snapshot made it,
+/// and says its hash.
+async fn store_a_list_naming(depot: &Depot, path: &str, file: Hash, size: i64) -> Hash {
     use orch_engine::manifest::{Entry, EntryKind, Header, build};
-    let depot = Depot::new().await;
-    let inside = depot.store(b"a file the list names").await;
-    let outside = depot.store(b"a file that no list names").await;
     let written = build(
         &Header {
             v: 1,
@@ -565,12 +563,12 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
             case_sensitive: true,
         },
         vec![Entry {
-            path: "src/a.txt".to_owned(),
+            path: path.to_owned(),
             kind: EntryKind::File,
-            size: 21,
+            size,
             mtime_ns: 1,
             mode: 0o644,
-            hash: Some(inside),
+            hash: Some(file),
             link: None,
         }],
     )
@@ -582,12 +580,21 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
         .await
         .unwrap();
     assert_eq!(list.hash, written.hash);
+    list.hash
+}
+
+#[tokio::test]
+async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
+    let depot = Depot::new().await;
+    let inside = depot.store(b"a file the list names").await;
+    let outside = depot.store(b"a file that no list names").await;
+    let list = store_a_list_naming(&depot, "src/a.txt", inside, 21).await;
     let materializing = depot
         .command(
             depot.machine,
             CommandKind::FsMaterialize,
             &json!({
-                "environment_id": new_id(), "job_id": null, "manifest_blob": list.hash,
+                "environment_id": new_id(), "job_id": null, "manifest_blob": list,
                 "target_root": "/workspace/web", "purpose": "delivery"
             }),
         )
@@ -601,7 +608,7 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
     assert_eq!(file.body.as_ref(), b"a file the list names");
     let list_itself = depot
         .content
-        .get(depot.machine, materializing, &list.hash, None)
+        .get(depot.machine, materializing, &list, None)
         .await;
     assert_eq!(
         list_itself.status,
@@ -611,6 +618,48 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
     let other = depot
         .content
         .get(depot.machine, materializing, &outside, None)
+        .await;
+    assert_eq!(other.status, StatusCode::FORBIDDEN);
+}
+
+/// A machine move carries the home and the recorded file states of an environment in two commands of
+/// this kind, each naming only the list of the exported tree: the machine that imports it fetches
+/// every file of the list by its hash, as `fs.materialize` does.
+#[tokio::test]
+async fn a_command_that_imports_a_data_part_is_given_the_files_its_list_names() {
+    let depot = Depot::new().await;
+    let inside = depot.store(b"a file of the exported data part").await;
+    let outside = depot.store(b"a file that no list names").await;
+    let list = store_a_list_naming(&depot, ".orch/file-states/state", inside, 32).await;
+    let importing = depot
+        .command(
+            depot.machine,
+            CommandKind::FsDataImport,
+            &json!({
+                "environment_id": new_id(), "job_id": new_id(), "part": "file_states",
+                "manifest_blob": list
+            }),
+        )
+        .await;
+
+    let list_itself = depot
+        .content
+        .get(depot.machine, importing, &list, None)
+        .await;
+    assert_eq!(
+        list_itself.status,
+        StatusCode::OK,
+        "the list is in the command's body"
+    );
+    let file = depot
+        .content
+        .get(depot.machine, importing, &inside, None)
+        .await;
+    assert_eq!(file.status, StatusCode::OK, "{file:?}");
+    assert_eq!(file.body.as_ref(), b"a file of the exported data part");
+    let other = depot
+        .content
+        .get(depot.machine, importing, &outside, None)
         .await;
     assert_eq!(other.status, StatusCode::FORBIDDEN);
 }

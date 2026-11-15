@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test threads_raw --test semantic_index --test search_meaning --test search_native_scopes
