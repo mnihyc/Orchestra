@@ -44,9 +44,9 @@ use orch_agent_contract::facts::{AgentProfile, HarnessState, HarnessStatus};
 use orch_agent_contract::loopback::Loopback as AdapterLoopback;
 use orch_agent_contract::session::ThreadId;
 use orch_link_contract::commands::{
-    AgentStart, CommandError, ErrorCode, Secret as LinkSecret, SecretOrText,
+    AgentStart, CommandError, ErrorCode, SandboxMode, Secret as LinkSecret, SecretOrText,
 };
-use orch_link_contract::events::{Event, RawFrame};
+use orch_link_contract::events::{Event, RawFrame, SessionSandbox};
 use orch_link_contract::session::MachineFactsAdapter;
 use orch_link_contract::streams::Stream;
 use orch_types::{Clock, Field, Id, Json};
@@ -409,6 +409,7 @@ pub struct Process {
     ctx: Arc<Context>,
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
+    interrupt: Mutex<Option<orch_agent_contract::adapter::Interrupt>>,
     output_directory: Mutex<Option<PathBuf>>,
     adapter_start: AdapterStart,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
@@ -585,9 +586,20 @@ impl Process {
             ));
         }
         let mut adapter = self.adapter.lock().await;
-        work(adapter.as_mut())
-            .await
-            .map_err(|error| command_error(&error))
+        let result = work(adapter.as_mut()).await;
+        *lock(&self.interrupt) = adapter.interrupt_handle();
+        result.map_err(|error| command_error(&error))
+    }
+
+    /// Stops one exact turn without joining an adapter call that may be exporting or replaying history.
+    pub async fn interrupt(&self, thread: ThreadId, turn: Id) -> Result<(), CommandError> {
+        let handle = lock(&self.interrupt).clone();
+        if let Some(handle) = handle {
+            return handle(thread, turn)
+                .await
+                .map_err(|error| command_error(&error));
+        }
+        self.call(|adapter| adapter.interrupt(thread, turn)).await
     }
 
     async fn publish(&self, stream: Stream, event: Event) {
@@ -715,7 +727,14 @@ impl Process {
     }
 
     /// A session opened in the adapter: it is kept, in the process and on disk.
-    pub fn session_opened(&self, binding: &SessionBinding, native_session_ref: &str) {
+    pub fn session_opened(
+        &self,
+        binding: &SessionBinding,
+        native_session_ref: &str,
+        directory: &str,
+        cwd: &str,
+        output_capture_bytes: u64,
+    ) {
         self.state().sessions.insert(
             binding.thread_id,
             OpenSession {
@@ -736,7 +755,11 @@ impl Process {
                 thread_id: binding.thread_id,
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
+                directory: directory.to_owned(),
+                cwd: cwd.to_owned(),
+                output_capture_bytes,
                 running_turn: None,
+                native_turn_ref: None,
             },
         );
     }
@@ -874,6 +897,7 @@ impl Process {
     /// and given up). Says whether the process is still the one they are of.
     async fn deliver_all(self: &Arc<Self>, events: Vec<AdapterEvent>, generation: u64) -> bool {
         let mut kept = Vec::with_capacity(events.len());
+        let mut observations = Vec::new();
         let mut deaths = Vec::new();
         let mut current = true;
         for event in events {
@@ -894,33 +918,105 @@ impl Process {
                 }
                 other => other,
             };
-            self.observe(&event);
+            self.observe_before_publication(&event);
             match convert(self.provider_id, self.agent_id, &event) {
                 Ok(converted) => {
                     if !self.keep_output_blobs(&converted.1, generation).await {
                         current = false;
                         break;
                     }
+                    if matches!(
+                        &event,
+                        AdapterEvent::Session {
+                            event: SessionEvent::TurnCompleted(_)
+                                | SessionEvent::SessionLost(_)
+                                | SessionEvent::BackgroundTasks(_),
+                            ..
+                        }
+                    ) {
+                        observations.push(event);
+                    }
                     kept.push(converted);
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "an event of the adapter was not given to the link")
+                Err(_) => {
+                    tracing::warn!("an event of the adapter could not be converted for publication")
                 }
             }
             if let Some(reason) = death {
                 deaths.push(reason);
             }
         }
-        for answer in self.ctx.services.publisher.publish_all(kept).await {
-            if let Err(error) = answer {
-                tracing::warn!(%error, "an event could not be put in the spool");
+        let mut warned = false;
+        while !kept.is_empty() {
+            let mut answers = self
+                .ctx
+                .services
+                .publisher
+                .publish_all(kept.clone())
+                .await
+                .into_iter();
+            let mut retry = Vec::new();
+            for event in kept {
+                if !matches!(answers.next(), Some(Ok(()))) {
+                    retry.push(event);
+                }
+            }
+            kept = retry;
+            if !kept.is_empty() {
+                if !warned {
+                    tracing::warn!(
+                        "native output is held until its events can be published durably"
+                    );
+                    warned = true;
+                }
+                tokio::time::sleep(RESTART_FIRST_PAUSE).await;
+            }
+        }
+        if self.generation.load(Ordering::SeqCst) == generation {
+            for observation in observations {
+                self.observe(&observation);
             }
         }
         for reason in deaths {
             let process = Arc::clone(self);
             tokio::spawn(async move { process.died(generation, reason).await });
         }
-        current
+        current && self.generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Native running identity is retained immediately; terminal retirement waits for a durable receipt.
+    fn observe_before_publication(&self, event: &AdapterEvent) {
+        match event {
+            AdapterEvent::Session {
+                thread_id,
+                segment_id,
+                event: SessionEvent::BackgroundTasks(report),
+                ..
+            } => {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                {
+                    for task in &report.tasks {
+                        if task.state
+                            == orch_agent_contract::background::BackgroundTaskState::Running
+                        {
+                            session
+                                .background
+                                .insert(serde_json::json!([task.id, task.run_id]).to_string());
+                        }
+                    }
+                    if report.self_waking && report.tasks.iter().any(|task| task.state.wakes()) {
+                        session.awaiting_native = true;
+                    }
+                }
+            }
+            AdapterEvent::Login(_)
+            | AdapterEvent::Session {
+                event: SessionEvent::TurnStarted(_),
+                ..
+            } => self.observe(event),
+            _ => {}
+        }
     }
 
     fn observe(&self, event: &AdapterEvent) {
@@ -961,19 +1057,29 @@ impl Process {
                 }
             }
             SessionEvent::TurnStarted(started) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self
+                    .state()
+                    .sessions
+                    .get_mut(thread_id)
+                    .filter(|session| session.segment_id == *segment_id)
+                {
                     session.running_turn = Some(started.turn_id);
                     session.awaiting_native = false;
                 }
                 self.ctx
                     .ledger
-                    .turn_running(*thread_id, Some(started.turn_id));
+                    .turn_native(*thread_id, started.turn_id, &started.native_turn_ref);
             }
             SessionEvent::TurnCompleted(completed) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.running_turn == Some(completed.turn_id)
+                {
                     session.running_turn = None;
+                    self.ctx.ledger.turn_running(*thread_id, None);
                 }
-                self.ctx.ledger.turn_running(*thread_id, None);
+                // Replayed recovery has no open slot. Its retained source stays until the next
+                // open/close replaces it, so a crash before publication can safely replay it again.
                 let commands = lock(&self.scratch).remove(&completed.turn_id);
                 if let Some(commands) = commands {
                     let content = Arc::clone(&self.ctx.services.content);
@@ -984,7 +1090,16 @@ impl Process {
                     });
                 }
             }
-            SessionEvent::SessionLost(_) => self.session_closed(*thread_id),
+            SessionEvent::SessionLost(_) => {
+                let owned = self
+                    .state()
+                    .sessions
+                    .get(thread_id)
+                    .is_some_and(|session| session.segment_id == *segment_id);
+                if owned {
+                    self.session_closed(*thread_id);
+                }
+            }
             _ => {}
         }
     }
@@ -1017,6 +1132,7 @@ impl Process {
                 segment_id: session.segment_id,
             };
             let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+                uncertain: false,
                 reason: format!("the harness process died: {reason}"),
             });
             if let Ok(body) = serde_json::to_value(&event)
@@ -1095,6 +1211,7 @@ impl Process {
             .await
             .map_err(|error| command_error(&error))?;
         let output_directory = adapter.output_directory();
+        *lock(&self.interrupt) = adapter.interrupt_handle();
         drop(adapter);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.output_directory) = output_directory;
@@ -1561,6 +1678,7 @@ impl Hosting {
             }
         };
         let output_directory = adapter.output_directory();
+        let interrupt = adapter.interrupt_handle();
         let process = Arc::new(Process {
             provider_id: request.provider_id,
             agent_id: request.agent_id,
@@ -1568,6 +1686,7 @@ impl Hosting {
             ctx: Arc::clone(&self.ctx),
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
+            interrupt: Mutex::new(interrupt),
             output_directory: Mutex::new(output_directory),
             adapter_start,
             resource_group,
@@ -1681,12 +1800,61 @@ impl Hosting {
         self.ctx.ledger.hosted()
     }
 
-    /// Reports that a clamp of the machine's ceilings lowered what a session was asked to be, as a
-    /// diagnostic of the session's stream.
-    pub async fn report_clamps(&self, thread: ThreadId, segment: Id, clamps: &[Clamp]) {
+    /// Keeps the applied sandbox with its native command before returning its successful result.
+    pub async fn report_sandbox(
+        &self,
+        session: (ThreadId, Id),
+        turn: Option<Id>,
+        command: Id,
+        applied: SandboxMode,
+        clamps: &[Clamp],
+    ) -> Result<(), CommandError> {
+        let (thread, segment) = session;
+        let mode = |value: &str| {
+            serde_json::from_value(Json::String(value.to_owned())).map_err(|_| {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "The applied sandbox could not be recorded.",
+                )
+            })
+        };
+        let requested = clamps
+            .iter()
+            .find(|clamp| clamp.key == "agent.max_sandbox")
+            .map_or(applied.as_str(), |clamp| clamp.asked.as_str());
+        let resolution = orch_api_contract::threads::SandboxResolution {
+            requested: mode(requested)?,
+            applied: mode(applied.as_str())?,
+            governing_policy: orch_api_contract::environment::SandboxLimitSource::MachinePolicy,
+            command_id: command,
+            at: self.ctx.services.clock.time(),
+        };
+        self.ctx
+            .services
+            .publisher
+            .publish(
+                Stream::Session {
+                    thread_id: thread,
+                    segment_id: segment,
+                },
+                Event::SessionSandbox(SessionSandbox {
+                    turn_id: turn,
+                    resolution,
+                }),
+            )
+            .await
+            .map_err(|_| {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "The applied sandbox is waiting for durable publication.",
+                )
+                .retryable()
+            })?;
         for clamp in clamps {
             tracing::warn!(key = clamp.key, asked = %clamp.asked, used = %clamp.used, "a request was lowered to the machine's ceiling");
             let frame = Event::RawFrame(RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 0,
                 direction: "connector".to_owned(),
                 payload: serde_json::json!({
@@ -1709,6 +1877,7 @@ impl Hosting {
                 tracing::warn!(%error, "a diagnostic could not be put in the spool");
             }
         }
+        Ok(())
     }
 
     /// The segment a thread's session serves, if it is open here.
@@ -1840,30 +2009,42 @@ impl Process {
         ))
     }
 
-    /// Lists the sessions the adapter holds, by their native references.
-    pub async fn native_refs(&self) -> Option<Vec<String>> {
-        let capable = self
-            .state()
-            .descriptor
-            .as_ref()
-            .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
-        if !capable {
-            return None;
-        }
-        self.call(|adapter| Box::pin(async move { adapter.discover_sessions().await }))
-            .await
-            .ok()
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .map(|session| session.native_session_ref)
-                    .collect()
+    /// Inspects only the exact admitted native turn; no model input, resume or interruption is submitted.
+    pub async fn recover_recorded_turn(
+        &self,
+        session: &HostedSession,
+    ) -> Result<bool, CommandError> {
+        let Some(turn) = session.running_turn else {
+            let native = session.native_session_ref.clone();
+            self.call(move |adapter| {
+                Box::pin(async move { adapter.read_session(&native, false).await })
             })
+            .await?;
+            return Ok(true);
+        };
+        let source = orch_agent_contract::history::NativePrefixSource {
+            thread_id: session.thread_id,
+            segment_id: session.segment_id,
+            native_session_ref: session.native_session_ref.clone(),
+        };
+        let native = session.native_turn_ref.clone();
+        let directory = session.directory.clone();
+        let cwd = session.cwd.clone();
+        let capture = session.output_capture_bytes;
+        self.call(move |adapter| {
+            Box::pin(async move {
+                adapter
+                    .recover_turn(source, turn, native, directory, cwd, capture)
+                    .await
+            })
+        })
+        .await
     }
 
     /// Reports a session of this process as lost, to the stream of its session.
     pub async fn report_lost(&self, thread: ThreadId, segment: Id, reason: &str) {
         let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+            uncertain: false,
             reason: reason.to_owned(),
         });
         if let Ok(body) = serde_json::to_value(&event)

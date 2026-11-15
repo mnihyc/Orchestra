@@ -11,6 +11,7 @@ import { HomePicker } from '@/features/resources/HomePicker';
 import { readObject } from '@/features/resources/jsonObject';
 import { useActKey } from '@/lib/forms';
 import { Input } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Select } from '@/ui/Select';
 import { StateLine } from '@/ui/StateLine';
@@ -69,9 +70,9 @@ export function EditMcp({ server: offered, onClose, onCreated }: { server?: McpS
   const mapped = imported ? ['name'] : ['name', commandConnection ? 'spec.command' : 'spec.url', 'spec.authentication', 'secrets', ...(usingVariables ? ['spec.secret_env'] : [])];
   const unplaced = faults.length === 0 || faults.some((fault) => !mapped.some((path) => fault.path === path || fault.path.startsWith(path + '[') || fault.path.startsWith(path + '.')));
   const fieldDisabled = save.isPending || imported || spec === null;
-  const secretField = (key: string, label: string) => <Input key={key} type="password" label={label} autoComplete="new-password" spellCheck={false} value={values[key] ?? ''}
-    disabled={fieldDisabled} placeholder={retained.has(key) ? t('resourceDetails.mcp.form.keepSecret') : undefined}
-    onChange={(event) => { const value = event.target.value; setValues((before) => ({ ...before, [key]: value })); save.reset(); }} onBlur={() => touch('secret:' + key)}
+  const secretField = (key: string, label: string) => <SecretField key={key} label={label} spellCheck={false} value={values[key] ?? ''}
+    disabled={fieldDisabled} set={retained.has(key)}
+    onValueChange={(value) => { setValues((before) => ({ ...before, [key]: value })); save.reset(); }} onBlur={() => touch('secret:' + key)}
     error={touched.has('secret:' + key) && !retained.has(key) && (values[key] ?? '').trim() === '' ? t('resourceDetails.mcp.form.secretRequired') : undefined} />;
   return <EditDialog admin={adminSpec(server, server?.environment === null ? 'mcp.manage' : 'environment.manage')} title={server === undefined ? t('resourceDetails.mcp.add') : t('resources.edit.title', { name: server.name })}
     submitLabel={server === undefined ? t('common.add') : undefined} changed={changed} valid={valid} pending={save.isPending} error={unplaced ? save.error : null} onSave={() => save.mutate()} onClose={onClose}>
