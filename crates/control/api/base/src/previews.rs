@@ -45,6 +45,8 @@ use serde::Serialize;
 use std::collections::VecDeque;
 
 use std::io::Cursor;
+
+use std::future::Future;
 /// Cached replies contain only derived bytes and metadata, never an original or an authority grant.
 #[derive(Default)]
 pub struct Cache {
@@ -222,12 +224,66 @@ async fn derived(
     media_type: String,
     limits: Limits,
 ) -> ApiResult<Bytes> {
+    let cache = blobs.previews().lock_owned().await;
+    derived_with_cache(blobs, cache, hash, size, name, media_type, limits).await
+}
+
+/// Uses the same decoder/cache while original transit bytes live only in an ephemeral memory store.
+pub async fn serve_bytes(
+    ctx: &Ctx,
+    bytes: impl Future<Output = ApiResult<Bytes>>,
+    name: &str,
+    media_type: &str,
+) -> ApiResult<Response> {
+    let limits = Limits::read(ctx).await?;
+    // Queue before collecting an original as well as before decoding it. Readers cannot pile up
+    // whole source files behind the shared decoder while their relay slots are already released.
+    let cache = ctx.app.blobs.previews().lock_owned().await;
+    let bytes = bytes.await?;
+    let size = i64::try_from(bytes.len()).map_err(ApiError::internal)?;
+    if size > limits.source {
+        return unavailable(
+            ctx,
+            size,
+            media_type,
+            crate::media::is_text_by_name(name),
+            true,
+        )
+        .await;
+    }
+    let hash = Hash::of(&bytes);
+    let ephemeral = Blobs::in_memory();
+    let _publication = ephemeral
+        .put_bytes(bytes)
+        .await
+        .map_err(ApiError::internal)?;
+    let derived = derived_with_cache(
+        ephemeral,
+        cache,
+        hash,
+        size,
+        name.to_owned(),
+        media_type.to_owned(),
+        limits,
+    )
+    .await?;
+    Ok(reply(derived))
+}
+
+async fn derived_with_cache(
+    blobs: Blobs,
+    mut cache: tokio::sync::OwnedMutexGuard<Cache>,
+    hash: Hash,
+    size: i64,
+    name: String,
+    media_type: String,
+    limits: Limits,
+) -> ApiResult<Bytes> {
     let key = format!(
         "{hash}:{media_type}:{}:{}:{}:{}:{}:{}",
         limits.source, limits.pixels, limits.edge, limits.bytes, limits.lines, limits.viewer
     );
     // One decode at a time per store also bounds aggregate pixel allocation and coalesces same-hash requests.
-    let mut cache = blobs.previews().lock_owned().await;
     cache.trim(limits.cache);
     if let Some(bytes) = cache.take(&key) {
         return Ok(bytes);
@@ -519,7 +575,7 @@ pub mod tests {
 
     use orch_blob_contract::store::Stored;
 
-    use std::sync::Arc;
+    use std::future::Future;
 
     use std::sync::atomic::AtomicUsize;
 
@@ -533,13 +589,19 @@ pub mod tests {
 
     #[async_trait::async_trait]
     impl BlobStore for HeldStore {
-        async fn put(
+        fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+            self.inner.lifetimes()
+        }
+
+        async fn put_held(
             &self,
             hash: &Hash,
             size: Option<i64>,
             bytes: ByteStream,
+            publication: &orch_blob_contract::lifetime::Publication,
         ) -> Result<Stored, BlobError> {
-            self.inner.put(hash, size, bytes).await
+            publication.check(self.lifetimes(), hash)?;
+            self.inner.put_held(hash, size, bytes, publication).await
         }
         async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
@@ -554,8 +616,13 @@ pub mod tests {
         async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
             self.inner.size(hash).await
         }
-        async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-            self.inner.delete(hash).await
+        async fn delete_held(
+            &self,
+            hash: &Hash,
+            retirement: &orch_blob_contract::lifetime::Retirement,
+        ) -> Result<bool, BlobError> {
+            retirement.check(self.lifetimes(), hash)?;
+            self.inner.delete_held(hash, retirement).await
         }
     }
 

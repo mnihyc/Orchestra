@@ -25,7 +25,7 @@ describe('resumable uploads', () => {
         if (offset !== stored.length) throw offsetError(stored.length);
         stored += await bytes.text();
         if (lose) { lose = false; throw new NetworkError('failed'); }
-        return stored.length;
+        return { received: stored.length, expires_at: session.expires_at };
       },
       complete: () => { expect(stored).toBe('abcdefghij'); return Promise.resolve(blob); },
     };
@@ -49,7 +49,7 @@ describe('resumable uploads', () => {
         expect(offset).toBe(stored.length);
         stored += await bytes.text();
         if (stored.length === 4) offline = true;
-        return stored.length;
+        return { received: stored.length, expires_at: session.expires_at };
       },
       complete: () => Promise.resolve(blob),
     };
@@ -66,13 +66,13 @@ describe('resumable uploads', () => {
   it('does not complete a file cancelled while a piece was in flight', async () => {
     const cancel = new AbortController();
     const complete = vi.fn(() => Promise.resolve(blob));
-    const requests: UploadTransport = { begin: () => Promise.resolve(session), put: () => { cancel.abort(); return Promise.resolve(4); }, complete };
+    const requests: UploadTransport = { begin: () => Promise.resolve(session), put: () => { cancel.abort(); return Promise.resolve({ received: 4, expires_at: session.expires_at }); }, complete };
     await expect(new UploadTask(new File(['abcdefghij'], 'plan.txt'), requests).run(cancel.signal)).rejects.toBeDefined();
     expect(complete).not.toHaveBeenCalled();
   });
 
   it('finishes an empty file without sending any piece', async () => {
-    const put = vi.fn(() => Promise.resolve(0));
+    const put = vi.fn(() => Promise.resolve({ received: 0, expires_at: session.expires_at }));
     const empty = { ...blob, size: 0 };
     const requests: UploadTransport = { begin: () => Promise.resolve(session), put, complete: () => Promise.resolve(empty) };
     await expect(new UploadTask(new File([], 'plan.txt'), requests).run(new AbortController().signal)).resolves.toEqual(empty);
@@ -88,7 +88,7 @@ describe('resumable uploads', () => {
     const cancel = vi.fn(() => Promise.resolve());
     const requests: UploadTransport = {
       begin: () => Promise.resolve(session),
-      put: (_id, offset, bytes) => Promise.resolve(offset + bytes.size),
+      put: (_id, offset, bytes) => Promise.resolve({ received: offset + bytes.size, expires_at: session.expires_at }),
       complete: () => { entered(); return answer; },
       cancel, release,
     };
@@ -109,7 +109,7 @@ describe('resumable uploads', () => {
     const release = vi.fn(() => Promise.resolve());
     const requests: UploadTransport = {
       begin: () => Promise.resolve(session),
-      put: (_id, offset, bytes) => Promise.resolve(offset + bytes.size),
+      put: (_id, offset, bytes) => Promise.resolve({ received: offset + bytes.size, expires_at: session.expires_at }),
       complete: () => Promise.resolve(blob), release,
     };
     const task = new UploadTask(new File(['abcdefghij'], 'plan.txt'), requests);
@@ -117,4 +117,31 @@ describe('resumable uploads', () => {
     await task.cancel();
     expect(release).toHaveBeenCalledExactlyOnceWith(blob.blob);
   });
+});
+
+
+it('retries native verification from the same upload without resending acknowledged pieces', async () => {
+  const begin = vi.fn(() => Promise.resolve(session));
+  const put = vi.fn((_id: string, offset: number, bytes: Blob) => Promise.resolve({ received: offset + bytes.size, expires_at: session.expires_at }));
+  const complete = vi.fn().mockRejectedValueOnce(new NetworkError('verification reply lost'))
+    .mockResolvedValueOnce({ ...blob, relay: session.upload_id });
+  const task = new UploadTask(new File(['abcdefghij'], 'plan.txt'), { begin, put, complete });
+  await expect(task.run(new AbortController().signal)).rejects.toBeInstanceOf(NetworkError);
+  const sent = put.mock.calls.length;
+  await expect(task.run(new AbortController().signal)).resolves.toMatchObject({ relay: session.upload_id });
+  expect(begin).toHaveBeenCalledTimes(1);
+  expect(put).toHaveBeenCalledTimes(sent);
+});
+
+it('cancels the actual native session without releasing an unrelated retained upload of the same hash', async () => {
+  const cancel = vi.fn(() => Promise.resolve());
+  const release = vi.fn(() => Promise.resolve());
+  const task = new UploadTask(new File([], 'plan.txt'), {
+    begin: () => Promise.resolve(session), put: () => Promise.resolve({ received: 0, expires_at: session.expires_at }),
+    complete: () => Promise.resolve({ ...blob, relay: session.upload_id, size: 0 }), cancel, release,
+  });
+  await task.run(new AbortController().signal);
+  await task.cancel();
+  expect(cancel).toHaveBeenCalledExactlyOnceWith(session.upload_id);
+  expect(release).not.toHaveBeenCalled();
 });

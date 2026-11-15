@@ -1,0 +1,3 @@
+test -p orch-api-core --test document_files --test document_import_files --test people_creation
+test -p orch-api-core --test kfix_upload --test creation_replays --test security_skill_source
+test -p orch-api-core --test skills --test chat_files --test blob_housekeeping

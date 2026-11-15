@@ -18,6 +18,10 @@ pub enum Source {
     CustodyAccount,
     /// The actual unfinished upload session and its stored owner.
     Session,
+    /// The actual acting upload namespace at session creation.
+    SessionNamespace,
+    /// The explicit stored workspace destination, or an actually empty collection for private uploads.
+    SessionEnvironment,
     /// The exact selected saved chat byte witness.
     ReadChats,
     /// The exact selected saved thread byte witness.
@@ -41,6 +45,26 @@ pub const RELEASE: Declaration<Source> = Declaration {
     }],
 };
 
+/// Session creation binds the real owner namespace and the explicitly selected workspace.
+pub const SESSION_CREATE: Declaration<Source> = Declaration {
+    operation: "UploadSessionCreate",
+    bindings: &[
+        Binding {
+            source: Source::SessionNamespace,
+            target: TargetResolver::CurrentAccount,
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::One,
+        },
+        SESSION_ENVIRONMENT,
+    ],
+};
+const SESSION_ENVIRONMENT: Binding<Source> = Binding {
+    source: Source::SessionEnvironment,
+    target: TargetResolver::ResolvedCollection("upload_environments"),
+    usage: FacetUsage::Required,
+    cardinality: Cardinality::Collection,
+};
+
 /// Cancelling a session acts on its stored identity, independently of any bytes it holds.
 pub const SESSION_DELETE: Declaration<Source> = Declaration {
     operation: "UploadSessionDelete",
@@ -55,23 +79,29 @@ pub const SESSION_DELETE: Declaration<Source> = Declaration {
 /// Appending newly supplied bytes acts on this exact unfinished session's identity.
 pub const SESSION_PUT: Declaration<Source> = Declaration {
     operation: "UploadSessionPut",
-    bindings: &[Binding {
-        source: Source::Session,
-        target: TargetResolver::Path("upload_id"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    }],
+    bindings: &[
+        Binding {
+            source: Source::Session,
+            target: TargetResolver::Path("upload_id"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::One,
+        },
+        SESSION_ENVIRONMENT,
+    ],
 };
 
 /// Completion records the bytes of this exact unfinished session.
 pub const SESSION_COMPLETE: Declaration<Source> = Declaration {
     operation: "UploadSessionComplete",
-    bindings: &[Binding {
-        source: Source::Session,
-        target: TargetResolver::Path("upload_id"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    }],
+    bindings: &[
+        Binding {
+            source: Source::Session,
+            target: TargetResolver::Path("upload_id"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::One,
+        },
+        SESSION_ENVIRONMENT,
+    ],
 };
 
 /// A source-only byte read chooses one real native witness, without inventing an upload identity.

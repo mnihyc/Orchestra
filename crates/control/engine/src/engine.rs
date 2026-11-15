@@ -124,6 +124,8 @@ pub struct Inner {
     pub(crate) blobs: OnceLock<Arc<dyn BlobStore>>,
     /// The idle environments that this process is stopping now.
     pub(crate) stopping: Mutex<HashSet<Id>>,
+    /// The units stopped by force whose host confirmations this process is following.
+    pub(crate) forced_stops: Mutex<HashSet<Id>>,
     /// Current browser profiles, counts and the API's volatile transport.
     pub(crate) browser_memory: Arc<crate::browsers::Memory>,
     /// Display sealing and transient-list hooks supplied by the API.
@@ -216,6 +218,7 @@ impl Engine {
                 growing: crate::streaming::Growing::default(),
                 blobs: OnceLock::new(),
                 stopping: Mutex::new(HashSet::new()),
+                forced_stops: Mutex::new(HashSet::new()),
                 browser_memory: Arc::new(crate::browsers::Memory::default()),
                 display_memory: Arc::new(crate::displays::Memory::default()),
                 background: crate::background::Memory::default(),
@@ -322,6 +325,8 @@ impl Engine {
         }
         let engine = self.clone();
         tokio::spawn(async move { engine.supervise().await });
+        let engine = self.clone();
+        tokio::spawn(async move { engine.follow_forced_stops().await });
         let engine = self.clone();
         tokio::spawn(async move { engine.deliver_wakes().await });
         let engine = self.clone();
