@@ -34,7 +34,7 @@ import { sourceHasReference, sourceLink, sourceReference, useFileSource } from '
 
 import { addToMessage } from '../AddToMessage';
 import { changedLines } from '../AgentEdits';
-import { invalidateHead, useFileText } from '../content';
+import { invalidateHead, useFileText, type FileHead } from '../content';
 import { Unavailable } from '../Unavailable';
 import { ChangedBar, forgetUnsaved, type KeptText, keepUnsaved, ReadOnlyNote, readUnsaved, useUnsavedMark } from '../Editing';
 import { keepFileTab } from '../FileTabs';
@@ -50,18 +50,29 @@ interface Shown {
   version: string;
 }
 
-export default function CodeViewer({ door, path, head, line, endLine, lineRequest, tabId, whyReadOnly, thread, onText }: ViewerProps) {
+/** Setup can edit the same workspace file without owning or marking a workbench tab. */
+type CodeViewerProps = Omit<ViewerProps, 'tabId' | 'head'> & {
+  tabId?: string;
+  /** Null means the native file read confirmed absence; Save uses exclusive creation. */
+  head: FileHead | null;
+};
+
+export default function CodeViewer({ door, path, head, line, endLine, lineRequest, tabId, whyReadOnly, thread, onText, workspaceBinding: binding = null }: CodeViewerProps) {
   const source = useFileSource();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const userId = useStore(client.session, (state) => state.userId);
   const format = useFormatContext();
-  const loaded = useFileText(door, path, head.brought);
-  const arrived = loaded.text;
+  const loaded = useFileText(door, path, head?.brought);
+  const name = head?.stat.name ?? path.split('/').at(-1) ?? path;
+  const absent = head === null;
+  const arrived = useMemo(() => absent
+    ? { text: '', version: 'absent', expected: 'none', total: 0, cut: false }
+    : loaded.text === null ? null : { ...loaded.text, version: loaded.text.hash, expected: loaded.text.hash }, [absent, loaded.text]);
   const code = useRef<CodeViewHandle>(null);
 
   const [shown, setShown] = useState<Shown | null>(null);
-  /** The hash of the version the editor's text is based on: what a save names as the version it read. */
+  /** The native version or absence precondition on which the edited text is based. */
   const [base, setBase] = useState<string | null>(null);
   /** The version that arrived last and was taken in. */
   const [seen, setSeen] = useState<string | null>(null);
@@ -89,22 +100,23 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
 
   // A version that arrived is taken in as it does: shown the first time, followed when nothing is unsaved,
   // and set against the person's text, with the choice put to them, when something is.
-  if (arrived !== null && arrived.hash !== seen) {
-    setSeen(arrived.hash);
+  if (arrived !== null && arrived.version !== seen) {
+    setSeen(arrived.version);
     if (shown === null) {
-      setShown({ text: arrived.text, version: arrived.hash });
-      setBase(arrived.hash);
-      const kept = readOnly ? null : readUnsaved(userId, door.environmentId, path);
+      setShown({ text: arrived.text, version: arrived.version });
+      setBase(arrived.expected);
+      const kept = readOnly ? null : readUnsaved(userId, door.environmentId, path, binding);
       if (kept !== null && kept.text !== arrived.text) {
-        setRestored({ ...kept, version: arrived.hash });
+        setRestored({ ...kept, version: arrived.version });
+        setBase(kept.base);
         // It was typed on another version than the one that is there now.
-        if (kept.base !== null && kept.base !== arrived.hash) setConflict(true);
+        if (kept.base !== arrived.expected) setConflict(true);
       }
-    } else if (arrived.hash !== base) {
+    } else if (arrived.expected !== base) {
       if (!dirty) {
-        setMarks({ version: arrived.hash, lines: changedLines(shown.text, arrived.text) });
-        setShown({ text: arrived.text, version: arrived.hash });
-        setBase(arrived.hash);
+        setMarks({ version: arrived.version, lines: changedLines(shown.text, arrived.text) });
+        setShown({ text: arrived.text, version: arrived.version });
+        setBase(arrived.expected);
       } else {
         setConflict(true);
       }
@@ -115,14 +127,14 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
     if (shown === null) return null;
     if (chosenLanguage === PLAIN) return null;
     if (chosenLanguage !== null) return languageById(chosenLanguage);
-    return languageOf(head.stat.name, shown.text.slice(0, 200).split('\n', 1)[0] ?? null);
-  }, [chosenLanguage, head.stat.name, shown]);
+    return languageOf(name, shown.text.slice(0, 200).split('\n', 1)[0] ?? null);
+  }, [chosenLanguage, name, shown]);
 
   const onDirtyChange = useCallback(
     (now: boolean) => {
       dirtyNow.current = now;
       setDirty(now);
-      if (now) keepFileTab(tabId);
+      if (now && tabId !== undefined) keepFileTab(tabId);
     },
     [tabId],
   );
@@ -135,51 +147,52 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
   const onSettled = useCallback(
     (text: string) => {
       onText?.(text);
-      if (dirtyNow.current) keepUnsaved(userId, door.environmentId, path, { base: baseNow.current, text });
-      else forgetUnsaved(userId, door.environmentId, path);
+      if (dirtyNow.current) keepUnsaved(userId, door.environmentId, path, binding, { base: baseNow.current, text });
+      else forgetUnsaved(userId, door.environmentId, path, binding);
     },
-    [userId, door.environmentId, path, onText],
+    [userId, door.environmentId, path, onText, binding],
   );
 
   const save = useCallback(async () => {
     const editor = code.current;
-    if (editor === null || readOnly || saving || !dirtyNow.current) return;
-    // Saving from the comparison writes on the version that is there now.
-    const expected = comparing && arrived !== null ? arrived.hash : base;
+    // Saving from the comparison writes on the version the person has now chosen to inspect.
+    const expected = comparing && arrived !== null ? arrived.expected : base;
+    if (editor === null || readOnly || saving || expected === null || !dirtyNow.current && expected !== 'none') return;
     setSaving(true);
     setSaveError(null);
     try {
       const stat = await writeFile(door, path, editor.getText(), expected);
       setBase(stat.hash ?? expected);
       editor.markSaved();
-      forgetUnsaved(userId, door.environmentId, path);
+      forgetUnsaved(userId, door.environmentId, path, binding);
       setConflict(false);
       setComparing(false);
       setRestored(null);
+      if (head === null) void invalidateHead(queryClient, door, path, binding ?? undefined);
     } catch (error) {
       if (currentOf(error) !== null) {
         // Not the version that was read: nothing was written, and what is there now is asked for.
         setConflict(true);
-        void invalidateHead(queryClient, door, path);
+        void invalidateHead(queryClient, door, path, binding ?? undefined);
       } else {
         setSaveError(error);
       }
     } finally {
       setSaving(false);
     }
-  }, [readOnly, saving, comparing, arrived, base, door, path, userId, queryClient]);
+  }, [readOnly, saving, comparing, arrived, base, door, path, userId, queryClient, head, binding]);
   useViewSaveGuard(tabId, {
     save: async () => { await save(); return !dirtyNow.current; },
-    discard: () => { forgetUnsaved(userId, door.environmentId, path); dirtyNow.current = false; setDirty(false); },
+    discard: () => { forgetUnsaved(userId, door.environmentId, path, binding); dirtyNow.current = false; setDirty(false); },
   });
 
 
   /** Puts the version that is there now in the editor's place, and what the person typed is gone. */
   const takeTheirs = () => {
     if (arrived === null) return;
-    setBase(arrived.hash);
-    forgetUnsaved(userId, door.environmentId, path);
-    setShown({ text: arrived.text, version: `${arrived.hash}:${discards + 1}` });
+    setBase(arrived.expected);
+    forgetUnsaved(userId, door.environmentId, path, binding);
+    setShown({ text: arrived.text, version: `${arrived.version}:${discards + 1}` });
     setDiscards(discards + 1);
     setConflict(false);
     setComparing(false);
@@ -188,7 +201,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
   };
 
   const keepMine = () => {
-    if (arrived !== null) setBase(arrived.hash);
+    if (arrived !== null) setBase(arrived.expected);
     setConflict(false);
     setComparing(false);
   };
@@ -205,11 +218,11 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
 
   // ---------------------------------------------------------------- what is drawn
 
-  if (head.brought.state === 'unavailable') {
+  if (head?.brought.state === 'unavailable') {
     return <Unavailable reason={head.brought.reason} />;
   }
-  if (loaded.error !== null) {
-    return <ErrorState compact className="h-full" error={loaded.error} onRetry={() => void invalidateHead(queryClient, door, path)} />;
+  if (head !== null && loaded.error !== null) {
+    return <ErrorState compact className="h-full" error={loaded.error} onRetry={() => void invalidateHead(queryClient, door, path, binding ?? undefined)} />;
   }
   if (shown === null) return <SkeletonRows rows={8} />;
 
@@ -241,7 +254,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
         <ChangedBar
           by={null}
           comparing={comparing}
-          pending={arrived === null || arrived.hash === base}
+          pending={arrived === null || arrived.expected === base}
           onCompare={() => setComparing(true)}
           onKeepMine={keepMine}
           onTakeTheirs={takeTheirs}
@@ -251,7 +264,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
       <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
         {!readOnly && (
           <>
-            <Button size="sm" variant="primary" icon={<Save aria-hidden />} pending={saving} disabled={!dirty} onClick={() => void save()}>
+            <Button size="sm" variant="primary" icon={<Save aria-hidden />} pending={saving} disabled={!dirty && base !== 'none' || base === null && !comparing} onClick={() => void save()}>
               {t('files.edit.save')}
             </Button>
             <IconButton size="sm" label={t('files.edit.discard')} icon={<Undo2 aria-hidden />} disabled={!dirty} onClick={() => setDiscarding(true)} />
@@ -272,7 +285,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
       </div>
       <div className={comparing ? 'grid min-h-0 flex-1 grid-cols-1 grid-rows-2 gap-px bg-border @3xl:grid-cols-2 @3xl:grid-rows-1' : 'min-h-0 flex-1'}>
         <div className="min-h-0 min-w-0 bg-surface">
-          <ContextMenu label={t('files.code.label', { name: head.stat.name })} entries={copyEntries}><div className="h-full"><CodeView
+          <ContextMenu label={t('files.code.label', { name: name })} entries={copyEntries}><div className="h-full"><CodeView
             ref={code}
             className="h-full"
             text={shown.text}
@@ -280,7 +293,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
             language={language === null ? null : language.load}
             languageKey={language?.id ?? null}
             readOnly={readOnly}
-            label={t('files.code.label', { name: head.stat.name })}
+            label={t('files.code.label', { name: name })}
             wrap={wrap}
             whitespace={whitespace}
             overlay={restored === null ? null : { version: restored.version, text: restored.text }}
@@ -290,6 +303,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
             lineRequest={lineRequest}
             onDirtyChange={onDirtyChange}
             onSettled={onSettled}
+            flushOnUnmount={tabId === undefined || binding !== null}
             onSave={() => void save()}
             onCursor={setCursor}
           /></div></ContextMenu>
@@ -300,11 +314,11 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
             <CodeView
               className="min-h-0 flex-1"
               text={arrived.text}
-              version={arrived.hash}
+              version={arrived.version}
               language={language === null ? null : language.load}
               languageKey={language?.id ?? null}
               readOnly
-              label={t('files.edit.changed.theirsLabel', { name: head.stat.name })}
+              label={t('files.edit.changed.theirsLabel', { name: name })}
               wrap={wrap}
               whitespace={whitespace}
             />
@@ -329,12 +343,13 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
           fieldClassName="w-(--field-narrow)"
         />
         {cursor !== null && cursor.endings !== 'none' && <span>{cursor.endings}</span>}
+        {head === null && base === 'none' && <span>{t('files.name.newFile')}</span>}
         {dirty && <span className="font-medium text-text">{t('files.edit.unsaved')}</span>}
       </div>
       <ConfirmDialog
         open={discarding}
         onOpenChange={setDiscarding}
-        title={t('files.edit.discardTitle', { name: head.stat.name })}
+        title={t('files.edit.discardTitle', { name: name })}
         confirmLabel={t('files.edit.discard')}
         danger
         onConfirm={takeTheirs}

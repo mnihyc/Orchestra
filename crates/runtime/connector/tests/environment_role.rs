@@ -301,6 +301,8 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
 
 fn attach_body(environment_id: orch_types::Id, root: &std::path::Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -543,6 +545,7 @@ async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_
     );
     assert_eq!(
         rig.fail(&McpImport {
+            profile: None,
             expected_fingerprint: None,
             stored: None,
             transfer: None,

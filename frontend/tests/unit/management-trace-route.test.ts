@@ -3,6 +3,7 @@ import { InfiniteQueryObserver, QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientApi from '@/api/client';
 import { trailQuery, wireFilters } from '@/api/trace';
+import { readFreshness } from '@/api/freshness';
 import { readSearch, withSearch } from '@/features/admin/search';
 import { AUDIT_KINDS, traceHref, traceSearch } from '@/features/trace/params';
 import type { AuditEntryPage } from '@/generated/api-types';
@@ -74,7 +75,7 @@ it('sends preserved filters on every system page and keeps direct-only, other ac
     trailQuery(system, { ...filters, actor: '01950000-0000-7000-8000-000000000002' }).queryKey,
     trailQuery({ type: 'node', id: 'place', name: 'Place', kind: 'org', orgId: 'place', access: undefined }, filters).queryKey];
   expect(new Set(keys.map((key) => JSON.stringify(key))).size).toBe(4);
-  expect(options.staleTime).toBe(0); expect(options.gcTime).toBe(0);
+  expect(readFreshness(options.queryKey)).toBe(0); expect(options.gcTime).toBe(0);
 });
 
 it('keeps every other Management page on its existing narrow runtime and form rules', () => {
