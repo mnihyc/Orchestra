@@ -352,6 +352,7 @@ pub fn all() -> Vec<Route> {
         crate::approvals::ROUTES,
         crate::resources::ROUTES,
         crate::resource_groups::ROUTES,
+        crate::pools::ROUTES,
         crate::storage::ROUTES,
         crate::resource_facts::ROUTES,
         crate::library::ROUTES,

@@ -26,12 +26,13 @@ heading_id.数据目录清单: data-directory-inventory
 
 ## 配置命名存储
 
-节点在 `orch.toml` 的 `[[node.storage]]` 声明名称和路径；目录连接器在 `config.toml`
-的 `[[storage]]` 使用相同的 `name`、`path` 和 `default`。路径必须已存在且位于本机允许的
+节点和目录连接器都在数据目录的 `config.toml` 中用 `[[storages]]` 声明命名路径。
+节点操作者也可用 `orch-node policy set storages` 写入同一份策略。
+每项使用 `name`、`path` 和 `default`。路径必须已存在且位于本机允许的
 `environment.roots` 中，机器先检查策略。声明的存储恰有一个默认项。
 
 ```toml
-[[storage]]
+[[storages]]
 name = "fast"
 path = "/srv/work"
 default = true

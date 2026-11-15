@@ -108,9 +108,15 @@ def source_contract(root, commit, tag, *, require_sealed=True):
     if surfaces != {"browser": "/api/v1", "keys": "/openapi/v1"}:
         raise ValueError("the candidate changed the reviewed browser/key transport roots")
     nginx = (root / "deploy/nginx.conf").read_text()
+    # The API's group keeps its connections and looks the service's name up again as its address changes, so an API
+    # made again by an update is found without the edge being restarted.
+    groups = re.findall(r"upstream\s+orch_api\s*\{([^{}]*)\}", nginx)
+    if len(groups) != 1 or not re.search(r"\bserver\s+api:8443\s+resolve;", groups[0]):
+        raise ValueError("the stock edge must look the API's address up again (upstream orch_api with `resolve`)")
     for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]:
         blocks = re.findall(rf"location\s+{re.escape(route)}\s*\{{([^{{}}]*)\}}", nginx)
-        if len(blocks) != 1 or "proxy_pass $upstream$request_uri;" not in blocks[0]:
+        # A `proxy_pass` without a URI part hands the request's own URI on as it was received.
+        if len(blocks) != 1 or not re.search(r"\bproxy_pass\s+https://orch_api;", blocks[0]):
             raise ValueError(f"the stock edge must forward the unchanged {route} route")
     native = catalogue(root, "TARGETS")
     nodes = catalogue(root, "NODE_TARGETS")

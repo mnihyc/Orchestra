@@ -76,6 +76,7 @@ pub(crate) fn entry_widens(before: &Entry, update: &CheckedUpdate) -> bool {
             Options::parse(Permission::ProviderUse, &before.options),
             Ok(Options::ProviderUse(before)) if after.within(&before)
         ),
+        Options::PoolUse(after) => !matches!(Options::parse(Permission::PoolUse,&before.options), Ok(Options::PoolUse(before)) if after.within(&before)),
         after => !options_only_narrow(&before.options, &after.to_json()),
     }) || update
         .expires_at

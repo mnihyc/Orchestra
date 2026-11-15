@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-engine --lib -- resource_choice::
+test -p orch-api-core --lib
+test -p orch-api-core --test resource_groups
