@@ -390,3 +390,6 @@ pub mod validation;
 
 #[path = "resources/view.rs"]
 pub mod view;
+
+#[path = "resources/notices.rs"]
+pub(crate) mod notices;

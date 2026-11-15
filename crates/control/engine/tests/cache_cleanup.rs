@@ -1237,6 +1237,405 @@ async fn session_delivery_follows_native_acknowledgement_order_and_missing_legac
 }
 
 #[tokio::test]
+async fn reopening_a_session_and_readmitting_a_tool_never_revives_their_old_tool_tickets() {
+    use orch_db::queries::link::{Ending, NewCommand, finish_command, insert_command};
+    let world = World::new().await;
+    let thread = world.thread("Tool session lifetime").await;
+    let _ = world.running_turn(thread, "Open a session").await;
+    let segment = world.segment_of(thread).await;
+    world.engine().stop();
+    let at = world.clock.now();
+    let a = new_id();
+    let b = new_id();
+    let first = new_id();
+    let reload = new_id();
+    let remove = new_id();
+    let readd = new_id();
+    let refresh = new_id();
+    let close = new_id();
+    let replacement = new_id();
+    let key_a = format!("mcp:{a}");
+    let key_b = format!("mcp:{b}");
+    let mut conn = world.pool.acquire().await.unwrap();
+    let mut retained_b = Json::Null;
+    for (id, kind, body) in [
+        (
+            first,
+            "session.open",
+            json!({"thread_id":thread,"segment_id":segment,"mcp":[{"name":"a","server_id":a}],"skills":[]}),
+        ),
+        (
+            reload,
+            "session.mcp.reload",
+            json!({"thread_id":thread,"segment_id":segment,"mcp":[{"name":"a","server_id":a},{"name":"b","server_id":b}]}),
+        ),
+        (
+            remove,
+            "session.mcp.reload",
+            json!({"thread_id":thread,"segment_id":segment,"mcp":[{"name":"b","server_id":b}]}),
+        ),
+        (
+            readd,
+            "session.mcp.reload",
+            json!({"thread_id":thread,"segment_id":segment,"mcp":[{"name":"a","server_id":a},{"name":"b","server_id":b}]}),
+        ),
+        (
+            refresh,
+            "session.open",
+            json!({"thread_id":thread,"segment_id":segment,"transport_only":true,"mcp":[],"skills":[]}),
+        ),
+        (
+            close,
+            "session.close.fenced",
+            json!({"thread_id":thread,"segment_id":segment}),
+        ),
+        (
+            replacement,
+            "session.open",
+            json!({"thread_id":thread,"segment_id":segment,"mcp":[{"name":"a","server_id":a}],"skills":[]}),
+        ),
+    ] {
+        insert_command(
+            &mut conn,
+            &NewCommand {
+                id,
+                machine_id: world.machine_id,
+                kind,
+                body: &body,
+                serial_key: None,
+                deadline_at: at + chrono::Duration::minutes(2),
+            },
+            at,
+        )
+        .await
+        .unwrap();
+        let admission: Json = sqlx::query_scalar(
+            "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+        )
+        .bind(segment)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            admission["opening_id"],
+            json!(if id == replacement {
+                replacement
+            } else {
+                first
+            }),
+            "reload and model transport refresh retain the physical opening, while a replacement never inherits it"
+        );
+        if id == reload {
+            retained_b = admission["members"][&key_b]["nonce"].clone();
+        }
+        if [reload, remove, readd, refresh].contains(&id) {
+            assert_eq!(
+                admission["members"][&key_b]["nonce"], retained_b,
+                "an unrelated tool remains admitted"
+            );
+        }
+        if id == remove {
+            assert!(admission["members"].get(&key_a).is_none());
+        }
+        if id == readd || id == refresh {
+            assert_eq!(
+                admission["members"][&key_a]["nonce"],
+                json!(readd),
+                "removal and re-add cannot revive the first ticket"
+            );
+        }
+        assert_eq!(
+            admission["live"],
+            json!(id != close),
+            "close refuses new calls before its remote acknowledgement"
+        );
+    }
+    let result = json!({"native_session_ref":"old"});
+    finish_command(&mut conn, first, &Ending::Succeeded(&result), at)
+        .await
+        .unwrap();
+    finish_command(&mut conn, close, &Ending::Succeeded(&json!({})), at)
+        .await
+        .unwrap();
+    let current: Json = sqlx::query_scalar(
+        "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+    )
+    .bind(segment)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(current["opening_id"], json!(replacement));
+    assert_eq!(
+        current["live"],
+        json!(true),
+        "old open and close completions cannot mutate a replacement"
+    );
+    let changed_body = json!({"thread_id":thread,"segment_id":segment,"mcp":[],"skills":[]});
+    assert!(
+        !insert_command(
+            &mut conn,
+            &NewCommand {
+                id: first,
+                machine_id: world.machine_id,
+                kind: "session.open",
+                body: &changed_body,
+                serial_key: None,
+                deadline_at: at + chrono::Duration::minutes(2)
+            },
+            at
+        )
+        .await
+        .unwrap(),
+        "replaying the accepted command cannot admit a new physical opening or tool membership"
+    );
+    let original = orch_db::queries::session_dependencies::command_tool_session(&mut conn, first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        original["opening_id"],
+        json!(first),
+        "a command keeps its own scope after replacement"
+    );
+    assert_eq!(original["members"][&key_a]["nonce"], json!(first));
+    finish_command(
+        &mut conn,
+        replacement,
+        &Ending::Failed(&json!({"code":"scripted_open_failure"})),
+        at,
+    )
+    .await
+    .unwrap();
+    let failed: Json = sqlx::query_scalar(
+        "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+    )
+    .bind(segment)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        failed["live"],
+        json!(false),
+        "a failed physical opening ends its tool admission"
+    );
+}
+
+#[tokio::test]
+async fn every_native_opening_path_captures_its_own_physical_tool_session() {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    let world = World::new().await;
+    let thread = world.thread("Every physical opening").await;
+    let _ = world.running_turn(thread, "Open a session").await;
+    let segment = world.segment_of(thread).await;
+    world.engine().stop();
+    let at = world.clock.now();
+    let mut conn = world.pool.acquire().await.unwrap();
+    for kind in [
+        "session.open",
+        "session.open.fenced",
+        "session.prefix.open",
+        "session.continuation.resume",
+    ] {
+        let command = new_id();
+        let session = json!({"thread_id":thread,"segment_id":segment,"mcp":[],"skills":[]});
+        let body = if kind == "session.open" {
+            session
+        } else {
+            json!({"thread_id":thread,"session":session})
+        };
+        insert_command(
+            &mut conn,
+            &NewCommand {
+                id: command,
+                machine_id: world.machine_id,
+                kind,
+                body: &body,
+                serial_key: None,
+                deadline_at: at + chrono::Duration::minutes(2),
+            },
+            at,
+        )
+        .await
+        .unwrap();
+        let facts =
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, command)
+                .await
+                .unwrap()
+                .expect("every supported opening freezes the same native lifetime facts");
+        assert_eq!(facts["opening_id"], json!(command), "{kind}");
+        assert_eq!(facts["segment_id"], json!(segment), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn undoing_a_tool_removal_or_thread_rebind_never_revives_the_old_physical_admission() {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    let world = World::new().await;
+    let thread = world.thread("Withdrawn physical admission").await;
+    let _ = world.running_turn(thread, "Open a session").await;
+    let segment = world.segment_of(thread).await;
+    world.engine().stop();
+    let mut conn = world.pool.acquire().await.unwrap();
+    let server = new_id();
+    sqlx::query("INSERT INTO mcp_servers(id,org_id,home_id,owner_id,name,spec) VALUES($1,$2,$2,$3,'files','{}')")
+        .bind(server).bind(world.root).bind(world.ada).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE mcp_servers SET machine_id=$2 WHERE id=$1")
+        .bind(server)
+        .bind(world.machine_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mcp_server_offerings(server_id,machine_id,state,source,seen_at) VALUES($1,$2,'ready','{}',$3)").bind(server).bind(world.machine_id).bind(world.clock.now()).execute(&mut *conn).await.unwrap();
+    let target = orch_db::queries::resources::testing::insert_machine(
+        &mut conn,
+        "Provider destination",
+        "connected",
+    )
+    .await
+    .unwrap();
+    let body = json!({"thread_id":thread,"segment_id":segment,"provider":{"ticket":{"$ticket":{"kind":"llm","service":format!("llm:{}",new_id()),"dst":target}}},"mcp":[{"name":"files","server_id":server}],"skills":[]});
+    let mut revision = 0;
+    for reason in [
+        "definition",
+        "selection",
+        "offering",
+        "tool_target",
+        "binding",
+        "environment",
+    ] {
+        let opening = new_id();
+        insert_command(
+            &mut conn,
+            &NewCommand {
+                id: opening,
+                machine_id: world.machine_id,
+                kind: "session.open",
+                body: &body,
+                serial_key: None,
+                deadline_at: world.clock.now() + chrono::Duration::minutes(2),
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+        match reason {
+            "definition" => {
+                sqlx::query("UPDATE mcp_servers SET enabled=false WHERE id=$1")
+                    .bind(server)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE mcp_servers SET enabled=true WHERE id=$1")
+                    .bind(server)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            "selection" => {
+                sqlx::query("UPDATE environments SET config=jsonb_build_object('mcp.enabled',jsonb_build_object($2::text,false)) WHERE id=$1").bind(world.environment).bind(server.to_string()).execute(&mut *conn).await.unwrap();
+                sqlx::query("UPDATE environments SET config='{}' WHERE id=$1")
+                    .bind(world.environment)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            "offering" => {
+                sqlx::query("UPDATE mcp_server_offerings SET state='lost' WHERE server_id=$1")
+                    .bind(server)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE mcp_server_offerings SET state='ready' WHERE server_id=$1")
+                    .bind(server)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            "tool_target" => {
+                sqlx::query("UPDATE machines SET status='revoked' WHERE id=$1")
+                    .bind(target)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE machines SET status='active' WHERE id=$1")
+                    .bind(target)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            "binding" => {
+                sqlx::query("UPDATE threads SET current_segment_id=NULL WHERE node_id=$1")
+                    .bind(thread)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE threads SET current_segment_id=$2 WHERE node_id=$1")
+                    .bind(thread)
+                    .bind(segment)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            "environment" => {
+                sqlx::query("UPDATE environments SET status='disabled' WHERE id=$1")
+                    .bind(world.environment)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE environments SET status='running' WHERE id=$1")
+                    .bind(world.environment)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let facts: Json = sqlx::query_scalar(
+            "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+        )
+        .bind(segment)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(facts["opening_id"], json!(opening));
+        let next = facts["revision"].as_i64().unwrap();
+        assert!(
+            next > revision,
+            "withdrawal advances the durable order even when the value is restored"
+        );
+        revision = next;
+        if reason == "tool_target" {
+            assert_eq!(facts["live"], json!(true));
+            assert!(
+                facts["members"].get("llm").is_none(),
+                "a restored tool destination cannot revive its withdrawn member"
+            );
+            assert_eq!(
+                facts["members"][format!("mcp:{server}")]["nonce"],
+                json!(opening),
+                "another member stays usable"
+            );
+        } else if ["definition", "selection", "offering"].contains(&reason) {
+            assert_eq!(
+                facts["live"],
+                json!(true),
+                "removing one member keeps the physical session live"
+            );
+            assert!(
+                facts["members"].get(format!("mcp:{server}")).is_none(),
+                "{reason} cannot restore the removed member's nonce"
+            );
+        } else {
+            assert_eq!(
+                facts["live"],
+                json!(false),
+                "{reason} cannot restore the old opening"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn exact_skill_versions_and_the_aggregate_share_one_reported_source_without_invented_zeroes()
 {
     use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
@@ -1594,6 +1993,7 @@ async fn a_failed_common_purge_stays_purge_only_and_its_retry_keeps_the_original
     });
     record.until = before.volumes_purge_at.map(Time::new);
     let plan = CleanupPlan {
+        effects: None,
         id: new_id(),
         expires_at: Time::new(now + chrono::Duration::minutes(15)),
         confirmation_name: record.name.clone(),

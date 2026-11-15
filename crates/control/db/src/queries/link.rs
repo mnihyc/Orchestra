@@ -204,6 +204,21 @@ pub async fn insert_command_with_authority(
     at: DateTime<Utc>,
     authority: Option<&Json>,
 ) -> Result<bool, DbError> {
+    if !crate::queries::transaction_guard::in_transaction(conn) {
+        let mut tx = sqlx::Connection::begin(conn).await?;
+        let inserted = insert_command_on(&mut tx, command, at, authority).await?;
+        tx.commit().await?;
+        return Ok(inserted);
+    }
+    insert_command_on(conn, command, at, authority).await
+}
+
+async fn insert_command_on(
+    conn: &mut Conn,
+    command: &NewCommand<'_>,
+    at: DateTime<Utc>,
+    authority: Option<&Json>,
+) -> Result<bool, DbError> {
     let inserted = sqlx::query(
         "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required)
          VALUES ($1, $2, $3, CASE WHEN jsonb_typeof($4::jsonb) = 'object'
@@ -452,6 +467,21 @@ pub async fn finish_command(
     ending: &Ending<'_>,
     at: DateTime<Utc>,
 ) -> Result<bool, DbError> {
+    if !crate::queries::transaction_guard::in_transaction(conn) {
+        let mut tx = sqlx::Connection::begin(conn).await?;
+        let changed = finish_command_on(&mut tx, id, ending, at).await?;
+        tx.commit().await?;
+        return Ok(changed);
+    }
+    finish_command_on(conn, id, ending, at).await
+}
+
+async fn finish_command_on(
+    conn: &mut Conn,
+    id: Id,
+    ending: &Ending<'_>,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
     let (state, result, error) = match ending {
         Ending::Succeeded(result) => ("succeeded", Some(*result), None),
         Ending::Failed(error) => ("failed", None, Some(*error)),
@@ -473,8 +503,33 @@ pub async fn finish_command(
         && let Some((kind, body, issued)) = &changed
     {
         crate::queries::session_dependencies::record(conn, id, kind, body, *issued, at).await?;
+    } else if let Some((kind, body, _)) = &changed {
+        crate::queries::session_dependencies::failed_open(conn, id, kind, body).await?;
     }
     Ok(changed.is_some())
+}
+
+/// The command that holds `command` up: the oldest other command, with the same machine and the same serial
+/// key, that the machine has taken and not answered and that was made before it. Its kind, and when it was
+/// made. None for a command without a key, one the machine has not taken yet (it waits for the machine, not
+/// for other work), and one that is over.
+pub async fn held_up_by(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted'
+            AND ahead.id <> me.id AND ahead.state = 'accepted'
+            AND (ahead.created_at, ahead.id) < (me.created_at, me.id)
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// Expires the commands that no machine took before their deadline, on any

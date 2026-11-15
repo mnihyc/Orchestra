@@ -1500,6 +1500,18 @@ impl Link {
         // Resolve transport policy before the synchronous substitution, with exact reference identities.
         // Every occurrence still receives its own newly signed ticket and frozen plan.
         let mut routed_tickets = std::collections::VecDeque::new();
+        let session_facts = if ticket_requests.is_empty() {
+            None
+        } else {
+            let mut conn = inner
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, cmd.id)
+                .await
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        };
         for more in ticket_requests {
             let wanted: TicketWanted =
                 serde_json::from_value(Json::Object(more.clone())).map_err(|error| {
@@ -1508,10 +1520,26 @@ impl Link {
                         format!("a ticket cannot be asked for: {error}"),
                     )
                 })?;
-            let ticket = inner
-                .tickets
-                .for_request(&wanted, machine)
-                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+            let session_tool = matches!(
+                wanted.kind,
+                orch_link_contract::tunnels::TunnelKind::Exec
+                    | orch_link_contract::tunnels::TunnelKind::Llm
+                    | orch_link_contract::tunnels::TunnelKind::Mcp
+            ) && wanted.more.get("src").and_then(Json::as_str) != Some("api");
+            let ticket = if session_tool {
+                let facts = session_facts.as_ref().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::SessionNotFound,
+                        "the command has no accepted physical tool session",
+                    )
+                })?;
+                let scope = crate::tickets::Tickets::command_scope(facts, &wanted, machine)
+                    .map_err(|error| CommandError::new(ErrorCode::Conflict, error.to_string()))?;
+                inner.tickets.for_session_request(&wanted, machine, &scope)
+            } else {
+                inner.tickets.for_request(&wanted, machine)
+            }
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
             routed_tickets.push_back((more, self.routed_ticket_value(ticket).await?));
         }
         resolve_reference_values(&mut cmd.body, &mut |reference| match reference {
