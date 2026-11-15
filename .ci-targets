@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-api-core --lib -- realtime::ticket_scope_tests::session_ticket_wire_tests::
+test -p orch-engine --lib -- jobs::source::
+test -p orch-envhost --lib -- file_states::
