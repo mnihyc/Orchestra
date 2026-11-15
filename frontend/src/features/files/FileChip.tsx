@@ -7,6 +7,7 @@ import { ReferenceCard } from '@/ui/ReferenceCard';
 import { cx } from '@/ui/cx';
 import { defaultViewer } from './viewers';
 import { FileGlyph, FilePreview, FileState, fileFailure } from './FilePreview';
+import { imageDeliveryFragment } from './FileFacts';
 import { FileOverlay } from './FileOverlay';
 import { previewQuery, sourceFacts, sourceHasReference, sourceReference, type FileSource } from './source';
 import { ORCH_REFERENCE } from '@/lib/drop';
@@ -47,6 +48,7 @@ export function FileAttachment({ source, presentation, thumbnail = true }: { sou
   return <span className="inline-flex max-w-full flex-col items-start gap-1 align-top" data-file-attachment="">
     {thumbnail && visual && size !== 'large' && presentation?.place !== 'compact' && <button type="button" aria-label={t('fileMedia.openFile', { name: source.name })} onClick={() => setViewing(true)} className="focus-inset block max-w-full rounded-md"><FilePreview source={source} /></button>}
     <FileChip source={source} presentation={presentation} />
+    {imageDeliveryFragment(source.imageDelivery, t) !== undefined && <span className="text-xs text-text-muted">{imageDeliveryFragment(source.imageDelivery, t)}</span>}
     {viewing && <FileOverlay source={source} onClose={() => setViewing(false)} />}
   </span>;
 }

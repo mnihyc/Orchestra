@@ -197,7 +197,7 @@ async fn a_persons_lost_machine_cannot_renew_or_use_a_previously_issued_reenroll
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     };
     let enrolled = service
