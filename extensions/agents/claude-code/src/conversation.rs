@@ -303,6 +303,7 @@ pub fn start_with_settler(
     );
     let failing = settling.clone();
     let conversation = Conversation {
+        physical_opening: params.spec.opening_id,
         params,
         mapper,
         settling,
@@ -646,6 +647,8 @@ struct Conversation {
     next_gate: u64,
     outbox: Mutex<Outbox>,
     process: Option<Running>,
+    /// Captured by this native process generation, independently of a later logical reconfiguration.
+    physical_opening: Id,
     process_tx: flow::Sender<(u64, ProcessEvent)>,
     process_rx: flow::Receiver<(u64, ProcessEvent)>,
     generation: u64,
@@ -1224,7 +1227,8 @@ impl Conversation {
                 &self.params.spec.settings.model,
             )
             .unwrap_or(true);
-        let changed = spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
+        let changed = spec.opening_id != self.params.spec.opening_id
+            || spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
             || page_reader_changed
             || spec.settings.background_wake != self.params.spec.settings.background_wake
             || spec.mcp != self.params.spec.mcp
@@ -1776,6 +1780,7 @@ impl Conversation {
             Ok(running) => running,
             Err(error) => return Err(AdapterError::HarnessUnavailable(error.to_string())),
         };
+        self.physical_opening = self.params.spec.opening_id;
         self.process = Some(running);
         self.settings_ask = None;
         // A process that begins the conversation counts its use from nothing; one that resumes or forks it
@@ -2679,6 +2684,8 @@ impl Conversation {
         self.lose_session(&info.describe()).await;
         if !expected && !had_turn && was_live {
             self.emit(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.physical_opening,
                 reason: format!("the harness process ended: {}", info.describe()),
             }))
             .await;
@@ -2715,6 +2722,8 @@ impl Conversation {
             let events = self.mapper.abandon_turn();
             self.emit_all(events).await;
             self.emit(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.physical_opening,
                 reason: format!("the harness process ended: {why}"),
             }))
             .await;
@@ -2891,6 +2900,8 @@ mod outbox_tests {
     fn what_asks_or_takes_an_ask_back_passes_a_shut_gate_in_its_order_and_the_rest_waits() {
         let lost = || {
             event(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: orch_types::new_id(),
                 reason: "gone".to_owned(),
             }))
         };

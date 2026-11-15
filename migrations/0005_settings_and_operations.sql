@@ -43,7 +43,7 @@ CREATE TABLE installation_records (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT installation_records_key_check CHECK ((key = ANY (ARRAY['release_check'::text, 'database_backup'::text]))),
+    CONSTRAINT installation_records_key_check CHECK ((key = ANY (ARRAY['release_check'::text, 'database_backup'::text, 'server_update_job'::text]))),
     CONSTRAINT installation_records_pkey PRIMARY KEY (key)
 );
 

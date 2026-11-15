@@ -106,6 +106,7 @@ CREATE TABLE commands (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    tool_session jsonb,
     login_authority jsonb,
     authority_required boolean DEFAULT false NOT NULL,
     mcp_import_completion jsonb,
@@ -292,6 +293,7 @@ ALTER TABLE snapshots ADD CONSTRAINT snapshots_environment_id_fkey FOREIGN KEY (
 CREATE TABLE hosts (
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
+    bundled_with_server boolean DEFAULT false NOT NULL,
     owner_id uuid,
     org_id uuid,
     home_id uuid,
@@ -306,6 +308,7 @@ CREATE TABLE hosts (
     load jsonb DEFAULT '{}'::jsonb NOT NULL,
     load_at timestamp with time zone,
     storages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    mount_sizes jsonb DEFAULT '[]'::jsonb NOT NULL,
     schedulable boolean DEFAULT true NOT NULL,
     disabled boolean DEFAULT false NOT NULL,
     when_full text,
@@ -546,6 +549,7 @@ CREATE TABLE mount_kept_data (
 CREATE INDEX mount_kept_data_mount_idx ON mount_kept_data USING btree (mount_id, machine_id);
 
 CREATE TABLE mount_locations (
+    membership_id uuid DEFAULT gen_random_uuid() NOT NULL UNIQUE,
     mount_id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
@@ -563,6 +567,9 @@ CREATE TABLE mount_locations (
     CONSTRAINT mount_locations_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
     CONSTRAINT mount_locations_mount_id_fkey FOREIGN KEY (mount_id) REFERENCES mounts(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER mount_location_membership BEFORE UPDATE ON mount_locations
+    FOR EACH ROW EXECUTE FUNCTION orch_mount_location_membership();
 
 CREATE TABLE mount_lost_locations (
     id uuid NOT NULL,
@@ -797,3 +804,6 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- Native openings are ordered independently from wall clocks and logical segment numbers.
+CREATE SEQUENCE native_session_openings AS bigint;
