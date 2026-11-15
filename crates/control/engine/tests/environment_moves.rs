@@ -522,14 +522,17 @@ async fn a_move_reviews_and_carries_the_exact_kept_image_before_creation_then_re
         f.source.count(CommandKind::NodeKeptRemove) > 0
     })
     .await;
-    common::eventually("the image archive pin is released", || async {
-        sqlx::query_scalar::<_, i32>("SELECT pin_count FROM blobs WHERE hash=$1")
-            .bind(Hash::of(&f.data).as_bytes().as_slice())
-            .fetch_one(f.world.pool.pool())
-            .await
-            .unwrap()
-            == 0
-    })
+    common::eventually(
+        "the image archive is released and removed from the server",
+        || async {
+            sqlx::query_scalar::<_, i32>("SELECT pin_count FROM blobs WHERE hash=$1")
+                .bind(Hash::of(&f.data).as_bytes().as_slice())
+                .fetch_optional(f.world.pool.pool())
+                .await
+                .unwrap()
+                .is_none()
+        },
+    )
     .await;
     assert_eq!(
         f.target.count(CommandKind::NodeKeptRemove),
@@ -1492,14 +1495,17 @@ async fn a_move_copies_a_mounts_data_into_a_new_location_before_its_unit_is_made
         source, name,
         "the copy is the host's location from the commit on"
     );
-    common::eventually("the copy's archive parts are released", || async {
-        sqlx::query_scalar::<_, i32>("SELECT pin_count FROM blobs WHERE hash=$1")
-            .bind(Hash::of(&f.data).as_bytes().as_slice())
-            .fetch_one(f.world.pool.pool())
-            .await
-            .unwrap()
-            == 0
-    })
+    common::eventually(
+        "the copy's archive parts are released and removed from the server",
+        || async {
+            sqlx::query_scalar::<_, i32>("SELECT pin_count FROM blobs WHERE hash=$1")
+                .bind(Hash::of(&f.data).as_bytes().as_slice())
+                .fetch_optional(f.world.pool.pool())
+                .await
+                .unwrap()
+                .is_none()
+        },
+    )
     .await;
     f.world.engine().stop();
 }

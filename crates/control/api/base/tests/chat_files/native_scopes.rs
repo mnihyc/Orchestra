@@ -4,7 +4,7 @@ use super::*;
 use chrono::Duration;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::threads::{UploadBlobGet, UploadBlobGetQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::Json;
 use std::sync::{
@@ -24,11 +24,12 @@ fn rule(operation: &str, kind: &str, id: Id, resource: &str, action: &str) -> Js
 async fn key(room: &Room, actor: &Who, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor.id(),
             name: "Native chat file fixture",
             token_hash: &token_hash(&secret),
@@ -116,11 +117,12 @@ async fn chat_blob_read_binds_its_actual_chat_and_preserves_native_bytes_ranges_
         .await;
     assert_eq!(ranged.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(ranged.raw.as_ref(), &bytes[10..20]);
-    let legacy = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let legacy = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.cai.id(),
             name: "Legacy native chat file",
             token_hash: &token_hash(&legacy),
@@ -278,13 +280,19 @@ struct OpenGate {
 }
 #[async_trait::async_trait]
 impl BlobStore for OpenGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         let opened = self.inner.get(hash, range).await?;
@@ -305,8 +313,13 @@ impl BlobStore for OpenGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 
@@ -595,11 +608,12 @@ async fn upload_blob_saved_source_needs_its_own_operation_read_and_current_nativ
             .status
             .is_success()
     );
-    let legacy = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let legacy = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.cai.id(),
             name: "Legacy native upload reader",
             token_hash: &token_hash(&legacy),

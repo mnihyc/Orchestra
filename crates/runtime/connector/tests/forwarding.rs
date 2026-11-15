@@ -1221,7 +1221,7 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
     let secret = "gateway-secret-value";
     let body = json!({
         "provider_id": p.rig.provider,
-        "protocols": [RESPONSES, MESSAGES],
+        "translation_output_tokens":4096,"protocols": [RESPONSES, MESSAGES],
         "upstreams": [
             { "protocol": RESPONSES, "base_url": p.mock.responses_base_url(), "options": {
                 "headers": { "x-route": "team-a" }, "query": { "api-version": "2025-01-01" },

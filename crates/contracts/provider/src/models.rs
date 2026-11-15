@@ -596,3 +596,57 @@ impl ModelSuggestion {
         }
     }
 }
+
+/// Captured policy and the fallback output allowance for a translated call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TranslationOptions {
+    /// Whether this provider's place permits translated pairings.
+    pub allowed: bool,
+    /// Output tokens when neither the request nor the offering supplies an allowance.
+    pub output_tokens: i64,
+}
+
+impl Default for TranslationOptions {
+    fn default() -> Self {
+        Self {
+            allowed: true,
+            output_tokens: 4096,
+        }
+    }
+}
+
+/// What is preserved, approximated or omitted across a chosen model interface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConversionLosses {
+    /// Facts carried without changing their meaning.
+    #[serde(default)]
+    pub preserved: Vec<String>,
+    /// Facts represented in a near equivalent form.
+    #[serde(default)]
+    pub approximated: Vec<String>,
+    /// Features without an equivalent.
+    #[serde(default)]
+    pub dropped: Vec<String>,
+}
+
+impl ConversionLosses {
+    /// Whether a choice needs to show its conversion limits.
+    #[must_use]
+    pub fn has_losses(&self) -> bool {
+        !self.approximated.is_empty() || !self.dropped.is_empty()
+    }
+}
+
+/// The actual interface route of a translated pairing, without addresses or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProtocolTranslation {
+    /// The interface requested by the caller or harness.
+    pub from: String,
+    /// The interface spoken by the selected upstream.
+    pub to: String,
+    /// The converter's public name.
+    pub title: String,
+    /// Its declared fidelity.
+    pub losses: ConversionLosses,
+}

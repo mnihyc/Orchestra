@@ -572,7 +572,7 @@ impl ProviderRig {
         let id = new_id();
         let body = json!({
             "provider_id": self.rig.provider,
-            "protocols": upstreams.iter().map(|(protocol, _, _)| *protocol).collect::<Vec<_>>(),
+            "translation_output_tokens":4096,"protocols": upstreams.iter().map(|(protocol, _, _)| *protocol).collect::<Vec<_>>(),
             "upstreams": upstreams.iter().map(|(protocol, url, options)| json!({
                 "protocol": protocol, "base_url": url, "options": options })).collect::<Vec<_>>(),
             "credential": key.map(|key| self.sealed_key_for(id, key)),

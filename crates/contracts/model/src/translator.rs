@@ -1,10 +1,9 @@
-//! ProtocolTranslator seam, declared conversion losses, and the endpoint and credential fields its upstream needs; for external implementations only.
+//! ProtocolTranslator seam, declared conversion losses, and the endpoint and credential fields its upstream needs; for built-in and external implementations.
 //!
-//! Orch itself is a plain relay: a request passes through in the protocol it came in. A **translator**
+//! Direct requests are plain relays: a request passes through in the protocol it came in. A **translator**
 //! converts requests of one wire protocol (`from`: the one the harness speaks) into another (`to`: the one
-//! the upstream speaks) and the response stream back, chunk by chunk. None is built in. A translator is an
-//! external implementation, installed by whoever needs that conversion, and adding one changes nothing in
-//! providers, bindings, leases, the allowlist, the ledger or the interface.
+//! the upstream speaks) and the response stream back, chunk by chunk. The shipped Responses / Messages extension implements both directions. Additional translators may be
+//! external implementations registered beside the provider runtime.
 //!
 //! **Who presents the credential.** Where `to` is a protocol that has an implementation, the translator
 //! leaves the credential alone and that implementation presents it as the endpoint's options say. Where
@@ -40,27 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::credentials::Credential;
 
-/// What a translator preserves, approximates and drops, in sentences a person can read.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ConversionLosses {
-    /// What passes over as it is.
-    #[serde(default)]
-    pub preserved: Vec<String>,
-    /// What passes over in a form that is near but not the same.
-    #[serde(default)]
-    pub approximated: Vec<String>,
-    /// What does not pass over.
-    #[serde(default)]
-    pub dropped: Vec<String>,
-}
-
-impl ConversionLosses {
-    /// Whether anything is approximated or dropped: the binding dialog then shows the losses.
-    #[must_use]
-    pub fn has_losses(&self) -> bool {
-        !self.approximated.is_empty() || !self.dropped.is_empty()
-    }
-}
+pub use orch_provider_contract::models::{ConversionLosses, ProtocolTranslation};
 
 /// What a translator declares of itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -96,6 +75,14 @@ pub struct UpstreamSide {
     /// Its options as the `to` side declares them.
     #[serde(default)]
     pub options: Json,
+    /// Captured output default, after the caller admitted this translated pairing.
+    pub output_tokens: i64,
+    /// Opaque stable session cache key; contains neither the original session identity nor a person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The selected model's captured option declarations and reported output limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<orch_provider_contract::models::ModelParameters>,
     /// The key, when the translator presents it itself.
     #[serde(default)]
     pub credential: Option<Credential>,
@@ -223,6 +210,16 @@ pub trait ProtocolTranslator: Send + Sync + 'static {
 
     /// A converter of the response stream, for one response.
     fn response_translator(&self) -> Box<dyn ResponseTranslator>;
+
+    /// One answer converter with this request's tool and route context. The default is stateless.
+    fn response_for(
+        &self,
+        _path: &str,
+        _body: &[u8],
+        _upstream: &UpstreamSide,
+    ) -> Result<Box<dyn ResponseTranslator>, TranslateError> {
+        Ok(self.response_translator())
+    }
 }
 
 /// The ends of a registered translator: the protocol the harness speaks and the one the upstream speaks.
@@ -277,6 +274,80 @@ pub fn route(request: &str, endpoints: &[&str], translators: &[Ends<'_>]) -> Rou
         .map_or(Route::Unserved, |(_, to)| Route::Translate {
             to: (*to).to_owned(),
         })
+}
+
+/// The built-in format conversions, considered only after direct endpoint matches.
+pub const BUILTIN_ENDS: [Ends<'static>; 2] = [
+    (
+        crate::protocol::OPENAI_RESPONSES,
+        crate::protocol::ANTHROPIC_MESSAGES,
+    ),
+    (
+        crate::protocol::ANTHROPIC_MESSAGES,
+        crate::protocol::OPENAI_RESPONSES,
+    ),
+];
+
+/// Public fidelity declarations shared by the converter and the choices that offer it.
+#[must_use]
+pub fn builtin_descriptors() -> [TranslatorDescriptor; 2] {
+    [
+        builtin_descriptor(BUILTIN_ENDS[0].0, BUILTIN_ENDS[0].1, true),
+        builtin_descriptor(BUILTIN_ENDS[1].0, BUILTIN_ENDS[1].1, false),
+    ]
+}
+
+/// A conversion's public facts, or none for a direct or unserved interface.
+#[must_use]
+pub fn builtin_translation(from: &str, endpoints: &[&str]) -> Option<ProtocolTranslation> {
+    if endpoints.contains(&from) {
+        return None;
+    }
+    let descriptor = builtin_descriptors()
+        .into_iter()
+        .find(|item| item.from == from && endpoints.contains(&item.to.as_str()))?;
+    Some(ProtocolTranslation {
+        from: descriptor.from,
+        to: descriptor.to,
+        title: descriptor.title,
+        losses: descriptor.losses,
+    })
+}
+
+fn builtin_descriptor(from: &str, to: &str, responses: bool) -> TranslatorDescriptor {
+    TranslatorDescriptor {
+        from: from.into(),
+        to: to.into(),
+        title: "Responses / Messages".into(),
+        summary: "Stream text, images and client tools across the two model interfaces.".into(),
+        losses: ConversionLosses {
+            preserved: vec![
+                "Text, image inputs, tool identifiers and upstream token usage.".into(),
+                "Signed reasoning is carried opaquely and restored on the next turn.".into(),
+                "Rate limits, overload, output limits and interrupted streams retain their meaning.".into(),
+            ],
+            approximated: if responses { vec![
+                    "Visible reasoning summaries survive an upstream change; incompatible opaque state is omitted.".into(),
+                    "Later system instructions become instructions in the following user turn.".into(),
+                    "Custom tool grammars become a single string argument; the upstream does not enforce the grammar.".into(),
+                    "Prefix caching uses system and newest-turn cache breakpoints.".into(),
+                    "Reasoning effort uses the offering's declared thinking controls.".into(),
+                    "Compaction produces a text summary carried as opaque conversation state.".into(),
+                ] } else { vec![
+                    "Visible reasoning summaries survive an upstream change; incompatible opaque state is omitted.".into(),
+                    "Images in a tool result follow the tool result as user image inputs.".into(),
+                    "Explicit cache breakpoints become a stable session cache key when one is provided.".into(),
+                    "Thinking budgets use the offering's declared reasoning effort.".into(),
+                ] },
+            dropped: if responses { vec!["Vendor server tools are not translated; use Orch's capability routes.".into()] } else { vec![
+                    "Stop sequences and sampling controls without an outgoing equivalent.".into(),
+                    "Unrecognized beta headers are not forwarded across interfaces.".into(),
+                ] },
+        },
+        endpoint_options: Vec::new(),
+        credential_fields: Vec::new(),
+        extensions: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +421,9 @@ mod tests {
             base_url: "https://beta.example.com".into(),
             options: Json::Null,
             credential: None,
+            model: None,
+            output_tokens: 4096,
+            session: None,
         };
         let request = t
             .translate_request("/chat", Bytes::from_static(b"ping ping"), &upstream)
@@ -396,6 +470,9 @@ mod tests {
                     base_url: String::new(),
                     options: Json::Null,
                     credential: None,
+                    model: None,
+                    output_tokens: 4096,
+                    session: None,
                 },
             )
             .unwrap();

@@ -43,8 +43,9 @@ impl Engine {
             let ids: Vec<Id> = {
                 let mut conn = self.db().acquire().await?;
                 sqlx::query_scalar("SELECT id FROM jobs WHERE state IN ('succeeded','failed','cancelled')
-                    AND ((plan ? 'fork_file_pins' AND plan->>'fork_file_pins_released' IS DISTINCT FROM 'true')
-                         OR (plan ? 'portable' AND plan ? 'move_pins' AND plan->>'move_pins_released' IS DISTINCT FROM 'true'))
+                    AND (((plan ? 'fork_file_pins' OR plan ? 'fork_live_pins') AND plan->>'fork_file_pins_released' IS DISTINCT FROM 'true')
+                         OR (plan ? 'portable' AND plan ? 'move_pins' AND plan->>'move_pins_released' IS DISTINCT FROM 'true')
+                         OR (kind = 'environment_move' AND (plan ? 'move_pins' OR plan ? 'kept_image_pins') AND plan->>'move_pins_released' IS DISTINCT FROM 'true'))
                     AND ($1::uuid IS NULL OR id > $1) ORDER BY id LIMIT $2")
                     .bind(after_job).bind(PAGE).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?
             };
@@ -57,10 +58,14 @@ impl Engine {
                     let mut conn = self.db().acquire().await?;
                     orch_db::queries::jobs::job(&mut conn, job).await?
                 };
-                if let Some(row) = row.filter(|row| row.plan.get("portable").is_some()) {
-                    self.after_machine_move(&row).await;
-                } else {
-                    crate::fork_source::release_pins(self, job, now).await?;
+                match row {
+                    Some(row) if row.plan.get("portable").is_some() => {
+                        self.after_machine_move(&row).await;
+                    }
+                    Some(row) if row.kind == "environment_move" => {
+                        self.release_move_held(row.id).await?;
+                    }
+                    _ => crate::fork_source::release_pins(self, job, now).await?,
                 }
             }
             if !lease.hold(self.db(), self.inner.clock.now()).await? {

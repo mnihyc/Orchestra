@@ -173,6 +173,7 @@ impl HttpCommand {
                 .or_else(|| self.deadline.map(Time::get))
                 != Some(row.deadline_at)
             || !self.matches(&NewCommand {
+                content_transit: row.content_transit,
                 id: row.id,
                 machine_id: row.machine_id,
                 kind: &row.kind,
@@ -270,6 +271,7 @@ impl HttpCommand {
                 .or_else(|| self.deadline.map(Time::get))
                 != Some(row.deadline_at)
             || !self.matches(&NewCommand {
+                content_transit: row.content_transit,
                 id: row.id,
                 machine_id: row.machine_id,
                 kind: &row.kind,
@@ -438,6 +440,7 @@ impl HttpCommand {
         self.checked(
             conn,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -465,6 +468,7 @@ impl HttpCommand {
         let row = link::command(conn, id).await?.ok_or_else(closed)?;
         let (origin, previous) = self.retained(conn, id, row.deadline_at).await?;
         if !self.matches(&NewCommand {
+            content_transit: row.content_transit,
             id: row.id,
             machine_id: row.machine_id,
             kind: &row.kind,

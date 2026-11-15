@@ -10,14 +10,18 @@ mod places;
 mod support;
 
 use chrono::Duration;
+use orch_api_contract::auth::{MetaGet, SetupCreate, SetupCreateBody};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::{
     MeNotificationRouteDelete, MeNotificationRouteLinkCreate, MeNotificationRouteSet,
     MeNotificationRouteSetBody, MePushSubscriptionCreate, MePushSubscriptionCreateBody,
     NotificationChannel, NotificationChannelCreateBody, NotificationChannelDelete,
-    NotificationKind, NotificationRoute, NotificationRouteNeeds, PushSubscriptionKeys,
+    NotificationChannelList, NotificationChannelListQuery, NotificationKind, NotificationRoute,
+    NotificationRouteNeeds, PushSubscriptionKeys,
 };
-use orch_api_core::middleware::authentication::{ACCESS_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{
+    ACCESS_TOKEN_PREFIX, new_api_token, new_token, token_hash,
+};
 use orch_api_core::testing::Reply;
 use orch_db::queries::identity::testing as user_rows;
 use orch_db::queries::notifications::routes as route_rows;
@@ -28,6 +32,63 @@ use places::Who;
 use serde_json::json;
 use sqlx::postgres::PgListener;
 use std::time::Duration as Wait;
+
+#[tokio::test]
+async fn first_setup_offers_browser_notifications_without_subscribing_the_administrator() {
+    outside::install();
+    orch_api_core::routes::notifications::install_push_public_key(
+        "synthetic-public-push-key".to_owned(),
+    );
+    let world = support::World::new().await;
+    let setup = world
+        .app
+        .call(SetupCreate, &[])
+        .body(&SetupCreateBody {
+            username: "root".to_owned(),
+            display_name: "Root".to_owned(),
+            password: support::PASSWORD.to_owned(),
+            email: None,
+            timezone: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let channels = world
+        .app
+        .call(NotificationChannelList, &[])
+        .token(&setup.access_token)
+        .query(&NotificationChannelListQuery::default())
+        .send()
+        .await
+        .ok();
+    let push = channels
+        .iter()
+        .find(|channel| channel.kind == "push")
+        .unwrap();
+    assert!(push.enabled);
+    assert!(!push.route.enabled);
+    assert_eq!(push.route.needs, Some(NotificationRouteNeeds::Device));
+    assert!(
+        world
+            .app
+            .call(MetaGet, &[])
+            .send()
+            .await
+            .ok()
+            .push_public_key
+            .is_some()
+    );
+    for table in ["notification_routes", "push_subscriptions", "outbox"] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
 
 async fn set(
     o: &Outside,
@@ -760,7 +821,7 @@ async fn a_routes_minutes_outside_the_contracts_bounds_are_refused_at_their_fiel
 #[tokio::test]
 async fn a_link_creation_key_reads_only_its_current_kept_generation_and_never_rotates_it() {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, new_token, token_hash};
     use orch_db::queries::identity;
     let o = Outside::new().await;
     let bot = o
@@ -789,11 +850,12 @@ async fn a_link_creation_key_reads_only_its_current_kept_generation_and_never_ro
     let scope:KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"account","id":o.cai.id(),"reach":"self"},
         "resources":["account"],"allow":[{"operation":"MeNotificationRouteLinkCreate","actions":["read"]}]}]})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *o.world.conn().await,
         &identity::NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: o.cai.id(),
             name: "Current native bot link",
             token_hash: &token_hash(&secret),

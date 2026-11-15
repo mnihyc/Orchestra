@@ -53,3 +53,24 @@ it('omits an absent older-server projection and ignores malformed rows', () => {
   rerender(<CapabilityRoutes value={[null, { capability: 'incomplete' }]} />);
   expect(screen.queryByTestId('capability-routes')).not.toBeInTheDocument();
 });
+
+it.each(['en','zh-CN'] as const)('shows a captured generation conversion with its declared limits in %s', async (language) => {
+  await setLocale(language);
+  const t = i18n.getFixedT(language);
+  const translation = {from:'openai-responses',to:'anthropic-messages',title:'Responses / Messages',losses:{
+    preserved:['Text, image inputs, tool identifiers and upstream token usage.'],
+    approximated:['Custom tool grammars become a single string argument; the upstream does not enforce the grammar.'],
+    dropped:['Vendor server tools are not translated; use Orch’s capability routes.'],
+  }};
+  const row = {capability:'generation',title:'Generation',reason:null,program_default:false,provider:null,prices:{},route_view:{kind:'native-model'}};
+  const shown = show(<CapabilityRoutes value={[{...row,translation}]} />);
+  const route = screen.getByRole('button',{name:t('modelTranslation.route',{from:'Responses',to:'Messages'})});
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  await userEvent.click(route);
+  expect(screen.getByRole('dialog')).toHaveTextContent(t('modelTranslation.custom'));
+  expect(screen.getByRole('dialog')).not.toHaveTextContent('private-backend');
+  await userEvent.keyboard('{Escape}');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  shown.rerender(<CapabilityRoutes value={[row]} />);
+  expect(screen.queryByRole('button',{name:t('modelTranslation.route',{from:'Responses',to:'Messages'})})).not.toBeInTheDocument();
+});

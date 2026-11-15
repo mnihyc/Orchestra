@@ -356,10 +356,8 @@ async fn native_skill_sources_keep_actual_environment_or_host_raw_origin_and_onc
                 json!({"rules":[{"target":{"kind":"org","id":home,"reach":"subtree"},"resources":["skill"],"allow":[{"operation":operation,"actions":["manage"]}]},source]}),
             )?;
             assert!(scope.validate().is_empty());
-            let token = crate::middleware::authentication::new_token(
-                crate::middleware::authentication::API_TOKEN_PREFIX,
-            );
             let key = new_id();
+            let token = crate::middleware::authentication::new_api_token(key);
             identity::create_api_token_scoped(
                 &mut conn,
                 &identity::NewApiToken {

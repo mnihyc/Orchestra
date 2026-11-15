@@ -8,6 +8,11 @@ export function approvalReview(value: unknown) {
   return { model: row.model, outcome: row.outcome, reason: typeof row.reason === 'string' ? row.reason : null, reported: row.reported === true, action: row.action, usage: row.usage };
 }
 
+/** Whether the review ended in a way that is a failure to give leave: what the harness's own call marks as an error. */
+export function reviewFailed(outcome: string): boolean {
+  return ['denied', 'failed', 'timedOut', 'timed_out', 'aborted'].includes(outcome);
+}
+
 export function reviewOutcome(outcome: string, t: TFunction): string {
   switch (outcome) {
     case 'inProgress': case 'in_progress': return t('timeline.permissionReview.status.reviewing');

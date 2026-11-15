@@ -85,3 +85,22 @@ describe('the ways an agent can be placed', () => {
     expect(screen.getByText(i18n.t('start.arrangement.waiting'))).toBeVisible();
   });
 });
+
+it.each(['en','zh-CN'] as const)('shows conversion limits on the selected pairing before it is applied in %s', async (language) => {
+  await setLocale(language);
+  try {
+    const selected = arrangement('key_separated',1);
+    selected.isolation.translation = {from:'openai-responses',to:'anthropic-messages',title:'Responses / Messages',losses:{
+      preserved:['Text, image inputs, tool identifiers and upstream token usage.'],
+      approximated:['Custom tool grammars become a single string argument; the upstream does not enforce the grammar.'],
+      dropped:['Vendor server tools are not translated; use Orch’s capability routes.'],
+    }};
+    const changed = vi.fn();
+    draw([selected],changed);
+    await userEvent.click(screen.getByRole('button',{name:i18n.t('modelTranslation.route',{from:'Responses',to:'Messages'})}));
+    expect(screen.getByRole('dialog')).toHaveTextContent(i18n.t('modelTranslation.custom'));
+    expect(changed).not.toHaveBeenCalled();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByRole('radio')).toBeChecked();
+  } finally { await setLocale('en'); }
+});
