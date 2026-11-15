@@ -671,6 +671,7 @@ fn gate_completion(world: &mut World) -> Arc<PutGate> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(gate.clone(), gate.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
@@ -1400,6 +1401,7 @@ fn gate_attachment_size(world: &mut World, hash: Hash) -> Arc<AttachmentSizeGate
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(gate.clone(), gate.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });

@@ -343,45 +343,54 @@ pub fn is_sandbox_refusal(detail: &str) -> bool {
 }
 
 /// Fixed product explanations, mirrored by the catalogues; never inferred from a vendor's words.
-pub const APPROVAL_NOT_ALLOWED: &str = "This approval mode is not allowed here. Choose a mode permitted by approval.allowed_modes, or ask a manager to change that setting.";
+pub const APPROVAL_NOT_ALLOWED: &str = "This approval mode is not allowed here";
 /// The selected adapter cannot use the requested approval mode.
-pub const APPROVAL_UNSUPPORTED: &str = "This agent does not support the selected approval.mode. Choose another approval mode or agent.";
+pub const APPROVAL_UNSUPPORTED: &str = "This approval mode is not supported by this agent";
 /// No supported sandbox fits all the current ceilings.
-pub const SANDBOX_UNSUPPORTED: &str = "This agent and environment cannot provide the requested tool access. Choose another agent or environment, or ask a manager to change sandbox.mode and the sandbox.max or agent.max_sandbox limits.";
+pub const SANDBOX_UNSUPPORTED: &str =
+    "The requested tool access is not available with this agent and environment";
 
 /// Names the requested mode while preserving its catalogued unsupported explanation.
 #[must_use]
 pub fn unsupported_approval_detail(mode: ApprovalMode) -> String {
-    approval_mode_detail(mode, APPROVAL_UNSUPPORTED)
+    format!(
+        "Approval mode “{}” is not supported by this agent",
+        approval_mode_name(mode)
+    )
 }
 
 /// Names the requested mode while preserving its catalogued policy explanation.
 #[must_use]
 pub fn disallowed_approval_detail(mode: ApprovalMode) -> String {
-    approval_mode_detail(mode, APPROVAL_NOT_ALLOWED)
+    format!(
+        "Approval mode “{}” is not allowed here",
+        approval_mode_name(mode)
+    )
 }
 
-fn approval_mode_detail(mode: ApprovalMode, explanation: &'static str) -> String {
-    let name = match mode {
+fn approval_mode_name(mode: ApprovalMode) -> &'static str {
+    match mode {
         ApprovalMode::Ask => "Ask",
         ApprovalMode::OnRequest => "On request",
         ApprovalMode::Auto => "Auto",
         ApprovalMode::Bypass => "Bypass",
-    };
-    format!("{name}: {explanation}")
+    }
 }
 
-/// Recognizes only current and retained product explanations for approval-mode recovery.
+/// Recognizes only complete product explanations for approval-mode recovery.
 #[must_use]
 pub fn is_approval_mode_refusal(detail: &str) -> bool {
     matches!(detail, APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED)
-        || matches!(
-            detail.split_once(": "),
-            Some((
-                "Ask" | "On request" | "Auto" | "Bypass",
-                APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED
-            ))
-        )
+        || detail
+            .strip_prefix("Approval mode “")
+            .and_then(|named| named.split_once("” "))
+            .is_some_and(|(mode, reason)| {
+                matches!(mode, "Ask" | "On request" | "Auto" | "Bypass")
+                    && matches!(
+                        reason,
+                        "is not supported by this agent" | "is not allowed here"
+                    )
+            })
 }
 
 /// How the harness is confined for a turn: the approval mode and the sandbox
@@ -504,6 +513,8 @@ pub struct StartSnapshot {
     pub capabilities: Option<instructions::CapabilityLine>,
     /// What it runs on and under, with the limits that touch what it has or can be given.
     pub isolation: Option<orch_driver_contract::isolation::RuntimeIsolation>,
+    /// The environment's current attachment projection, with the machine's observed state.
+    pub mounts: Vec<orch_api_contract::mounts::EnvMount>,
     /// What was found to run a browser and where its profiles are kept.
     pub browser_line: String,
     /// What the people who manage the environment answered about a configuration of the harness's own in its
@@ -576,12 +587,15 @@ impl StartSnapshot {
     #[must_use]
     pub fn session_configuration(&self) -> harnesses::SessionConfiguration {
         harnesses::SessionConfiguration {
+            output_capture_bytes: self.settings.output_capture_bytes,
             cwd: self.cwd(),
+            workspace_configuration: self.workspace_configuration.clone(),
             prompt_cache_ttl: self
                 .settings
                 .prompt_cache_ttl
                 .filter(|_| self.descriptor.capabilities.prompt_cache_ttl),
             background_wake: self.settings.background_wake,
+            web_action_wait_secs: self.settings.web_action_wait_secs,
             image_generation: self.settings.image_generation,
             native_configuration: self
                 .native_model
@@ -657,6 +671,7 @@ impl StartSnapshot {
                 .map(|memory| memory.kept_by),
             capabilities: self.capabilities.as_ref(),
             isolation: self.isolation.as_ref(),
+            mounts: &self.mounts,
             tools: &self.tools,
             browsers: &self.browser_line,
             rates: instructions::ToolRates {
@@ -1054,6 +1069,7 @@ pub fn session_open_body_importing(
         _ => serde_json::Map::new(),
     };
     Ok(link::SessionOpen {
+        output_capture_bytes: snapshot.settings.output_capture_bytes,
         native_model: snapshot.native_model.clone(),
         transport_only: false,
         turn_changes_require_restart: snapshot
@@ -1087,6 +1103,7 @@ pub fn session_open_body_importing(
         subagent_limits: snapshot.settings.subagent_limits,
         prompt_cache_ttl: configuration.prompt_cache_ttl,
         background_wake: snapshot.settings.background_wake,
+        web_action_wait_secs: configuration.web_action_wait_secs,
         image_generation: configuration.image_generation,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
@@ -1498,6 +1515,7 @@ impl Engine {
         let context_sent = threads::context_sent(conn, segment.id).await?;
         // Keep the shared-material future out of the snapshot's accumulated state.
         let material = Box::pin(self.topic_material(conn, thread_id)).await?;
+        let mounts = crate::mounts::views(conn, environment.id, self.inner.clock.now()).await?;
         let mut snapshot = StartSnapshot {
             native_model: None,
             material,
@@ -1530,6 +1548,7 @@ impl Engine {
             tools,
             capabilities,
             isolation,
+            mounts,
             browser_line,
             workspace_configuration,
             cut,
@@ -1706,6 +1725,50 @@ mod tests {
             "/workspace/web/api/v1"
         );
         assert_eq!(absolute_cwd("/workspace", "", "api"), "/workspace/api");
+    }
+
+    #[test]
+    fn confinement_refusals_name_the_choice_without_internal_setting_keys() {
+        for (mode, name) in [
+            (ApprovalMode::Ask, "Ask"),
+            (ApprovalMode::OnRequest, "On request"),
+            (ApprovalMode::Auto, "Auto"),
+            (ApprovalMode::Bypass, "Bypass"),
+        ] {
+            let unsupported = unsupported_approval_detail(mode);
+            let disallowed = disallowed_approval_detail(mode);
+            assert_eq!(
+                unsupported,
+                format!("Approval mode “{name}” is not supported by this agent")
+            );
+            assert_eq!(
+                disallowed,
+                format!("Approval mode “{name}” is not allowed here")
+            );
+            assert!(is_approval_mode_refusal(&unsupported));
+            assert!(is_approval_mode_refusal(&disallowed));
+            assert!(!is_approval_mode_refusal(&format!(
+                "{unsupported} Vendor detail"
+            )));
+        }
+        for detail in [
+            APPROVAL_UNSUPPORTED,
+            APPROVAL_NOT_ALLOWED,
+            SANDBOX_UNSUPPORTED,
+        ] {
+            for key in [
+                "approval.mode",
+                "approval.allowed_modes",
+                "sandbox.mode",
+                "sandbox.max",
+                "agent.max_sandbox",
+            ] {
+                assert!(
+                    !detail.contains(key),
+                    "internal setting key in public refusal: {detail}"
+                );
+            }
+        }
     }
 
     #[test]

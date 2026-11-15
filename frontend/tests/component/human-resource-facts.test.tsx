@@ -46,7 +46,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const trigger = screen.getByRole('combobox', { name: i18n.t('start.where.title') });
     expect(trigger).toHaveValue(blocked.environment.name);
     await userEvent.click(trigger);
-    const list = await screen.findByRole('listbox');
+    const list = await screen.findByRole('dialog', { name: i18n.t('start.where.title') });
     const off = within(list).getByRole('option', { name: blocked.environment.name });
     expect(off).toHaveAttribute('aria-disabled', 'true');
     expect(off).toHaveAccessibleDescription();

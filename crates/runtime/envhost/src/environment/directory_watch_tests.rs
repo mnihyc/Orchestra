@@ -55,6 +55,8 @@ impl Rig {
         let environment = new_id();
         host.env_attach(
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
@@ -307,16 +309,34 @@ async fn removing_one_logical_reader_keeps_another_native_directory_watch_live()
 async fn a_plain_observation_does_not_claim_live_activation_when_native_watching_is_unavailable()
 -> Proof {
     let rig = Rig::new().await?;
-    std::fs::write(rig.root.join("actual.txt"), b"actual")?;
     let environment = rig.host.environment(rig.environment)?;
     lock(&environment.watcher)
         .as_ref()
         .ok_or("watcher absent")?
         .stop();
+    std::fs::write(rig.root.join("actual.txt"), b"actual")?;
     let watch = new_id();
     let mut plain = rig.request(watch);
     plain.watch_id = None;
-    let observed = rig.host.fs_list(&plain).await?;
+    let host = EnvHost {
+        inner: Arc::clone(&rig.host.inner),
+    };
+    let (entered, reached) = oneshot::channel();
+    let (resume, blocked) = oneshot::channel();
+    let reading = tokio::spawn(BEFORE_SNAPSHOT.scope(
+        Mutex::new(Some(Boundary {
+            entered,
+            resume: blocked,
+        })),
+        async move { host.fs_list(&plain).await },
+    ));
+    tokio::time::timeout(PATIENCE, reached).await??;
+    // A late classification of watch loss cannot revoke a read that promised no native activation.
+    environment.admit_directory_change(&Change::Unavailable);
+    resume
+        .send(())
+        .map_err(|()| "the plain reader ended before its delivery resumed")?;
+    let observed = tokio::time::timeout(PATIENCE, reading).await???;
     assert_eq!(
         observed
             .entries
@@ -324,6 +344,14 @@ async fn a_plain_observation_does_not_claim_live_activation_when_native_watching
             .map(|row| row.name.as_str())
             .collect::<Vec<_>>(),
         ["actual.txt"]
+    );
+    assert!(observed.watch_instance.is_none());
+    assert!(
+        observed
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.watch.as_ref())
+            .is_some_and(|watch| !watch.native)
     );
     let metadata = observed
         .page

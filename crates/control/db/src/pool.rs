@@ -6,6 +6,7 @@
 //! taken, a missing row that is referred to, a broken rule of the schema,
 //! a transaction that lost a race and may be run again, and the rest.
 
+use orch_api_contract::common::DatabaseWaitPhase;
 use sqlx::ConnectOptions as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::cell::Cell;
@@ -14,6 +15,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{str::FromStr, time::Duration};
+use tracing::instrument::WithSubscriber as _;
 
 /// One connection, alone or inside a transaction.
 pub type Conn = sqlx::PgConnection;
@@ -110,6 +112,8 @@ struct Serving {
     route: &'static str,
     open: Cell<u32>,
     refused: Cell<bool>,
+    limits: Cell<Option<Limits>>,
+    limits_seen: Cell<bool>,
 }
 
 /// Runs a request's work so that the development guard can name it: a transaction of this task open
@@ -128,6 +132,8 @@ pub async fn serving_watched<T>(route: &'static str, work: impl Future<Output = 
                 route,
                 open: Cell::new(0),
                 refused: Cell::new(false),
+                limits: Cell::new(None),
+                limits_seen: Cell::new(false),
             },
             async move {
                 let out = work.await;
@@ -146,6 +152,50 @@ pub async fn serving_watched<T>(route: &'static str, work: impl Future<Output = 
 /// under moved (`orch_commit_work`'s `authz_epoch_moved`).
 fn note_refusal() {
     let _ = SERVING.try_with(|serving| serving.refused.set(true));
+}
+
+/// A mixed or unknown pool profile cannot certify the deadline of a later query error.
+fn note_limits(limits: Option<Limits>) {
+    let _ = SERVING.try_with(|serving| {
+        if !serving.limits_seen.replace(true) {
+            serving.limits.set(limits);
+        } else if serving.limits.get() != limits {
+            serving.limits.set(None);
+        }
+    });
+}
+
+fn captured_limit(phase: DatabaseWaitPhase) -> Option<Duration> {
+    let limits = SERVING
+        .try_with(|serving| serving.limits.get())
+        .ok()
+        .flatten()?;
+    let limit = match phase {
+        DatabaseWaitPhase::Acquire => return None,
+        DatabaseWaitPhase::Statement => limits.statement?,
+        DatabaseWaitPhase::IdleTransaction => limits.idle_in_transaction,
+    };
+    (!limit.is_zero()).then_some(limit)
+}
+
+/// PostgreSQL's cancellation SQLSTATE alone also describes manual cancellation.
+fn timeout_phase(error: &sqlx::Error) -> Option<DatabaseWaitPhase> {
+    if matches!(error, sqlx::Error::PoolTimedOut) {
+        return Some(DatabaseWaitPhase::Acquire);
+    }
+    let native = error
+        .as_database_error()?
+        .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()?;
+    if native.file() != Some("postgres.c") || native.routine() != Some("ProcessInterrupts") {
+        return None;
+    }
+    match native.code() {
+        "25P03" => Some(DatabaseWaitPhase::IdleTransaction),
+        "57014" if native.message() == "canceling statement due to statement timeout" => {
+            Some(DatabaseWaitPhase::Statement)
+        }
+        _ => None,
+    }
 }
 
 /// How many times the development guard reported a transaction held too long, and a pooled acquisition
@@ -269,8 +319,17 @@ impl Tx {
     /// Commits. The commit runs what the transaction left for it (`orch_commit_work`): a change
     /// of authority it decided under refuses it as [`DbError::Retry`].
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        let Self { inner, held } = self;
-        let done = inner.commit().await;
+        let Self { mut inner, held } = self;
+        let done = finish_boundary(async move {
+            // Run deferred checks while a rejected transaction still needs its
+            // rollback. A failed PostgreSQL COMMIT has already ended it, while
+            // SQLx would otherwise queue another rollback on the same session.
+            sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+                .execute(&mut *inner)
+                .await?;
+            inner.commit().await
+        })
+        .await;
         drop(held);
         done
     }
@@ -278,10 +337,35 @@ impl Tx {
     /// Rolls back.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         let Self { inner, held } = self;
-        let done = inner.rollback().await;
+        let done = finish_boundary(async move { inner.rollback().await }).await;
         drop(held);
         done
     }
+}
+
+/// Once BEGIN, COMMIT or ROLLBACK is sent, one task owns it through the
+/// server's answer. Cancelling its waiter cannot return a half-finished boundary
+/// to the pool. A BEGIN whose caller disappeared drops its completed transaction
+/// normally; a COMMIT already begun finishes even if the HTTP request goes away.
+async fn finish_boundary<T: Send + 'static>(
+    work: impl Future<Output = Result<T, sqlx::Error>> + Send + 'static,
+) -> Result<T, sqlx::Error> {
+    tokio::spawn(work.with_current_subscriber())
+        .await
+        .map_err(|error| sqlx::Error::Io(std::io::Error::other(error)))?
+}
+
+/// A timeout's facts remain in the source chain when an engine error wraps it transparently.
+#[derive(Debug, thiserror::Error)]
+#[error("a native database deadline expired in {phase:?}")]
+pub struct DatabaseTimeout {
+    /// The native phase that expired.
+    pub phase: DatabaseWaitPhase,
+    /// The original applied limit, if that profile was known.
+    pub applied_limit: Option<Duration>,
+    /// The original cause remains available to the service's diagnostics only.
+    #[source]
+    pub source: sqlx::Error,
 }
 
 /// What went wrong in the database, by what a caller can do about it.
@@ -317,6 +401,13 @@ pub enum DbError {
     /// The transaction lost a race with another and can be run again.
     #[error("the transaction lost a race and can be run again")]
     Retry,
+    /// A known native deadline, captured before later work can replace the pool profile.
+    #[error("{source}")]
+    Timeout {
+        /// The original native cause and the facts captured with it.
+        #[source]
+        source: DatabaseTimeout,
+    },
     /// Anything else.
     #[error(transparent)]
     Other(sqlx::Error),
@@ -324,6 +415,15 @@ pub enum DbError {
 
 impl From<sqlx::Error> for DbError {
     fn from(error: sqlx::Error) -> Self {
+        if let Some(phase) = timeout_phase(&error) {
+            return Self::Timeout {
+                source: DatabaseTimeout {
+                    phase,
+                    applied_limit: captured_limit(phase),
+                    source: error,
+                },
+            };
+        }
         let Some(database) = error.as_database_error() else {
             return Self::Other(error);
         };
@@ -371,6 +471,7 @@ impl DbError {
 #[derive(Debug, Clone)]
 pub struct Db {
     pool: sqlx::PgPool,
+    configured_limits: Option<Limits>,
 }
 
 impl Db {
@@ -434,7 +535,10 @@ impl Db {
         metrics::gauge!(metrics_names::MAX).set(f64::from(connections));
         metrics::counter!(metrics_names::ACQUIRE_OVER_BAR).increment(0);
         metrics::counter!(metrics_names::HELD_OVER_GUARD).increment(0);
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            configured_limits: Some(limits),
+        })
     }
 
     /// Notes that a caller asks for a connection, before it waits for one: a pool whose connections are all
@@ -468,7 +572,10 @@ impl Db {
     /// The database behind an existing pool.
     #[must_use]
     pub fn from_pool(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            configured_limits: None,
+        }
     }
 
     /// The pool, for the few things that need it as such (a listener).
@@ -479,10 +586,15 @@ impl Db {
 
     /// A connection for statements that need no transaction.
     pub async fn acquire(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, DbError> {
+        note_limits(self.configured_limits);
         check_nested("acquire");
         self.asking("acquire");
         let asked = Instant::now();
-        let conn = self.pool.acquire().await?;
+        let conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| self.failure(error))?;
         self.measure(asked.elapsed());
         Ok(conn)
     }
@@ -498,10 +610,14 @@ impl Db {
     }
 
     async fn begin_with_snapshot(&self, snapshot: bool) -> Result<Tx, DbError> {
+        note_limits(self.configured_limits);
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let inner = finish_boundary(async move { pool.begin().await })
+            .await
+            .map_err(|error| self.failure(error))?;
         self.measure(asked.elapsed());
         let mut tx = Tx {
             inner,
@@ -521,10 +637,14 @@ impl Db {
     /// PostgreSQL takes one only before any query, so it comes before what the request's lock class
     /// runs when a transaction begins (a write's request reads its answer after its commit).
     pub(crate) async fn begin_isolated(&self, isolation: &'static str) -> Result<Tx, DbError> {
+        note_limits(self.configured_limits);
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let mut inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let mut inner = finish_boundary(async move { pool.begin().await })
+            .await
+            .map_err(|error| self.failure(error))?;
         self.measure(asked.elapsed());
         sqlx::query(isolation).execute(&mut *inner).await?;
         let mut tx = Tx {
@@ -533,6 +653,24 @@ impl Db {
         };
         crate::queries::transaction_guard::begin_scope(&mut tx).await?;
         Ok(tx)
+    }
+
+    /// Keeps an entry-point failure tied to the pool whose deadline actually expired.
+    fn failure(&self, error: sqlx::Error) -> DbError {
+        let mut error = DbError::from(error);
+        if let DbError::Timeout { source: timeout } = &mut error {
+            timeout.applied_limit = match timeout.phase {
+                DatabaseWaitPhase::Acquire => Some(self.pool.options().get_acquire_timeout()),
+                DatabaseWaitPhase::Statement => {
+                    self.configured_limits.and_then(|limits| limits.statement)
+                }
+                DatabaseWaitPhase::IdleTransaction => self
+                    .configured_limits
+                    .map(|limits| limits.idle_in_transaction),
+            }
+            .filter(|limit| !limit.is_zero());
+        }
+        error
     }
 
     /// Whether the database answers.

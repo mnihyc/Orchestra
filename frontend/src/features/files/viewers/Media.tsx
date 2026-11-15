@@ -3,6 +3,7 @@
  * The browser's own player, given the file from the page's memory once it has been read with the
  * person's credentials. A file too large to be held in the page is offered for download instead.
  */
+import { PreviewRefusal } from '../FileFacts';
 import { useState } from 'react';
 
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -20,7 +21,7 @@ export default function MediaViewer({ door, path, head }: ViewerProps) {
   const { bytes, error, loading } = useFileBytes(door, path, tooBig || preview.data === undefined ? undefined : head.brought);
   const type = head.stat.media_type.startsWith('audio/') || head.stat.media_type.startsWith('video/') ? head.stat.media_type : 'video/mp4';
   const url = useObjectUrl(bytes, type);
-  if (tooBig) return <FileState state="too_large" />;
+  if (tooBig) return <PreviewRefusal allowance={preview.data?.viewer_allowance} />;
   if (preview.isError) return <FileState state={fileFailure(preview.error)} />;
   if (head.brought.state === 'unavailable') return <FileState state={head.brought.reason === 'not_found' ? 'gone' : 'unavailable'} />;
   if (failed !== null && failed === url) return <FileState state="unavailable" />;
