@@ -42,6 +42,8 @@ pub(super) fn offset(cursor: Option<&str>) -> ApiResult<Option<i64>> {
 
 /// The scope and remaining position of the list's private phase.
 pub(super) struct PrivateList {
+    /// The same visible-title search as the readable phase.
+    pub q: Option<String>,
     /// The place requested.
     pub node: Id,
     /// Whether its descendants are included.
@@ -69,9 +71,15 @@ pub(super) async fn select(
     let mut more = false;
     let mut hidden = Vec::new();
     for _ in 0..super::LIST_ROUNDS_MAX {
-        let found =
-            rows::names_beside(conn, request.node, request.under, offset, request.limit + 1)
-                .await?;
+        let found = rows::names_beside(
+            conn,
+            request.node,
+            request.under,
+            request.q.as_deref().unwrap_or(""),
+            offset,
+            request.limit + 1,
+        )
+        .await?;
         exhausted = i64::try_from(found.len()).unwrap_or(i64::MAX) <= request.limit;
         let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
         let allowed = reader.accept(conn, &ids).await?;

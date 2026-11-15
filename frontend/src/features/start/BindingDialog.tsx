@@ -1,16 +1,11 @@
 import { BindingPickerScope } from '@/features/resources/PickerContext';
-import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Four ordinary choices; optional setup stays under Options. The native answer still decides every permission and value. */
 import { useQuery } from '@tanstack/react-query';
-import { PlugZap } from 'lucide-react';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
-import { choiceOption, offeredChoice } from '@/i18n/choices';
 
 import { machinesQuery, providersQuery } from '@/api/resources';
-import { ResourceHint, resourcePreview, resourceChoice } from '@/features/resource-facts/ResourceFacts';
-import { useHarnessTitle } from '@/features/resources/harnesses';
 import { ResourceCreationActions } from '@/features/resources/ResourceCreation';
 import { providerPickerLabels } from '@/features/resources/providers/labels';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
@@ -26,13 +21,13 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { PromptScope, usePrompt } from '@/ui/PromptScope';
-import { Select } from '@/ui/Select';
 import { Textarea } from '@/ui/Textarea';
 
 import { ArrangementSection } from './Arrangement';
 import { ChoiceOriginMark } from './ChoiceOrigin';
 import { useViewerDefault } from './viewerDefault';
-import { type Mode, modelName, NEW_ENVIRONMENT, NO_PICKS, type Picks } from './choices';
+import { type Mode, NEW_ENVIRONMENT, NO_PICKS, type Picks } from './choices';
+import { StartAgentChoice, StartModelChoice } from './ModelChoice';
 import { useStartOptions } from './options';
 import { useStart } from './start';
 import { DirectorySign } from './DirectorySign';
@@ -41,8 +36,7 @@ import { CreationAgentAccess } from './AgentAccess';
 import { useOfferedAgentAccess } from './agentAccessOffer';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
 import type { AgentAccessChoice, BindingEnvironment, CreateThread, CreateThreadProgram } from '@/generated/api-types';
-import { agentWhy, bindingReason, providerWhy, reasonWords } from './words';
-import { agentProgramPreview } from './ProgramReport';
+import { bindingReason } from './words';
 import { ProgramThread } from './ProgramThread';
 
 /** What the person typed and chose in the inline starter, which the dialog opens with. */
@@ -93,7 +87,6 @@ function ThreadSetup(props: NewThreadDialogProps) {
 function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }: NewThreadDialogProps & { onProgram: (draft: StartDraft) => void }) {
   const { t } = useTranslation();
   const optionsId = useId();
-  const harnessTitle = useHarnessTitle(open);
   const [picks, setPicks] = useState<Picks>(draft?.picks ?? { ...NO_PICKS, provider: prepare?.initial?.binding?.provider_id ?? null, agent: prepare?.initial?.binding?.agent_id ?? null, model: prepare?.initial?.model ?? null, effort: prepare?.initial?.effort ?? null, arrangement: prepare?.initial?.binding?.arrangement ?? null, environment: prepare?.initial?.environment !== undefined && prepare.initial.environment !== null && 'use' in prepare.initial.environment ? prepare.initial.environment.use : null });
   const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
   const [access, setAccess] = useState<NewPagePreset>(draft?.generalAccess ?? 'defaults');
@@ -103,6 +96,8 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
   const [temporary, setTemporary] = useState(false);
   const [message, setMessage] = useState(draft?.message ?? '');
   const [advanced, setAdvanced] = useState(false);
+  // The line that says where a choice of model changed the agent.
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
   const making = parent.kind !== 'topic';
   const simpleAudience = access === 'defaults' || access === 'private';
   const catalogue = useQuery({ ...permissionsQuery, enabled: open && !simpleAudience });
@@ -122,7 +117,6 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
   const places = useKnownPlaces({ trees: false });
   const machines = useQuery({ ...machinesQuery, enabled: open && extraOpen });
   const place = useQuery({ ...nodeQuery(parent.id), enabled: open });
-  const known = new Map((providers.data ?? []).map((provider) => [provider.id, provider]));
   const providerNames=providerPickerLabels(resolved?.providers.map((row)=>row.entry.provider) ?? [],providers.data ?? [],places);
 
   const make = useStart(() => onClose());
@@ -186,10 +180,8 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
   const whereValue = resolved === null ? null : resolved.fresh ? NEW_ENVIRONMENT : (resolved.environment?.environment.id ?? picks.environment);
   const defaultDirectory = resolved?.environment?.directory ?? null;
   const optionsSummary = [
-    (resolved?.effort === null || resolved?.effort === undefined) ? null : t('startImplicit.effort', { value: offeredChoice(t, 'effort', resolved.effort)?.name ?? t('changeCompact.otherEffort') }),
     (resolved?.arrangement === null || resolved?.arrangement === undefined) ? null : t(`choiceCatalog.arrangement.${resolved.arrangement}.name`),
     directory.trim() === '' ? defaultDirectory === '' ? null : defaultDirectory : directory.trim(),
-    name.trim() === '' ? null : t('startImplicit.name', { value: name.trim() }),
     message.trim() === '' ? null : t('startImplicit.message', { value: message.trim() }),
   ].filter((value): value is string => value !== null).join(t('startFlow.separator'));
   const footerReason = make.pending && make.step !== null ? t(`start.making.${make.step}`) : !loading && (options === null || resolved === null) ? null : why;
@@ -215,6 +207,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
       }
     >
       <div className="flex flex-col gap-4 py-2 outline-none" data-new-thread data-autofocus tabIndex={-1}>
+        <Input label={t('start.options.name')} optional placeholder={t('start.options.nameDefault')} value={name} disabled={make.pending} onChange={(event) => setName(event.target.value)} autoComplete="off" />
         {parent.kind === 'topic' && <Button size="sm" variant="ghost" className="self-start" disabled={make.pending}
           onClick={() => onProgram({ ...draft, picks, message, name, generalAccess: access })}>{t('ask.startProgram')}</Button>}
         {options === null || resolved === null ? (
@@ -225,91 +218,38 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
           )
         ) : (
           <>
-            <Step title={t('start.provider.title')} mark={<ChoiceOriginMark origin={resolved.origins.provider} />}>
-              {resolved.providers.length === 0 ? (
-                <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>
+            {resolved.providers.length === 0 && <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>}
+            {options.defaults.locked && <p className="text-sm text-text-muted">{t('start.provider.locked')}</p>}
+
+            {(resolved.providers.every((row) => !row.choosable) || resolved.agents.every((row) => !row.startable)) && <ResourceCreationActions onReadChoices={retry} />}
+            <Step title={t('start.model.model')} mark={<ChoiceOriginMark origin={resolved.origins.model} />}>
+              {resolved.provider !== null && resolved.models.length === 0 ? (
+                <InlineAlert tone="warning">{t('start.model.none')}</InlineAlert>
               ) : (
-                <ResourcePicker pickerKey="start.BindingDialog.start.provider.title"
-                  label={t('start.provider.title')}
-                  hideLabel
-                  value={resolved.provider?.id ?? ''}
-                  disabled={options.defaults.locked}
-                  onValueChange={(next) => pick({ provider: next, agent: null, model: null, effort: null, arrangement: null })}
-                  options={resolved.providers
-                    .map((row) => {
-                      const full = known.get(row.id);
-                      const ref = row.entry.provider;
-                      return {
-                        value: row.id,
-                        preview: resourcePreview({ kind: 'provider', provider: full ?? ref }),
-                        disabled: !row.choosable,
-                        label: (
-                          <span className="flex flex-wrap items-center gap-2">
-                            <PlugZap aria-hidden />
-                            {providerNames.get(ref.id) ?? ref.name}
-                          </span>
-                        ),
-                        description: (
-                          <span className="flex flex-wrap gap-x-3 gap-y-1">
-                            <ResourceHint subject={{ kind: 'provider', provider: full ?? ref }} />
-                            {!row.choosable && <span>{providerWhy(row, full?.owner.display_name ?? null, t)}</span>}
-                          </span>
-                        ),
-                      };
-                    })}
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <StartModelChoice options={options} resolved={resolved} names={providerNames} onPick={(patch, notice) => { setAgentNotice(notice); pick(patch); }} />
+                  <ChoiceOriginMark origin={resolved.origins.effort} />
+                </div>
               )}
-              {options.defaults.locked && <p className="text-sm text-text-muted">{t('start.provider.locked')}</p>}
             </Step>
 
             <Step title={t('start.agent.title')} mark={<ChoiceOriginMark origin={resolved.origins.agent} />}>
               {resolved.agents.length === 0 ? (
                 <EmptyState compact title={t('start.agent.none')} />
               ) : (
-                <ResourcePicker pickerKey="start.BindingDialog.start.agent.title"
-                  label={t('start.agent.title')}
-                  hideLabel
-                  value={resolved.agent?.id ?? ''}
-                  onValueChange={(next) => pick({ agent: next, arrangement: null })}
-                  options={resolved.agents.map((row) => ({
-                    value: row.id,
-                    label: row.entry.agent.name,
-                    preview: row.entry.program_report?.status === 'error' ? agentProgramPreview(row.entry, resolved.provider?.entry.provider ?? null)
-                      : resourcePreview({ kind: 'agent', agent: row.entry.agent, provider: known.get(resolved.provider?.id ?? ''), models: resolved.models }),
-                    description: row.startable ? harnessTitle(row.entry.agent.harness_kind) : agentWhy(row, t),
-                    disabled: !row.startable,
-                  }))}
-                />
-              )}
-            </Step>
-
-            {(resolved.providers.every((row) => !row.choosable) || resolved.agents.every((row) => !row.startable)) && <ResourceCreationActions onReadChoices={retry} />}
-            <Step title={t('start.model.model')} mark={<ChoiceOriginMark origin={resolved.origins.model} />}>
-              {resolved.provider === null ? (
-                <p className="text-sm text-text-muted">{t('start.model.pickProvider')}</p>
-              ) : resolved.models.length === 0 ? (
-                <InlineAlert tone="warning">{t('start.model.none')}</InlineAlert>
-              ) : (
-                <div className="flex flex-wrap items-start gap-3">
-                  <Select
-                    label={t('start.model.model')}
-                    hideLabel
-                    value={resolved.model?.model_name ?? ''}
-                    onValueChange={(next) => pick({ model: next, effort: null })}
-                    options={[
-                      ...resolved.models.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '', usage: known.get(resolved.provider?.id ?? '')?.choice_usage }) })),
-                      // What the provider lists and the person may not use is shown, off, with why.
-                      ...resolved.closedModels.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '', usage: known.get(resolved.provider?.id ?? '')?.choice_usage }), description: model.reason === null ? t('start.model.closed') : reasonWords(model.reason), disabled: true })),
-                    ]}
-                    fieldClassName="min-w-(--field-wide) flex-1"
-                  />
+                <div className="flex flex-col gap-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StartAgentChoice options={options} resolved={resolved} names={providerNames} onPick={(agent) => { setAgentNotice(null); pick({ agent, arrangement: null }); }} />
+                  </div>
+                  {agentNotice !== null && <p role="status" className="text-sm text-text-muted" data-agent-notice>{agentNotice}</p>}
                 </div>
               )}
             </Step>
 
             <Step title={t('start.where.title')} mark={<ChoiceOriginMark origin={resolved.origins.environment} />}>
               <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
-                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })} />
+                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })}
+                note={resolved.environmentNote} agentHere={resolved.agentHere} />
               {requesting === null && resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
             </Step>
           </>
@@ -329,7 +269,6 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
         </div>
         {extraOpen && <div id={optionsId} role="region" aria-label={t('start.options.title')} className="flex flex-col gap-3">
           {resolved !== null && options !== null && <>
-              {resolved.efforts.length > 0 && <Select label={t('start.model.effort')} aside={<ChoiceOriginMark origin={resolved.origins.effort} />} value={resolved.effort ?? ''} onValueChange={(next) => pick({ effort: next })} options={resolved.efforts.map((value) => ({ value, ...(offeredChoice(t, 'effort', value) ?? choiceOption(t, 'dynamic.value', { name: value, context: t('start.model.effort') })) }))} />}
               <WhereOptions place={parent} options={options} value={whereValue} onChange={(next) => { setRequesting(null); pick({ environment: next, arrangement: null }); }} machines={machines.data ?? []} machinesLoading={machines.isPending} homeId={place.data?.org_id ?? ''} />
               <div className="flex min-w-0 flex-col gap-1"><Input
                 label={t('start.where.directory')}
@@ -345,7 +284,6 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
               {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(type) => pick({ arrangement: type })} />}
 
           </>}
-          <Input label={t('start.options.name')} optional hint={t('start.options.nameHint')} value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
           {prepare === undefined && <Textarea label={t('start.message.title')} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} />}
         </div>}
 

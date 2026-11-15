@@ -92,7 +92,7 @@ use orch_api_contract::nodes::SharedList;
 
 use orch_api_contract::nodes::SharedListItem;
 
-use orch_api_contract::nodes::SharedListReply;
+use orch_api_contract::nodes::{SharedListKind, SharedListQuery, SharedListReply};
 
 use orch_api_contract::nodes::TREE_SYNC_MAX_CHANGES;
 
@@ -631,7 +631,9 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
 }
 
 /// Stable descending tie order: hierarchy node, document folder, text document.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub(super) enum SharedKind {
     Document,
     Folder,
@@ -649,46 +651,71 @@ impl SharedKind {
 }
 
 /// One scanned identity in the merged creation-time order; no hidden name is retained here.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct SharedCandidate {
     pub(super) id: Id,
     pub(super) at: chrono::DateTime<chrono::Utc>,
     pub(super) kind: SharedKind,
 }
 
-pub(super) fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
-    let bad = || invalid("cursor", "is not a cursor of your shared places");
-    let parts: Vec<&str> = text.split('|').collect();
-    if !matches!(parts.len(), 3 | 4) || parts[0] != user.to_string() {
-        return Err(bad());
-    }
-    let at = parts[1]
-        .parse::<i64>()
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_micros)
-        .ok_or_else(bad)?;
-    // Existing node-only cursors remain valid. New cursors distinguish exact cross-kind ties.
-    let (kind, id) = if parts.len() == 3 {
-        (SharedKind::Node, parts[2])
-    } else {
-        (
-            match parts[2] {
-                "node" => SharedKind::Node,
-                "document_container" => SharedKind::Folder,
-                "document" => SharedKind::Document,
-                _ => return Err(bad()),
-            },
-            parts[3],
-        )
-    };
-    Ok(SharedCandidate {
-        id: id.parse().map_err(|_| bad())?,
-        at,
-        kind,
-    })
+pub(super) fn shared_cursor(
+    query: &SharedListQuery,
+    user: Id,
+) -> ApiResult<Option<SharedCandidate>> {
+    crate::collection::after(
+        &query.collection(),
+        &format!("shared:{user}:{:?}", query.kind),
+    )
 }
 
-async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply> {
+fn shared_name<K>(
+    base: &orch_api_contract::nodes::NodeBase<K>,
+) -> (&str, &str, &[orch_api_contract::nodes::NodeRef]) {
+    (&base.name, &base.description, &base.path)
+}
+
+pub(super) fn shared_matches(item: &SharedListItem, query: &SharedListQuery) -> bool {
+    let (kind, (name, description, path)) = match item {
+        SharedListItem::Node(node) => match node.as_ref() {
+            orch_api_contract::nodes::Node::Org(row) => {
+                (SharedListKind::Org, shared_name(&row.base))
+            }
+            orch_api_contract::nodes::Node::Project(row) => {
+                (SharedListKind::Project, shared_name(&row.base))
+            }
+            orch_api_contract::nodes::Node::Topic(row) => {
+                (SharedListKind::Topic, shared_name(&row.base))
+            }
+            orch_api_contract::nodes::Node::Thread(row) => {
+                (SharedListKind::Thread, shared_name(&row.base))
+            }
+        },
+        SharedListItem::Document { document, path, .. } => (
+            SharedListKind::Document,
+            (document.title.as_str(), "", path.as_slice()),
+        ),
+        SharedListItem::DocumentContainer { folder, path, .. } => (
+            SharedListKind::DocumentContainer,
+            (folder.name.as_deref().unwrap_or(""), "", path.as_slice()),
+        ),
+    };
+    if query.kind.is_some_and(|wanted| wanted != kind) {
+        return false;
+    }
+    if query.q.as_deref().is_none_or(|q| q.trim().is_empty()) {
+        return true;
+    }
+    let visible_path = path
+        .iter()
+        .filter(|part| !part.redacted)
+        .filter_map(|part| part.name.as_deref())
+        .collect::<Vec<_>>()
+        .join(" ");
+    orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""))
+        .matches(&format!("{name} {description} {visible_path}"))
+}
+
+async fn shared(ctx: Ctx, query: SharedListQuery, (): ()) -> ApiResult<SharedListReply> {
     super::shared_operation::read(ctx, query).await
 }
 
@@ -817,25 +844,55 @@ pub(super) async fn shared_in(
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
     now: chrono::DateTime<chrono::Utc>,
-    query: &PageQuery,
+    query: &SharedListQuery,
 ) -> ApiResult<SharedListReply> {
-    let before = query
-        .cursor
-        .as_deref()
-        .map(|cursor| shared_cursor(cursor, principal.user()))
-        .transpose()?;
+    let mut before = shared_cursor(query, principal.user())?;
     let limit = query.limit();
-    let mut candidates = shared_candidates(conn, principal, now, before, limit).await?;
-    let partial = candidates.len() > usize::try_from(limit).unwrap_or(0);
-    candidates.truncate(usize::try_from(limit).unwrap_or(0));
+    let wanted = usize::try_from(limit).map_err(ApiError::internal)?;
+    let mut selected = Vec::new();
+    let mut shown = HashMap::new();
+    loop {
+        let mut candidates = shared_candidates(conn, principal, now, before, limit).await?;
+        candidates.truncate(wanted + 1);
+        let Some(last) = candidates.last().copied() else {
+            break;
+        };
+        before = Some(last);
+        let items = shared_items(conn, principal, now, &candidates, None).await?;
+        let keyed = |item: &SharedListItem| match item {
+            SharedListItem::Node(node) => (SharedKind::Node, super::node_id(node)),
+            SharedListItem::Document { document, .. } => (SharedKind::Document, document.id),
+            SharedListItem::DocumentContainer { folder, .. } => (SharedKind::Folder, folder.id),
+        };
+        shown.extend(
+            items
+                .into_iter()
+                .filter(|item| shared_matches(item, query))
+                .map(|item| (keyed(&item), item)),
+        );
+        selected.extend(
+            candidates
+                .into_iter()
+                .filter(|row| !query.filtered() || shown.contains_key(&(row.kind, row.id))),
+        );
+        if selected.len() > wanted || !query.filtered() {
+            break;
+        }
+    }
+    let partial = selected.len() > wanted;
+    selected.truncate(wanted);
     let next_cursor = if partial {
-        candidates
+        selected
             .last()
-            .map(|last| shared_cursor_text(principal.user(), *last))
+            .map(|last| shared_cursor_text(principal.user(), *last, query))
+            .transpose()?
     } else {
         None
     };
-    let items = shared_items(conn, principal, now, &candidates, None).await?;
+    let items = selected
+        .into_iter()
+        .filter_map(|row| shown.remove(&(row.kind, row.id)))
+        .collect();
     Ok(SharedListReply {
         partial,
         next_cursor,
@@ -843,13 +900,15 @@ pub(super) async fn shared_in(
     })
 }
 
-pub(super) fn shared_cursor_text(user: Id, last: SharedCandidate) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        user,
-        last.at.timestamp_micros(),
-        last.kind.name(),
-        last.id
+pub(super) fn shared_cursor_text(
+    user: Id,
+    last: SharedCandidate,
+    query: &SharedListQuery,
+) -> ApiResult<String> {
+    crate::collection::cursor(
+        &query.collection(),
+        &format!("shared:{user}:{:?}", query.kind),
+        last,
     )
 }
 

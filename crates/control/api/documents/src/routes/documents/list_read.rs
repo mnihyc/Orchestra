@@ -396,6 +396,7 @@ pub(super) async fn select_for(
             let found = rows::list_beside(
                 conn,
                 &ListWhere {
+                    q: query.q.clone(),
                     node,
                     under: query.under.unwrap_or(false),
                     deleted: want_deleted,
@@ -486,6 +487,7 @@ pub(super) async fn select_for(
                 conn,
                 &mut reader,
                 listing::PrivateList {
+                    q: query.q.clone(),
                     node,
                     under: query.under.unwrap_or(false),
                     limit,
@@ -505,6 +507,7 @@ pub(super) async fn select_for(
                 conn,
                 &mut reader,
                 listing::PrivateList {
+                    q: query.q.clone(),
                     node,
                     under: query.under.unwrap_or(false),
                     limit,

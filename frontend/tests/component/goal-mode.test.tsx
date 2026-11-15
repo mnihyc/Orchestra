@@ -35,7 +35,7 @@ function goalOf(patch: Partial<ThreadGoal>): ThreadGoal {
 
 function threadOf(goal: ThreadGoal | null, permissions = ['thread.view', 'thread.interact']): Thread {
   return { id: 'thread-goal', name: 'Fix the tests', archived: false, side_of: null, state: 'idle', goal,
-    access: { permissions }, binding: { agent: { name: 'Scripted agent' }, plan_mode: false } } as unknown as Thread;
+    access: { permissions }, binding: { agent: { id: 'agent', name: 'Scripted agent' }, provider: { id: 'provider', name: 'Team subscription' }, plan_mode: false } } as unknown as Thread;
 }
 
 beforeEach(() => { vi.clearAllMocks(); goals.updateGoal.mockResolvedValue(base); goals.clearGoal.mockResolvedValue(base); goals.setGoal.mockResolvedValue(base); });

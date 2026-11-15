@@ -7,6 +7,8 @@
 //! A plugin is listed from the configuration that names it, and from what each machine reports of
 //! the plugins it loaded.
 
+use orch_api_contract::common::{CollectionQuery, Page as CollectionPage};
+
 use super::SECONDS_PER_DAY;
 
 use super::admin_of;
@@ -290,8 +292,16 @@ fn storages_of(value: &Json) -> Vec<HostStorage> {
 }
 
 /// Every host of the system, as the Admin of all of them reads them.
-async fn hosts(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Host>> {
-    native::selected_read::<Hosts>(ctx, (), ()).await
+async fn hosts(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<CollectionPage<Host>> {
+    let rows = native::selected_read::<Hosts>(ctx, query.clone(), ()).await?;
+    orch_api_base::collection::snapshot(
+        &query,
+        "admin-hosts",
+        rows,
+        |row| (row.base.name.clone(), row.base.id),
+        |row| format!("{} {}", row.base.name, row.machine.name),
+        false,
+    )
 }
 
 struct Hosts;
@@ -306,7 +316,7 @@ struct PreparedHosts {
 
 impl native::Selected for Hosts {
     type Source = Source;
-    type Query = ();
+    type Query = CollectionQuery;
     type Value = PreparedHosts;
     type Reply = Vec<Host>;
     const DECLARATION: &'static Declaration<Source> = &sources::HOSTS;
@@ -314,7 +324,7 @@ impl native::Selected for Hosts {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a (),
+        _query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(PreparedHosts, Vec<native::Facts<Source>>)>> {
         Box::pin(prepare_hosts(ctx, conn, caller))
     }
@@ -337,7 +347,7 @@ impl native::Selected for Hosts {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a (),
+        _query: &'a CollectionQuery,
         old: &'a PreparedHosts,
         fresh: &'a PreparedHosts,
     ) -> BoxFuture<'a, ApiResult<bool>> {
@@ -607,8 +617,34 @@ async fn host_views(
 // ---- runtimes ----
 
 /// The runtimes of both pools, whoever's they are.
-async fn runtimes(ctx: Ctx, query: AdminRuntimeListQuery, (): ()) -> ApiResult<Vec<Runtime>> {
-    native::selected_read::<Runtimes>(ctx, query, ()).await
+async fn runtimes(
+    ctx: Ctx,
+    query: AdminRuntimeListQuery,
+    (): (),
+) -> ApiResult<CollectionPage<Runtime>> {
+    let source = format!("admin-runtimes:{:?}:{:?}", query.host_id, query.kind);
+    let page = query.collection();
+    let rows = native::selected_read::<Runtimes>(ctx, query, ()).await?;
+    orch_api_base::collection::snapshot(
+        &page,
+        &source,
+        rows,
+        |row| row.id,
+        |row| {
+            format!(
+                "{} {} {} {}",
+                row.unit_name,
+                row.template.name,
+                row.environment
+                    .as_ref()
+                    .map_or("", |value| value.name.as_str()),
+                row.provider
+                    .as_ref()
+                    .map_or("", |value| value.name.as_str())
+            )
+        },
+        false,
+    )
 }
 
 struct Runtimes;
@@ -1001,7 +1037,11 @@ fn plugin_state(word: &str) -> PluginState {
 }
 
 /// The plugins named in the configuration of this process, and the ones every machine reports.
-async fn plugins(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<AdminPlugin>> {
+async fn plugins(
+    ctx: Ctx,
+    query: CollectionQuery,
+    (): (),
+) -> ApiResult<CollectionPage<AdminPlugin>> {
     admin_of(&ctx)?;
     let mut found: Vec<AdminPlugin> = ctx
         .app
@@ -1040,7 +1080,29 @@ async fn plugins(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<AdminPlugin>> {
             });
         }
     }
-    Ok(found)
+    orch_api_base::collection::snapshot(
+        &query,
+        "admin-plugins",
+        found,
+        |row| {
+            (
+                row.component.clone(),
+                row.machine.as_ref().map(|value| value.id),
+                row.kind.clone(),
+                row.name.clone(),
+            )
+        },
+        |row| {
+            format!(
+                "{} {} {} {}",
+                row.component,
+                row.kind,
+                row.name,
+                row.machine.as_ref().map_or("", |value| value.name.as_str())
+            )
+        },
+        false,
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
