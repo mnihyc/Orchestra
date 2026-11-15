@@ -421,6 +421,7 @@ async fn a_reported_program_failure_is_not_an_unreported_harness() {
         s.on.agent,
         s.rig.machine_id,
         &orch_db::queries::resources::thread_engine::HarnessReport {
+            home: None,
             status: "error",
             detail: Some("The selected executable was not found."),
             version: None,

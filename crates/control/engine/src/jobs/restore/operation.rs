@@ -717,6 +717,7 @@ impl RestoreCommand {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -1252,6 +1253,7 @@ fn body_matches(
                     environment_id: plan.environment,
                     snapshot_id: expected.undo_snapshot_id,
                     directory: directory.clone(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Restore,
                     record_days: *record_days,
                     max_bytes: *max_bytes,

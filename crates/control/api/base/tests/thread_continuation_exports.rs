@@ -466,7 +466,7 @@ async fn archive_preflight_and_shared_turn_bounds_count_the_selected_frozen_payl
             .await?;
         let mut conn = scene.rig.world.conn().await;
         store
-            .register(&mut conn, meta, scene.rig.world.now())
+            .register(&mut conn, &meta, scene.rig.world.now())
             .await?;
         files.push(
             json!({"type":"file","path":format!(".orch/uploads/{}.bin",files.len()),

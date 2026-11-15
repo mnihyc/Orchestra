@@ -6,8 +6,9 @@ import { ApiError, ReceiptAcknowledged, invitationIssuerAuthorityLost } from '@/
 import type { TranslationKey } from '@/i18n';
 import { apiErrorSentence, hasErrorSentence } from '@/i18n/errors';
 import { useAppearance } from '@/lib/appearance';
-import { NetworkError } from '@/lib/requests';
-import { formatTimeOfDay } from '@/lib/time';
+import { NetworkError, networkFailureDetails } from '@/lib/requests';
+import { formatSpan, formatTimeOfDay } from '@/lib/time';
+import { formatBytes, formatNumber } from '@/lib/format';
 import nativeAliases from '@/i18n/error-aliases.json';
 
 export interface ErrorText {
@@ -36,6 +37,41 @@ function sentence(code: string, t: TFunction, locale: string): string | null {
   return hasErrorSentence(key,locale) ? t(key as TranslationKey) : null;
 }
 
+/** The sentence of a reason an answer names by a word (`reason`), with the work (`work`) and the step (`step`) it names; `null` when the catalogue has no sentence for the word. */
+function reasonSentence(error: ApiError, t: TFunction, locale: string): string | null {
+  const { reason, work, step } = error.problem;
+  if (typeof reason !== 'string' || !hasErrorSentence(`errors.reason.${reason}`, locale)) return null;
+  const doing = typeof work === 'string' && hasErrorSentence(`errors.reasonWork.${work}`, locale) ? t(`errors.reasonWork.${work}` as TranslationKey) : '';
+  const phases = work === 'remove' ? 'providers.runtime.removalPhase' : 'providers.runtime.phase';
+  const where = typeof step !== 'string' ? '' : hasErrorSentence(`${phases}.${step}`, locale) ? t(`${phases}.${step}` as TranslationKey) : step;
+  return t(`errors.reason.${reason}` as TranslationKey, { work: doing, step: where });
+}
+
+/** What a refused Ask says: the API names the reason it refused for, and the catalogue gives its sentence in the reader's language. */
+function refusalSentence(error: ApiError, t: TFunction, locale: string): string | null {
+  const reason = error.problem.reason;
+  if (error.status !== 403 || typeof reason !== 'string') return null;
+  const key = `errors.ask.${reason}`;
+  return hasErrorSentence(key, locale) ? t(key as TranslationKey) : null;
+}
+
+/** Captured upstream rules use the same failure line, with the actual amount rather than a UI default. */
+function upstreamSentence(details: unknown, t: TFunction, context: {locale:string;timeZone?:string|undefined}): string | null {
+  if (typeof details !== 'object' || details === null || !('upstream' in details)) return null;
+  const fact = details.upstream;
+  if (typeof fact !== 'object' || fact === null || !('rule' in fact)) return null;
+  if (fact.rule === 'whole-reply-size' && 'bytes' in fact && typeof fact.bytes === 'number' && Number.isFinite(fact.bytes) && fact.bytes > 0) return t('ui.error.upstreamSize', {size:formatBytes(fact.bytes,context.locale)});
+  if (!('seconds' in fact) || typeof fact.seconds !== 'number' || !Number.isFinite(fact.seconds) || fact.seconds <= 0) return null;
+  const time = formatSpan(fact.seconds * 1000,context);
+  switch (fact.rule) {
+    case 'response-header': return t('ui.error.upstreamHeader',{time});
+    case 'whole-reply': return t('ui.error.upstreamWhole',{time});
+    case 'silence': return t('ui.error.upstreamSilence',{time});
+    case 'connection': return t('ui.error.upstreamConnection',{time});
+    default: return null;
+  }
+}
+
 /** Puts an error into words. `t` is the catalogue; the time of a "try again at" is said in `context`. */
 export function errorText(
   error: unknown,
@@ -48,10 +84,12 @@ export function errorText(
   };
   if (error instanceof ApiError) {
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
-    const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
-      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
+    const message = upstreamSentence(error.problem,t,context) ?? refusalSentence(error, t, context.locale) ?? (invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
+      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale));
+    const reason = reasonSentence(error, t, context.locale);
     return {
       message,
+      ...(reason === null ? {} : { diagnostic: reason }),
       code: error.code,
       requestId: error.requestId === '' ? null : error.requestId,
       status: error.status,
@@ -60,8 +98,16 @@ export function errorText(
     };
   }
   if (error instanceof NetworkError) {
+    const details = networkFailureDetails(error);
+    let message = t(`network.${error.failure}`);
+    if (details !== null && error.failure === 'silent') {
+      const duration = details.limitMs < 1_000 ? formatNumber(details.limitMs, context.locale, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' }) : formatSpan(details.limitMs, context);
+      message = t(details.responseStarted ? 'ui.error.silenceBody' : 'ui.error.silenceResponse', { duration });
+    } else if (details !== null && error.failure === 'failed') {
+      message = t(details.responseStarted ? 'ui.error.networkBody' : 'ui.error.networkResponse');
+    }
     return {
-      message: t(`network.${error.failure}`),
+      message,
       code: `network.${error.failure}`,
       requestId: null,
       status: error.status,
@@ -69,7 +115,12 @@ export function errorText(
     };
   }
   if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') {
+    if (error.code === 'too_many_subscriptions') return {
+      message: t('ui.error.subscriptionCapacity'), code: error.code, requestId: null, status: null, retryable: true,
+    };
     const nativeDetails = 'details' in error && typeof error.details === 'object' && error.details !== null ? error.details : null;
+    const upstream = upstreamSentence(nativeDetails,t,context);
+    if (upstream !== null) return {message:upstream,code:error.code,requestId:null,status:null,retryable:error.code==='timeout'};
     const reason = 'reason' in error && typeof error.reason === 'string' ? error.reason
       : nativeDetails !== null && 'reason' in nativeDetails && typeof nativeDetails.reason === 'string' ? nativeDetails.reason : null;
     if (error.code === 'model_unavailable' && reason === 'credit_program') {

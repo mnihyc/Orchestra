@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 
 import { resourceReaders } from '@/features/resources/inventory';
 import { Hint } from '@/features/help/Hint';
-import type { Skill } from '@/generated/api-types';
+import type { SkillListRow as Skill } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { entriesOf, shareAct, type Act, type RowActs } from '@/features/resources/acts';
 import { ResourceList } from '@/features/resources/ResourceList';

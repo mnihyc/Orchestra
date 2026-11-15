@@ -451,7 +451,6 @@ impl SourceCommand {
             Some("fs.stat") => "fs.stat",
             Some("fs.mkdir") => "fs.mkdir",
             Some("git.prepare") => "git.prepare",
-            Some("fs.record") => "fs.record",
             Some("git.worktree") => "git.worktree",
             _ => "unknown",
         }
@@ -534,6 +533,7 @@ impl SourceCommand {
         self.current_issue_callers(
             conn,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
