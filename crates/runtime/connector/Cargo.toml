@@ -73,6 +73,7 @@ orch-adapter-fake.workspace = true
 orch-executor-orch.workspace = true
 orch-protocol-anthropic-messages.workspace = true
 orch-protocol-openai-responses.workspace = true
+orch-protocol-google-interactions.workspace = true
 orch-testkit.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

@@ -26,10 +26,6 @@ use orch_types::Clock;
 /// setting's own default.
 const DEFAULT_RAW_EVENT_DAYS: i64 = 14;
 
-/// The fewest days raw events are kept, whatever a row of the database says: a
-/// value that is not a number of days, or is none, never makes the cutoff now.
-const LEAST_RAW_EVENT_DAYS: i64 = 1;
-
 /// Why a retention job failed.
 #[derive(Debug, thiserror::Error)]
 pub enum RetentionError {
@@ -61,16 +57,20 @@ pub async fn raw_events(db: &Db, clock: &dyn Clock) -> Result<Option<RawEvents>,
     let days = orch_settings::get::<i64>(&mut tx, Place::System, "diagnostics.retention_days")
         .await?
         .unwrap_or(DEFAULT_RAW_EVENT_DAYS);
-    let cutoff = now - spans::days(days.max(LEAST_RAW_EVENT_DAYS).unsigned_abs());
     migrations::ensure_partitions(&mut tx, now).await?;
-    let partitions_dropped =
-        migrations::drop_partitions_before(&mut tx, "raw_events", cutoff).await?;
-    let rows_trimmed = upkeep::trim_raw_events(&mut tx, cutoff).await?;
+    // A cutoff before the clock can represent keeps every frame; it never shortens retention.
+    let cutoff = chrono::Duration::try_days(days).and_then(|age| now.checked_sub_signed(age));
+    let kept = if let Some(cutoff) = cutoff {
+        RawEvents {
+            partitions_dropped: migrations::drop_partitions_before(&mut tx, "raw_events", cutoff)
+                .await?,
+            rows_trimmed: upkeep::trim_raw_events(&mut tx, cutoff).await?,
+        }
+    } else {
+        RawEvents::default()
+    };
     tx.commit().await.map_err(DbError::from)?;
-    Ok(Some(RawEvents {
-        partitions_dropped,
-        rows_trimmed,
-    }))
+    Ok(Some(kept))
 }
 
 /// What a run of `metrics_retention` did.
