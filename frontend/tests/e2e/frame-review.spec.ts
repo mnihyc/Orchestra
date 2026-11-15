@@ -23,6 +23,51 @@ async function minimumTarget(link: Locator) {
 test.beforeEach(async () => { await scenario(); });
 
 for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
+  test(`startup keeps one baseline and a bare list address at ${width}/${locale}/${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page); await language(page, locale);
+    await page.waitForLoadState('networkidle');
+    const delayed = new Set<ReturnType<typeof setTimeout>>();
+    let admissions = 0, reads = 0;
+    page.on('request', (request) => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname.endsWith('/me/bootstrap')) reads += 1;
+    });
+    await page.routeWebSocket(/\/api\/v1\/ws(?:\?|$)/, (route) => {
+      const server = route.connectToServer();
+      server.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as { op?: unknown; feed?: unknown; mode?: unknown };
+        if (frame.op === 'ready') {
+          // Authentication work exceeds the slow-link threshold without delaying ping replies.
+          const timer = setTimeout(() => { delayed.delete(timer); route.send(message); }, 259);
+          delayed.add(timer);
+        } else {
+          if (frame.op === 'subscribed' && frame.feed === 'user' && frame.mode !== 'reload') admissions += 1;
+          route.send(message);
+        }
+      });
+    });
+    try {
+      for (const reload of [false, true]) {
+        reads = 0; const before = admissions;
+        if (reload) await page.reload(); else await page.goto('/org/acme');
+        await expect(page.getByRole('heading', { name: 'Acme', exact: true, level: 1 })).toBeVisible();
+        await expect.poll(() => admissions).toBeGreaterThan(before);
+        await expect(page.locator('html')).toHaveAttribute('lang', locale);
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        // Cover the former 1.5 s background delay and its 1.5 s idle deadline.
+        await page.waitForTimeout(4_000);
+        expect(reads).toBe(1);
+        expect(new URL(page.url()).searchParams.has('list')).toBe(false);
+        expect(new URL(page.url()).searchParams.has('_list')).toBe(false);
+        if (width === 1440) {
+          await expect(page.getByRole('contentinfo')).toContainText(locale === 'en' ? 'Connected' : '已连接');
+          await expect(page.getByRole('contentinfo')).not.toContainText(locale === 'en' ? 'Slow connection' : '连接较慢');
+        }
+      }
+      await page.screenshot({ path: test.info().outputPath('startup.png') });
+    } finally { for (const timer of delayed) clearTimeout(timer); }
+  });
   test(`single chrome names and full parent targets at ${width}/${locale}/${theme}`, async ({ page }) => {
     const words = locale === 'en' ? { navigation: 'Navigation', home: 'Open Acme home', details: 'Details', main: 'Main area', documents: 'Documents', team: 'Team', help: 'Help' }
       : { navigation: '导航', home: '打开Acme主页', details: '详情', main: '主区域', documents: '文档', team: '团队', help: '帮助' };

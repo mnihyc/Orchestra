@@ -1,24 +1,83 @@
 /** A streaming thread updates its status from native rows without an HTTP request on any tick. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, screen } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { parametersQuery } from '@/api/threads';
 import { queryClient } from '@/api/query';
+import { i18n, setLocale } from '@/i18n';
 import type { ThreadParameters } from '@/generated/api-types';
 import { StatusPlace } from '@/features/status-items/StatusPlace';
-import { defaultStatus } from '@/features/status-items/arrangement';
+import { StatusLine } from '@/features/timeline/StatusLine';
+import { Plan } from '@/features/timeline/items/Plan';
+import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
+import { defaultStatus, showStatus } from '@/features/status-items/arrangement';
 import { useWorkbench } from '@/features/workbench/store';
 import { threadWriter } from '@/realtime/stores/thread';
 import { statusContext } from '../unit/status-items-fixtures';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
+import { plan } from '../doubles/thread-rows';
 
 const server = vi.hoisted(() => ({ reads: vi.fn(), now: Date.parse('2026-10-25T00:00:10Z') }));
 vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: (path: string) => { server.reads(path); return Promise.reject(new Error(`Unexpected read ${path}`)); } } }));
 vi.mock('@/lib/time', async (load) => ({ ...await load<object>(), useRunningClock: () => server.now }));
-afterEach(() => { useWorkbench.setState({ statusItems: defaultStatus() }); });
+vi.mock('@/realtime/live', async (load) => ({ ...await load<object>(), useSocketStatus: () => ({ phase: 'ready' }) }));
+afterEach(async () => { useWorkbench.setState({ statusItems: defaultStatus() }); await setLocale('en'); });
 
-it('uses reported live counts for ten updates while retaining the exact zero-read count', () => {
+it('draws the running status from its small opening facts without reading settings or model metadata', async () => {
+  const context = statusContext();
+  if (context.turn === null) throw new Error('The native running turn is required');
+  server.reads.mockClear(); server.now = context.now;
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache.setQueryData(['thread-screen-facts', context.thread.id], { silent_after_secs: 600, plan_answered_by: 'writers' });
+  threadWriter.reset(context.thread.id, { thread: context.thread, turns: [context.turn] }, false);
+  const view = show(<StatusLine threadId={context.thread.id} />, cache);
+  try {
+    await waitFor(() => expect(view.container.querySelector('[data-status-line]')).toBeVisible());
+    expect(server.reads).not.toHaveBeenCalled();
+  } finally { view.unmount(); threadWriter.evict(context.thread.id); cache.clear(); }
+});
+
+it('keeps the latest proposed plan manager-only from its opening facts without a full settings read', async () => {
+  const source = statusContext();
+  if (source.turn === null) throw new Error('The native proposed turn is required');
+  const thread = { ...source.thread, state: 'idle' as const, current_turn_id: null, pending_inputs: 0,
+    access: { ...source.thread.access, permissions: ['thread.view', 'thread.interact'] } };
+  const turn = { ...source.turn, state: 'completed' as const, plan: true };
+  const proposed = plan('proposed-policy', [], { explanation: 'Proceed with the reviewed plan.' });
+  if (proposed.kind !== 'plan') throw new Error('The proposal is a plan item');
+  const item = { ...proposed, thread_id: thread.id, turn_id: turn.id };
+  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, detail: 'normal', layout: 'one', setLayout: () => undefined,
+    meId: thread.owner.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
+  server.reads.mockClear();
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache.setQueryData(['thread-screen-facts', thread.id], { silent_after_secs: 600, plan_answered_by: 'managers' });
+  threadWriter.reset(thread.id, { thread, turns: [turn], items: [item] }, false);
+  const view = show(<TimelineContextValue.Provider value={context}><Plan item={item} /></TimelineContextValue.Provider>, cache);
+  try {
+    expect(await screen.findByRole('button', { name: i18n.t('plan.proceed') })).toBeDisabled();
+    expect(server.reads).not.toHaveBeenCalled();
+  } finally { view.unmount(); threadWriter.evict(thread.id); cache.clear(); }
+});
+
+it.each(['en', 'zh-CN'] as const)('shows the activity once in its inspection instead of three stacked copies in %s', async (locale) => {
+  await setLocale(locale);
+  const context = statusContext();
+  if (context.turn === null) throw new Error('The running turn is required');
+  const { thread, turn } = context;
+  const word = i18n.t('statusItems.generating');
+  server.now = context.now;
+  threadWriter.reset(thread.id, { thread, turns: [turn] }, false);
+  const view = show(<StatusPlace place="live" threadId={thread.id} activeLabel={word} />);
+  try {
+    await userEvent.click(screen.getByRole('button', { name: word }));
+    const card = await screen.findByRole('dialog', { name: word });
+    expect(within(card).getAllByText(word, { exact: true })).toHaveLength(1);
+  } finally { view.unmount(); threadWriter.evict(thread.id); }
+});
+
+it('keeps live usage as a breakdown without a summed request figure or reads on any tick', async () => {
   const context = statusContext();
   if (context.turn === null) throw new Error('The running turn is required');
   const { thread } = context, turn = context.turn;
@@ -28,7 +87,8 @@ it('uses reported live counts for ten updates while retaining the exact zero-rea
   const parameters: ThreadParameters = { provider: planProvider({ id: thread.binding?.provider.id ?? 'provider' }), approval_mode: 'on_request', approval_reviewer: null,
     model: { value: thread.model, writable: true, options: [], source }, effort: { value: thread.effort, supported: true, writable: true, source }, parameters: [] };
   cache.setQueryData(parametersQuery(thread.id).queryKey, parameters);
-  useWorkbench.setState({ statusItems: defaultStatus() });
+  // The line shows what is being done and one clock until a person adds more: here the person has added speed and usage details.
+  useWorkbench.setState({ statusItems: showStatus(showStatus(defaultStatus(), 'speed', 'live', true), 'usage', 'live', true) });
   threadWriter.reset(thread.id, { thread, turns: [turn] }, false);
   const view = show(<QueryClientProvider client={cache}><StatusPlace place="bar" threadId={thread.id} /><StatusPlace place="live" threadId={thread.id} /></QueryClientProvider>);
   expect(screen.getByRole('button', { name: 'Output speed' })).toHaveTextContent('48 tok/s');
@@ -40,7 +100,13 @@ it('uses reported live counts for ten updates while retaining the exact zero-rea
     });
   }
   expect(screen.getByRole('button', { name: 'Output speed' })).toHaveTextContent('48 tok/s');
-  expect(screen.getByRole('button', { name: 'Turn tokens' })).toHaveTextContent('1,060 tokens');
+  const usage = screen.getByRole('button', { name: 'Turn usage' });
+  expect(usage).toHaveTextContent('Usage');
+  expect(view.container).not.toHaveTextContent('1,060 tokens');
+  await userEvent.click(usage);
+  expect(await screen.findByText('100')).toBeVisible();
+  expect(screen.getByText('960')).toBeVisible();
+  expect(screen.getByText('Cached input')).toBeVisible();
   expect(server.reads).not.toHaveBeenCalled();
   view.unmount(); threadWriter.evict(thread.id); cache.clear();
 });

@@ -288,8 +288,10 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
     readySince = now();
     (options.clock ?? serverClock).observe(frame.server_time, authSentAt, readySince);
     heartbeatMs = frame.heartbeat_secs > 0 ? frame.heartbeat_secs * 1_000 : HEARTBEAT_MS;
-    measured(authSentAt);
-    status.setState({ phase: 'ready', lostAt: null, build: frame.build });
+    // Authentication includes server-side admission work, not just the live link's response.
+    // A replacement transport starts its own ping samples too.
+    roundTrips = [];
+    status.setState({ phase: 'ready', lostAt: null, build: frame.build, roundTripMs: null });
     clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(heartbeat, heartbeatMs);
     // Every feed that is wanted is subscribed again, from where it had come to.
