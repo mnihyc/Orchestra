@@ -19,6 +19,9 @@ it('renders stored text and stored output without replacing the same thread’s 
   const tool = command('stored-command', { command: 'pwd', output: 'Stored tail', exit: 0 });
   if (tool.kind !== 'tool_call' || tool.payload.tool.kind !== 'command') throw new Error('Expected stored command');
   tool.payload.tool.output.total_len = 200;
+  tool.payload.tool.output.blob = 'd'.repeat(64);
+  tool.payload.tool.output.retained = { offset: 0, len: 200 };
+  tool.payload.tool.output.truncated = true;
   const reads: string[] = [];
   vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : new Request(input);
@@ -40,6 +43,7 @@ it('renders stored text and stored output without replacing the same thread’s 
   const path = new URL(reads[1] ?? 'http://invalid');
   expect(path.pathname).toBe(`/api/v1/threads/${id}/items/stored-command/output`);
   expect(path.searchParams.get('inspect_deleted')).toBe('true');
+  expect(path.searchParams.get('expected_blob')).toBe('d'.repeat(64));
   expect(path.searchParams.get('continuation_id')).toBe(B);
   expect(threadViewOf(id)).toBe(before);
   shown.unmount(); expect(threadViewOf(id)).toBe(before);

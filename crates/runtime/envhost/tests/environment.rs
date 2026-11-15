@@ -185,6 +185,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
             &request,
             orch_types::new_id(),
             until,
+            until,
             tokio_util::sync::CancellationToken::new(),
         )
         .await?;
@@ -660,9 +661,49 @@ fn code_of<T: std::fmt::Debug>(result: Result<T, HostError>) -> ErrorCode {
 // ---------------------------------------------------------------------------------------------
 // Attaching
 
+fn assert_attachment_identity_and_capabilities(
+    attached: &EnvironmentFacts,
+    current: &EnvironmentFacts,
+) {
+    // File indexing, recording coverage and observation times can advance while
+    // this same environment stays attached. Its identity and capabilities stay.
+    macro_rules! same {
+        ($($field:ident),+ $(,)?) => {
+            $(assert_eq!(current.$field, attached.$field, "{}", stringify!($field));)+
+        };
+    }
+    same!(
+        browser_profiles_dir,
+        browser,
+        vnc,
+        ports,
+        os,
+        arch,
+        shell,
+        user,
+        home,
+        workspace_root,
+        path_style,
+        case_sensitive,
+        executors,
+        mcp_found,
+        mcp_servers,
+        mounts,
+        private_views,
+        suspend,
+        git,
+        generation,
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attaching_an_environment_says_where_it_is_and_what_it_can_do() {
-    let rig = rig(&[("src/main.rs", "fn main() {}\n")]).await;
+    // Probe case sensitivity without changing the tree after its watcher starts.
+    let rig = rig(&[
+        ("src/main.rs", "fn main() {}\n"),
+        ("CaseProbe", "case probe"),
+    ])
+    .await;
     let facts = &rig.facts;
     assert_eq!(facts.workspace_root, rig.root.to_string_lossy());
     let expected_os = if cfg!(windows) {
@@ -681,14 +722,17 @@ async fn attaching_an_environment_says_where_it_is_and_what_it_can_do() {
             PathStyle::Posix
         }
     );
-    std::fs::write(rig.root.join("CaseProbe"), "case probe").unwrap();
     assert_eq!(facts.case_sensitive, !rig.root.join("caseprobe").exists());
     assert_eq!(facts.index, IndexMode::Full);
     assert_eq!(facts.suspend, cfg!(unix));
     assert_eq!(facts.generation, 7);
     assert_eq!(facts.git, git_exists());
     assert!(!facts.shell.path.is_empty(), "a person gets a shell");
-    assert_eq!(rig.host.environment(rig.env).unwrap().facts(), rig.facts);
+    let current = rig.host.environment(rig.env).unwrap().facts();
+    assert_attachment_identity_and_capabilities(facts, &current);
+    assert_eq!(current.index, IndexMode::Full);
+    assert_eq!(current.index_reason, None);
+    assert_eq!(current.index_entry_limit, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -914,14 +958,16 @@ async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_s
         std::fs::write(rig.root.join(format!("more{n}.txt")), "x").unwrap();
     }
     let report = rig
-        .report("the facts of a tree that is live now", |report| {
-            matches!(report, Report::Facts(_))
-        })
+        .report(
+            "the facts of a tree that is live now",
+            |report| matches!(report, Report::Facts(facts) if facts.index == IndexMode::Live),
+        )
         .await;
     let Report::Facts(facts) = report else {
         unreachable!()
     };
     assert_eq!(facts.index, IndexMode::Live);
+    assert_attachment_identity_and_capabilities(&rig.facts, &facts);
     assert_eq!(
         rig.host.environment(rig.env).unwrap().facts().index,
         IndexMode::Live

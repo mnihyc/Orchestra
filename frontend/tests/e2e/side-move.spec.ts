@@ -20,20 +20,20 @@ for (const [locale, label, reason] of [
   const words = (key: string) => caption(`@${key}`, locale);
   let side: string | null = null;
   // The side double supplies its own authorized sync. Only the aggregate supplements are fixture-empty.
-  await page.route('**/api/v1/threads/*/opening?*', async (route) => {
+  await page.route('**/api/v1/threads/*/opening*', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.split('/')[4] !== side) { await route.continue(); return; }
     url.pathname = url.pathname.replace(/\/opening$/u, '/sync');
     const response = await route.fetch({ url: url.toString() });
     expect(response.ok()).toBe(true);
     const sync = await response.json() as ThreadSync;
-    const opening: ThreadOpening = { sync, draft: null, parameters: null, limits: null, settings: [],
-      outline: { entries: [], next_before: null, seq: sync.seq } };
+    const opening: ThreadOpening = { sync, draft: null, parameters: null, limits: null };
     await route.fulfill({ json: opening });
   });
   await page.goto(`/thread/${MAIN}`);
   await screenReady(page, locale, 'light');
-  await page.locator('[data-thread-header]').getByRole('button', { name: words('side.menu.ask'), exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: words('side.menu.ask'), exact: true }).click();
   const ask = page.getByRole('dialog', { name: words('side.ask.title'), exact: true });
   await ask.getByRole('textbox', { name: words('side.ask.label'), exact: true }).fill('A question to keep on the side');
   const made = arrived(page.waitForResponse((response) => response.request().method() === 'POST'

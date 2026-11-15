@@ -76,7 +76,7 @@ After each turn Orch counts what it used and starts the next one in your name,
 so it passes every check a message of yours passes: usage caps, held queues,
 approvals and recovery. It waits while a question, an approval or a plan asks
 somebody, while the queue is held and while the thread is blocked. The line
-above the composer says **Working**, **Waiting for you**, **Paused**, **Met** or
+above the composer says **Working**, **Waiting for you**, **Unchecked**, **Paused**, **Met** or
 **Stopped**, with the turns, the time and the tokens used.
 
 The conversation outline names each goal turn by its **Done when** condition,
@@ -86,9 +86,11 @@ so you can return to that part of the work after reloading.
 
 The agent reports with its goal tool: working, met (with its evidence) or
 blocked. Where the place has a summary model, it checks the evidence against
-**Done when**; a "not yet" starts the next turn with its reason. Where there is
-none, the agent's report decides, and the conversation says so. A blocked agent
-pauses the goal and says what it needs.
+**Done when**; a "not yet" starts the next turn with its reason. Without an
+independent check, or when that check cannot run, the goal stays **Unchecked**
+and waits for a person. Review **Show the evidence**, then choose **Mark met**
+or **Keep working**. The agent's own claim never verifies completion. A blocked
+agent pauses the goal and says what it needs.
 
 ## Limits and stopping
 
