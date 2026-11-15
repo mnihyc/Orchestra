@@ -6,6 +6,9 @@ import { ApiError, createApiClient, done, ok, ReceiptAcknowledged, RENEW_BEFORE_
 import type { AuthResult, Me } from '@/generated/api-types';
 import { NetworkError, retryRead } from '@/lib/requests';
 import { beginOpening, openingId } from '@/lib/opening';
+import { i18n, setLocale } from '@/i18n';
+import { formatSpan } from '@/lib/time';
+import { errorText } from '@/ui/errorText';
 
 const BASE = 'http://orch.test/api/v1';
 
@@ -36,8 +39,10 @@ function server(answer: (request: Request, seen: Request[]) => Response | Promis
   return { fetch, seen, paths: () => seen.map((request) => `${request.method} ${new URL(request.url).pathname.replace('/api/v1', '')}`) };
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+  await setLocale('en');
 });
 
 it('shares one logical opening across HTTP reads and uses a fresh one for the next navigation', async () => {
@@ -331,6 +336,51 @@ describe('a slow answer', () => {
     expect(error).toMatchObject({ failure: 'silent' });
   });
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const stage of ['response', 'body'] as const) {
+  it(`names the ${stage} silence stage and the admitted request's own duration in ${locale}`, async () => {
+    await setLocale(locale);
+    vi.useFakeTimers();
+    const limit = stage === 'response' ? 45_000 : 120_000;
+    const { fetch, paths } = server(() => stage === 'response' ? new Promise<Response>(() => undefined)
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    const client = createApiClient({ baseUrl: BASE, fetch, silenceLimitMs: limit });
+    const pending = ok(client.api.GET('/meta')).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(limit);
+    const error = await pending;
+    expect(error).toBeInstanceOf(NetworkError);
+    if (!(error instanceof NetworkError)) throw new Error('The admitted request must keep its native network failure');
+    const duration = formatSpan(limit, { locale });
+    const expected = locale === 'en' ? stage === 'response' ? `No response for ${duration}` : `Transfer stalled for ${duration}`
+      : stage === 'response' ? `等待响应已达 ${duration}` : `传输停滞已达 ${duration}`;
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).message).toBe(expected);
+    expect(error.failure).toBe('silent'); expect(retryRead(0, error)).toBe(true);
+    expect(paths()).toEqual(['GET /meta']);
+    expect(client.session.getState().status).toBe('unknown');
+    await setLocale('en');
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const stage of ['response', 'body'] as const) {
+  it(`names a connection failure during ${stage} without changing its read retry in ${locale}`, async () => {
+    await setLocale(locale);
+    vi.stubGlobal('navigator', { onLine: true });
+    const { fetch, paths } = server(() => stage === 'response' ? Promise.reject(new TypeError('private connection diagnostic'))
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.error(new TypeError('private transfer diagnostic')); } }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    const error = await ok(client.api.GET('/meta')).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(NetworkError);
+    if (!(error instanceof NetworkError)) throw new Error('The native connection failure must be preserved');
+    const expected = locale === 'en' ? stage === 'response' ? 'Connection failed before a response' : 'Connection failed during transfer'
+      : stage === 'response' ? '响应前连接失败' : '传输期间连接失败';
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).message).toBe(expected);
+    expect(error.failure).toBe('failed'); expect(retryRead(0, error)).toBe(true);
+    expect(paths()).toEqual(['GET /meta']);
+    expect(client.session.getState().status).toBe('unknown');
+  });
+}
 
 describe('a request that creates something', () => {
   it('carries the key of the act, so that a second attempt makes nothing twice', async () => {

@@ -616,6 +616,8 @@ impl CommandHandler for Native {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -728,7 +730,7 @@ fn peer(
                                             &gateway,
                                             machine,
                                             session,
-                                            UpFrame::CmdAck(CmdAck { id }),
+                                            UpFrame::CmdAck(CmdAck { id, key_phase: orch_link_contract::commands::CommandKeyPhase::Queued }),
                                         )
                                         .await;
                                         // Only an explicitly declared mirror gate needs an
