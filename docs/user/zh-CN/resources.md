@@ -1,6 +1,6 @@
 ---
 title: 资源与移动
-screens: /resources, /resources/agents/$id, /resources/machines/$id, /resources/providers/$id, /resources/environments/$id, /thread/$threadId
+screens: /resources/pools, /resources/pools/$id, /resources, /resources/agents/$id, /resources/machines/$id, /resources/providers/$id, /resources/environments/$id, /thread/$threadId
 keywords: 环境, 提供方, 主目录, 浏览器, 显示, 端口, 文件, 终端, 文件夹, 分支, 移动, 连接机器, 安装, 服务, 前台, 数据目录, 移除, 多个连接器
 heading_id.删除环境: delete-an-environment
 heading_id.提供方和模型: providers-and-models
@@ -19,6 +19,7 @@ heading_id.挂载和工具服务器: mounts-and-tool-servers
 heading_id.模板和更新: templates-and-updates
 heading_id.分支和移动方案: fork-and-move-plans
 summary: 修改工作的运行位置前，了解环境、提供方、配置和机器。
+heading_id.资源池: pools
 ---
 
 # 资源与移动
@@ -208,3 +209,14 @@ Git 状态仅在要求时刷新。
 用量限制见[限额](settings-and-usage.md#limits)。
 
 资源可读取时，适用的管理操作仍然可见。没有管理权限时，操作显示为不可用并说明要求；仍可打开资源或复制链接。特定状态的操作和删除前的审查保留原有检查。
+
+
+<a id="pools"></a>
+
+## 资源池
+
+资源池是可以作为一个模型、提供方、环境或主机来选择的已配置资源组。可从现有分组创建资源池并选择规则。禁用的草稿仍可查看和编辑。启用与借出成员分别由用户明确选择。
+
+仅有资源池使用权限不会获得成员使用权限。借出成员还需要成员的“通过资源池”同意，以及同意者当前的共享权限。模型、服务、推理强度、运行方式和位置必须由一条完整授权覆盖。继承中的私有设置和锁定同样适用于借出。除非成员侧条目允许显示名称，否则隐藏成员仍保持隐藏。
+
+实际选择处会显示成员、规则和跳过原因。资源池不会自动移动线程的环境，也不会另建重试机制。失败后的行为由调用恢复决定；已接纳但结果不确定的请求保留原成员和回执。

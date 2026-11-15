@@ -253,7 +253,12 @@ impl Engine {
         };
         let marker = serde_json::to_value(MarkerPayload::ResourceStopped(MarkerResourceStopped {
             object: target.object,
-            name: name.into(),
+            // Pool Use does not disclose its definition or name to every future history reader.
+            name: if target.object.kind == ObjectKind::Pool {
+                target.object.id.to_string()
+            } else {
+                name.into()
+            },
             model,
             by: actor,
             note: note.map(str::to_owned),
@@ -299,6 +304,7 @@ impl Engine {
                 ObjectKind::Provider => "Provider",
                 ObjectKind::Agent => "Agent profile",
                 ObjectKind::Environment => "Environment",
+                ObjectKind::Pool => "Pool",
                 _ => "Resource",
             }
         };
@@ -360,7 +366,11 @@ impl Engine {
             || !harnesses.is_empty()
             || !keepers.is_empty()
             || !units.is_empty();
-        let plan = json!({"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
+        let notification_threads = work
+            .iter()
+            .map(|row| row.thread)
+            .collect::<std::collections::BTreeSet<_>>();
+        let plan = json!({"notification_operation":crate::notifications::current_operation(),"notification_threads":notification_threads,"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
         let row = jobs::insert(
             unit.conn,
             &jobs::NewJob {

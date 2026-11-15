@@ -148,6 +148,7 @@ impl native::Selected for Batch {
     type Query = ();
     type Value = Selected;
     type Reply = ForkBatch;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::BATCH_GET;
 
     fn select<'a>(
@@ -277,6 +278,11 @@ pub(super) async fn prepare_view(
     selected: Vec<JobRow>,
     declaration: &'static Declaration<Source>,
 ) -> ApiResult<(Selected, Vec<native::Facts<Source>>)> {
+    for row in &selected {
+        // A moving list can be reread; a job cannot acquire another native governor.
+        orch_engine::jobs::fork::operation::Preparation::from_job(row)
+            .map_err(super::preparation::engine_error)?;
+    }
     let caller = principal.caller();
     let limited = native::modern(caller);
     let plan = OperationPlan::new(ctx.route, declaration.operation)?;

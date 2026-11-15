@@ -3,10 +3,10 @@ import { queryOptions, type QueryClient } from '@tanstack/react-query';
 import { api, client, ok } from '@/api/client';
 import type { LibraryEntry, LibraryTarget, ResourceFacts } from '@/generated/api-types';
 
-export const libraryKey = (targets: readonly LibraryTarget[]) => ['resource-library', targets] as const;
 const environmentTarget = (id: string): LibraryTarget => ({ object: { kind: 'environment', id }, version_id: null });
 const reader = () => { const state = client.session.getState(); return [state.userId, state.readerVersion] as const; };
 export const libraryReader = reader;
+export const libraryKey = (targets: readonly LibraryTarget[],viewing=reader()) => ['resource-library', targets,viewing] as const;
 export function sameLibraryReader(before: ReturnType<typeof reader>): boolean {
   const now = reader(); return now[0] === before[0] && now[1] === before[1];
 }
@@ -59,12 +59,15 @@ async function settleOpening(pending: Promise<unknown>, signal: AbortSignal): Pr
   signal.throwIfAborted();
 }
 
-export const libraryQuery = (targets: readonly LibraryTarget[]) => queryOptions({
-  queryKey: libraryKey(targets),
+export const libraryQuery = (targets: readonly LibraryTarget[]) => {
+  const before=reader();
+  return queryOptions({
+  queryKey: libraryKey(targets,before),
   queryFn: async ({ signal, client: cache }): Promise<LibraryEntry[]> => {
-    const before = reader(), target = targets.length === 1 ? targets[0] : undefined;
+    if (!sameLibraryReader(before)) throw new DOMException('The requesting reader changed.', 'AbortError');
+    const target = targets.length === 1 ? targets[0] : undefined;
     if (target?.object.kind === 'environment' && target.version_id === null) {
-      const key = libraryKey(targets), held = cache.getQueryCache().find<LibraryEntry[]>({ queryKey: key, exact: true });
+      const key = libraryKey(targets,before), held = cache.getQueryCache().find<LibraryEntry[]>({ queryKey: key, exact: true });
       const updates = held?.state.dataUpdateCount;
       // Match the existing Environment key without importing its producer back into this query.
       const opening = cache.getQueryCache().find({ queryKey: ['environment', target.object.id], exact: true });
@@ -85,6 +88,9 @@ export const libraryQuery = (targets: readonly LibraryTarget[]) => queryOptions(
     }
     signal.throwIfAborted();
     if (!sameLibraryReader(before)) throw new DOMException('The requesting reader changed.', 'AbortError');
-    return ok(api.POST('/resources/library', { body: { targets: [...targets] }, signal }));
+    const value=await ok(api.POST('/resources/library', { body: { targets: [...targets] }, signal }));
+    if (!sameLibraryReader(before)) throw new DOMException('The requesting reader changed.', 'AbortError');
+    return value;
   },
-});
+  });
+};

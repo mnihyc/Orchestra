@@ -249,7 +249,11 @@ fn expected(def: &SettingDef, layers: &[Layer]) -> Option<Json> {
             Json::Array(kept)
         }
         Merge::Map => {
-            let mut merged = serde_json::Map::new();
+            // The default is the base the rows' members are put over, as the resolver joins them.
+            let mut merged = def
+                .default_value()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
             for layer in honoured(layers) {
                 for (name, value) in layer.value.as_object().cloned().unwrap_or_default() {
                     merged.insert(name, value);

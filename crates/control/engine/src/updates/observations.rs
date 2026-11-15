@@ -442,7 +442,8 @@ impl Engine {
             );
             if !environment {
                 if settings
-                    .get::<Id>(keys::RUNTIME_HOST_ID)?
+                    .get::<orch_provider_contract::pools::Target>(keys::RUNTIME_HOST_ID)?
+                    .and_then(|target| target.single_host())
                     .is_some_and(|wanted| wanted != old.host_id)
                 {
                     updates.push(PendingUpdate {

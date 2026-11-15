@@ -144,6 +144,13 @@ pub struct Work {
 
 /// One resource's exact work at the caller's observation instant.
 pub async fn read(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Work>, EngineError> {
+    if target.object.kind == ObjectKind::Pool && target.model_id.is_none() {
+        return Ok(sqlx::query_as(include_str!("pool_activity.sql"))
+            .bind(target.object.id)
+            .fetch_all(conn)
+            .await
+            .map_err(DbError::from)?);
+    }
     let kind = match target.object.kind {
         ObjectKind::Provider => "provider",
         ObjectKind::Agent => "agent",

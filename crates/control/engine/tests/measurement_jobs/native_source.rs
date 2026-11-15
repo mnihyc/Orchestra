@@ -114,7 +114,7 @@ impl Fixture {
         )?;
         let caller = known.preparation_caller(&caller)?;
         let request: ForkRequest = serde_json::from_value(
-            json!({"result":"new","history":{"mode":"none"},"environment":{"new":{"template_id":template,"host_id":host.id,"files":{"mode":"none"},"home":true,"private_views":false}}}),
+            json!({"result":"new","history":{"mode":"none"},"environment":{"new":{"template_id":template,"host_id":orch_provider_contract::pools::Target::host(host.id),"files":{"mode":"none"},"home":true,"private_views":false}}}),
         )?;
         let selected = engine
             .prepare_fork_in(&mut tx, &caller, thread, &request, Reach::Seen, None, None)

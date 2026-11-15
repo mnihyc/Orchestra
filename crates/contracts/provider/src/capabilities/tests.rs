@@ -437,7 +437,7 @@ fn fallback_previews_use_call_rules_without_selecting_a_service_or_exposing_priv
         .unwrap()
         .recovery_purpose = Some("web_search".into());
     registry.register("fixture", declaration).unwrap();
-    let candidate = json!({"provider_id":reference.provider,"model":"","route":{"route":"auxiliary","offering":reference,"config":{"private":"never-publish"}},"params":{"private":"never-publish"}});
+    let candidate = json!({"target":{"type":"single","resource":{"kind":"model","backend":{"route":"auxiliary","offering":reference,"config":{"private":"never-publish"}}}},"params":{"private":"never-publish"}});
     context.recovery=Some(RecoveryPolicy { scope:"org".into(),rules:crate::calls::validate(&json!([{"id":"lookup-fallback","when":{"kind":"unavailable","purpose":"web_search"},"steps":[{"type":"failover","candidate":candidate}]}])).unwrap() });
     let rows = registry.resolve(&context);
     assert_eq!(rows[0].route.as_ref().unwrap().kind, "native-model");
@@ -1428,4 +1428,77 @@ fn a_native_delegated_backend_has_no_wire_endpoint_and_keeps_its_own_denial() {
         registry.declarations().providers[&reference.provider],
         primary
     );
+}
+
+#[test]
+fn a_host_pool_cannot_be_submitted_as_a_model_choice() {
+    use crate::pools::{Kind, Target};
+    let target = Target::Pool {
+        id: new_id(),
+        kind: Kind::Host,
+    };
+    assert!(target.validate(Kind::Model).is_err());
+    assert!(target.validate(Kind::Host).is_ok());
+}
+
+#[test]
+fn two_native_placements_of_one_model_remain_distinct_choices() {
+    use crate::pools::{Leaf, Target};
+    let (_, _, offering) = fixture();
+    let first = Target::Single {
+        resource: Leaf::Model {
+            backend: BackendRef {
+                route: "program-session".into(),
+                offering: Some(offering.clone()),
+                config: json!({"environment_id": new_id()}),
+                ..BackendRef::default()
+            },
+        },
+    };
+    let second = Target::Single {
+        resource: Leaf::Model {
+            backend: BackendRef {
+                route: "program-session".into(),
+                offering: Some(offering),
+                config: json!({"environment_id": new_id()}),
+                ..BackendRef::default()
+            },
+        },
+    };
+    assert_ne!(first.identity().unwrap(), second.identity().unwrap());
+    let reordered: Target = serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+    assert_eq!(first.identity().unwrap(), reordered.identity().unwrap());
+}
+
+#[test]
+fn a_pool_member_cannot_change_the_kind_of_its_parent() {
+    use crate::pools::{Kind, Leaf, MemberRule};
+    let member = MemberRule::Single {
+        resource: Leaf::Host { id: new_id() },
+    };
+    assert!(member.validate(Kind::Environment).is_err());
+    assert!(member.validate(Kind::Host).is_ok());
+    let nested = MemberRule::Pool {
+        id: new_id(),
+        kind: Kind::Provider,
+    };
+    assert!(nested.validate(Kind::Model).is_err());
+}
+
+#[test]
+fn an_enabled_pool_needs_an_explicit_selection_policy() {
+    use crate::pools::{Definition, Kind, Policy};
+    let mut pool = Definition {
+        kind: Kind::Model,
+        enabled: false,
+        policy: None,
+        lend_members: false,
+        members: vec![],
+        config: json!({}),
+    };
+    assert!(pool.validate().is_ok());
+    pool.enabled = true;
+    assert!(pool.validate().is_err());
+    pool.policy = Some(Policy::Ordered);
+    assert!(pool.validate().is_ok());
 }

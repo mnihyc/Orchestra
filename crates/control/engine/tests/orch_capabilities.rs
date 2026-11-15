@@ -718,7 +718,7 @@ async fn a_world_with_capabilities() -> CapabilityWorld {
     declared_drivers(&world, &host).await;
     sqlx::query("UPDATE environments SET config=config || $2 WHERE id=$1")
         .bind(world.environment)
-        .bind(json!({"env.host_id":host.id}))
+        .bind(json!({"env.host_id":orch_provider_contract::pools::Target::host(host.id)}))
         .execute(world.pool.pool())
         .await
         .unwrap();
@@ -1490,7 +1490,7 @@ async fn a_request_before_the_first_unit_uses_only_the_current_selected_hosts_ma
     );
     sqlx::query("UPDATE environments SET config=config || $2 WHERE id=$1")
         .bind(world.environment)
-        .bind(json!({"env.host_id":world.host.id}))
+        .bind(json!({"env.host_id":orch_provider_contract::pools::Target::host(world.host.id)}))
         .execute(world.pool.pool())
         .await
         .unwrap();

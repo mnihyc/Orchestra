@@ -1439,6 +1439,8 @@ async fn places_not_seen(
         (WhereKind::Environment, Permission::EnvironmentView),
         (WhereKind::Host, Permission::HostView),
         (WhereKind::Machine, Permission::MachineView),
+        (WhereKind::EnvironmentPool, Permission::PoolView),
+        (WhereKind::HostPool, Permission::PoolView),
     ] {
         let ids: Vec<Id> = asked
             .iter()
@@ -1563,6 +1565,10 @@ fn exceeds_what_the_giver_holds(
 /// a sentence a client reads as it is; the screen has the same words in each language.
 fn beyond_sentence(member: EntryMember) -> (&'static str, &'static str) {
     match member {
+        EntryMember::Purposes => (
+            "purposes",
+            "allows more uses than any one entry of yours does",
+        ),
         EntryMember::Models => (
             "models",
             "allows more models than any one entry of yours does",

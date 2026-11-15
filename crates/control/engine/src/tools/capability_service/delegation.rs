@@ -220,14 +220,31 @@ impl ParentLink {
             };
             let parameters: orch_provider_contract::models::ModelParameters =
                 serde_json::from_value(model.parameters)?;
-            let use_request = model::ModelUse {
-                place: record.call.thread,
-                provider: record.provider,
-                offering: &record.model,
-                groups: &model.groups,
-                effort: parameters.default_effort.as_deref(),
-            };
             for caller in origins.callers() {
+                let pool = match record.recovery.as_ref() {
+                    Some(recovery) => {
+                        recovery
+                            .selection(
+                                conn,
+                                caller,
+                                record.call.thread,
+                                record.provider,
+                                &record.model,
+                                &record.capability,
+                            )
+                            .await?
+                    }
+                    None => None,
+                };
+                let use_request = model::ModelUse {
+                    pool: pool.as_ref(),
+                    in_thread: true,
+                    place: record.call.thread,
+                    provider: record.provider,
+                    offering: &record.model,
+                    groups: &model.groups,
+                    effort: parameters.default_effort.as_deref(),
+                };
                 if model::offering_use(conn, caller, &use_request, clock)
                     .await?
                     .is_none()

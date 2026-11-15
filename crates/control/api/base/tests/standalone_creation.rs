@@ -76,7 +76,7 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
                 name: Some("Standalone native proof".into()),
                 home_node_id: Some(world.root),
                 template_id: Some(template),
-                host_id: Some(Some(host.id)),
+                host_id: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 ..NewEnvironment::default()
             })
             .send()
@@ -136,7 +136,12 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
                 "the closed origin cannot launch its next native effect"
             );
         } else {
-            host.wait_for(CommandKind::NodeRuntimeStart, 1).await;
+            tokio::select! {
+                () = host.wait_for(CommandKind::NodeRuntimeStart, 1) => {},
+                (state, _, error) = hosting::wait_over(&world, made.job_id) => {
+                    panic!("standalone provisioning ended before its native start: {state}, {error:?}");
+                }
+            }
             let runtime = host.started().unwrap();
             let _unit = hosting::enroll(&world, runtime).await;
             let (state, _, error) = hosting::wait_over(&world, made.job_id).await;

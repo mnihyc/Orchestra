@@ -156,6 +156,179 @@ fn wanted(team: &Team, name: &str) -> NewEnvironment {
     }
 }
 
+#[tokio::test]
+async fn ten_creations_through_a_lent_host_pool_share_one_last_slot_and_keep_the_admitted_host() {
+    use orch_access_contract::permissions::Permission;
+    use orch_provider_contract::pools::{Kind, Target};
+    use std::sync::Arc;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let other = a_host(&world, &t.c.admin, t.c.acme, "Second build box", 32768).await;
+    places::give_role(&world, t.topic, &t.c.viewer, "developer", &t.c.boss).await;
+    resources::name_person(
+        &world,
+        "template",
+        t.template,
+        "template.use",
+        t.c.viewer.id(),
+    )
+    .await;
+    let mut conn = world.conn().await;
+    let pool = fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(t.c.admin.id()),
+        Some(t.c.acme),
+        "Shared build hosts",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Pool.into(),
+            id: pool,
+        },
+        t.c.admin.id(),
+        NewAccess::OnlyMe,
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool)
+        .bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":true,"members":[],"config":{}}))
+        .execute(&mut *conn).await.unwrap();
+    for (position, host) in [t.host, other].into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,$3,$4,true)",
+        )
+        .bind(pool)
+        .bind(orch_types::new_id())
+        .bind(i64::try_from(position).unwrap())
+        .bind(json!({"type":"single","resource":{"kind":"host","id":host}}))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO pool_lending(id,resource_kind,resource_id,giver_id,matcher,options) VALUES($1,'host',$2,$3,$4,'{}')")
+            .bind(orch_types::new_id()).bind(host).bind(t.c.admin.id()).bind(json!({"kind":"pool","pool_id":pool})).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let entry = resources::name_person(
+        &world,
+        "pool",
+        pool,
+        Permission::PoolUse.as_str(),
+        t.c.viewer.id(),
+    )
+    .await;
+    sqlx::query("UPDATE permission_entries SET options=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(json!({"host":{"max_environments":1}}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let target = Target::Pool {
+        id: pool,
+        kind: Kind::Host,
+    };
+    let barrier = Arc::new(tokio::sync::Barrier::new(10));
+    let mut requests = Vec::new();
+    for index in 0..10 {
+        let app = world.app.clone();
+        let token = t.c.viewer.token.clone();
+        let barrier = barrier.clone();
+        let mut body = wanted(&t, &format!("Pool last slot {index}"));
+        body.host_id = Some(Some(target.clone()));
+        requests.push(tokio::spawn(async move {
+            barrier.wait().await;
+            app.call(EnvironmentCreate, &[])
+                .token(&token)
+                .body(&body)
+                .send_bytes()
+                .await
+        }));
+    }
+    let mut accepted = 0;
+    for request in requests {
+        let reply = request.await.unwrap();
+        if reply.status.as_u16() == 201 {
+            accepted += 1;
+        } else {
+            let problem: orch_api_contract::common::Problem =
+                serde_json::from_slice(&reply.raw).unwrap();
+            assert_eq!(
+                problem.code,
+                ErrorCode::PlanBlocked,
+                "{}",
+                String::from_utf8_lossy(&reply.raw)
+            );
+        }
+    }
+    assert_eq!(
+        accepted, 1,
+        "the post-lock count holds across both physical hosts"
+    );
+    let (environment, chosen, leaf): (Id, Id, serde_json::Value) = sqlx::query_as(
+        "SELECT e.id,(j.plan->>'admitted_host')::uuid,c.leaf FROM environments e
+         JOIN jobs j ON j.environment_id=e.id AND j.kind='environment_provision'
+         JOIN pool_choices c ON c.id=(j.plan->>'pool_choice')::uuid
+         WHERE e.name LIKE 'Pool last slot %'",
+    )
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!([t.host, other].contains(&chosen));
+    assert_eq!(leaf, json!({"kind":"host","id":chosen}));
+    let counted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM environment_creation_entries WHERE environment_id=$1 AND entry_id=$2",
+    )
+    .bind(environment)
+    .bind(entry)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(counted, 1);
+    let choices:i64=sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE actor_id=$1 AND source->>'kind'='environment_creation'")
+        .bind(t.c.viewer.id()).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(
+        choices, 1,
+        "failed creations roll their draws and rotation back"
+    );
+    sqlx::query(
+        "UPDATE pools SET definition=jsonb_set(definition,'{enabled}','false') WHERE id=$1",
+    )
+    .bind(pool)
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    resources::name_person(&world, "host", t.host, "host.use", t.c.viewer.id()).await;
+    let mut body = wanted(&t, "Closed pool cannot become automatic");
+    body.host_id = Some(Some(target));
+    let refused = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.viewer.token)
+        .body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::PlanBlocked);
+    body.name = Some("Explicit single host remains available".into());
+    body.host_id = Some(Some(Target::host(t.host)));
+    assert_eq!(
+        world
+            .app
+            .call(EnvironmentCreate, &[])
+            .token(&t.c.viewer.token)
+            .body(&body)
+            .send()
+            .await
+            .status
+            .as_u16(),
+        201
+    );
+}
+
 /// A reported forwarded harness: the template's executor promise is checked again at actual admission.
 async fn start_binding(world: &World, t: &Team) -> orch_api_contract::nodes::CreateThreadBinding {
     let owner = &t.c.admin;
@@ -832,7 +1005,7 @@ async fn creation_in_an_explicit_place_works_with_multiple_orgs_and_a_missing_pl
             .any(|fault| fault["path"] == "home_node_id")
     );
     request.home_node_id = Some(t.topic);
-    request.host_id = Some(Some(t.host));
+    request.host_id = Some(Some(orch_provider_contract::pools::Target::host(t.host)));
     let made = world
         .app
         .call(EnvironmentCreate, &[])
@@ -847,7 +1020,10 @@ async fn creation_in_an_explicit_place_works_with_multiple_orgs_and_a_missing_pl
     assert_eq!(made.template.unwrap().id, t.template);
     // The host it was asked for is its own value; it is shown as its host once its unit has volumes
     // there.
-    assert_eq!(made.config["env.host_id"], json!(t.host));
+    assert_eq!(
+        made.config["env.host_id"],
+        json!(orch_provider_contract::pools::Target::host(t.host))
+    );
     assert!(made.host.is_none());
 }
 
@@ -1187,7 +1363,7 @@ async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_r
     let making = make(&world, &t, &t.c.admin, "Committed before response");
     let inspect = async {
         rig::eventually("the response's blocked component update read", || async {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates%')")
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id%FROM component_updates%')")
                 .fetch_one(&world.db.pool).await.unwrap()
         }).await;
         let committed: (Id, Id) = sqlx::query_as(
@@ -1374,7 +1550,7 @@ async fn a_host_that_is_named_and_cannot_take_the_environment_is_not_replaced_by
         .await
         .unwrap();
     let mut asking = wanted(&t, "Main");
-    asking.host_id = Some(Some(busy));
+    asking.host_id = Some(Some(orch_provider_contract::pools::Target::host(busy)));
     let blocked = world
         .app
         .call(EnvironmentCreate, &[])
@@ -2145,4 +2321,61 @@ async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_
         ErrorCode::EnvironmentNoneUsable,
         "{implicit:?}"
     );
+}
+
+#[tokio::test]
+async fn choosing_another_template_checks_the_agent_and_host_that_will_actually_start() {
+    use orch_api_contract::binding::NodeBindingOptionsGet;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let alternate = a_template(&world, &t.c.admin, t.c.acme, "Agent ready").await;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{exec,offers}','[]') WHERE id=$1")
+        .bind(t.template)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_provider_contract::pools::Target::host(
+                orch_types::new_id()
+            )),
+        )
+        .await;
+    for (template, host, automatic, ready) in [
+        (t.template, Some(t.host), false, false),
+        (alternate, Some(t.host), false, true),
+        (alternate, Some(orch_types::new_id()), false, false),
+        (alternate, None, false, false),
+        (alternate, None, true, true),
+    ] {
+        let mut query =
+            json!({ "environment_new": true, "template_id": template, "host_auto": automatic });
+        if let Some(host) = host {
+            query["host_id"] = json!(host);
+        }
+        let offered = world
+            .app
+            .call(NodeBindingOptionsGet, &[&t.topic])
+            .token(&t.c.admin.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        let agent = offered
+            .providers
+            .iter()
+            .find(|row| row.provider.id == binding.provider_id)
+            .unwrap()
+            .agents
+            .iter()
+            .find(|row| row.agent.id == binding.agent_id)
+            .unwrap();
+        assert_eq!(
+            agent.usable, ready,
+            "the exact chosen template and host decide readiness"
+        );
+    }
 }
