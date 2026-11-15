@@ -1494,14 +1494,19 @@ fn exceeds_what_the_giver_holds(
     if resource.kind != ResourceKind::Provider || setup.owns_or_administers() {
         return Ok(Beyond::Within);
     }
-    let mut written: Vec<(String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
+    let mut written: Vec<(Permission, String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
     for (index, row) in checked.rows.iter().enumerate() {
-        if row.permission != Permission::ProviderUse {
+        if !row.permission.has_provider_options() {
             continue;
         }
         for (entry, added) in row.add.iter().enumerate() {
             if let Options::ProviderUse(options) = &added.options {
-                written.push((format!("rows[{index}].add[{entry}]"), options, None));
+                written.push((
+                    row.permission,
+                    format!("rows[{index}].add[{entry}]"),
+                    options,
+                    None,
+                ));
             }
         }
         for (entry, update) in row.update.iter().enumerate() {
@@ -1517,27 +1522,30 @@ fn exceeds_what_the_giver_holds(
                 continue;
             };
             written.push((
+                row.permission,
                 format!("rows[{index}].update[{entry}]"),
                 options,
                 Some(before),
             ));
         }
     }
-    let wider: Vec<(&String, &ProviderUse)> = written
+    let wider: Vec<(Permission, &String, &ProviderUse)> = written
         .iter()
-        .filter(|(_, options, before)| {
+        .filter(|(_, _, options, before)| {
             !before.as_ref().is_some_and(|before| options.within(before))
         })
-        .map(|(path, options, _)| (path, *options))
+        .map(|(permission, path, options, _)| (*permission, path, *options))
         .collect();
     if wider.is_empty() {
         return Ok(Beyond::Within);
     }
-    let Ok(Ok(held)) = crate::usable::access(&setup.frame, resource, site, None, false) else {
-        return Ok(Beyond::NoUse);
-    };
     let mut named: Vec<(String, EntryMember)> = Vec::new();
-    for (path, options) in wider {
+    for (permission, path, options) in wider {
+        let Ok(Ok(held)) =
+            crate::usable::access_for(&setup.frame, resource, site, None, false, permission)
+        else {
+            return Ok(Beyond::NoUse);
+        };
         let nearest = held
             .each
             .iter()
@@ -2079,7 +2087,7 @@ where
             resource.kind == ResourceKind::Provider && shared.keeps_to_its_owner(resource)
         })
         && checked.rows.iter().any(|row| {
-            row.permission == Permission::ProviderUse
+            row.permission.has_provider_options()
                 && (!row.add.is_empty() || !row.update.is_empty())
         })
     {

@@ -385,6 +385,128 @@ fn fill_schema_defaults(
     }
 }
 
+/// The public relay accepts declared model options, alongside the format's own input and delivery members.
+/// The ordinary outgoing validator still applies every original schema and model ceiling to their values.
+pub fn check_relay_options(
+    protocol: &str,
+    model: &ModelParameters,
+    body: &[u8],
+) -> Result<(), &'static str> {
+    let payload: Json =
+        serde_json::from_slice(body).map_err(|_| "model request must be an object")?;
+    let members = payload
+        .as_object()
+        .ok_or("model request must be an object")?;
+    let schema = constraints(protocol, model);
+    for key in members.keys() {
+        let structural = matches!(
+            key.as_str(),
+            "model"
+                | "input"
+                | "inputs"
+                | "instructions"
+                | "system"
+                | "messages"
+                | "prompt"
+                | "max_output_tokens"
+                | "max_tokens"
+                | "max_completion_tokens"
+                | "stream"
+                | "stream_options"
+                | "tools"
+                | "tool_choice"
+                | "parallel_tool_calls"
+                | "include"
+                | "store"
+                | "previous_response_id"
+                | "conversation"
+                | "background"
+                | "dimensions"
+                | "prompt_cache_key"
+        );
+        if !structural
+            && !declares_member(
+                &schema,
+                &schema,
+                key,
+                &mut std::collections::BTreeSet::new(),
+            )
+        {
+            return Err(
+                "this request includes an option the provider has not declared for this interface",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn declares_member<'a>(
+    root: &'a Json,
+    node: &'a Json,
+    key: &str,
+    visited: &mut std::collections::BTreeSet<&'a str>,
+) -> bool {
+    if node == &Json::Bool(true) {
+        return true;
+    }
+    if node
+        .get("properties")
+        .is_some_and(|properties| properties.get(key).is_some())
+        || node
+            .get("required")
+            .and_then(Json::as_array)
+            .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(key)))
+        || node
+            .get("additionalProperties")
+            .is_some_and(|rule| rule == &Json::Bool(true) || rule.is_object())
+    {
+        return true;
+    }
+    if let Some(patterns) = node.get("patternProperties").and_then(Json::as_object) {
+        for pattern in patterns.keys() {
+            if orch_types::schema::validate(
+                &json!({"type":"string","pattern":pattern}),
+                &json!(key),
+            )
+            .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+    if let Some(reference) = node.get("$ref").and_then(Json::as_str)
+        && visited.insert(reference)
+        && let Some(target) = reference
+            .strip_prefix('#')
+            .and_then(|pointer| root.pointer(pointer))
+        && declares_member(root, target, key, visited)
+    {
+        return true;
+    }
+    for join in ["allOf", "anyOf", "oneOf"] {
+        if node
+            .get(join)
+            .and_then(Json::as_array)
+            .is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|node| declares_member(root, node, key, visited))
+            })
+        {
+            return true;
+        }
+    }
+    for branch in ["if", "then", "else"] {
+        if node
+            .get(branch)
+            .is_some_and(|node| declares_member(root, node, key, visited))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Validate actual resolved values, never attempt to prove that one schema implies another.
 /// The same schema is projected to downstream forms. Protocol-owned members are not option values.
 pub fn constrain(
@@ -966,7 +1088,9 @@ pub fn outgoing_at(
     let model = applicable.as_ref();
     let format = parameter_format(protocol);
     let compact = path.ends_with("/responses/compact") && format.program.is_some();
-    let count_tokens = path.ends_with("/messages/count_tokens") && format.tier.is_some();
+    let count_tokens = (path.ends_with("/messages/count_tokens")
+        || path.ends_with("/responses/input_tokens"))
+        && format.tier.is_some();
     if compact || count_tokens {
         let mut parameters = model.clone();
         parameters.default_effort = None;
@@ -1510,6 +1634,37 @@ mod tests {
                 "{protected}"
             );
         }
+    }
+
+    #[test]
+    fn public_relay_keeps_protocol_input_and_only_accepts_declared_model_options() {
+        let model = ModelParameters {
+            request_options: Some([("openai-responses".into(), json!({
+                "type":"object",
+                "$defs":{"options":{"properties":{"temperature":{"type":"number","maximum":1}}}},
+                "allOf":[{"$ref":"#/$defs/options"}],
+                "patternProperties":{"^extension_":{"type":"boolean"}}
+            }))].into()),
+            ..ModelParameters::default()
+        };
+        assert!(check_relay_options("openai-responses",&model,
+            br#"{"model":"chosen","input":"hello","stream":true,"max_output_tokens":8192,"temperature":0.2,"extension_trace":true}"#).is_ok());
+        assert!(
+            check_relay_options(
+                "openai-responses",
+                &model,
+                br#"{"model":"chosen","input":"hello","routing_override":"another"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            check_relay_options(
+                "openai-responses",
+                &ModelParameters::default(),
+                br#"{"model":"chosen","input":"hello","temperature":0.2}"#
+            )
+            .is_err()
+        );
     }
 }
 

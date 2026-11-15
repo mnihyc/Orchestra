@@ -54,6 +54,7 @@ async fn a_withdrawn_registration_retries_its_committed_busy_detach_and_checkpoi
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            content_transit: false,
             id: original,
             machine_id: connector.id,
             kind: "env.detach",
@@ -123,6 +124,7 @@ async fn active_or_expired_registrations_cannot_be_claimed_for_background_busy_r
     link::insert_command(
         &mut conn,
         &link::NewCommand {
+            content_transit: false,
             id: original,
             machine_id: connector.id,
             kind: "env.detach",

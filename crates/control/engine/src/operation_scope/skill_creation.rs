@@ -635,6 +635,7 @@ impl CommandSource {
             return Ok(None);
         };
         let outgoing = Outgoing {
+            content_transit: false,
             id: command.id,
             machine: command.machine_id,
             key: SerialKey::None,
@@ -658,6 +659,7 @@ impl CommandSource {
         self.current_issue(
             conn,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

@@ -67,3 +67,34 @@ it('keeps every legacy section bookmark reachable through the six sections',()=>
   for(const name of ['threads','sessions'])expect(providerTab(name)).toBe('activity');
   expect(providerTab('unknown')).toBeUndefined();
 });
+
+for(const locale of ['en','zh-CN'] as const)it('opens only the chosen relay models and preserves a draft through unrelated observations in '+locale,async()=>{
+  await setLocale(locale);
+  const {RelayModels}=await import('@/features/resources/providers/Relay');
+  const save=vi.fn<(models:string[])=>void>();
+  const models=Array.from({length:12},(_,index)=>({model_name:`model-${index}`,display_name:`Choice ${index}`,enabled:true}));
+  const opened=['model-0'];
+  const shown=show(<RelayModels saved={opened} models={models} pending={false} onSave={save}/>);
+  expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('providerRelay.models',{count:1})}));
+  const search=screen.getByRole('searchbox',{name:i18n.t('providerRelay.search')});
+  await userEvent.type(search,'Choice 11');
+  await userEvent.click(screen.getByRole('checkbox',{name:'Choice 11'}));
+  shown.rerender(<RelayModels saved={[...opened]} models={[...models]} pending={false} onSave={save}/>);
+  expect(screen.getByRole('checkbox',{name:'Choice 11'})).toBeChecked();
+  expect(save).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('common.save')}));
+  expect(save).toHaveBeenCalledWith(['model-0','model-11']);
+});
+
+it('lets a manager remove a formerly opened model that is no longer enabled',async()=>{
+  const {RelayModels}=await import('@/features/resources/providers/Relay');
+  const save=vi.fn<(models:string[])=>void>();
+  show(<RelayModels saved={['old']} models={[{model_name:'old',display_name:'Old offering',enabled:false}]} pending={false} onSave={save}/>);
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('providerRelay.models',{count:1})}));
+  const old=screen.getByRole('checkbox',{name:'Old offering'});
+  expect(old).toBeChecked();expect(old).toBeEnabled();
+  await userEvent.click(old);
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('common.save')}));
+  expect(save).toHaveBeenCalledWith([]);
+});

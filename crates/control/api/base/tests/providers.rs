@@ -43,7 +43,7 @@ fn endpoint(protocol: &str, base_url: &str, options: Json) -> Upstream {
 
 fn api_body(name: &str, home: Id) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: name.to_owned(),
         home_id: home,
         access: None,
@@ -151,12 +151,16 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
     let runtime = directory_keeper(&world, &c.boss, c.acme, "Harness runtime").await;
     let mut api = api_body("Separated locations", c.acme);
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut api
     {
-        *runtime_machine_id = Some(runtime);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: runtime,
+            },
+        );
         *key_machine_id = Some(keeper);
     }
     let made = make(&world, &c.boss, &api).await;
@@ -246,7 +250,11 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
         agent_id: agent,
         access: None,
         arrangements: None,
-        runtime_machine_id: Some(runtime),
+        runtime_location: Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: runtime,
+            },
+        ),
         key_machine_id: Some(keeper),
         config: None,
         sign_in: None,
@@ -359,6 +367,7 @@ async fn a_runtime_home_uses_the_physical_machines_roots_and_the_provider_manage
         .await
         .unwrap();
     let body = |home| ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: None,
@@ -457,6 +466,7 @@ async fn provider_managers_can_keep_commands_but_only_owners_can_add_replace_or_
     );
     let commands = json!({"10-helper":{"command":["/opt/helper","a b"],"timeout_secs":30}});
     let body = |revision, config| ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: None,
@@ -538,12 +548,16 @@ async fn a_providers_arrangement_choices_and_writes_use_its_credential_keepers_p
     let keeper = directory_keeper(&world, &c.boss, c.acme, "Credential keeper").await;
     let mut body = api_body("Policy-aware provider", c.acme);
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut body
     {
-        *runtime_machine_id = Some(keeper);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: keeper,
+            },
+        );
         *key_machine_id = Some(keeper);
     }
     let provider = make(&world, &c.boss, &body).await;
@@ -558,6 +572,7 @@ async fn a_providers_arrangement_choices_and_writes_use_its_credential_keepers_p
         [ArrangementType::Separated, ArrangementType::KeySeparated]
     );
     let change = ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: None,
@@ -640,7 +655,7 @@ async fn make(world: &World, by: &Who, body: &CreateProvider) -> Provider {
 #[tokio::test]
 async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secret_values() {
     use orch_access_contract::permissions::Permission;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     const FACT: &str = "provider-view-only-private-fact";
     let world = world().await;
@@ -680,11 +695,12 @@ async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secr
         !grant.carries(Permission::ProviderView),
         "the fixture delegates no View permission"
     );
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let token = new_api_token(issued_key_id);
     create_api_token(
         &mut *world.conn().await,
         &NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: c.boss.id(),
             name: "Legacy metadata management",
             token_hash: &token_hash(&token),
@@ -787,6 +803,7 @@ async fn runtime_variables_and_secret_names_are_editable_but_the_sealed_value_is
         }
         let updated = world.app.call(ProviderUpdate, &[&made.base.id]).token(&c.boss.token)
         .body(&ProviderUpdateBody {
+        relay: None,
             service_offerings: None, model_group_options: None,  name:None,upstreams:None,config:None,arrangements:None,expected_revision:made.revision,
             runtime_config:Some(json!({"runtime.variables":{"REGION":"east"},"runtime.secret_names":["SERVICE_TOKEN"]})) })
         .send().await.ok().into_full().expect("a full provider reply").provider;
@@ -1062,6 +1079,7 @@ async fn no_request_about_a_provider_returns_its_key_or_a_secret_header() {
             .call(ProviderUpdate, &[&id])
             .token(&c.boss.token)
             .body(&ProviderUpdateBody {
+                relay: None,
                 service_offerings: None,
                 model_group_options: None,
                 name: Some("Renamed".into()),
@@ -1081,6 +1099,7 @@ async fn no_request_about_a_provider_returns_its_key_or_a_secret_header() {
             .call(ProviderUpdate, &[&id])
             .token(&c.boss.token)
             .body(&ProviderUpdateBody {
+                relay: None,
                 service_offerings: None,
                 model_group_options: None,
                 name: Some("Again".into()),
@@ -1190,7 +1209,7 @@ async fn a_provider_is_ready_when_it_has_a_key_and_an_enabled_model_and_not_befo
     assert_eq!(status(&world).await, ProviderStatus::Ready);
     // A provider that takes no key is ready as soon as it has a model.
     let keyless = CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: "Local".to_owned(),
         home_id: c.acme,
         access: None,
@@ -1250,6 +1269,7 @@ async fn endpoint_model_defaults_survive_provider_create_update_and_reload() {
         .call(ProviderUpdate, &[&made.base.id])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -1281,6 +1301,7 @@ async fn endpoint_model_defaults_survive_provider_create_update_and_reload() {
         .call(ProviderUpdate, &[&made.base.id])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -1446,7 +1467,7 @@ async fn what_is_wrong_with_a_new_provider_is_told_member_by_member() {
     assert_eq!(count, 0, "nothing was made");
     // A subscription of a profile that is not there is refused, naming the member.
     let subscription = CreateProvider::Subscription {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: "Team Pro".to_owned(),
         home_id: c.acme,
@@ -1759,6 +1780,7 @@ async fn a_provider_is_changed_by_whoever_manages_it_and_a_change_against_an_old
     let provider = make(&world, &c.boss, &api_body("Team key", c.acme)).await;
     let id = provider.base.id;
     let change = |revision: i64| ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         name: Some("Renamed".to_owned()),
@@ -1836,6 +1858,7 @@ async fn a_provider_is_changed_by_whoever_manages_it_and_a_change_against_an_old
     assert_eq!(stale.extra["current"]["name"], "Renamed");
     // Taking away every type, or naming an endpoint twice, is not a change.
     let none = ProviderUpdateBody {
+        relay: None,
         service_offerings: None,
         model_group_options: None,
         arrangements: Some(vec![]),
@@ -1871,6 +1894,7 @@ async fn the_secret_header_of_an_endpoint_that_goes_is_forgotten_with_it() {
         .call(ProviderUpdate, &[&id])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -2188,4 +2212,443 @@ async fn the_owner_row_of_a_new_provider_names_its_maker_and_a_choice_of_who_els
     );
     assert!(names(&world, &c.stranger, None).await.is_empty());
     let _ = name_on_page; // naming people by hand is done in the other tests
+}
+
+#[tokio::test]
+async fn a_new_key_provider_keeps_public_relay_off_and_does_not_expose_that_choice_to_a_stranger() {
+    use orch_api_contract::resources::ProviderRelayResponses;
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Private model access", c.acme)).await;
+    let relay = provider
+        .relay
+        .as_ref()
+        .expect("a key provider reports its relay choice");
+    assert!(!relay.enabled);
+    assert!(relay.models.is_empty());
+    let request = json!({"model":"not-opened","input":"A direct model call","stream":true});
+    let refused = world
+        .app
+        .call(ProviderRelayResponses, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert_eq!(refused.status, http::StatusCode::FORBIDDEN);
+    assert_eq!(refused.problem().code, ErrorCode::ProviderRelayUnavailable);
+    assert!(
+        refused
+            .problem()
+            .detail
+            .to_ascii_lowercase()
+            .contains("off")
+    );
+    assert!(!String::from_utf8_lossy(&refused.raw).contains(KEY));
+    let stranger = world
+        .app
+        .call(ProviderRelayResponses, &[&provider.base.id])
+        .token(&c.stranger.token)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert!(!stranger.status.is_success());
+    assert_ne!(stranger.problem().code, ErrorCode::ProviderRelayUnavailable);
+    assert!(!String::from_utf8_lossy(&stranger.raw).contains(KEY));
+    let commands: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind='provider.relay'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        commands, 0,
+        "an off or unreadable relay has no native model effect"
+    );
+}
+
+#[test]
+fn relay_has_its_own_grant_and_the_same_model_option_rules_as_provider_use() {
+    use orch_access_contract::permissions::{Choice, ObjectKind, Options, Permission};
+    assert!(
+        !Permission::ProviderRelay
+            .held_through()
+            .any(|permission| permission == Permission::ProviderUse)
+    );
+    let written = json!({"models":["team/*"],"efforts":["low"],"arrangements":["key_separated"]});
+    assert_eq!(
+        Options::parse(Permission::ProviderRelay, &written).unwrap(),
+        Options::parse(Permission::ProviderUse, &written).unwrap()
+    );
+    assert_eq!(
+        Permission::ProviderRelay.options_schema(),
+        Permission::ProviderUse.options_schema()
+    );
+    assert!(
+        !Choice::FullInteract
+            .permissions(ObjectKind::Provider)
+            .contains(&Permission::ProviderRelay),
+        "ordinary Can use does not silently open the public API"
+    );
+    assert_eq!(
+        Choice::highest(ObjectKind::Provider, &[Permission::ProviderUse]),
+        Some(Choice::FullInteract)
+    );
+    assert_eq!(
+        Choice::highest(
+            ObjectKind::Provider,
+            &[Permission::ProviderUse, Permission::ProviderRelay]
+        ),
+        Some(Choice::FullInteract)
+    );
+}
+
+#[tokio::test]
+async fn a_manager_opens_exact_enabled_models_and_a_bad_relay_edit_keeps_the_saved_choice() {
+    let world = world().await;
+    let c = company(&world).await;
+    let made = make(&world, &c.boss, &api_body("Explicit API relay", c.acme)).await;
+    world
+        .app
+        .call(ProviderModelCreate, &[&made.base.id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "chosen".into(),
+            display_name: None,
+            parameters: None,
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let current = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    let updated=world.app.call(ProviderUpdate,&[&made.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}}))
+        .send().await.ok().into_full().unwrap().provider;
+    assert_eq!(updated.relay.as_ref().unwrap().models, vec!["chosen"]);
+    assert!(updated.relay.as_ref().unwrap().enabled);
+    let refused=world.app.call(ProviderUpdate,&[&made.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":updated.revision,"relay":{"enabled":true,"models":["missing"]}}))
+        .send().await.problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    let saved = world
+        .app
+        .call(ProviderGet, &[&made.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(saved.revision, updated.revision);
+    assert_eq!(saved.relay, updated.relay);
+}
+
+#[tokio::test]
+async fn a_relay_call_checks_declared_options_before_starting_its_runtime() {
+    use orch_api_contract::resources::ProviderRelayResponses;
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Declared relay options", c.acme)).await;
+    world
+        .app
+        .call(ProviderModelCreate, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "chosen".into(),
+            display_name: None,
+            parameters: None,
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let current = world
+        .app
+        .call(ProviderGet, &[&provider.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    world.app.call(ProviderUpdate,&[&provider.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}}))
+        .send().await.ok();
+    let refused = world
+        .app
+        .call(ProviderRelayResponses, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&json!({"model":"chosen","input":"Only declared choices","made_up_paid_option":true}))
+        .send_bytes()
+        .await;
+    assert_eq!(refused.problem().code, ErrorCode::RequestInvalid);
+    let native: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind='provider.relay'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    let calls: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_relay_calls")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (native, calls),
+        (0, 0),
+        "undeclared options have no admitted or native model call"
+    );
+}
+
+#[tokio::test]
+async fn a_public_model_response_arrives_before_its_native_call_ends_and_keeps_no_server_file() {
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use orch_api_contract::resources::{ProviderConnectionLocation, ProviderRelayResponses};
+    use orch_api_core::{relay::Relays, testing::Machine};
+    use orch_link_contract::commands::{
+        Cmd, CommandError, CommandKind, LeaseCloseResult, ProviderRelay, ProviderRelayHead,
+    };
+    use std::{sync::Arc, time::Duration};
+    struct Native {
+        relays: Relays,
+        finish: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl Machine for Native {
+        async fn run(&self, command: &Cmd) -> Result<Json, CommandError> {
+            if command.kind != CommandKind::ProviderRelay.as_str() {
+                return Ok(json!({}));
+            }
+            let body: ProviderRelay = serde_json::from_value(command.body.clone()).unwrap();
+            assert_eq!(body.lease.lease_id, command.id);
+            assert!(!serde_json::to_string(&command.body).unwrap().contains(KEY));
+            let pipe = self.relays.get(body.relay_id).unwrap();
+            pipe.stand(0).unwrap();
+            let mut input = Vec::new();
+            while i64::try_from(input.len()).unwrap() < body.request_bytes {
+                let offset = u64::try_from(input.len()).unwrap();
+                let length = u64::try_from(body.request_bytes).unwrap() - offset;
+                input.extend_from_slice(&pipe.pull(offset, length).await.unwrap().unwrap());
+                pipe.stand(u64::try_from(input.len()).unwrap()).unwrap();
+            }
+            assert_eq!(orch_types::Hash::of(&input), body.request_hash);
+            let input: Json = serde_json::from_slice(&input).unwrap();
+            assert_eq!(input["model"], "chosen");
+            let head = serde_json::to_vec(&ProviderRelayHead {
+                status: 200,
+                headers: vec![("content-type".into(), b"text/event-stream".to_vec())],
+            })
+            .unwrap();
+            let mut offset = u64::try_from(body.request_bytes).unwrap();
+            offset = pipe
+                .push(
+                    offset,
+                    Bytes::copy_from_slice(&u64::try_from(head.len()).unwrap().to_be_bytes()),
+                )
+                .await
+                .unwrap();
+            offset = pipe.push(offset, Bytes::from(head)).await.unwrap();
+            offset = pipe
+                .push(offset, Bytes::from_static(b"data: first\n\n"))
+                .await
+                .unwrap();
+            self.finish.notified().await;
+            pipe.push(offset, Bytes::from_static(b"data: last\n\n"))
+                .await
+                .unwrap();
+            Ok(serde_json::to_value(LeaseCloseResult {
+                requests: 1,
+                usage: None,
+                usage_groups: Some(Vec::new()),
+            })
+            .unwrap())
+        }
+    }
+    let world = world().await;
+    let c = company(&world).await;
+    let keeper = directory_keeper(&world, &c.boss, c.acme, "SDK keeper").await;
+    let mut setup = api_body("SDK stream", c.acme);
+    if let CreateProvider::Api {
+        runtime_location,
+        key_machine_id,
+        ..
+    } = &mut setup
+    {
+        *runtime_location = Some(ProviderConnectionLocation::Machine { machine_id: keeper });
+        *key_machine_id = Some(keeper);
+    }
+    let provider = make(&world, &c.boss, &setup).await;
+    world
+        .app
+        .call(ProviderModelCreate, &[&provider.base.id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "chosen".into(),
+            display_name: None,
+            parameters: None,
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let current = world
+        .app
+        .call(ProviderGet, &[&provider.base.id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    world.app.call(ProviderUpdate,&[&provider.base.id]).token(&c.boss.token)
+        .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}})).send().await.ok();
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let played = world.app.play(
+        keeper,
+        Arc::new(Native {
+            relays: world.app.app.blobs.model_relays().clone(),
+            finish: Arc::clone(&finish),
+        }),
+    );
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let response = world
+            .app
+            .call(ProviderRelayResponses, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&json!({"model":"chosen","input":"An SDK request","stream":true}))
+            .send_response()
+            .await;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(!response.headers().contains_key("content-length"));
+        let mut body = response.into_body();
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(first, Bytes::from_static(b"data: first\n\n"));
+        let command = played.seen_of(CommandKind::ProviderRelay).pop().unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
+            .bind(command.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            state, "accepted",
+            "the first response piece precedes native completion"
+        );
+        sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{offered}',$2,true) WHERE provider_id=$1 AND model_name='chosen'")
+            .bind(provider.base.id).bind(json!({"cache_lifetimes":["1h"]})).execute(&world.db.pool).await.unwrap();
+        finish.notify_one();
+        assert_eq!(
+            body.collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"data: last\n\n")
+        );
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM blobs")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+    })
+    .await
+    .expect("the SDK stream must progress without waiting for its whole response");
+}
+
+#[tokio::test]
+async fn ordinary_provider_use_does_not_open_relay_and_both_all_purpose_and_relay_caps_refuse_before_model_work()
+ {
+    use orch_api_contract::{
+        access::NewResourceAccess,
+        resources::ProviderRelayResponses,
+        usage::{CapInput, CapMeter, CapPeriod, CapSplit, CapSubjectInput, UsageCapCreate},
+    };
+    for purposes in [None, Some(vec!["relay".to_owned()])] {
+        let world = world().await;
+        let c = company(&world).await;
+        let mut setup = api_body("Capped direct access", c.acme);
+        if let CreateProvider::Api { access, .. } = &mut setup {
+            *access = Some(NewResourceAccess::Home);
+        }
+        let provider = make(&world, &c.boss, &setup).await;
+        world
+            .app
+            .call(ProviderModelCreate, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&ProviderModelCreateBody {
+                model_name: "chosen".into(),
+                display_name: None,
+                parameters: None,
+                groups: None,
+            })
+            .send()
+            .await
+            .ok();
+        let current = world
+            .app
+            .call(ProviderGet, &[&provider.base.id])
+            .token(&c.boss.token)
+            .send()
+            .await
+            .ok();
+        world.app.call(ProviderUpdate,&[&provider.base.id]).token(&c.boss.token)
+            .raw_body(&json!({"expected_revision":current.revision,"relay":{"enabled":true,"models":["chosen"]}})).send().await.ok();
+        let request =
+            json!({"model":"chosen","input":"Direct access follows its own grant and cap"});
+        let only_use = world
+            .app
+            .call(ProviderRelayResponses, &[&provider.base.id])
+            .token(&c.viewer.token)
+            .body(&request)
+            .send_bytes()
+            .await;
+        assert!(!only_use.status.is_success());
+        assert_ne!(
+            only_use.problem().code,
+            ErrorCode::ProviderRelayUnavailable,
+            "private relay choices stay behind the independent grant"
+        );
+        world
+            .app
+            .call(UsageCapCreate, &[])
+            .token(&c.boss.token)
+            .body(&CapInput {
+                node_id: Some(c.acme),
+                provider_id: None,
+                subject: CapSubjectInput::Everyone,
+                split: CapSplit::Shared,
+                models: None,
+                services: None,
+                purposes,
+                tiers: None,
+                harness_kinds: None,
+                meter: CapMeter::Tokens,
+                period: Some(CapPeriod::Total),
+                counted_from: None,
+                amount: Some("0".into()),
+                at_limit: None,
+                warn_percent: None,
+                uncounted: None,
+                note: None,
+            })
+            .send()
+            .await
+            .ok();
+        let capped = world
+            .app
+            .call(ProviderRelayResponses, &[&provider.base.id])
+            .token(&c.boss.token)
+            .body(&request)
+            .send_bytes()
+            .await;
+        assert_eq!(capped.problem().code, ErrorCode::ProviderRelayUnavailable);
+        assert!(capped.problem().detail.to_ascii_lowercase().contains("cap"));
+        let accepted: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_relay_calls")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        let native: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind='provider.relay'")
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+        assert_eq!((accepted, native), (0, 0));
+    }
 }

@@ -489,6 +489,7 @@ impl Authority {
         clock: &dyn Clock,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let native = NewCommand {
+            content_transit: false,
             id: command.id,
             machine_id: command.machine_id,
             kind: &command.kind,

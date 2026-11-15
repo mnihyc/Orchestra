@@ -87,7 +87,7 @@ async fn fixture() -> (World, resources::Company, orch_types::Id) {
     let world = World::with_builtin_sources(Arc::new(table)).await;
     let c = resources::company(&world).await;
     let body = CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: "Admin-source fixture".into(),
         home_id: c.acme,

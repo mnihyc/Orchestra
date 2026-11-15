@@ -397,7 +397,9 @@ pub async fn givers_for(
     policy: &ResourcePolicy,
 ) -> Result<Givers, AskError> {
     let (graph, site, resource) = locate(conn, object).await?;
-    if permissions.contains(&Permission::ProviderUse)
+    if permissions
+        .iter()
+        .any(|permission| permission.has_provider_options())
         && resource
             .as_ref()
             .is_some_and(|resource| policy.keeps_to_its_owner(resource))
@@ -421,8 +423,10 @@ pub async fn givers_for(
     }
     let givers = entitled_givers(conn, &frame, &site, permissions, requester.user()).await?;
     let mut entitled = Vec::new();
-    for giver in givers {
-        if permissions.contains(&Permission::ProviderUse)
+    'givers: for giver in givers {
+        if permissions
+            .iter()
+            .any(|permission| permission.has_provider_options())
             && let Some(resource) = &resource
         {
             // As above: a giver is asked as they would decide.
@@ -443,10 +447,6 @@ pub async fn givers_for(
                 entitled.push(giver);
                 continue;
             }
-            let Ok(Ok(grant)) = crate::usable::access(&candidate, resource, &site, None, false)
-            else {
-                continue;
-            };
             // A giver gives what one single entry of theirs allows, and the entry a request writes
             // names the models, services and efforts that were asked for, and no type and no
             // place: the givers are those who could write that entry, as the approval holds them.
@@ -457,12 +457,23 @@ pub async fn givers_for(
                 arrangements: None,
                 r#where: None,
             };
-            let fits = grant
-                .each
+            for permission in permissions
                 .iter()
-                .any(|allowance| writes.within(&allowance.provider));
-            if !fits {
-                continue;
+                .copied()
+                .filter(|permission| permission.has_provider_options())
+            {
+                let Ok(Ok(grant)) =
+                    crate::usable::access_for(&candidate, resource, &site, None, false, permission)
+                else {
+                    continue 'givers;
+                };
+                if !grant
+                    .each
+                    .iter()
+                    .any(|allowance| writes.within(&allowance.provider))
+                {
+                    continue 'givers;
+                }
             }
         }
         entitled.push(giver);
@@ -542,7 +553,12 @@ pub async fn plan(
             ));
         }
     }
-    if ask.options.is_some() && !ask.permissions.contains(&Permission::ProviderUse) {
+    if ask.options.is_some()
+        && !ask
+            .permissions
+            .iter()
+            .any(|permission| permission.has_provider_options())
+    {
         return Err(invalid(
             "options",
             "models and efforts are asked for with the use of a provider",
@@ -597,7 +613,10 @@ pub async fn plan(
             });
         }
     }
-    if ask.permissions.contains(&Permission::ProviderUse)
+    if ask
+        .permissions
+        .iter()
+        .any(|permission| permission.has_provider_options())
         && resource
             .as_ref()
             .is_some_and(|resource| policy.keeps_to_its_owner(resource))
@@ -938,7 +957,11 @@ pub async fn grant(
             chosen.clone()
         }
     };
-    if giving.options.is_some() && !permissions.contains(&Permission::ProviderUse) {
+    if giving.options.is_some()
+        && !permissions
+            .iter()
+            .any(|permission| permission.has_provider_options())
+    {
         return Err(unfit("options", "are for the use of a provider"));
     }
     if let Some(end) = giving.expires_at
@@ -949,7 +972,7 @@ pub async fn grant(
     let holder = asked.whom.holder(requester);
     let mut rows: Vec<RowChange> = Vec::with_capacity(permissions.len());
     for permission in &permissions {
-        let options = if *permission == Permission::ProviderUse {
+        let options = if permission.has_provider_options() {
             Some(options_given(asked, giving.options.as_ref())?)
         } else {
             None

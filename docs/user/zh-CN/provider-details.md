@@ -3,7 +3,7 @@ heading_id.服务后端: service-backends
 heading_id.请求选项规则: request-option-rules
 title: 选择和阅读提供方详情
 screens: /thread/$threadId, /resources/providers, /resources/providers/$id, /resources/machines, /resources/templates
-keywords: 提供方详情, 信息来源, 模型来源, SourceChoice, 余额, 花费, 重置, 尚未读取, 未报告, 不提供, 未加密, providers.allow_http_upstreams, 上次程序错误, 已中断
+keywords: Relay, SDK, provider.relay, 提供方详情, 信息来源, 模型来源, SourceChoice, 余额, 花费, 重置, 尚未读取, 未报告, 不提供, 未加密, providers.allow_http_upstreams, 上次程序错误, 已中断
 heading_id.选择数据源: choose-a-source
 heading_id.理解四种状态: read-the-four-states
 heading_id.使用重置: use-a-reset
@@ -13,6 +13,7 @@ heading_id.自己构建: build-your-own
 heading_id.请求选项: request-options
 heading_id.线程选项: thread-options
 heading_id.确认值: confirmed-values
+heading_id.直接调用模型接口: direct-model-api-calls
 summary: 结合来源、缺失状态和重置选项阅读提供方观测。
 ---
 
@@ -80,8 +81,10 @@ OpenRouter 或 DeepSeek 密钥地址用相应读取器，否则没有可选信�
 ## 线程选项
 
 Codex 的**访问计划**也可用于转发的 API 端点，前提是该接口支持，并且提供方管理者已为模型启用对应计划。
-在线程输入区的**模型与强度**对话框中选择。修改从下一轮生效；该轮的租约在重试或重启后仍保留同一选择。
+在线程输入区的**访问计划**控件中选择，它位于**模型**和**强度**旁边，模型启用了计划时才会出现。修改从下一轮生效；该轮的租约在重试或重启后仍保留同一选择。
 普通访问不会向 Responses 请求添加计划选择字段。提供方仅报告、尚未由管理者启用的计划不可选择。
+
+管理者已为模型开启、但线程无法使用的速度、访问计划或上下文大小，仍有各自的控件，只是显示为关闭，并用几个字说明原因：智能体不提供、凭据没有留在提供方、环境或提供方属于另一种、提供方对该模型的规则把它排除在外，或**智能体功能**设置中对应的功能是关闭的。你有权解除时，控件还会给出对应的操作，例如**在智能体功能中开启**。
 
 打开线程的**参数 → 请求选项**。通过 API 转发的线程按接口显示提供方开放的字段。
 枚举值从列表中选择，固定值只读。使用程序自身登录的线程保留程序原有的参数控制。
@@ -183,3 +186,14 @@ API 提供方的**设置 → 服务**列出其已保存端点声明的服务。�
 目录价格是以原币种记录的估算值。管理员明确保存的 Orch 点数价格决定 Orch 的计数；供应商报告的总费用另行保留以供比较。清除自定义价格会恢复目录估算。编辑会保留其他服务及未来配置字段。提供方版本已变化时，保存会被拒绝，避免覆盖其他管理员的修改。
 
 只有在线程明确选择**服务**模式，并指定已启用的后端后，才会调用付费服务。每次请求都检查原始发起人或原生工作来源的提供方使用权限、服务或模型允许列表，以及按用途设置的额度。模型列表与服务列表相互独立。未设置时保留程序默认行为，不会选择付费回退。
+
+
+## 直接调用模型接口
+
+密钥提供方的**设置 → 转发**默认关闭。在模型选择器中开放准确的已启用模型，再开启转发。独立的**转发**权限使用与“使用”相同的完整模型、推理强度和部署方式条件；普通“可使用”不会授予转发。独立 SDK 调用没有经过确认的机器或环境，因此无法使用带位置限制的授权。订阅仍通过普通线程使用。
+
+将 **SDK 地址**复制到 SDK 的基础地址，并使用 Orch API 密钥认证。OpenAI 兼容 SDK 使用其 API 密钥参数；Messages SDK 使用其 bearer/auth-token 参数。提供方的模型密钥始终留在连接的保管机器上。基础地址支持 `/responses`、`/responses/compact`、`/responses/input_tokens`、`/chat/completions`、`/embeddings`、`/v1/messages` 和 `/v1/messages/count_tokens`；模型列表仅显示已开放且调用者获准使用的模型。这些请求不会刷新提供方观测。
+
+调用通过现有原生转发器逐段传输。相同的端点、分组和模型选项声明会在上游请求前约束调用。未开放的模型、未声明的选项、已耗尽的用量上限、不可用的保管机器或已关闭的转发会按实际原因拒绝调用。用量归于调用者，记录在**用量 → 转发**，来源为 Orch；用途列表为空的上限也包含转发。公开请求不携带提供方凭据，请求和响应内容不作为服务端文件保留。
+
+系统设置 `providers.relay_concurrency`、`providers.relay_request_bytes`、`providers.relay_idle_secs` 和 `providers.relay_retry_ms` 分别控制排队准入、请求大小、静默时间和传输重试。`jobs.io_timeout_secs` 提供调用的原生工作总时限。读取端断开会结束其命令。SDK 重放请求会产生新调用；运行时崩溃后，Orch 不会自动重复可能已经付费的原生调用。

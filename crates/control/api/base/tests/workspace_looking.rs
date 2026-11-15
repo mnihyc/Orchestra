@@ -647,6 +647,20 @@ async fn one_entry_of_an_archive_is_served_to_a_viewer_and_written_nowhere() {
     );
     assert_eq!(site.sent(CommandKind::FsWrite), 0);
     assert!(!site.disk.exists("docs/readme.txt"));
+    let hash = orch_types::Hash::of(b"inside docs/readme.txt");
+    assert!(
+        site.app()
+            .app
+            .blobs
+            .store()
+            .size(&hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "an entry viewed through a relay leaves no server blob"
+    );
+    assert_eq!(site.sent(CommandKind::FsArchiveRead), 0);
+    assert_eq!(site.sent(CommandKind::FsRelayArchiveRead), 1);
 }
 
 #[tokio::test]

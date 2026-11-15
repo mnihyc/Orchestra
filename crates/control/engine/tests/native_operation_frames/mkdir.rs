@@ -85,6 +85,7 @@ async fn setup(world: &World) -> (Id, Caller, HttpOrigin, FileMkdirInput, Outgoi
         .unwrap();
     let input = FileMkdirInput::new(&env, world.machine_id, None, "native-created".into());
     let outgoing = Outgoing {
+        content_transit: false,
         id: new_id(),
         machine: world.machine_id,
         key: input.serial(),
@@ -108,6 +109,7 @@ async fn check(
         .current_issue_callers(
             &mut tx,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

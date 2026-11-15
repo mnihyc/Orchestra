@@ -5,6 +5,12 @@ WITH open_requests AS (
     WHERE c.kind IN ('provider.complete','provider.embed') AND c.state IN ('queued','sent','accepted')
       AND NOT EXISTS(SELECT 1 FROM summary_calls accepted WHERE accepted.id=c.id)
   UNION ALL
+  SELECT relay.id,relay.provider_id,relay.model_name,NULL::uuid,p.held_by_environment_id
+    FROM provider_relay_calls relay JOIN providers p ON p.id=relay.provider_id
+    LEFT JOIN commands c ON c.id=relay.id
+    WHERE relay.finished_at IS NULL AND relay.native_done_at IS NULL AND ($4::timestamptz IS NULL OR relay.deadline>$4)
+      AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
+  UNION ALL
   SELECT accepted.id,accepted.provider_id,accepted.model_name,
     COALESCE(accepted.agent_id,s.agent_id,t.agent_id,p.agent_id),
     COALESCE(accepted.environment_id,s.environment_id,t.environment_id,p.held_by_environment_id)

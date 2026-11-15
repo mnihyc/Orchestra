@@ -1168,6 +1168,8 @@ pub enum UsagePurpose {
     ImageGeneration,
     /// A question explicitly issued by a person.
     Ask,
+    /// A direct model API call through a key provider.
+    Relay,
 }
 
 /// What a ledger row counts.

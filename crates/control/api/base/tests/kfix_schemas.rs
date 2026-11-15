@@ -416,6 +416,7 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
         .call(ProviderUpdate, &[&scene.on.provider])
         .token(&scene.ada.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -440,6 +441,7 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
             .call(ProviderUpdate, &[&scene.on.provider])
             .token(&scene.ada.token)
             .body(&ProviderUpdateBody {
+                relay: None,
                 service_offerings: None,
                 model_group_options: None,
                 name: Some("Must not save".into()),

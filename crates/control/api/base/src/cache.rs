@@ -415,6 +415,51 @@ pub async fn evict_caches(db: &Db, clock: &dyn Clock) -> Result<Evicted, DbError
     Ok(done)
 }
 
+/// What one run of the purge of relayed caches did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Purged {
+    /// How many environments had cached versions in a place that relays.
+    pub environments: u64,
+    /// How many cached versions of files were forgotten.
+    pub versions: u64,
+}
+
+/// Forgets the cached versions of files in each environment whose place relays file content
+/// (`storage.relay_transfers`), and removes from the store the content that nothing else holds, at once
+/// and not after the grace. The first run after a place switches to relay removes its cache, and
+/// it runs again whenever a place switches to relaying. Content that a snapshot, an attachment, a
+/// document or a move holds is only no longer a cached version. A run goes on from where the last one
+/// stopped, `BATCH` versions at a time and `MAX_BATCHES_PER_RUN` batches at most, so that it never
+/// holds the store for long.
+pub async fn purge_relayed_caches(
+    db: &Db,
+    blobs: &Blobs,
+    clock: &dyn Clock,
+) -> Result<Purged, DbError> {
+    let mut conn = db.acquire().await?;
+    let mut done = Purged::default();
+    let at = clock.now();
+    storage::release_orphaned_command_pins(&mut conn, at, at).await?;
+    let mut batches = 0;
+    for environment in storage::cached_environments(&mut conn).await? {
+        if !orch_engine::transfers::relay_on(&mut conn, Place::Environment(environment)).await {
+            continue;
+        }
+        done.environments += 1;
+        while batches < MAX_BATCHES_PER_RUN {
+            let at = clock.now();
+            let hashes = storage::forget_cached_batch(&mut conn, environment, at, BATCH).await?;
+            if hashes.is_empty() {
+                break;
+            }
+            batches += 1;
+            done.versions += u64::try_from(hashes.len()).unwrap_or(u64::MAX);
+            blobs.forget_after_transfer(db, &hashes, at).await;
+        }
+    }
+    Ok(done)
+}
+
 // ---------------------------------------------------------------- collection
 
 /// What one run of the collection did.
@@ -456,23 +501,26 @@ pub async fn collect_garbage(
         .await?;
     }
     let mut done = Collected::default();
+    let mut after = None;
     for _ in 0..MAX_BATCHES_PER_RUN {
-        let mut conn = db.acquire().await?;
-        let candidates = storage::unreferenced(&mut conn, idle_since, BATCH).await?;
-        if candidates.is_empty() {
+        let candidates = {
+            let mut conn = db.acquire().await?;
+            storage::unreferenced_page(&mut conn, idle_since, after, BATCH).await?
+        };
+        let Some(last) = candidates.last() else {
             break;
-        }
-        for (hash, size) in candidates {
-            // The conditions are looked at again where the row is deleted: a pin or a use that
-            // came meanwhile keeps the blob.
-            if storage::forget_blob(&mut conn, &hash, idle_since).await? {
-                if let Err(error) = blobs.store().delete(&hash).await {
-                    tracing::warn!(%error, %hash, "a blob that nothing wanted could not be removed");
-                }
-                done.blobs += 1;
-                done.bytes = done.bytes.saturating_add(size);
-            }
-        }
+        };
+        after = Some((last.last_access_at, last.hash));
+        let hashes: Vec<Hash> = candidates.iter().map(|row| row.hash).collect();
+        let retired = orch_engine::transfers::retire_blobs(
+            db,
+            blobs.store().as_ref(),
+            &hashes,
+            orch_engine::transfers::RetirementWhen::IdleSince(idle_since),
+        )
+        .await?;
+        done.blobs = done.blobs.saturating_add(retired.blobs);
+        done.bytes = done.bytes.saturating_add(retired.bytes);
     }
     let mut conn = db.acquire().await?;
     for session in storage::expired_sessions(&mut conn, now, BATCH).await? {
@@ -558,6 +606,14 @@ pub fn start_housekeeping(
             let every = interval_of(&app.config, EVICTION_JOB, EVICTION_EVERY);
             run_every(every, &stop, || async {
                 locked(&app.db, app.clock.as_ref(), EVICTION_JOB, || async {
+                    app.blobs
+                        .reap_command_transfers(&app.db, app.clock.as_ref(), &app.link.dispatcher())
+                        .await?;
+                    let purged =
+                        purge_relayed_caches(&app.db, &app.blobs, app.clock.as_ref()).await?;
+                    if purged.versions > 0 {
+                        tracing::info!(?purged, "the caches of places that relay were emptied");
+                    }
                     let evicted = evict_caches(&app.db, app.clock.as_ref()).await?;
                     if evicted.versions > 0 {
                         tracing::info!(?evicted, "the caches of environments were trimmed");
@@ -575,6 +631,9 @@ pub fn start_housekeeping(
             let every = interval_of(&app.config, COLLECTION_JOB, COLLECTION_EVERY);
             run_every(every, &stop, || async {
                 locked(&app.db, app.clock.as_ref(), COLLECTION_JOB, || async {
+                    app.blobs
+                        .reap_command_transfers(&app.db, app.clock.as_ref(), &app.link.dispatcher())
+                        .await?;
                     let collected =
                         collect_garbage(&app.db, &app.blobs, app.clock.as_ref(), &app.config)
                             .await?;

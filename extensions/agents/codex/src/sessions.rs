@@ -531,6 +531,7 @@ pub fn thread_config(
             );
         }
         ProviderAccess::Native { .. } => {}
+        ProviderAccess::Shared { form, .. } if form == crate::copied_token::FORM => {}
         ProviderAccess::Shared { .. } | ProviderAccess::Handover { .. } => {
             return Err(AdapterError::Unsupported("credentials".to_owned()));
         }
@@ -1073,6 +1074,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 memory: None,
                 arrangement: ArrangementType::KeySeparated,
