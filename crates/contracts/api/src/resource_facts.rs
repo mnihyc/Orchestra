@@ -29,6 +29,33 @@ pub struct ResourcePauseQuery {
     pub run_waiting: Option<bool>,
 }
 
+/// Explicit choice for this deletion, off unless the person selects its reviewed audience.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceNotificationQuery {
+    /// Tell the reviewed affected people once for this operation. Absent or false tells nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    /// The caller-bound audience from the current impact review; required when notify is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_review: Option<Id>,
+}
+
+/// Provider stop choices, with notification separately selected for this act.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceStopQuery {
+    /// A short one-line note shown to people whose threads wait on the resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Tell the reviewed affected people once for this operation. Absent or false tells nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    /// The caller-bound audience from the current impact review; required when notify is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_review: Option<Id>,
+}
+
 /// Enable keeps waiting messages held unless the person explicitly asks to run them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +94,9 @@ pub struct ActivityFacts {
 /// A pause, resumption or deletion reads the same current facts before its one confirmation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceImpact {
+    /// The current affected audience for an explicit lifecycle notification, initially off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<crate::loss::OperationNotificationPlan>,
     /// The exact resource or provider model being affected.
     pub target: FactTarget,
     /// Its current authorized name.
