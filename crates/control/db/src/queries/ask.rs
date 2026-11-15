@@ -336,8 +336,19 @@ pub async fn retain_call(
     request: &Json,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    sqlx::query("INSERT INTO ask_calls (id,thread_id,turn_id,item_id,root_org_id,person_id,provider_id,machine_id,request,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING")
-        .bind(id).bind(thread).bind(turn).bind(item).bind(root).bind(person).bind(provider).bind(machine).bind(request).bind(at).execute(conn).await?;
+    let recorded = sqlx::query("INSERT INTO ask_calls (id,thread_id,turn_id,item_id,root_org_id,person_id,provider_id,machine_id,request,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING")
+        .bind(id).bind(thread).bind(turn).bind(item).bind(root).bind(person).bind(provider).bind(machine).bind(request).bind(at).execute(&mut *conn).await?;
+    if recorded.rows_affected() > 0
+        && let Some(model) = request.get("model_name").and_then(Json::as_str)
+    {
+        super::identity::note_model_choice(conn, person, provider, model, at).await?;
+        crate::sequences::notify_user_event(
+            conn,
+            &[person],
+            &serde_json::json!({"what":"model_recents"}),
+        )
+        .await?;
+    }
     Ok(())
 }
 

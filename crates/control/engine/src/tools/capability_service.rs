@@ -341,6 +341,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -601,6 +609,25 @@ impl Engine {
         harness_takes_mcp: bool,
         now: Time,
     ) -> Result<Vec<orch_agent_contract::events::OrchTool>, EngineError> {
+        self.offered_tools_with_facts(conn, thread, harness_takes_mcp, now)
+            .await
+            .map(|(tools, _)| tools)
+    }
+
+    pub(crate) async fn offered_tools_with_facts(
+        &self,
+        conn: &mut Conn,
+        thread: &threads::ThreadRow,
+        harness_takes_mcp: bool,
+        now: Time,
+    ) -> Result<
+        (
+            Vec<orch_agent_contract::events::OrchTool>,
+            super::catalogue::AcceptedOrchTools,
+        ),
+        EngineError,
+    > {
+        let mut inputs = super::ToolOfferInputs::default();
         let owned: Option<Id> =
             sqlx::query_scalar("SELECT t.input_id FROM turns t WHERE t.id=$1 AND t.thread_id=$2")
                 .bind(thread.current_turn_id)
@@ -613,14 +640,21 @@ impl Engine {
                 .await?
                 .is_some()
         {
-            return Ok(Vec::new());
+            inputs.blocker = Some(orch_api_contract::settings::OrchToolUnavailable::CapabilityWork);
+            return Ok((
+                Vec::new(),
+                super::catalogue::capture(thread, &[], inputs, now),
+            ));
         }
-        let mut tools = super::offered_for_session(conn, thread, harness_takes_mcp, now).await?;
+        let mut tools =
+            super::offered_for_session_in(conn, thread, harness_takes_mcp, now, Some(&mut inputs))
+                .await?;
         if harness_takes_mcp {
             self.append_web_service_tools(conn, thread, &mut tools)
                 .await?;
         }
-        Ok(tools)
+        let receipt = super::catalogue::capture(thread, &tools, inputs, now);
+        Ok((tools, receipt))
     }
 
     pub(crate) async fn append_web_service_tools(

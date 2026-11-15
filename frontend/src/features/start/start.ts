@@ -6,7 +6,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useRef, useState } from 'react';
 
-import { ApiError, client } from '@/api/client';
+import { ApiError } from '@/api/client';
 import { permissionsQuery } from '@/api/access';
 import { queryClient } from '@/api/query';
 import { createTopicAndThread } from '@/api/nodes';
@@ -18,7 +18,6 @@ import { newActKey } from '@/lib/requests';
 import { i18n } from '@/i18n';
 
 import type { Resolved } from './choices';
-import { rememberSetup } from './lastSetup';
 import { checkStart } from './admission';
 import { startOptionsKey, type StartOptions } from '@/api/start';
 
@@ -83,7 +82,6 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
 
   const run = useMutation({
     mutationFn: async (asked: StartPlan) => {
-      const person = client.session.getState().userId;
       const plan = { ...asked, place: { ...asked.place },
         ...(asked.agentAccess === undefined ? {} : { agentAccess: { ...asked.agentAccess, parts: { ...asked.agentAccess.parts } } }) };
       const inputId = firstInput.current;
@@ -130,7 +128,6 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
       if (environment === null) throw new Error(i18n.t('startPreflight.changed'));
       made.current = { ...made.current, environment: { id: environment.id, name: environment.name } };
       setStanding(made.current);
-      rememberSetup(person, { place: thread.topic_id, picks: { provider: chosen.provider, agent: chosen.agent, model: chosen.model, effort: chosen.effort, environment: environment.id, arrangement: chosen.arrangement } });
       return thread;
     },
     onSuccess: (thread) => {
