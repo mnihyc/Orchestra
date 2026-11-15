@@ -818,3 +818,105 @@ async fn a_prepared_archive_checks_the_writer_cut_before_any_export_or_job_inser
     assert!(rows::get(&mut tx, made.export.id).await.unwrap().is_some());
     tx.rollback().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_full_detail_tail_and_streamed_archive_equal_the_continuous_reading_across_pages() {
+    use orch_api_contract::exports::ExportChosen;
+    use orch_api_contract::threads::ExportDetail;
+    use orch_engine::written::{self, Detail};
+    let o = office(World::new().await).await;
+    let source = o.world.thread("Full window proof").await;
+    talk(
+        &o.world,
+        source,
+        "A full reading question",
+        "A full reading answer",
+    )
+    .await;
+    o.world.wait_followed_up(source).await;
+    // Two full history pages and one partial page also cross many export windows.
+    let turns = 2 * orch_db::queries::thread_history::PAGE + 1;
+    o.world.grow_history(source, turns).await;
+    let mut conn = o.world.pool.acquire().await.unwrap();
+    let whole = written::read_conversation(&mut conn, source, (None, None), Detail::Full, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let tail = written::read_conversation(
+        &mut conn,
+        source,
+        (Some(turns - 1), Some(turns)),
+        Detail::Full,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!((tail.from, tail.to, tail.last), (turns - 1, turns, turns));
+    let heading = format!("## Turn {} ·", turns - 1);
+    assert_eq!(
+        &tail.text[tail.text.find(&heading).unwrap()..],
+        &whole.text[whole.text.find(&heading).unwrap()..]
+    );
+    drop(conn);
+    let request = ExportRequest {
+        what: ExportWhat::Chosen(ExportChosen {
+            nodes: Some(vec![source]),
+            ..Default::default()
+        }),
+        parts: Some(ExportParts {
+            conversations: Some(true),
+            chats: Some(false),
+            documents: Some(false),
+        }),
+        detail: Some(ExportDetail::Full),
+        files: Some(false),
+        package: Some(false),
+        ..everything()
+    };
+    let made = o
+        .world
+        .engine()
+        .make_export(
+            &Caller::session(o.world.ada),
+            &Origin::default(),
+            o.world.root,
+            &request,
+        )
+        .await
+        .unwrap();
+    let ended = o.ended(&made).await;
+    assert_eq!(ended.state, "succeeded", "{:?}", ended.error);
+    let held = o.contents(o.world.ada, made.export.id).await;
+    let (path, bytes) = held
+        .iter()
+        .find(|(path, bytes)| {
+            path.ends_with(".md")
+                && std::str::from_utf8(bytes).is_ok_and(|text| text.contains("## Turn 1 ·"))
+        })
+        .unwrap();
+    let streamed = std::str::from_utf8(bytes).unwrap();
+    let ordinals: Vec<i64> = streamed
+        .lines()
+        .filter_map(|line| line.strip_prefix("## Turn "))
+        .map(|line| line.split_whitespace().next().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(ordinals, (1..=turns).collect::<Vec<_>>());
+    let files = written::files_beside(path);
+    let expected = written::read_conversation_in(
+        &mut o.world.pool.acquire().await.unwrap(),
+        source,
+        (None, None),
+        Detail::Full,
+        None,
+        Some(&files),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        &streamed[streamed.find("## Turn 1 ·").unwrap()..],
+        &expected.text[expected.text.find("## Turn 1 ·").unwrap()..],
+        "every Full window is the same reading, including its loose history lines"
+    );
+}

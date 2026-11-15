@@ -412,14 +412,27 @@ pub async fn bind_kept(
     Ok(())
 }
 
-/// The original Ask remains a kept history link, with no further inputs admitted.
-pub async fn kept(conn: &mut Conn, source: Id, target: Id) -> Result<(), DbError> {
-    sqlx::query("UPDATE threads SET ask_state='kept',ask_kept_thread_id=$2 WHERE node_id=$1")
-        .bind(source)
-        .bind(target)
-        .execute(conn)
-        .await?;
-    Ok(())
+/// A source that received later words keeps its current conversation and work.
+pub async fn kept_if_unchanged(
+    conn: &mut Conn,
+    source: Id,
+    target: Id,
+    view: Id,
+    through: Seq,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE threads SET ask_state='kept',ask_kept_thread_id=$2
+        WHERE node_id=$1 AND ask_state='ready' AND active_continuation_id=$3
+          AND NOT EXISTS(SELECT 1 FROM items i WHERE i.thread_id=$1 AND i.continuation_id=$3 AND i.seq_updated>$4)",
+    )
+    .bind(source)
+    .bind(target)
+    .bind(view)
+    .bind(through)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Stop cancels only this turn's exact retained commands.
