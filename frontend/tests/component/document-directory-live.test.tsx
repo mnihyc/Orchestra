@@ -15,7 +15,7 @@ vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: async (request: Promise<unknown>) => request };
 });
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: calls.subscribe,
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: calls.subscribe,
   status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, build: null, outdated: false })) } }));
 const request = { node: 'node-a', at: { kind: 'container' as const, id: 'folder' } };
 const page = (name: string, node = 'node-a', feed = 'opaque-first'): DocumentTreePage => ({

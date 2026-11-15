@@ -105,6 +105,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
             .call(NodeSettingSet, &[&node, &"calls.rules"])
             .token(&scene.ada.token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value,
                 locked: None,
                 expected_revision: None,
@@ -124,6 +125,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         )
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(9),
             locked: None,
             expected_revision: None,
@@ -143,6 +145,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .call(NodeSettingSet, &[&node, &"calls.repeat_limit"])
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(10),
             locked: None,
             expected_revision: None,
@@ -162,6 +165,7 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .call(NodeSettingSet, &[&node, &"calls.repeat_limit"])
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(4),
             locked: None,
             expected_revision: child.own.as_ref().map(|own| own.revision),

@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test model_entries --test provider_models
