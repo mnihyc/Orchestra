@@ -354,7 +354,8 @@ pub struct Cmd {
     /// Its serial key; `null` for a command that waits for no other.
     #[serde(default)]
     pub key: Option<String>,
-    /// The moment after which it is not to be started.
+    /// The latest arrival time. Once accepted, admission and serial-key queue time are credited
+    /// to execution, including after a connector restart.
     pub deadline: Time,
     /// Its body, as its kind defines it.
     #[serde(rename = "b")]
@@ -372,10 +373,34 @@ pub fn is_transport_rebind(kind: &str, body: &Json) -> bool {
     flag.and_then(Json::as_bool) == Some(true)
 }
 
+/// Actual serial-key ownership, independent of an accepted command's later upload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[repr(i16)]
+pub enum CommandKeyPhase {
+    /// Accepted, still waiting for its place in the serial line.
+    Queued = 0,
+    /// Running while it owns the key.
+    Running = 1,
+    /// Capture released the key; its result can still be uploading.
+    Released = 2,
+}
+
 /// A machine's acceptance: durable for ordinary commands, in memory for a live transport rebind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CmdAck {
     /// The command.
+    pub id: Id,
+    /// The machine's current ownership of its serial key.
+    pub key_phase: CommandKeyPhase,
+}
+
+/// A machine received the complete command, before any durable acceptance work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct CmdSeen {
+    /// The command that arrived whole.
     pub id: Id,
 }
 
@@ -1013,7 +1038,7 @@ commands! {
     /// Adds an input to the turn that is running.
     TurnSteer = "turn.steer": AGENT, Thread, 30, Download, TurnSteer => Empty;
     /// Stops the turn that is running.
-    TurnInterrupt = "turn.interrupt": AGENT, Thread, 30, None, TurnInterrupt => Empty;
+    TurnInterrupt = "turn.interrupt": AGENT, None, 30, None, TurnInterrupt => Empty;
     /// Gives a harness the decision it asked for.
     ApprovalResolve = "approval.resolve": AGENT, Thread, 30, None, ApprovalResolve => Empty;
     /// Gives a harness the outcome of a call to one of the system's own tools.
@@ -1257,6 +1282,34 @@ impl std::fmt::Display for CommandKind {
     }
 }
 
+impl CommandKind {
+    /// Requests or answers of these kinds can outgrow a message's byte allowance.
+    /// They use the same parts transport with a wide logical length; each part still fits a frame.
+    #[must_use]
+    pub const fn is_paged(self) -> bool {
+        matches!(
+            self,
+            Self::AgentDiscoverSessions
+                | Self::AgentHistoryManage
+                | Self::AgentHistoryHomeCleanup
+                | Self::OrchToolResult
+                | Self::ProviderComplete
+                | Self::ProviderGenerate
+                | Self::ProviderService
+                | Self::ProviderEmbed
+                | Self::FsList
+                | Self::FsArchiveList
+                | Self::GitStatus
+                | Self::GitCommit
+                | Self::GitPush
+                | Self::FsRestorePlan
+                | Self::WorkspaceObserve
+                | Self::ProcList
+                | Self::NodeResourcesList
+        )
+    }
+}
+
 impl Cmd {
     /// The frame for a command of the catalogue.
     pub fn new<B: CommandBody>(
@@ -1326,6 +1379,8 @@ pub struct MachineProbe {}
 pub struct MachineUpdateNow {
     /// The same recommendation announced by ready.versions; no arbitrary download address is accepted.
     pub recommended: String,
+    /// True is an automatic drain grant; false retains a person's explicit Update choice.
+    pub automatic: bool,
 }
 
 /// What the physical program did with Update now.
@@ -1811,6 +1866,8 @@ pub struct SessionOpenMcp {
 /// The body of `session.open`: everything a session is set up with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpen {
+    /// Bytes retained for one native text output; resolved from the thread setting.
+    pub output_capture_bytes: u64,
     /// Current admitted model metadata and unchanged core capability resolutions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
@@ -1867,6 +1924,8 @@ pub struct SessionOpen {
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the selected program's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -2033,6 +2092,8 @@ pub struct SessionBackground {
     /// Continues the same bounded native snapshot, renewing its idle transfer deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// Current resolved transfer preferences, without a limit on complete roster length.
+    pub limits: crate::background::BackgroundReadLimits,
 }
 
 /// Reads the effective action mapping of the exact open native session generation.
@@ -2216,6 +2277,9 @@ pub struct ToolError {
     pub code: String,
     /// A sentence for the agent.
     pub message: String,
+    /// The actual refusal's retained allowance and reported wait, when captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<Box<orch_api_contract::threads::ToolRateLimit>>,
 }
 
 /// The body of `orch.tool_result`: one of `result` and `error`.
@@ -3143,6 +3207,60 @@ impl UnitAfterUpResult {
     }
 }
 
+/// Resolved workspace working allowances. Larger trees keep bounded incremental coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceLimits {
+    /// Folder rows in the default page. Explicit requests can choose another window.
+    pub directory_entries: u64,
+    /// File search rows in the default page. Explicit requests can choose another window.
+    pub search_results: u64,
+    /// Archive rows in the default page. Explicit requests can choose another window.
+    pub archive_results: u64,
+    /// Cached file entries.
+    pub index_entries: u64,
+    /// Indexing slice.
+    pub index_scan_secs: u64,
+    /// Exclusion parsing.
+    pub ignore_max_bytes: u64,
+    /// Cached exclusion rules.
+    pub ignore_cache_bytes: u64,
+    /// Folder continuation idle time.
+    pub directory_idle_secs: u64,
+    /// Folder observations.
+    pub directory_slots: u64,
+    /// Shared directory and file-read continuation bytes.
+    pub directory_cache_bytes: u64,
+    /// Folder metadata reads.
+    pub directory_builds: u64,
+    /// Folder page bytes.
+    pub directory_page_bytes: u64,
+    /// File search slice.
+    pub search_slice_secs: u64,
+    /// Diff bytes.
+    pub git_diff_bytes: u64,
+}
+
+impl Default for WorkspaceLimits {
+    fn default() -> Self {
+        Self {
+            directory_entries: 5000,
+            search_results: 200,
+            archive_results: 1000,
+            index_entries: 250000,
+            index_scan_secs: 10,
+            ignore_max_bytes: 1048576,
+            ignore_cache_bytes: 16777216,
+            directory_idle_secs: 300,
+            directory_slots: 256,
+            directory_cache_bytes: 1073741824,
+            directory_builds: 1,
+            directory_page_bytes: 2097152,
+            search_slice_secs: 20,
+            git_diff_bytes: 2097152,
+        }
+    }
+}
+
 /// The body of `env.attach`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvAttach {
@@ -3163,6 +3281,8 @@ pub struct EnvAttach {
     /// The root of its workspace; `null` where a driver made the unit
     /// and the connector uses what it was given.
     pub workspace_root: Option<String>,
+    /// Resolved working allowances from the workspace settings.
+    pub workspace: WorkspaceLimits,
     /// The patterns of what is left out of the workspace.
     pub ignore: Vec<String>,
     /// Whether a list of the whole tree is kept.
@@ -3602,6 +3722,12 @@ pub struct FsCopy {
 /// The body of `fs.archive.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsArchiveList {
+    /// Match the displayed child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Continue the same open archive reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The environment.
     pub environment_id: Id,
     /// The archive.
@@ -3634,6 +3760,10 @@ pub struct FsArchiveReadResult {
 /// The body of `fs.search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsSearch {
+    /// Names or text content, read incrementally from the live workspace.
+    pub scope: orch_api_contract::workspace::FileSearchIn,
+    /// The previous page of exactly this search; omitted starts a fresh traversal.
+    pub cursor: Option<String>,
     /// The environment.
     pub environment_id: Id,
     /// The directory to stay in.
@@ -3654,6 +3784,14 @@ pub struct FsSearch {
 /// The result of `fs.search`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FsSearchResult {
+    /// The names found; absent for content searches.
+    pub names: Option<Vec<foreign::DirEntry>>,
+    /// Continue this traversal, including when a time slice found no matches.
+    pub next_cursor: Option<String>,
+    /// When live traversal began; results cover the reported observation interval.
+    pub observed_from: Option<Time>,
+    /// When this page was observed.
+    pub as_of: Option<Time>,
     /// The lines that were found.
     pub matches: Vec<foreign::FileMatch>,
     /// Whether the search stopped before it had seen everything.
@@ -3871,6 +4009,12 @@ pub struct GitStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitDiff {
+    /// Continue the same native Git output, rather than running it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Preferred bytes in this page; omitted uses the workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
     /// The environment.
     pub environment_id: Id,
     /// The path to keep to.
@@ -3884,6 +4028,9 @@ pub struct GitDiff {
 /// The result of `git.diff`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GitDiffResult {
+    /// Continue the same process's output; null means its actual end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// The differences, as a unified diff.
     pub text: String,
     /// Whether there was more than is returned.
@@ -5114,7 +5261,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
-            "background_wake": true,
+            "web_action_wait_secs": 120, "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",
@@ -5125,7 +5272,7 @@ mod tests {
             "mcp": [ { "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
             "orch_tools": ["list_shared", "read_shared", "search_shared", "download_shared", "edit_document",
                            "send_message", "announce", "request_capability"],
-            "raw_events": true, "raw_after": 42
+            "output_capture_bytes":67108864, "raw_events": true, "raw_after": 42
         })
     }
 
@@ -5142,7 +5289,7 @@ mod tests {
                 turn_id: id(TURN)
             })
         );
-        round_trip::<CmdAck>(json!({ "id": COMMAND }));
+        round_trip::<CmdAck>(json!({ "id": COMMAND, "key_phase": "queued" }));
         round_trip::<CmdCancel>(json!({ "id": COMMAND }));
     }
 
@@ -5418,11 +5565,12 @@ mod tests {
         }));
         round_trip::<EnvAttach>(json!({
             "environment_id": ENVIRONMENT_ID, "workspace_root": null, "ignore": ["node_modules/"], "index": "full",
+            "workspace": WorkspaceLimits::default(),
             "mounts": null, "variables": { "CI": "1" }, "secrets": { "NPM_TOKEN": { "$sealed": "c2VhbGVk" } }
         }));
         round_trip::<FsSearch>(json!({
             "environment_id": ENVIRONMENT_ID, "path": "src", "query": "fn main", "regex": false, "case": true,
-            "glob": "*.rs", "limit": 200
+            "glob": "*.rs", "limit": 200, "scope": "content", "cursor": null
         }));
         round_trip::<ProcSignal>(json!({
             "environment_id": ENVIRONMENT_ID, "pid": 4711, "started_at": "2026-10-08T17:00:00.000Z", "signal": "TERM"
@@ -5679,7 +5827,7 @@ mod tests {
     fn update_now_is_one_machine_serial_command_for_connector_and_node_with_a_typed_answer() {
         let decoded = Command::decode(
             "machine.update.now",
-            serde_json::json!({"recommended":"1.2.3"}),
+            serde_json::json!({"recommended":"1.2.3","automatic":false}),
         )
         .unwrap();
         assert_eq!(decoded.kind(), CommandKind::MachineUpdateNow);
@@ -5697,7 +5845,7 @@ mod tests {
         assert!(
             Command::decode(
                 "machine.update.now",
-                serde_json::json!({"recommended":"1.2.3","url":"https://elsewhere.test/program"})
+                serde_json::json!({"recommended":"1.2.3","automatic":false,"url":"https://elsewhere.test/program"})
             )
             .is_err()
         );
@@ -5783,5 +5931,45 @@ mod reported_cost_tests {
         );
         assert!(LeaseReportedCost::of(&RequestTiming::default()).is_none());
         assert_eq!(one("0", "USD").complete(1).unwrap().amount, "0");
+    }
+    #[test]
+    fn workspace_working_allowances_match_the_defaults_people_can_change() {
+        use orch_settings_contract::registry::{self, keys};
+        let limits = WorkspaceLimits::default();
+        for (key, expected) in [
+            (keys::WORKSPACE_INDEX_ENTRIES, limits.index_entries),
+            (keys::WORKSPACE_INDEX_SCAN_SECS, limits.index_scan_secs),
+            (keys::WORKSPACE_IGNORE_MAX_BYTES, limits.ignore_max_bytes),
+            (
+                keys::WORKSPACE_IGNORE_CACHE_BYTES,
+                limits.ignore_cache_bytes,
+            ),
+            (
+                keys::WORKSPACE_DIRECTORY_IDLE_SECS,
+                limits.directory_idle_secs,
+            ),
+            (keys::WORKSPACE_DIRECTORY_SLOTS, limits.directory_slots),
+            (
+                keys::WORKSPACE_DIRECTORY_CACHE_BYTES,
+                limits.directory_cache_bytes,
+            ),
+            (keys::WORKSPACE_DIRECTORY_BUILDS, limits.directory_builds),
+            (
+                keys::WORKSPACE_DIRECTORY_PAGE_BYTES,
+                limits.directory_page_bytes,
+            ),
+            (keys::WORKSPACE_SEARCH_SLICE_SECS, limits.search_slice_secs),
+            (keys::WORKSPACE_GIT_DIFF_BYTES, limits.git_diff_bytes),
+        ] {
+            assert_eq!(
+                registry::get(key)
+                    .unwrap()
+                    .default_value()
+                    .unwrap()
+                    .as_u64(),
+                Some(expected),
+                "{key}"
+            );
+        }
     }
 }

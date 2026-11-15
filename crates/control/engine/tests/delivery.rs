@@ -541,6 +541,48 @@ async fn image_delivery(
         native_count,
         "native images need both program and model support and the effective byte budget"
     );
+    let before: serde_json::Value = world
+        .scalar(
+            "SELECT to_jsonb(i) FROM thread_inputs i WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    assert_eq!(
+        before["native_image"]["images"][0]["delivery"],
+        if native_count == 1 { "native" } else { "path" }
+    );
+    if let Some(limit) = limit {
+        assert_eq!(before["native_image"]["native_image_bytes"], limit);
+        if limit == 0 && program_native && model_native {
+            assert_eq!(
+                before["native_image"]["images"][0]["reason"],
+                "paths_setting"
+            );
+        }
+        if limit == 14 && program_native && model_native {
+            assert_eq!(
+                before["native_image"]["images"][0]["reason"],
+                "allowance_exceeded"
+            );
+        }
+    }
+    world
+        .set(
+            world.topic,
+            "files.native_image_bytes",
+            serde_json::json!(0),
+        )
+        .await;
+    let after: serde_json::Value = world
+        .scalar(
+            "SELECT to_jsonb(i) FROM thread_inputs i WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    assert_eq!(
+        before["native_image"], after["native_image"],
+        "a later image default does not rewrite an admitted command's image delivery"
+    );
     for image in &start.images {
         assert!(
             image

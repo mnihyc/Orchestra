@@ -43,7 +43,7 @@ vi.mock('@/api/nodes', async (load) => {
   };
 });
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: reads.thread, useDocumentFeed: reads.document }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 // Keep actual producers and their frame props, without creating/editing settings or mounting form readers.
 vi.mock('@/features/settings/Frame', () => ({ SettingsFrame: ({ title, current }: SettingsFrameProps) => <section><h1>{title}</h1><output data-testid="body-section">{current}</output></section> }));
 
@@ -148,7 +148,7 @@ it('retains a qualified cached name during a genuine cold settings read and focu
   await waitFor(() => expect(state().named.get(first.id)?.title).toBe('General · Acme'));
   act(() => state().focus(next.id)); await waitFor(() => expect(state().named.get(next.id)?.title).toBe('General · Web'));
   act(() => state().focus(first.id)); await waitFor(() => expect(state().named.get(first.id)?.source).toBe('view'));
-  await act(() => window.dispatchEvent(new Event('pagehide'))); const saved = loadWorkspace(scene.person.me.id, 'page').kept;
+  await act(() => window.dispatchEvent(new Event('pagehide'))); const saved = loadWorkspace(scene.person.me.id).kept;
   expect(saved?.titles?.[first.id]?.title).toBe('General · Acme');
   const before = allTabs(state().layout).map((one) => ({ id: one.id, href: pageAddress(one) }));
   for (const view of views.splice(0)) view.unmount(); state().leave(); forgetHeads(); queryClient.clear(); mounted.length = 0;

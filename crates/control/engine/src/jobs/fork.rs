@@ -1721,6 +1721,8 @@ impl Forking {
 /// The command that opens the session of the result, and what it was opened as.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Attempt {
+    #[serde(default)]
+    orch_tools_offer: Option<crate::tools::catalogue::AcceptedOrchTools>,
     method: HistoryMethod,
     mode: SessionMode,
     body: SessionOpen,
@@ -2131,6 +2133,7 @@ impl Forking {
                 )
                 .await?;
             Attempt {
+                orch_tools_offer: Some(snapshot.orch_tools_offer.clone()),
                 method,
                 mode,
                 body,
@@ -2266,6 +2269,18 @@ impl Forking {
             ));
         }
         source::child_result(job, &command, &opened).await?;
+        if let Some(receipt) = &attempt_record.orch_tools_offer {
+            let mut receipt = receipt.clone();
+            receipt.summary.accepted_at = engine.inner.clock.time();
+            sqlx::query("UPDATE segments SET orch_tools_offer=$2 WHERE id=$1")
+                .bind(snapshot.segment.id)
+                .bind(serde_json::to_value(&receipt).map_err(EngineError::from)?)
+                .execute(&mut *engine.inner.db.acquire().await.map_err(EngineError::from)?)
+                .await
+                .map_err(orch_db::DbError::from)
+                .map_err(EngineError::from)?;
+        }
+
         if matches!(
             method,
             HistoryMethod::NativeFork | HistoryMethod::NativeTransplant
@@ -2818,8 +2833,8 @@ impl Engine {
             threads::other_topic_threads_in_environment(conn, thread.topic_id, environment.id)
                 .await?
                 > 0;
-        let tools = self
-            .offered_tools_for_session(
+        let (tools, orch_tools_offer) = self
+            .offered_tools_with_facts(
                 conn,
                 &thread,
                 descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
@@ -2879,7 +2894,10 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2915,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2905,6 +2924,8 @@ impl Engine {
             plan: false,
         };
         let input = threads::InputRow {
+            delivery_resolution: None,
+            native_image: None,
             id: Id::nil(),
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2982,8 +3003,10 @@ impl Engine {
             author_name: None,
             authors: 0,
             tools,
+            orch_tools_offer,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3026,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,

@@ -92,12 +92,14 @@ CREATE INDEX browser_sessions_open_idx ON browser_sessions USING btree (environm
 CREATE UNIQUE INDEX browser_sessions_profile_key ON browser_sessions USING btree (environment_id, lower(profile)) WHERE ((state <> 'closed'::text) AND (profile IS NOT NULL));
 
 CREATE TABLE commands (
+    session_offer jsonb,
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
