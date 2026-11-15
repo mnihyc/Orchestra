@@ -1,0 +1,4 @@
+test -p orch-api-core --test threads_start_source --test thread_creator_initial_files_scopes --test workspace_source --test workspace_source_scopes --test workspace_snapshots
+test -p orch-api-core --test kmounts_mcp --test mcp_duplicates --test hosted_environments
+test -p orch-api-core --test resource_facts --test resource_resume --test mcp_reader_scopes
+test -p orch-api-core --test thread_continuation_tokens --test threads_adopt --test workspace_jobs_scopes
