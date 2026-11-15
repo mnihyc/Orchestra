@@ -470,8 +470,23 @@ async fn the_restarted_native_worker_rechecks_the_original_key_before_issuing_a_
             }
             _ => {}
         }
+        eprintln!("Restarting the native count after {change}");
         s.engine.start();
-        let (state, _, error) = hosting::wait_over(&s.world, count.reference.job_id).await;
+        let completed = hosting::wait_over(&s.world, count.reference.job_id);
+        tokio::pin!(completed);
+        let (state, _, error) = tokio::select! {
+            result = &mut completed => result,
+            () = tokio::time::sleep(common::PATIENCE) => {
+                // Keep the original wait and its deadline; one bounded observation identifies a stalled stage.
+                let position: (Option<String>, Option<String>) = sqlx::query_as(
+                    "SELECT plan#>>'{active_command,phase}',plan#>>'{runner,until}' FROM jobs WHERE id=$1")
+                    .bind(count.reference.job_id).fetch_one(s.world.pool.pool()).await?;
+                eprintln!("Native count after {change}: issued {}, began {}, active phase {:?}, runner until {:?}",
+                    s.world.commands.issued_of("node.runtime.volumes.measure"),
+                    s.host.began(CommandKind::NodeRuntimeVolumesMeasure), position.0, position.1);
+                completed.await
+            }
+        };
         if change == "live" {
             assert_eq!(state, "succeeded", "{error:?}");
             let complete = s.claim().await?;

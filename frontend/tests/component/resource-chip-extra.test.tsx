@@ -93,8 +93,8 @@ for (const entry of cases) it(`opens the ${entry.subject.kind} body by tap with 
 });
 
 for (const entry of [
-  { name: 'a separately pinned image', spec: { image: 'example.test/runtime:stable', image_digest: 'sha256:abcdef' }, expected: ['example.test/runtime:stable', 'Digest', 'sha256:abcdef'] },
-  { name: 'a Dockerfile source', spec: { build: { dockerfile: 'FROM example.test/runtime:stable' } }, expected: ['Built from a Dockerfile'] },
+  { name: 'a separately pinned image, said as pinned and without its digest', spec: { image: 'example.test/runtime:stable', image_digest: 'sha256:abcdef' }, expected: ['example.test/runtime:stable', 'Pinned'], absent: ['sha256:abcdef', 'Digest'] },
+  { name: 'a Dockerfile source', spec: { build: { dockerfile: 'FROM example.test/runtime:stable' } }, expected: ['Built from a Dockerfile'], absent: [] },
 ]) it(`shows ${entry.name} from the native template spec with one read`, async () => {
   server.row = { ...detailTemplate, spec: entry.spec };
   const user = userEvent.setup();
@@ -103,6 +103,7 @@ for (const entry of [
   await user.click(screen.getByRole('button', { name: detailTemplate.name }));
   const body = within(screen.getByRole('dialog'));
   for (const text of entry.expected) expect(await body.findByText(text, { exact: true })).toBeVisible();
+  for (const text of entry.absent) expect(body.queryByText(text, { exact: true })).not.toBeInTheDocument();
   expect(server.reads).toHaveBeenCalledTimes(1);
 });
 

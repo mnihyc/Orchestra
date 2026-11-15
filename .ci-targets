@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-link-contract --test largest_messages
+test -p orch-envhost --lib -- exact_materialize::tests::
+test -p orch-engine --test measurement_jobs -- native_source::the_restarted_native_worker_rechecks_the_original_key_before_issuing_a_count

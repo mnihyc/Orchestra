@@ -8,7 +8,7 @@
  * the menu of a row and in the toolbar, for whoever may write the thread's files, and switched off with
  * the reason for those who may not.
  */
-import { ArrowUp, ChevronsDownUp, FilePlus, FolderPlus, Folder as FolderIcon, Info, MoreHorizontal, RefreshCw, Search, X } from 'lucide-react';
+import { ArrowUp, ChevronsDownUp, FilePlus, FolderPlus, Folder as FolderIcon, MoreHorizontal, RefreshCw, Search, X } from 'lucide-react';
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
@@ -24,7 +24,6 @@ import { Banner } from '@/ui/Banner';
 import { EmptyState } from '@/ui/EmptyState';
 import { IconButton } from '@/ui/IconButton';
 import { Menu, type MenuEntry } from '@/ui/Menu';
-import { Tooltip } from '@/ui/Tooltip';
 import { toast } from '@/ui/Toast';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { carriesFiles, draggedFileCount } from '@/lib/drop';
@@ -32,6 +31,8 @@ import { useFileDrops } from '@/features/composer/FileDrops';
 import { UploadHelp } from '@/features/composer/UploadHelp';
 import { formatNumber } from '@/lib/format';
 import { cx } from '@/ui/cx';
+import { FileSourceDisclosure } from '../files/FileFacts';
+import { RelativeTime } from '@/ui/RelativeTime';
 import { StatusDot } from '@/ui/StatusDot';
 import { Button } from '@/ui/Button';
 import { ErrorState } from '@/ui/ErrorState';
@@ -225,7 +226,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
   const cached = directory?.source === 'cached';
   const asOf = directory?.asOf ?? null;
   const heading = root === '' ? access.environment.name : t('files.panel.heading', { directory: `${root}/`, environment: access.environment.name });
-  const showSearch = () => { if (liveOnly) setSearch((before) => ({ ...before, mode: 'content' })); setSearchOpen(true); };
+  const showSearch = () => { setSearchOpen(true); };
   const panelEntries: MenuEntry[] = [
     ...actions.emptyEntries(folderOfFocus()).map((entry) => entry.id === 'refresh' ? { id: 'refresh', label: t('files.panel.refresh'), icon: <RefreshCw aria-hidden />, onSelect: refresh } : entry),
     { id: 'search', label: t('files.search.label'), icon: <Search aria-hidden />, onSelect: showSearch },
@@ -295,7 +296,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
         </Banner>
       )}
       {searchOpen && <div className="shrink-0 border-b border-border pt-1" onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setSearchOpen(false); } }}>
-        <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} namesAvailable={!liveOnly} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
+        <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} {...(liveOnly ? { reason: liveIndexReason(t, environment.index_reason, environment.facts) } : {})} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
       </div>}
       {why !== false && <p className="px-2 py-1 text-xs text-text-muted" data-testid="why-read-only">{why}</p>}
       {(capacity !== null || directory?.capacity !== null && directory?.capacity !== undefined) && <div className="shrink-0 border-b border-border px-2 py-1 text-xs text-text-muted" role="status">
@@ -346,10 +347,11 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
       )}
       {!paused && <div className="max-h-[30dvh] shrink-0 overflow-auto px-2">{fileDrops.progress}{actions.progress}</div>}
       <div className="flex shrink-0 flex-wrap items-center gap-x-2 border-t border-border px-2 py-1 text-xs text-text-muted">
-        <StatusDot tone={allLive ? 'success' : 'idle'} label={allLive ? t('files.panel.live') : t('files.panel.snapshot')} showLabel />
+        <StatusDot tone={allLive ? 'success' : 'idle'} label={allLive ? t(liveOnly ? 'files.panel.liveFolders' : 'files.panel.live') : t(liveOnly ? 'files.panel.snapshotFolders' : 'files.panel.snapshot')} showLabel />
+        {!paused && directory?.status === 'ready' && <FileSourceDisclosure facts={directory.facts} asOf={directory.asOf} door={door} />}
+        {!allLive && !cached && asOf !== null && <span>{t('files.panel.observed')} <RelativeTime at={asOf} /></span>}
         {directory !== undefined && <DirectoryPager window={directory} path={root} navigate={(path, action) => { if (current.current) tree.navigate(path, action); }} />}
         {others > 0 && <span className="min-w-0 flex-1 truncate" title={t('files.panel.shared', { name: access.environment.name, count: others })}>{t('files.panel.sharedCount', { count: others })}</span>}
-        {liveOnly && <Tooltip content={`${liveIndexReason(t, environment.index_reason, environment.facts)} ${t('largeTree.liveCost')} ${t('largeTree.mountSuggestion')}`}><span tabIndex={0} className="ml-auto inline-flex" aria-label={liveIndexReason(t, environment.index_reason, environment.facts)}><Info aria-hidden /></span></Tooltip>}
       </div>
       {!paused && actions.picking}
       {!paused && actions.dialogs}
