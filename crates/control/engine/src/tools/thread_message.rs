@@ -218,6 +218,7 @@ impl Engine {
             severity: AnnouncementSeverity::Info,
             delivery: broadcast.delivery,
             fallback: broadcast.fallback,
+            fallback_source: Some(broadcast.fallback_source.clone()),
             wake_idle,
             reach: Reach::All,
         };

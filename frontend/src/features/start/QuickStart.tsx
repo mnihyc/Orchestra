@@ -8,6 +8,7 @@
  * the default; typing is never held back, only the sending, and nothing is made until it can be sent. What was typed
  * stays where a step failed, with what was made so far said.
  */
+import { SetupChoiceFacts } from './SetupChoiceFacts';
 import { Send } from 'lucide-react';
 import { type KeyboardEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -54,7 +55,7 @@ function Composer({ node }: { node: Topic | Project }) {
   const [picks, setPicks] = useState<Picks>(NO_PICKS);
   const [keepChosen, setKeepChosen] = useState<string | null | undefined>(undefined);
   const [changing, setChanging] = useState(false);
-  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(node.id, picks, QUICK_SETUP, true, undefined,
+  const { setupObservation, options, resolved, loading, failed, refreshing, retry } = useStartOptions(node.id, picks, QUICK_SETUP, true, undefined,
     node.kind === 'topic' ? node.default_environment_id : undefined);
   const viewers = useViewerDefault(node.id, options);
   // This same options failure is already rendered once beneath the composer.
@@ -137,6 +138,7 @@ function Composer({ node }: { node: Topic | Project }) {
         <>
           <p className="flex min-h-(--control-sm) flex-wrap items-center gap-x-2 text-sm text-text-muted" data-runs-on>
             <span aria-live="polite" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">{make.pending && make.step !== null ? t(`start.making.${make.step}`) : <StartValues resolved={resolved} />}</span>
+            <SetupChoiceFacts options={options} resolved={resolved} observation={setupObservation} />
             {refreshing && <span role="status">{t('start.quick.checking')}</span>}
             <Button size="sm" variant="ghost" disabled={make.pending} onClick={() => setChanging(true)}>
               {t('start.quick.change')}

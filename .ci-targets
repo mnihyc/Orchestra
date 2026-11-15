@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-adapter-acp -p orch-adapter-claude-code -p orch-adapter-codex -p orch-adapter-fake -p orch-agent-contract -p orch-api-admin -p orch-api-base -p orch-api-contract -p orch-api-resources -p orch-api-threads -p orch-authz -p orch-conformance -p orch-connector-core -p orch-db -p orch-link-contract -p orch-model-contract -p orch-plugin -p orch-protocol-google-interactions -p orch-protocol-openai-responses -p orch-provider-contract -p orch-realtime-contract -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test delivery --test orch_tools
+test -p orch-api-core --test threads_settings --test binding_options --test model_entries --test provider_models --test personal --test semantic_admin --test provider_recovery --test call_recovery --test provider_harness --test node_setting_native_scopes
+test -p orch-authz --test depends
+test -p orch-xtask --bin orch-xtask -- names::tests::
+web typecheck
+web lint
+web test

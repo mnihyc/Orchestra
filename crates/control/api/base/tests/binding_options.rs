@@ -28,6 +28,102 @@ use places::{Who, join};
 use rig::{MODEL, Scene};
 use serde_json::json;
 
+#[tokio::test]
+async fn a_successful_native_start_remembers_its_resolved_model_on_the_server_for_only_its_maker() {
+    use orch_api_contract::personal::{
+        MeModelRecentCreate, MeModelRecentList, MeStateGet, ModelRecent,
+    };
+    let s = Scene::new().await;
+    let thread = s.thread().await;
+    let state = s
+        .rig
+        .world
+        .app
+        .call(MeStateGet, &[])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let saved = &state["thread_setup"];
+    assert_eq!(saved["place"], json!(s.tree.topic.base.id));
+    assert_eq!(saved["picks"]["provider"], json!(s.on.provider));
+    assert_eq!(saved["picks"]["agent"], json!(s.on.agent));
+    assert_eq!(saved["picks"]["model"], json!(thread.model));
+    assert_eq!(
+        saved["picks"]["environment"],
+        json!(thread.environment.unwrap().id)
+    );
+    let recent = s
+        .rig
+        .world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(recent.recent[0].provider_id, s.on.provider);
+    assert_eq!(recent.recent[0].model_name, MODEL);
+    s.rig
+        .world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&s.ada.token)
+        .body(&ModelRecent {
+            provider_id: orch_types::new_id(),
+            model_name: "another-choice".into(),
+        })
+        .send()
+        .await
+        .ok();
+    s.say(
+        &s.ada,
+        thread.base.id,
+        "Use the current model again",
+        orch_api_contract::threads::Delivery::Queue,
+        "reuse-current-model",
+    )
+    .await
+    .ok();
+    s.rig.turn_start(thread.base.id, 0).await;
+    let used = s
+        .rig
+        .world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(used.recent[0].provider_id, s.on.provider);
+    assert_eq!(
+        used.recent[0].model_name, MODEL,
+        "native work updates recency without opening or changing the picker"
+    );
+    let private = s
+        .rig
+        .world
+        .app
+        .call(MeStateGet, &[])
+        .token(&s.cai.token)
+        .send()
+        .await
+        .ok();
+    assert!(!private.contains_key("thread_setup"));
+    assert!(
+        s.rig
+            .world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&s.cai.token)
+            .send()
+            .await
+            .ok()
+            .recent
+            .is_empty()
+    );
+}
+
 async fn options_for(s: &Scene, who: &Who, thread: Id) -> BindingOptions {
     s.rig
         .world
@@ -500,7 +596,10 @@ async fn what_the_settings_choose_when_nothing_is_said_is_told_with_whether_a_lo
     let org = s.tree.org.base.id;
     let before = options_for(&s, &s.ada, thread).await;
     assert_eq!(before.defaults.provider_id, None);
-    assert!(!before.defaults.locked);
+    assert_eq!(
+        serde_json::to_value(before.defaults.locks).unwrap(),
+        json!({"provider":false,"agent":false,"model":false,"effort":false})
+    );
     s.rig
         .world
         .set_at(
@@ -642,6 +741,133 @@ async fn a_failed_environment_is_not_offered_as_the_topics_default_even_when_the
         refused.code,
         ErrorCode::EnvironmentNoneUsable,
         "an explicit stale choice cannot preview a different environment"
+    );
+}
+
+/// What starting a thread in `node` is offered, read as Ada reads it before any thread exists.
+async fn start_options_for(s: &Scene, node: Id) -> BindingOptions {
+    s.rig
+        .world
+        .app
+        .call(NodeBindingOptionsGet, &[&node])
+        .token(&s.ada.token)
+        .query(&NodeBindingOptionsGetQuery::default())
+        .send()
+        .await
+        .ok()
+}
+
+#[tokio::test]
+async fn a_default_environment_set_on_the_project_is_the_default_of_its_topics_and_names_where_it_is_set()
+ {
+    let s = Scene::new().await;
+    let spare = another_environment(&s, "Spare", None).await;
+    let project = s.tree.project.base.id;
+    let topic = s.tree.topic.base.id;
+    s.rig
+        .world
+        .set_at(Target::Node(project), "env.default_id", json!(spare))
+        .await;
+
+    let in_topic = start_options_for(&s, topic).await;
+    let row = in_topic
+        .environments
+        .iter()
+        .find(|row| row.environment.id == spare)
+        .unwrap();
+    assert!(
+        row.is_default,
+        "the nearest place that sets the default decides, as for every other setting"
+    );
+    let named = in_topic.default_environment.as_ref().unwrap();
+    assert_eq!(named.environment, spare);
+    assert_eq!(
+        named.from.as_ref().map(|node| node.id),
+        Some(project),
+        "the person is told which place above the topic set it"
+    );
+    assert!(named.reason.is_none());
+
+    let in_project = start_options_for(&s, project).await;
+    assert!(
+        in_project
+            .environments
+            .iter()
+            .find(|row| row.environment.id == spare)
+            .unwrap()
+            .is_default,
+        "the first thread of a topic made in the project starts on the project's default"
+    );
+
+    s.rig
+        .world
+        .set_at(
+            Target::Node(topic),
+            "env.default_id",
+            json!(s.on.environment),
+        )
+        .await;
+    let own = start_options_for(&s, topic).await;
+    let named = own.default_environment.as_ref().unwrap();
+    assert_eq!(
+        named.environment, s.on.environment,
+        "the topic's own setting wins over its project's"
+    );
+    assert!(named.from.is_none(), "the topic's own needs no place named");
+    assert!(
+        own.environments
+            .iter()
+            .find(|row| row.environment.id == s.on.environment)
+            .unwrap()
+            .is_default
+    );
+    assert!(
+        !own.environments
+            .iter()
+            .find(|row| row.environment.id == spare)
+            .unwrap()
+            .is_default
+    );
+}
+
+#[tokio::test]
+async fn a_default_environment_the_caller_cannot_use_is_named_with_why_and_is_not_offered_as_the_default()
+ {
+    let s = Scene::new().await;
+    let project = s.tree.project.base.id;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(project),
+            "env.default_id",
+            json!(s.on.environment),
+        )
+        .await;
+    sqlx::query("UPDATE environments SET status='failed' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let shown = start_options_for(&s, s.tree.topic.base.id).await;
+    let named = shown.default_environment.as_ref().unwrap();
+    assert_eq!(named.environment, s.on.environment);
+    assert_eq!(named.from.as_ref().map(|node| node.id), Some(project));
+    assert_eq!(
+        named.reason.as_deref(),
+        Some("environment_failed"),
+        "the dialog can say why it did not start on the default"
+    );
+    assert!(shown.environments.iter().all(|row| !row.is_default));
+
+    sqlx::query("DELETE FROM settings WHERE node_id=$1 AND key='env.default_id'")
+        .bind(project)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let cleared = start_options_for(&s, s.tree.topic.base.id).await;
+    assert!(
+        cleared.default_environment.is_none(),
+        "no setting, no default named"
     );
 }
 
@@ -974,5 +1200,88 @@ async fn grouping_uses_the_same_native_arrangements_and_preserves_unavailable_ch
     assert_eq!(
         environment.grouping.availability[0].reason.as_deref(),
         Some("environment_lost")
+    );
+}
+
+#[tokio::test]
+async fn each_creation_default_names_only_its_own_lock() {
+    use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
+    for key in [
+        "agent.default_provider_id",
+        "agent.default_agent_id",
+        "agent.model",
+        "agent.effort",
+    ] {
+        let s = Scene::new().await;
+        let thread = s.thread().await.base.id;
+        let value = match key {
+            "agent.default_provider_id" => json!(s.on.provider),
+            "agent.default_agent_id" => json!(s.on.agent),
+            "agent.model" => json!(MODEL),
+            _ => json!("high"),
+        };
+        s.rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&s.tree.org.base.id, &key])
+            .token(&s.ada.token)
+            .body(&NodeSettingSetBody {
+                model_choice: None,
+                value,
+                locked: Some(true),
+                expected_revision: None,
+            })
+            .send()
+            .await
+            .ok();
+        let options = options_for(&s, &s.ada, thread).await;
+        assert_eq!(
+            serde_json::to_value(options.defaults.locks).unwrap(),
+            json!({
+                "provider":key=="agent.default_provider_id", "agent":key=="agent.default_agent_id",
+                "model":key=="agent.model", "effort":key=="agent.effort"
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_start_proposal_names_the_real_approval_replacement_and_changes_when_the_preference_changes()
+ {
+    let s = Scene::new().await;
+    let topic = s.tree.topic.base.id;
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(descriptor, '{approval_modes}', '[\"on_request\"]'), descriptor_overrides='{}' WHERE id=$1")
+        .bind(s.on.agent).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    s.rig
+        .world
+        .set_at(Target::Node(topic), "approval.mode", json!("auto"))
+        .await;
+    let first = start_options_for(&s, topic).await;
+    let first = serde_json::to_value(&provider_of(&first, s.on.provider).agents[0]).unwrap();
+    let resolution = &first["approval_resolution"];
+    assert_eq!(resolution["preferred"], "auto");
+    assert_eq!(resolution["effective"], "on_request");
+    assert_eq!(resolution["reason"], "not_declared");
+    assert_eq!(resolution["source"]["node"]["id"], json!(topic));
+    s.rig
+        .world
+        .set_at(Target::Node(topic), "approval.mode", json!("on_request"))
+        .await;
+    let next = start_options_for(&s, topic).await;
+    let next = serde_json::to_value(&provider_of(&next, s.on.provider).agents[0]).unwrap();
+    assert_eq!(next["approval_resolution"]["effective"], "on_request");
+    assert_eq!(
+        next["approval_resolution"]["reason"],
+        serde_json::Value::Null
+    );
+    assert_ne!(
+        next["approval_resolution"]["revision"],
+        resolution["revision"]
+    );
+    assert_eq!(
+        resolution["preferred"], "auto",
+        "a later proposal does not rewrite the first one"
     );
 }

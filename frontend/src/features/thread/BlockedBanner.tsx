@@ -17,7 +17,7 @@ import { changeModelChoice, isSettingConflict, useRunsWith } from '@/features/co
 import { SettingConflict } from '@/features/composer/SettingConflict';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 import { openChange } from '@/features/change/target';
 import type { Thread } from '@/generated/api-types';
 import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, waitingWords } from '@/features/timeline/waiting';
@@ -31,6 +31,9 @@ import { ApiError } from '@/api/client';
 import { useFormatContext } from '@/lib/appearance';
 import { formatDateTime } from '@/lib/time';
 import { Link } from '@tanstack/react-router';
+import { modelPurpose, modelsForPurpose } from '@/features/models/purpose';
+import { splitRecent, useModelHistory } from '@/features/models/history';
+import { ReadFeedback } from '@/ui/ReadFeedback';
 
 /**
  * The plan's other permitted models after a family limit. Model options do not report vendor-family membership,
@@ -49,9 +52,10 @@ function OtherModels({ thread }: { thread: Thread }) {
   });
   const [state, model, family] = last === null ? ['', '', '\u0001'] : last.split('\u0000');
   const waits = state === 'failed' && family !== '\u0001';
-  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: waits });
+  const parameters = useQuery({ ...parametersQuery(thread.id, true), enabled: waits });
   const runs = useRunsWith(thread, true);
   const [open, setOpen] = useState(false);
+  const history = useModelHistory(open);
   const change = useMutation({
     mutationFn: (value: string) => {
       const option = parameters.data?.model.options.find((candidate) => candidate.model_name === value);
@@ -68,26 +72,29 @@ function OtherModels({ thread }: { thread: Thread }) {
   const failed = readError !== null && readError !== undefined;
   const checking = parameters.isPending || parameters.isFetching || runs.pending || reads.some((read) => read.isFetching === true);
   const available = checking || failed ? undefined : parameters.data;
-  const others = available?.model.options.filter(
+  const others = modelsForPurpose(available?.model.options ?? [], 'generation').filter(
     (option) => option.allowed && option.model_name !== model,
-  ) ?? [];
+  );
+  const promoted = splitRecent(others, history.history, (option) => thread.binding === null ? null : { provider_id: thread.binding.provider.id, model_name: option.model_name });
   const reason = checking ? t('thread.blocked.familyChecking') : failed ? t('thread.blocked.familyReadFailed')
     : available === undefined ? t('thread.blocked.familyChecking') : others.length === 0 ? t('thread.blocked.familyNoOther') : undefined;
   const currentModel = available?.model.value;
   const selected = others.some((option) => option.model_name === currentModel) ? currentModel ?? '' : '';
   return (
     <div className="flex flex-col gap-1" data-family-limit>
-      <Select<string>
+      <ResourcePicker<string>
+        pickerKey="thread.recovery-model"
         size="sm"
         label={t('thread.blocked.familyChoose')}
         placeholder={reason ?? t('thread.blocked.familyChoose')}
         value={selected}
         open={reason === undefined && open}
         onOpenChange={setOpen}
-        onValueChange={(value) => change.mutate(value)}
-        options={others.map((option) => ({ value: option.model_name, label: option.display_name, description: option.model_name }))}
+        onValueChange={(value) => { if (thread.binding !== null) history.remember({ provider_id: thread.binding.provider.id, model_name: value }); change.mutate(value); }}
+        options={[...promoted.recent.map((option) => ({ ...option, recent: true })), ...promoted.rest.map((option) => ({ ...option, recent: false }))].map((option) => ({ value: option.model_name, label: option.display_name, group: option.recent ? t('modelPicker.recent') : '', description: modelPurpose(option, 'generation') === 'unknown' ? t('modelPicker.purposeUnknown') : option.model_name }))}
         disabled={reason !== undefined || change.isPending || !runs.ready}
       />
+      <ReadFeedback reads={[history.read]} pending={history.read.isFetching && history.history === undefined} />
       {failed && <ErrorAlert error={readError} action={<Button size="sm" pending={checking} onClick={() => {
         for (const read of reads) if (read.isError === true) void read.refetch?.();
       }}>{t('common.tryAgain')}</Button>} />}
