@@ -44,8 +44,9 @@ impl Engine {
             if !allowed.contains(mode) {
                 continue;
             }
-            // Auto exists only where the descriptor of the build says so (it keeps the mode only for a build whose
-            // check proved it) and declares the reviewer, and only for someone who may use that reviewer's model.
+            // Auto exists only where the descriptor of the build says so (it keeps the mode for a program that has the
+            // trial of it, unless a check of this build ran the trial and it failed) and declares the reviewer, and
+            // only for someone who may use that reviewer's model.
             let reviewer = match binding {
                 Some((path, model)) => {
                     reviewer_allowed_for(*mode, Some(descriptor), models, path, model)
@@ -98,6 +99,7 @@ impl Engine {
                 .provider_use(
                     conn,
                     &ProviderUse {
+                        purpose: orch_access_contract::permissions::ProviderPurpose::Review,
                         person: person.unwrap_or(thread.owner_id),
                         node: thread.node_id,
                         provider,
