@@ -22,7 +22,7 @@ use orch_agent_contract::events::{
 };
 use orch_agent_contract::facts::{HarnessState, HarnessStatus, ProviderFacts};
 use orch_agent_contract::session::{MountGrant, ThreadId};
-use orch_types::{Clock, Id, Json};
+use orch_types::{Clock, Id, Json, Time};
 use serde::Deserialize;
 use tokio::sync::watch;
 
@@ -42,6 +42,12 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// How often the host looks whether a turn has run out of patience: a second, since the shortest patience is
 /// minutes and a turn that has run out is not worth a quarter of a minute more.
 pub const WATCH_EVERY: Duration = Duration::from_secs(1);
+
+/// A small local evidence read must not hold back every session's event stream.
+/// The registry supplies this default, and a profile can replace it within the interrupt window.
+pub(crate) const DEFAULT_NATIVE_RESULT_WAIT_MS: u64 = 2_000;
+/// The registry supplies this replaceable burst default; pressure stops only optional evidence.
+pub(crate) const DEFAULT_NATIVE_RESULT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// How long the host waits for the harness to take the interrupt of a turn it has given up on.
 const INTERRUPT_WAIT: Duration = Duration::from_secs(10);
@@ -113,10 +119,82 @@ pub struct Asked {
 struct State {
     sessions: BTreeMap<ThreadId, SessionRecord>,
     image_sources: BTreeMap<ThreadId, crate::viewed_images::Sources>,
+    result_gates: BTreeMap<ThreadId, Arc<tokio::sync::Mutex<()>>>,
+    pending_ends: BTreeMap<ThreadId, PendingEnd>,
     by_native: HashMap<String, ThreadId>,
     unscoped_mcp: HashMap<String, Json>,
     unexpectedly_closed:
         std::collections::HashSet<orch_agent_contract::history::NativePrefixSource>,
+}
+
+#[derive(Clone)]
+struct Heard {
+    at: Time,
+    input: Incoming,
+}
+
+impl Heard {
+    fn params(&self) -> Option<&Json> {
+        match &self.input {
+            Incoming::Notification { params, .. } | Incoming::Request { params, .. } => {
+                Some(params)
+            }
+            _ => None,
+        }
+    }
+
+    fn introduces(&self, native: &str) -> bool {
+        let Incoming::Notification { method, params } = &self.input else {
+            return false;
+        };
+        if method == "thread/started" {
+            return params.pointer("/thread/id").and_then(Json::as_str) == Some(native);
+        }
+        if method != "item/started" && method != "item/completed" {
+            return false;
+        }
+        let Some(item) = params.get("item") else {
+            return false;
+        };
+        item["type"] == "collabAgentToolCall"
+            && item["tool"] == "spawnAgent"
+            && item
+                .get("receiverThreadIds")
+                .and_then(Json::as_array)
+                .is_some_and(|children| children.iter().any(|child| child.as_str() == Some(native)))
+    }
+}
+
+struct PendingEnd {
+    token: Id,
+    segment: Id,
+    root: String,
+    end: Heard,
+    queued: VecDeque<Heard>,
+    bytes: usize,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct NativeResults {
+    views: BTreeMap<crate::viewed_images::Key, crate::viewed_images::Prepared>,
+    web: BTreeMap<crate::viewed_images::Key, crate::native_web::Checked>,
+}
+
+/// Replay a retained native frame at its actual receipt time, including usage and warning timestamps.
+#[derive(Debug)]
+struct HeardAt(Time);
+impl Clock for HeardAt {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.0.get()
+    }
+}
+
+#[cfg(test)]
+struct ResultProbe {
+    owner: ThreadId,
+    started: tokio::sync::oneshot::Sender<()>,
+    released: std::sync::mpsc::Receiver<()>,
 }
 
 /// The sessions that want their raw frames reported, by the harness's thread id.
@@ -142,6 +220,7 @@ pub struct Shared {
     /// one that was killed has loaded none, and has nothing to unload before a resume.
     loaded: Mutex<std::collections::HashSet<String>>,
     state: Mutex<State>,
+    end_changed: tokio::sync::Notify,
     raw: RawTable,
     dead: AtomicBool,
     stopping: AtomicBool,
@@ -155,6 +234,10 @@ pub struct Shared {
     ended_commands: Mutex<std::collections::HashSet<String>>,
     /// How long a turn is waited for.
     patience: Patience,
+    native_result_wait: Duration,
+    native_result_buffer_bytes: usize,
+    #[cfg(test)]
+    result_probe: Mutex<Option<ResultProbe>>,
     /// The sign-in that runs, and what is known of who is signed in.
     pub login: LoginTracker,
 }
@@ -254,6 +337,10 @@ pub struct ProcessParts {
     pub exit: Arc<watch::Sender<Option<String>>>,
     /// How long a turn is waited for.
     pub patience: Patience,
+    /// Combined evidence wait before the turn's end, also bounding individual history reads.
+    pub native_result_wait: Duration,
+    /// Pending same-session input while optional evidence is read; pressure ends the read.
+    pub native_result_buffer_bytes: usize,
 }
 
 impl Shared {
@@ -314,6 +401,8 @@ impl Shared {
             version,
             exit,
             patience,
+            native_result_wait,
+            native_result_buffer_bytes,
         } = parts;
         Arc::new(Self {
             sink,
@@ -323,6 +412,7 @@ impl Shared {
             outputs,
             rpc,
             state: Mutex::new(State::default()),
+            end_changed: tokio::sync::Notify::new(),
             unloads: Mutex::new(HashMap::new()),
             loaded: Mutex::new(std::collections::HashSet::new()),
             raw,
@@ -335,7 +425,11 @@ impl Shared {
             windows: Mutex::new(None),
             ended_commands: Mutex::new(std::collections::HashSet::new()),
             patience,
+            native_result_wait,
+            native_result_buffer_bytes,
             login: LoginTracker::default(),
+            #[cfg(test)]
+            result_probe: Mutex::new(None),
         })
     }
 
@@ -425,7 +519,12 @@ impl Shared {
         result
     }
     /// Maps and delivers one bounded operation outside the state lock.
-    pub async fn register(&self, record: SessionRecord, raw_events: bool, opened: SessionEvent) {
+    pub async fn register(
+        self: &Arc<Self>,
+        record: SessionRecord,
+        raw_events: bool,
+        opened: SessionEvent,
+    ) {
         self.register_with_images(
             record,
             raw_events,
@@ -435,7 +534,7 @@ impl Shared {
         .await;
     }
     pub(crate) async fn register_with_images(
-        &self,
+        self: &Arc<Self>,
         record: SessionRecord,
         raw_events: bool,
         opened: SessionEvent,
@@ -444,6 +543,7 @@ impl Shared {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
         let thread = record.mapper.thread_id();
+        self.drain_pending(thread, "native_result_session_changed");
         self.stage_register(record, raw_events, opened);
         lock(&self.state).image_sources.insert(thread, sources);
         if !self.is_dead() {
@@ -454,9 +554,10 @@ impl Shared {
         self.flush_events().await;
     }
     /// Maps and delivers one bounded operation outside the state lock.
-    pub async fn remove(&self, thread: ThreadId) -> Option<SessionRecord> {
+    pub async fn remove(self: &Arc<Self>, thread: ThreadId) -> Option<SessionRecord> {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
+        self.drain_pending(thread, "native_result_session_closed");
         let result = self.stage_remove(thread);
         if result.is_some() && !self.is_dead() {
             self.stage_event(AdapterEvent::Status(
@@ -477,10 +578,19 @@ impl Shared {
     pub async fn on_notification(self: &Arc<Self>, method: &str, params: &Json) {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
-        if method == "warning"
-            && thread_of(params).is_none()
-            && crate::failure::row_name(params) == "credential_refused"
-        {
+        if method == "warning" && thread_of(params).is_none() {
+            let credential_refused = crate::failure::row_name(params) == "credential_refused";
+            if !credential_refused
+                && let Some(message) = params
+                    .get("message")
+                    .and_then(Json::as_str)
+                    .filter(|message| !message.trim().is_empty())
+            {
+                self.stage_event(AdapterEvent::Status(
+                    self.status(HarnessState::Online, Some(message.into())),
+                ));
+                self.flush_events().await;
+            }
             let mut after = None;
             loop {
                 let next = {
@@ -492,23 +602,294 @@ impl Shared {
                     state
                         .sessions
                         .range(range)
-                        .find(|(_, record)| record.mapper.turn_in_progress())
+                        .find(|(_, record)| !credential_refused || record.mapper.turn_in_progress())
                         .map(|(id, record)| (*id, record.mapper.native_thread().to_owned()))
                 };
                 let Some((id, native)) = next else { break };
                 after = Some(id);
                 let mut targeted = params.clone();
                 targeted["threadId"] = Json::String(native);
-                self.route(method, &targeted);
+                self.dispatch(
+                    Heard {
+                        at: self.clock.time(),
+                        input: Incoming::Notification {
+                            method: method.into(),
+                            params: targeted,
+                        },
+                    },
+                    None,
+                );
                 self.flush_events().await;
             }
         } else {
-            if method == "turn/completed" {
-                Box::pin(self.finish_viewed_images(params)).await;
-                Box::pin(self.finish_web_results(params)).await;
-            }
-            self.stage_on_notification(method, params);
+            self.dispatch(
+                Heard {
+                    at: self.clock.time(),
+                    input: Incoming::Notification {
+                        method: method.into(),
+                        params: params.clone(),
+                    },
+                },
+                None,
+            );
             self.flush_events().await;
+        }
+    }
+
+    fn owner_of(&self, params: &Json) -> Option<ThreadId> {
+        let state = lock(&self.state);
+        thread_of(params)
+            .and_then(|thread| state.by_native.get(thread))
+            .or_else(|| {
+                params
+                    .pointer("/thread/parentThreadId")
+                    .and_then(Json::as_str)
+                    .and_then(|parent| state.by_native.get(parent))
+            })
+            .copied()
+    }
+
+    fn waiting_introduction(&self, params: &Json) -> Option<ThreadId> {
+        let native = thread_of(params);
+        let parent = params
+            .pointer("/thread/parentThreadId")
+            .and_then(Json::as_str);
+        lock(&self.state)
+            .pending_ends
+            .iter()
+            .find_map(|(owner, pending)| {
+                pending
+                    .queued
+                    .iter()
+                    .any(|frame| {
+                        native.is_some_and(|native| frame.introduces(native))
+                            || parent.is_some_and(|parent| frame.introduces(parent))
+                    })
+                    .then_some(*owner)
+            })
+    }
+
+    /// Only the session whose end is waiting retains later frames. No optional IO owns the event gate.
+    fn dispatch(self: &Arc<Self>, frame: Heard, skipped: Option<&'static str>) {
+        let mut frames = VecDeque::from([(frame, skipped)]);
+        while let Some((frame, skipped)) = frames.pop_front() {
+            let mut owner = frame.params().and_then(|params| self.owner_of(params));
+            if owner.is_none()
+                && let Some(params) = frame.params()
+            {
+                // A retained spawn may be the only introduction of this child. Admit its earlier frames
+                // before resolving ownership; never lose new child input behind an optional read.
+                loop {
+                    let waiting = self.waiting_introduction(params);
+                    let Some(waiting) = waiting else {
+                        break;
+                    };
+                    self.drain_pending(waiting, "native_result_ordering_unknown");
+                }
+                owner = frame.params().and_then(|params| self.owner_of(params));
+            }
+            if let Some(owner) = owner {
+                let weight = protocol::incoming_weight(&frame.input);
+                let pending = {
+                    let mut state = lock(&self.state);
+                    state.pending_ends.get_mut(&owner).map(|pending| {
+                        if skipped.is_none()
+                            && pending.bytes.saturating_add(weight)
+                                <= self.native_result_buffer_bytes
+                        {
+                            pending.bytes = pending.bytes.saturating_add(weight);
+                            pending.queued.push_back(frame.clone());
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                };
+                if pending == Some(true) {
+                    continue;
+                }
+                if pending == Some(false) {
+                    let reason = skipped.unwrap_or("native_result_buffer_full");
+                    let mut queued = self.finish_pending(owner, None, Err(reason), true);
+                    queued.push_back(frame);
+                    for frame in queued.into_iter().rev() {
+                        frames.push_front((frame, Some(reason)));
+                    }
+                    continue;
+                }
+            }
+            if let Incoming::Notification { method, params } = &frame.input
+                && method == "turn/completed"
+            {
+                if skipped.is_none() && self.defer_native_end(&frame) {
+                    continue;
+                }
+                if let Some(reason) = skipped {
+                    self.unavailable_native_results(params, reason);
+                }
+            }
+            self.stage_heard(frame);
+        }
+    }
+
+    fn stage_heard(self: &Arc<Self>, frame: Heard) {
+        match frame.input {
+            Incoming::Notification { method, params } => {
+                self.stage_on_notification(&method, &params, frame.at)
+            }
+            Incoming::Request { id, method, params } => {
+                self.stage_on_request(id, &method, &params, frame.at)
+            }
+            _ => {}
+        }
+    }
+
+    fn defer_native_end(self: &Arc<Self>, frame: &Heard) -> bool {
+        let Some(params) = frame.params() else {
+            return false;
+        };
+        let Some(native) = thread_of(params) else {
+            return false;
+        };
+        let Some(turn) = params.pointer("/turn/id").and_then(Json::as_str) else {
+            return false;
+        };
+        let Some(owner) = self.owner_of(params) else {
+            return false;
+        };
+        let token = orch_types::new_id();
+        let (segment, root, views, snapshots) = {
+            let mut state = lock(&self.state);
+            let Some(record) = state.sessions.get(&owner) else {
+                return false;
+            };
+            let views = record.mapper.pending_view_keys(native, turn);
+            let snapshots = record.mapper.pending_web_results(native, turn);
+            if views.is_empty() && snapshots.is_empty() {
+                return false;
+            }
+            let segment = record.mapper.segment_id();
+            let root = record.mapper.native_thread().to_owned();
+            state.pending_ends.insert(
+                owner,
+                PendingEnd {
+                    token,
+                    segment,
+                    root: root.clone(),
+                    end: frame.clone(),
+                    queued: VecDeque::new(),
+                    bytes: 0,
+                    task: None,
+                },
+            );
+            (segment, root, views, snapshots)
+        };
+        let shared = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let keys = views
+                .iter()
+                .cloned()
+                .chain(snapshots.keys().cloned())
+                .collect();
+            let work = shared.native_result_work(
+                owner,
+                segment,
+                &root,
+                keys,
+                move |source, _, outputs| NativeResults {
+                    views: source.prepare(&views, outputs),
+                    web: crate::native_web::checked_results(
+                        source,
+                        &snapshots.keys().cloned().collect::<Vec<_>>(),
+                        &snapshots,
+                        outputs,
+                    ),
+                },
+            );
+            let results = tokio::time::timeout(shared.native_result_wait, work)
+                .await
+                .unwrap_or(Err("native_result_timed_out"));
+            let _gate = shared.event_gate.lock().await;
+            shared.flush_events().await;
+            let queued = shared.finish_pending(owner, Some(token), results, false);
+            for frame in queued {
+                shared.dispatch(
+                    frame,
+                    shared.is_dead().then_some("native_result_session_closed"),
+                );
+            }
+            shared.flush_events().await;
+        });
+        if let Some(pending) = lock(&self.state).pending_ends.get_mut(&owner) {
+            pending.task = Some(task);
+        }
+        true
+    }
+
+    /// Called under the event gate. Stale work cannot finish a reopened session or charge its turn.
+    fn finish_pending(
+        self: &Arc<Self>,
+        owner: ThreadId,
+        token: Option<Id>,
+        results: Result<NativeResults, &'static str>,
+        abort: bool,
+    ) -> VecDeque<Heard> {
+        let pending = {
+            let mut state = lock(&self.state);
+            if !state
+                .pending_ends
+                .get(&owner)
+                .is_some_and(|pending| token.is_none_or(|token| token == pending.token))
+            {
+                return VecDeque::new();
+            }
+            state.pending_ends.remove(&owner)
+        };
+        let Some(mut pending) = pending else {
+            return VecDeque::new();
+        };
+        self.end_changed.notify_waiters();
+        if abort {
+            if let Some(task) = pending.task.take() {
+                task.abort();
+            }
+            if let Some(source) = lock(&self.state).image_sources.get(&owner) {
+                source.cancellation().store(true, Ordering::Release);
+            }
+        }
+        let valid = lock(&self.state)
+            .sessions
+            .get(&owner)
+            .is_some_and(|record| {
+                record.mapper.segment_id() == pending.segment
+                    && record.mapper.native_thread() == pending.root
+            });
+        if !valid {
+            return VecDeque::new();
+        }
+        match results {
+            Ok(results) => {
+                let mut state = lock(&self.state);
+                if let Some(record) = state.sessions.get_mut(&owner) {
+                    let mut events = record.mapper.complete_view_results(results.views);
+                    events.extend(record.mapper.complete_web_results(results.web));
+                    self.emit_mapped(&mut record.mapper, events);
+                }
+            }
+            Err(reason) => {
+                if let Some(params) = pending.end.params() {
+                    self.unavailable_native_results(params, reason);
+                }
+            }
+        }
+        self.stage_heard(pending.end);
+        pending.queued
+    }
+
+    fn drain_pending(self: &Arc<Self>, owner: ThreadId, reason: &'static str) {
+        let queued = self.finish_pending(owner, None, Err(reason), true);
+        for frame in queued {
+            self.dispatch(frame, Some(reason));
         }
     }
 
@@ -527,6 +908,14 @@ impl Shared {
         + Send
         + 'static,
     ) -> Result<R, &'static str> {
+        let gate = lock(&self.state)
+            .result_gates
+            .entry(thread)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let owner_gate = tokio::time::timeout(self.native_result_wait, gate.lock_owned())
+            .await
+            .map_err(|_| "native_result_timed_out")?;
         let work = {
             let mut state = lock(&self.state);
             let Some(record) = state.sessions.get(&thread).filter(|record| {
@@ -539,23 +928,46 @@ impl Shared {
         };
         let mut cancelled = crate::native_history::CancelOnDrop(Some(work.cancellation()));
         let outputs = self.outputs.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let probe = {
+            let mut probe = lock(&self.result_probe);
+            if probe.as_ref().is_some_and(|probe| probe.owner == thread) {
+                probe.take()
+            } else {
+                None
+            }
+        };
+        let worker = tokio::task::spawn_blocking(move || {
+            // Cancellation releases the async wait, but a blocked filesystem call keeps this owner's IO
+            // permit until it really returns. Repeated turns cannot pile up blocked readers of one source.
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                let _ = probe.started.send(());
+                let _ = probe.released.recv();
+            }
             let mut work = work;
             let values = prepare(&mut work, &keys, &outputs);
-            (work, values)
-        })
-        .await;
+            (work, values, owner_gate)
+        });
+        let result = match tokio::time::timeout(self.native_result_wait, worker).await {
+            Ok(result) => result,
+            Err(_) => return Err("native_result_timed_out"),
+        };
         cancelled.disarm();
         match result {
-            Ok((work, values)) => {
+            Ok((work, values, _owner)) => {
                 let mut state = lock(&self.state);
                 if state.sessions.get(&thread).is_some_and(|record| {
                     record.mapper.segment_id() == segment && record.mapper.native_thread() == native
                 }) && let Some(sources) = state.image_sources.get_mut(&thread)
+                    && Arc::ptr_eq(&sources.cancellation(), &work.cancellation())
+                    && !work.cancellation().load(Ordering::Acquire)
                 {
                     sources.finish_work(work);
+                    Ok(values)
+                } else {
+                    Err("native_result_session_changed")
                 }
-                Ok(values)
             }
             Err(_) => Err("native_result_worker_unavailable"),
         }
@@ -593,7 +1005,6 @@ impl Shared {
         if keys.is_empty() {
             return BTreeMap::new();
         }
-        let _gate = self.event_gate.lock().await;
         Box::pin(self.native_result_work(
             thread,
             segment,
@@ -609,60 +1020,35 @@ impl Shared {
         })
     }
 
-    async fn finish_web_results(&self, params: &Json) {
+    fn unavailable_native_results(&self, params: &Json, reason: &'static str) {
         let Some(native) = thread_of(params) else {
             return;
         };
         let Some(turn) = params.pointer("/turn/id").and_then(Json::as_str) else {
             return;
         };
-        let pending = {
-            let state = lock(&self.state);
-            let Some(owner) = state.by_native.get(native).copied() else {
-                return;
-            };
-            let Some(record) = state.sessions.get(&owner) else {
-                return;
-            };
-            (
-                owner,
-                record.mapper.segment_id(),
-                record.mapper.native_thread().to_owned(),
-                record.mapper.pending_web_results(native, turn),
-            )
-        };
-        let (owner, segment, root, snapshots) = pending;
-        if snapshots.is_empty() {
+        let mut state = lock(&self.state);
+        let Some(owner) = state.by_native.get(native).copied() else {
             return;
-        }
-        let keys: Vec<_> = snapshots.keys().cloned().collect();
-        let missed = keys.clone();
-        let values = Box::pin(self.native_result_work(
-            owner,
-            segment,
-            &root,
-            keys,
-            move |source, keys, outputs| {
-                crate::native_web::checked_results(source, keys, &snapshots, outputs)
-            },
-        ))
-        .await
-        .unwrap_or_else(|reason| {
-            missed
-                .into_iter()
-                .map(|key| (key, (crate::native_web::Proof::unavailable(reason), None)))
-                .collect()
-        });
-        {
-            let mut state = lock(&self.state);
-            if let Some(record) = state.sessions.get_mut(&owner).filter(|record| {
-                record.mapper.segment_id() == segment && record.mapper.native_thread() == root
-            }) {
-                let events = record.mapper.complete_web_results(values);
-                self.emit_mapped(&mut record.mapper, events);
-            }
-        }
-        self.flush_events().await;
+        };
+        let Some(record) = state.sessions.get_mut(&owner) else {
+            return;
+        };
+        let views = record
+            .mapper
+            .pending_view_keys(native, turn)
+            .into_iter()
+            .map(|key| (key, Err(reason)))
+            .collect();
+        let mut events = record.mapper.complete_view_results(views);
+        let web = record
+            .mapper
+            .pending_web_results(native, turn)
+            .into_keys()
+            .map(|key| (key, (crate::native_web::Proof::unavailable(reason), None)))
+            .collect();
+        events.extend(record.mapper.complete_web_results(web));
+        self.emit_mapped(&mut record.mapper, events);
     }
 
     pub(crate) async fn image_results(
@@ -672,54 +1058,24 @@ impl Shared {
         native: &str,
         keys: Vec<crate::viewed_images::Key>,
     ) -> BTreeMap<crate::viewed_images::Key, crate::viewed_images::Prepared> {
-        let _gate = self.event_gate.lock().await;
         Box::pin(self.image_results_owned(thread, segment, native, keys)).await
     }
 
-    async fn finish_viewed_images(&self, params: &Json) {
-        let Some(native) = thread_of(params) else {
-            return;
-        };
-        let Some(turn) = params.pointer("/turn/id").and_then(Json::as_str) else {
-            return;
-        };
-        let pending = {
-            let state = lock(&self.state);
-            let Some(owner) = state.by_native.get(native).copied() else {
-                return;
-            };
-            let Some(record) = state.sessions.get(&owner) else {
-                return;
-            };
-            (
-                owner,
-                record.mapper.segment_id(),
-                record.mapper.native_thread().to_owned(),
-                record.mapper.pending_view_keys(native, turn),
-            )
-        };
-        let (owner, segment, root, keys) = pending;
-        let values = Box::pin(self.image_results_owned(owner, segment, &root, keys)).await;
-        if values.is_empty() {
-            return;
-        }
-        {
-            let mut state = lock(&self.state);
-            if let Some(record) = state.sessions.get_mut(&owner).filter(|record| {
-                record.mapper.segment_id() == segment && record.mapper.native_thread() == root
-            }) {
-                let events = record.mapper.complete_view_results(values);
-                self.emit_mapped(&mut record.mapper, events);
-            }
-        }
-        self.flush_events().await;
-    }
-
     /// Maps and delivers one bounded operation outside the state lock.
-    pub async fn on_request(&self, id: RequestId, method: &str, params: &Json) {
+    pub async fn on_request(self: &Arc<Self>, id: RequestId, method: &str, params: &Json) {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
-        self.stage_on_request(id, method, params);
+        self.dispatch(
+            Heard {
+                at: self.clock.time(),
+                input: Incoming::Request {
+                    id,
+                    method: method.into(),
+                    params: params.clone(),
+                },
+            },
+            None,
+        );
         self.flush_events().await;
     }
 
@@ -905,6 +1261,7 @@ impl Shared {
         let native = record.mapper.native_thread().to_owned();
         let mut state = lock(&self.state);
         state.image_sources.remove(&thread);
+        state.result_gates.remove(&thread);
         if let Some(earlier) = state.sessions.remove(&thread) {
             state.by_native.retain(|_, owner| *owner != thread);
             lock(&self.raw).retain(|_, (owner, _)| *owner != thread);
@@ -940,6 +1297,7 @@ impl Shared {
         let mut state = lock(&self.state);
         let mut record = state.sessions.remove(&thread)?;
         state.image_sources.remove(&thread);
+        state.result_gates.remove(&thread);
         state.by_native.retain(|_, owner| *owner != thread);
         lock(&self.raw).retain(|_, (owner, _)| *owner != thread);
         for (reference, asked) in record.approvals.drain() {
@@ -986,7 +1344,7 @@ impl Shared {
     // -- what the harness says -----------------------------------------------------------------------
 
     /// Handles a notification of the harness.
-    fn stage_on_notification(self: &Arc<Self>, method: &str, params: &Json) {
+    fn stage_on_notification(self: &Arc<Self>, method: &str, params: &Json, at: Time) {
         if method == "thread/closed" {
             if let Some(native) = thread_of(params) {
                 lock(&self.loaded).remove(native);
@@ -1009,7 +1367,7 @@ impl Shared {
                             native_session_ref: native.into(),
                         })
                 };
-                self.route(method, params);
+                self.route(method, params, at);
                 if let Some(source) = source {
                     lock(&self.state).unexpectedly_closed.insert(source.clone());
                     // Reuse ordinary missing-session repair rather than dispatch into an unloaded thread.
@@ -1054,9 +1412,7 @@ impl Shared {
                 {
                     *lock(&self.windows) = Some(Windows::read(limits));
                 }
-                if let Some(facts) =
-                    provider::facts_from_update(method, params, &self.login, self.clock.time())
-                {
+                if let Some(facts) = provider::facts_from_update(method, params, &self.login, at) {
                     self.stage_event(AdapterEvent::Facts(facts));
                 }
             }
@@ -1065,12 +1421,12 @@ impl Shared {
                     self.stage_event(AdapterEvent::Login(state));
                 }
             }
-            "serverRequest/resolved" => self.request_resolved(params),
-            _ => self.route(method, params),
+            "serverRequest/resolved" => self.request_resolved(params, at),
+            _ => self.route(method, params, at),
         }
     }
 
-    fn route(self: &Arc<Self>, method: &str, params: &Json) {
+    fn route(self: &Arc<Self>, method: &str, params: &Json, at: Time) {
         let Some(thread) = thread_of(params) else {
             return;
         };
@@ -1089,7 +1445,7 @@ impl Shared {
         };
         let windows = lock(&self.windows).clone();
         let ctx = Context {
-            clock: self.clock.as_ref(),
+            clock: &HeardAt(at),
             outputs: &self.outputs,
             windows: windows.as_ref(),
         };
@@ -1247,6 +1603,11 @@ impl Shared {
                     "this native build does not offer exact background command control",
                 ));
             }
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackground::unsupported(
+                    crate::native_schema::FORM_UNKNOWN,
+                ));
+            }
             Err(error) => return Err(crate::map_rpc(error)),
         };
         let mut items = Vec::new();
@@ -1314,10 +1675,17 @@ impl Shared {
                 reason: None,
             });
         }
-        let (terminals, _) = self
-            .background_terminals(&native)
-            .await
-            .map_err(crate::map_rpc)?;
+        let terminals = match self.background_terminals(&native).await {
+            Ok((terminals, _)) => terminals,
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackgroundEnd {
+                    id: id.to_owned(),
+                    state: BackgroundEndState::Unknown,
+                    reason: Some(crate::native_schema::FORM_UNKNOWN.into()),
+                });
+            }
+            Err(error) => return Err(crate::map_rpc(error)),
+        };
         let Some(terminal) = terminals.into_iter().find(|terminal| {
             command_identity(&native, &terminal.item_id, &terminal.process_id) == id
         }) else {
@@ -1468,7 +1836,7 @@ impl Shared {
         format!("{}:{id}", self.run)
     }
 
-    fn request_resolved(&self, params: &Json) {
+    fn request_resolved(&self, params: &Json, at: Time) {
         let Some(id) = params.get("requestId").and_then(RequestId::from_json) else {
             return;
         };
@@ -1489,7 +1857,7 @@ impl Shared {
         if matches!(asked.pending.kind, PendingKind::UserInput(_))
             && let Some(item) = &asked.pending.item
         {
-            let events = record.mapper.user_input_resolved(item, self.clock.time());
+            let events = record.mapper.user_input_resolved(item, at);
             self.emit_mapped(&mut record.mapper, events);
         }
         if !asked.pending.answered && !asked.pending.closed {
@@ -1504,7 +1872,7 @@ impl Shared {
     }
 
     /// Handles a request of the harness, which waits for an answer.
-    fn stage_on_request(&self, id: RequestId, method: &str, params: &Json) {
+    fn stage_on_request(&self, id: RequestId, method: &str, params: &Json, at: Time) {
         let thread = thread_of(params).map(str::to_owned);
         let mut state = lock(&self.state);
         let owner = thread
@@ -1523,7 +1891,7 @@ impl Shared {
         let Some(translated) = approvals::translate(method, params, changes) else {
             let windows = lock(&self.windows).clone();
             let ctx = Context {
-                clock: self.clock.as_ref(),
+                clock: &HeardAt(at),
                 outputs: &self.outputs,
                 windows: windows.as_ref(),
             };
@@ -1564,10 +1932,9 @@ impl Shared {
         }
         let reference = self.reference_of(&id);
         if matches!(translated.pending.kind, PendingKind::UserInput(_))
-            && let Some(event) =
-                record
-                    .mapper
-                    .user_input_requested(params, &translated.title, self.clock.time())
+            && let Some(event) = record
+                .mapper
+                .user_input_requested(params, &translated.title, at)
         {
             self.emit_session(&record.mapper, event);
         }
@@ -1704,14 +2071,33 @@ impl Shared {
     }
 
     /// Ends every session because the process is gone.
-    pub async fn on_closed(&self, reason: &str) {
+    pub async fn on_closed(self: &Arc<Self>, reason: &str) {
         if self.dead.swap(true, Ordering::SeqCst) {
             return;
         }
         self.rpc.process_exited(reason);
         let stopping = self.stopping.load(Ordering::SeqCst);
+        // A native end already received still gets its bounded proof, even if stdout closes just after it.
+        // Wait outside the event gate: the parallel result tasks need that gate to deliver their ends.
+        loop {
+            let changed = self.end_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if lock(&self.state).pending_ends.is_empty() {
+                break;
+            }
+            changed.await;
+        }
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
+        loop {
+            let owner = lock(&self.state).pending_ends.keys().next().copied();
+            let Some(owner) = owner else {
+                break;
+            };
+            self.drain_pending(owner, "native_result_session_closed");
+            self.flush_events().await;
+        }
         loop {
             let record = lock(&self.state).sessions.pop_first();
             let Some((_, mut record)) = record else { break };
@@ -1723,6 +2109,7 @@ impl Shared {
         }
         lock(&self.state).by_native.clear();
         lock(&self.state).image_sources.clear();
+        lock(&self.state).result_gates.clear();
         lock(&self.raw).clear();
         self.stage_event(AdapterEvent::Status(HarnessStatus {
             status: if stopping {
@@ -1748,6 +2135,8 @@ impl Shared {
     pub async fn watch(&self) {
         let event_gate = self.event_gate.lock().await;
         self.flush_events().await;
+        let ended: std::collections::HashSet<_> =
+            lock(&self.state).pending_ends.keys().copied().collect();
         let mut after = None;
         let mut tired = Vec::new();
         loop {
@@ -1760,8 +2149,11 @@ impl Shared {
                 let next = state.sessions.range_mut(range).next();
                 next.map(|(id, record)| {
                     let id = *id;
+                    if ended.contains(&id) { return (id, None); }
                     let windows = lock(&self.windows).clone();
                     let ctx = Context { clock: self.clock.as_ref(), outputs: &self.outputs, windows: windows.as_ref() };
+                    let expired = record.mapper.expire_silent_web_actions(self.clock.time());
+                    self.emit_mapped(&mut record.mapper, expired);
                     let asking = record.approvals.values().any(|asked| !asked.pending.answered && !asked.pending.closed);
                     let exhausted = record.mapper.give_up_if_tired(&ctx, &self.patience, asking);
                     if let Some((native_turn, events)) = exhausted {
@@ -1851,3 +2243,364 @@ pub async fn pump(
 
 /// The tools of the protocol module, for the code that connects.
 pub use protocol::connect;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+    use super::*;
+    use futures::StreamExt;
+    use orch_agent_contract::events::ItemStatus;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn a_slow_sessions_evidence_does_not_hold_another_sessions_web_end_or_silence_timer() {
+        slow_evidence_with_other_session(false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn pending_input_pressure_ends_only_the_optional_evidence_read_and_keeps_every_frame_in_order()
+     {
+        slow_evidence_with_other_session(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn a_native_end_keeps_its_bounded_evidence_when_stdout_closes_just_after_it() {
+        slow_evidence_with_other_session(false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn opening_another_native_thread_does_not_cancel_a_sessions_evidence_read() {
+        slow_evidence_with_other_session(false, false, true).await;
+    }
+
+    async fn slow_evidence_with_other_session(pressure: bool, close: bool, opening: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let (sink, mut events) = EventSink::channel();
+        let (rpc, _) = protocol::connect(tokio::io::empty(), tokio::io::sink(), None);
+        let clock = Arc::new(orch_types::ManualClock::new(chrono::Utc::now()));
+        let shared = Shared::new(ProcessParts {
+            background_control: false,
+            sink,
+            clock: clock.clone(),
+            outputs: OutputStore::new(directory.path().join("outputs")),
+            rpc,
+            raw: Arc::new(Mutex::new(HashMap::new())),
+            version: "0.167.2".into(),
+            exit: Arc::new(watch::channel(None).0),
+            patience: Patience::default(),
+            native_result_wait: Duration::from_secs(60),
+            native_result_buffer_bytes: if pressure {
+                8192
+            } else {
+                DEFAULT_NATIVE_RESULT_BUFFER_BYTES
+            },
+        });
+        for (number, native) in [(1, "slow"), (2, "other")] {
+            let thread = Id::from_u128(number);
+            let mut mapper = Mapper::new(crate::events::MapperConfig {
+                thread_id: thread,
+                segment_id: Id::from_u128(number + 10),
+                native_thread: native.into(),
+                directory: "/workspace".into(),
+            })
+            .with_native_web_results(true)
+            .with_web_action_wait(Duration::from_secs(3));
+            mapper.expect_turn(Id::from_u128(number + 20));
+            let mut state = lock(&shared.state);
+            state.by_native.insert(native.into(), thread);
+            state.sessions.insert(
+                thread,
+                SessionRecord {
+                    mapper,
+                    directory: "/workspace".into(),
+                    cwd: "/workspace".into(),
+                    workspace_root: "/workspace".into(),
+                    instruction_root_marker: false,
+                    workspace_configuration: None,
+                    instructions_notice: None,
+                    mounts: Vec::new(),
+                    remote: None,
+                    approvals: HashMap::new(),
+                    planning: false,
+                    approval_mode: orch_agent_contract::descriptor::ApprovalMode::Bypass,
+                },
+            );
+        }
+        let (started, began) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *lock(&shared.result_probe) = Some(ResultProbe {
+            owner: Id::from_u128(1),
+            started,
+            released,
+        });
+        let (send, incoming) = orch_agent_contract::flow::channel(|_: &Incoming| 1);
+        let task = tokio::spawn(pump(shared.clone(), incoming));
+        async fn notification(
+            send: &orch_agent_contract::flow::Sender<Incoming>,
+            method: &str,
+            params: Json,
+        ) {
+            send.send(Incoming::Notification {
+                method: method.into(),
+                params,
+            })
+            .await
+            .unwrap();
+        }
+        for native in ["slow", "other"] {
+            notification(
+                &send,
+                "turn/started",
+                json!({"threadId":native,"turn":{"id":native}}),
+            )
+            .await;
+        }
+        for (native, item) in [
+            ("slow", "slow-web"),
+            ("other", "other-web"),
+            ("other", "silent-web"),
+        ] {
+            notification(&send, "item/started", json!({"threadId":native,"turnId":native,"item":{"id":item,"type":"webSearch","query":"a query"}})).await;
+        }
+        notification(&send, "item/completed", json!({"threadId":"slow","turnId":"slow","item":{"id":"slow-web","type":"webSearch","action":{"type":"search","query":"a query"}}})).await;
+        notification(
+            &send,
+            "turn/completed",
+            json!({"threadId":"slow","turn":{"id":"slow","status":"completed"}}),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), began)
+            .await
+            .unwrap()
+            .unwrap();
+        if opening {
+            shared
+                .on_notification(
+                    "thread/started",
+                    &json!({"thread":{"id":"opening","cwd":"/workspace","name":"A new thread"}}),
+                )
+                .await;
+            assert!(
+                lock(&shared.state)
+                    .pending_ends
+                    .contains_key(&Id::from_u128(1)),
+                "a new session has no relation to the waiting session's child introductions"
+            );
+        }
+        let received = clock.time();
+        shared
+            .on_notification(
+                "warning",
+                &json!({"threadId":"slow","message":"The first retained warning."}),
+            )
+            .await;
+        notification(&send, "item/completed", json!({"threadId":"other","turnId":"other","item":{"id":"other-web","type":"webSearch","action":{"type":"search","query":"a query"}}})).await;
+        clock.advance(chrono::Duration::seconds(3));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut completed = false;
+            let mut expired = false;
+            while !(completed && expired) {
+                if let Some(AdapterEvent::Session {
+                    thread_id,
+                    event: SessionEvent::ItemCompleted(item),
+                    ..
+                }) = events.next().await
+                {
+                    if thread_id == Id::from_u128(2)
+                        && item.native_ref == "other-web"
+                        && item.status == ItemStatus::Completed
+                    {
+                        completed = true;
+                    }
+                    if thread_id == Id::from_u128(2)
+                        && item.native_ref == "silent-web"
+                        && item.status == ItemStatus::Failed
+                    {
+                        expired = true;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the other session and watchdog progress before the slow read is released");
+        assert!(
+            lock(&shared.state).sessions[&Id::from_u128(1)]
+                .mapper
+                .turn_in_progress()
+        );
+        let closing = close.then(|| {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                shared.on_closed("native stdout ended").await;
+            })
+        });
+        if let Some(closing) = &closing {
+            tokio::task::yield_now().await;
+            assert!(
+                !closing.is_finished(),
+                "an already observed end retains its own proof wait"
+            );
+        }
+        let second = "A large retained warning. ".repeat(1024);
+        if pressure {
+            shared
+                .on_notification("warning", &json!({"threadId":"slow","message":second}))
+                .await;
+            assert!(
+                lock(&shared.state).image_sources[&Id::from_u128(1)]
+                    .cancellation()
+                    .load(Ordering::Acquire)
+            );
+        } else {
+            release.send(()).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut ended = false;
+            let mut first_seen = false;
+            let mut second_seen = !pressure;
+            let mut pressure_explained = !pressure;
+            while !(ended && first_seen && second_seen && pressure_explained) {
+                if let Some(AdapterEvent::Session {
+                    thread_id, event, ..
+                }) = events.next().await
+                    && thread_id == Id::from_u128(1)
+                {
+                    match event {
+                        SessionEvent::TurnCompleted(_) => {
+                            assert!(!ended);
+                            ended = true;
+                        }
+                        SessionEvent::ItemCompleted(item)
+                            if item.payload["data"]["change"] == "warning" =>
+                        {
+                            assert!(ended, "retained frames follow their own native end");
+                            if item.payload["data"]["value"]["message"]
+                                == "The first retained warning."
+                            {
+                                first_seen = true;
+                                assert_eq!(item.payload["data"]["reported_at"], json!(received));
+                            } else if item.payload["data"]["value"]["message"] == second {
+                                assert!(first_seen);
+                                second_seen = true;
+                            }
+                        }
+                        SessionEvent::ItemCompleted(item)
+                            if item.payload["details"]["reason"] == "native_result_buffer_full" =>
+                        {
+                            pressure_explained = true;
+                        }
+                        SessionEvent::ItemCompleted(item)
+                            if close && item.payload["code"] == "native_web_action_unproven" =>
+                        {
+                            assert_ne!(
+                                item.payload["details"]["reason"],
+                                "native_result_session_closed"
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if pressure {
+            release.send(()).unwrap();
+        }
+        assert!(lock(&shared.state).pending_ends.is_empty());
+        if let Some(closing) = closing {
+            tokio::time::timeout(Duration::from_secs(5), closing)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_native_result_read_releases_its_wait_and_cancels_the_worker() {
+        let (sink, _events) = EventSink::channel();
+        let (rpc, _incoming) = protocol::connect(tokio::io::empty(), tokio::io::sink(), None);
+        let directory = tempfile::tempdir().unwrap();
+        let shared = Shared::new(ProcessParts {
+            background_control: false,
+            sink,
+            clock: Arc::new(orch_types::SystemClock),
+            outputs: OutputStore::new(directory.path().join("outputs")),
+            rpc,
+            raw: Arc::new(Mutex::new(HashMap::new())),
+            version: "0.167.2".into(),
+            exit: Arc::new(watch::channel(None).0),
+            patience: Patience::default(),
+            native_result_wait: Duration::from_secs(3),
+            native_result_buffer_bytes: DEFAULT_NATIVE_RESULT_BUFFER_BYTES,
+        });
+        let thread = Id::from_u128(1);
+        let segment = Id::from_u128(2);
+        lock(&shared.state).sessions.insert(
+            thread,
+            SessionRecord {
+                mapper: Mapper::new(crate::events::MapperConfig {
+                    thread_id: thread,
+                    segment_id: segment,
+                    native_thread: "native".into(),
+                    directory: "/workspace".into(),
+                }),
+                directory: "/workspace".into(),
+                cwd: "/workspace".into(),
+                workspace_root: "/workspace".into(),
+                instruction_root_marker: false,
+                workspace_configuration: None,
+                instructions_notice: None,
+                mounts: Vec::new(),
+                remote: None,
+                approvals: HashMap::new(),
+                planning: false,
+                approval_mode: orch_agent_contract::descriptor::ApprovalMode::Bypass,
+            },
+        );
+        let (started, began) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let working = shared.clone();
+        let worker = tokio::spawn(async move {
+            working
+                .native_result_work(
+                    thread,
+                    segment,
+                    "native",
+                    Vec::new(),
+                    move |source, _, _| {
+                        let _ = started.send(source.cancellation());
+                        blocked.recv().unwrap();
+                    },
+                )
+                .await
+        });
+        let cancelled = began.await.unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(worker.await.unwrap(), Err("native_result_timed_out"));
+        assert!(cancelled.load(Ordering::Acquire));
+        let began_again = Arc::new(AtomicBool::new(false));
+        let began_read = began_again.clone();
+        let again =
+            shared.native_result_work(thread, segment, "native", Vec::new(), move |_, _, _| {
+                began_read.store(true, Ordering::Release);
+            });
+        tokio::pin!(again);
+        tokio::select! {
+            biased;
+            result = &mut again => panic!("another physical read must wait for its owner: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(again.await, Err("native_result_timed_out"));
+        assert!(
+            !began_again.load(Ordering::Acquire),
+            "a timed-out physical read cannot accumulate more readers"
+        );
+        release.send(()).unwrap();
+        let gate = lock(&shared.state).result_gates[&thread].clone();
+        let _finished = gate.lock().await;
+    }
+}

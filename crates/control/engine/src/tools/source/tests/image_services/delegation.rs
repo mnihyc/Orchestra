@@ -14,6 +14,253 @@ async fn native_scene() -> Proof<(Scene, Id)> {
     Ok((scene, provider))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admitted_image_request_needs_no_unrelated_thread_creation_operation() -> Proof {
+    use orch_access_contract::key_scope::KeyScope;
+    let (scene, _, _) = native_scene_with_input_keys(true).await?;
+    let keys: Vec<(Id, Json)> = sqlx::query_as(
+        "SELECT id,operation_scope FROM api_tokens WHERE user_id=$1 AND revoked_at IS NULL",
+    )
+    .bind(scene.world.ada)
+    .fetch_all(scene.world.pool.pool())
+    .await?;
+    assert!(!keys.is_empty());
+    for (id, value) in keys {
+        let mut scope: KeyScope = serde_json::from_value(value)?;
+        for rule in &mut scope.rules {
+            rule.allow
+                .retain(|operation| !operation.operation.starts_with("ThreadCreate"));
+        }
+        sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
+            .bind(id)
+            .bind(serde_json::to_value(scope)?)
+            .execute(scene.world.pool.pool())
+            .await?;
+    }
+    publish(
+        &scene,
+        "source-native-creation",
+        "out/source-native-creation.png",
+    )
+    .await;
+    let (helper, start) = begin_helper(&scene, "source-native-creation").await?;
+    image(
+        &scene,
+        helper,
+        start.turn_id,
+        "source-native-created-image",
+        true,
+    )
+    .await?;
+    let answer = Scene::answer(&scene.world, scene.thread, "source-native-creation", None).await?;
+    assert!(answer.error.is_none(), "{answer:?}");
+    let authority:Json=sqlx::query_scalar("SELECT i.submission_authority FROM delegated_program_work w JOIN thread_inputs i ON i.id=w.initial_input_id WHERE w.helper_id=$1")
+        .bind(helper).fetch_one(scene.world.pool.pool()).await?;
+    scene.end_original().await?;
+    assert!(
+        authority
+            .get("origins")
+            .is_none_or(|origins| origins.as_array().is_some_and(Vec::is_empty)),
+        "an internal execution input does not claim a public creation operation"
+    );
+    assert!(
+        authority
+            .get("boundaries")
+            .and_then(Json::as_array)
+            .is_some_and(|boundaries| !boundaries.is_empty())
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_program_executor_cannot_use_a_call_context_without_its_actual_source() -> Proof {
+    let (scene, provider) = native_scene().await?;
+    let engine = scene.world.engine();
+    let sources = engine
+        .inner
+        .capability_services
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or("no installed declarations")?;
+    let selected=crate::tools::capability_service::selection::from_value(sources.capabilities().declarations(),"image_generation",
+        json!({"route":"image_generation.delegation","offering":{"provider":provider,"offering":NATIVE_MODEL}})).ok_or("no native selection")?;
+    let call = crate::tools::CallContext {
+        machine: scene.world.machine_id,
+        thread: scene.thread,
+        turn: scene.start.turn_id,
+        call_ref: "unscoped-program".into(),
+        attempt: None,
+        tool: orch_agent_contract::events::OrchTool::ImageGeneration,
+        arguments: json!({"prompt":"An orchard","output_paths":["out/unscoped.png"]}),
+    };
+    let result = crate::tools::capability_service::delegation::executor::Executor::thread_tool(
+        &engine,
+        &call,
+        "image_generation",
+        &sources,
+        selected,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(EngineError::StaleToolSource)),
+        "a current thread ID is not native source authority"
+    );
+    let helpers: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM nodes WHERE kind='thread' AND id<>$1")
+            .bind(scene.thread)
+            .fetch_one(scene.world.pool.pool())
+            .await?;
+    assert_eq!(helpers, 0);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_threadless_placement_never_picks_another_environment_or_governance_root() -> Proof {
+    use crate::tools::capability_service::delegation::placement::Placement;
+    use orch_provider_contract::capabilities::ProgramPlacement;
+    let (scene, _) = native_scene().await?;
+    let mut conn = scene.world.pool.acquire().await?;
+    let source = orch_db::queries::threads::thread(&mut conn, scene.thread)
+        .await?
+        .ok_or("missing source thread")?;
+    let mut config = ProgramPlacement {
+        environment_id: source.environment_id,
+        helper_topic_id: Some(new_id()),
+    };
+    let placed =
+        Placement::configured(&mut conn, source.org_id, Some(source.topic_id), &config).await?;
+    assert_eq!(Some(placed.environment), source.environment_id);
+    assert_eq!(
+        placed.topic, source.topic_id,
+        "the actual source topic takes precedence"
+    );
+    config.helper_topic_id = Some(source.topic_id);
+    assert!(
+        Placement::configured(&mut conn, source.org_id, None, &config)
+            .await?
+            .current(&mut conn)
+            .await?
+    );
+    assert!(
+        Placement::configured(&mut conn, new_id(), None, &config)
+            .await
+            .is_err()
+    );
+    config.environment_id = None;
+    assert!(
+        Placement::configured(&mut conn, source.org_id, None, &config)
+            .await
+            .is_err(),
+        "a usable environment elsewhere is never selected by default"
+    );
+    config.environment_id = Some(new_id());
+    assert!(
+        Placement::configured(&mut conn, source.org_id, None, &config)
+            .await
+            .is_err()
+    );
+    drop(conn);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_threads_delegated_work_keeps_its_actual_environment_topic_and_directory() -> Proof {
+    let (scene, provider) = native_scene().await?;
+    scene.world.set(scene.thread,orch_settings_contract::registry::keys::AGENTS_IMAGE_GENERATION_BACKEND,
+        json!({"route":"image_generation.delegation","offering":{"provider":provider,"offering":NATIVE_MODEL},
+          "config":{"environment_id":new_id(),"helper_topic_id":new_id()}})).await;
+    publish(&scene, "source-placement", "out/source-placement.png").await;
+    let (helper, start) = begin_helper(&scene, "source-placement").await?;
+    let actual: (Id, Id, String) = sqlx::query_as(
+        "SELECT environment_id,topic_id,workspace_dir FROM threads WHERE node_id=$1",
+    )
+    .bind(helper)
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    let expected: (Id, Id, String) = sqlx::query_as(
+        "SELECT environment_id,topic_id,workspace_dir FROM threads WHERE node_id=$1",
+    )
+    .bind(scene.thread)
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    assert_eq!(
+        actual, expected,
+        "backend placement references never redirect an ordinary thread's work"
+    );
+    image(&scene, helper, start.turn_id, "placed-image", true).await?;
+    let outcome = Scene::answer(&scene.world, scene.thread, "source-placement", None).await?;
+    assert!(outcome.error.is_none(), "{outcome:?}");
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changing_the_requesting_directory_stops_owned_work_before_a_result_is_published() -> Proof
+{
+    let (scene, _) = native_scene().await?;
+    publish(&scene, "moved-source", "out/moved-source.png").await;
+    let (helper, start) = begin_helper(&scene, "moved-source").await?;
+    sqlx::query("UPDATE threads SET workspace_dir='moved-source' WHERE node_id=$1")
+        .bind(scene.thread)
+        .execute(scene.world.pool.pool())
+        .await?;
+    scene.world.engine().wake(scene.thread);
+    scene.world.wait_turn(start.turn_id, "interrupted").await;
+    assert_eq!(scene.world.began(CommandKind::FsWrite), 0);
+    assert_eq!(scene.world.turn_starts(helper).len(), 1);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_without_the_requested_codec_is_unavailable_before_a_helper_is_created() -> Proof
+{
+    let (scene, provider) = native_scene().await?;
+    let mut descriptor: Json = scene
+        .world
+        .scalar(
+            "SELECT descriptor FROM agents WHERE id=$1",
+            scene.world.agent,
+        )
+        .await;
+    descriptor["x_capability_program"]["access"]["native"]["native"]["image_generation"]["execution"] =
+        json!([]);
+    scene.world.declares(descriptor).await;
+    let engine = scene.world.engine();
+    let sources = engine
+        .inner
+        .capability_services
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or("no installed declarations")?;
+    let mut conn = scene.world.pool.acquire().await?;
+    let result = crate::tools::capability_service::delegation::native_state(
+        &mut conn,
+        &sources,
+        provider,
+        NATIVE_MODEL,
+        "image_generation",
+    )
+    .await?;
+    drop(conn);
+    assert!(
+        result.is_err(),
+        "a delegated mode alone does not prove an implemented input and result codec"
+    );
+    let helpers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM nodes WHERE kind='thread' AND name='Capability helper'",
+    )
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    assert_eq!(helpers, 0);
+    scene.end_original().await?;
+    Ok(())
+}
+
 async fn native_scene_with_file_failure() -> Proof<(Scene, Id, Arc<AtomicBool>)> {
     Box::pin(native_scene_with_input_keys(false)).await
 }
@@ -31,6 +278,7 @@ async fn native_scene_with_input_keys(keyed: bool) -> Proof<(Scene, Id, Arc<Atom
     "title":"Fixture image program", "access":{"native":{"orch_tools":true,"native":{
         "generation":{"enabled":true,"modes":["native"],"default_mode":"native"},
         "image_generation":{"enabled":true,"modes":["off","on"],"default_mode":"off","delegated_mode":"on",
+            "execution":[{"input":"image.request","result":"image.generated"}],
             "eligible_when":{"required":["plan"],"properties":{"plan":{"const":"fixture-paid"}}},
             "delegation_label":{"en":"Fixture image program","zh-CN":"测试图像程序"}}
     }}}});
@@ -132,7 +380,7 @@ async fn helper(scene: &Scene, call: &str) -> Proof<Id> {
     let answer = crate::ids::tool_result(scene.thread, call);
     tokio::time::timeout(common::PATIENCE, async {
         loop {
-            let helper:Option<Id>=sqlx::query_scalar("SELECT (e.value->>'helper')::uuid FROM thread_tool_calls c CROSS JOIN LATERAL jsonb_each(c.plan) e WHERE c.answer_id=$1 AND e.key LIKE 'delegated_capability:%'")
+            let helper:Option<Id>=sqlx::query_scalar("SELECT helper_id FROM delegated_program_work WHERE request_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1")
                 .bind(answer).fetch_optional(scene.world.pool.pool()).await?;
             if let Some(helper)=helper {return Ok(helper);}
             tokio::time::sleep(common::config().sweep_every).await;
@@ -232,6 +480,224 @@ async fn image(
         )
         .await;
     Ok(blob)
+}
+
+async fn native_text(
+    scene: &Scene,
+    helper: Id,
+    turn: Id,
+    reference: &str,
+    text: &str,
+    phase: Option<&str>,
+    parent: Option<&str>,
+) -> Proof {
+    let payload = ItemPayload::AgentMessage(serde_json::from_value(json!({
+        "text":text,"text_len":text.chars().count(),"phase":phase,
+    }))?);
+    scene
+        .world
+        .say(
+            helper,
+            Event::ItemStarted(orch_link_contract::events::ItemStarted {
+                turn_id: turn,
+                native_ref: reference.into(),
+                stream: "main".into(),
+                parent_native_ref: parent.map(str::to_owned),
+                kind: orch_link_contract::events::EmittedItemKind::AgentMessage,
+                payload: payload.clone(),
+            }),
+        )
+        .await;
+    scene
+        .world
+        .say(
+            helper,
+            Event::ItemCompleted(orch_link_contract::events::ItemCompleted {
+                native_ref: reference.into(),
+                status: orch_link_contract::foreign::ItemStatus::Completed,
+                payload,
+                output_blob: None,
+            }),
+        )
+        .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_answer_uses_only_the_successful_owned_turns_final_main_message() -> Proof {
+    use crate::tools::capability_service::delegation::text;
+    for phased in [true, false] {
+        let (scene, _) = native_scene().await?;
+        publish(
+            &scene,
+            "native-text-evidence",
+            "out/text-is-not-an-image.png",
+        )
+        .await;
+        let (helper, start) = begin_helper(&scene, "native-text-evidence").await?;
+        native_text(
+            &scene,
+            helper,
+            start.turn_id,
+            "earlier",
+            "Earlier text.",
+            phased.then_some("commentary"),
+            None,
+        )
+        .await?;
+        native_text(
+            &scene,
+            helper,
+            start.turn_id,
+            "answer",
+            "The final answer.",
+            phased.then_some("final"),
+            None,
+        )
+        .await?;
+        native_text(
+            &scene,
+            helper,
+            start.turn_id,
+            "nested",
+            "A nested answer is not the result.",
+            phased.then_some("final"),
+            Some("answer"),
+        )
+        .await?;
+        if phased {
+            native_text(
+                &scene,
+                helper,
+                start.turn_id,
+                "later-unphased",
+                "A later unphased note is not the final phase.",
+                None,
+                None,
+            )
+            .await?;
+        }
+        let mut conn = scene.world.pool.acquire().await?;
+        assert!(
+            text::completed(
+                &mut conn,
+                helper,
+                start.turn_id,
+                Some(scene.world.machine_id)
+            )
+            .await?
+            .is_none(),
+            "an item is not a successful turn"
+        );
+        drop(conn);
+        scene
+            .world
+            .say(
+                helper,
+                common::turn_ended(
+                    start.turn_id,
+                    orch_agent_contract::events::TurnOutcome::Completed,
+                ),
+            )
+            .await;
+        scene.world.wait_turn(start.turn_id, "completed").await;
+        let mut conn = scene.world.pool.acquire().await?;
+        let result = text::completed(
+            &mut conn,
+            helper,
+            start.turn_id,
+            Some(scene.world.machine_id),
+        )
+        .await?
+        .ok_or("no final text receipt")?;
+        assert_eq!(result.text, "The final answer.");
+        assert_eq!(result.native_ref, "answer");
+        assert!(!result.command.is_nil());
+        assert_eq!(
+            Some(result),
+            text::completed(
+                &mut conn,
+                helper,
+                start.turn_id,
+                Some(scene.world.machine_id)
+            )
+            .await?
+        );
+        assert!(
+            text::completed(&mut conn, helper, start.turn_id, Some(new_id()))
+                .await?
+                .is_none()
+        );
+        assert!(
+            text::completed(
+                &mut conn,
+                scene.thread,
+                start.turn_id,
+                Some(scene.world.machine_id)
+            )
+            .await?
+            .is_none()
+        );
+        drop(conn);
+        assert_eq!(scene.world.turn_starts(helper).len(), 1);
+        assert_eq!(
+            scene.world.began(CommandKind::FsWrite),
+            0,
+            "text cannot replace generated image evidence"
+        );
+        scene.end_original().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn commentary_and_failed_turns_cannot_supply_a_successful_text_answer() -> Proof {
+    use crate::tools::capability_service::delegation::text;
+    for (outcome, state, phase) in [
+        (
+            orch_agent_contract::events::TurnOutcome::Failed,
+            "failed",
+            "final",
+        ),
+        (
+            orch_agent_contract::events::TurnOutcome::Completed,
+            "completed",
+            "commentary",
+        ),
+    ] {
+        let (scene, _) = native_scene().await?;
+        publish(&scene, "failed-native-text", "out/failed-text.png").await;
+        let (helper, start) = begin_helper(&scene, "failed-native-text").await?;
+        native_text(
+            &scene,
+            helper,
+            start.turn_id,
+            "failed-answer",
+            "An incomplete answer.",
+            Some(phase),
+            None,
+        )
+        .await?;
+        scene
+            .world
+            .say(helper, common::turn_ended(start.turn_id, outcome))
+            .await;
+        scene.world.wait_turn(start.turn_id, state).await;
+        let mut conn = scene.world.pool.acquire().await?;
+        assert!(
+            text::completed(
+                &mut conn,
+                helper,
+                start.turn_id,
+                Some(scene.world.machine_id)
+            )
+            .await?
+            .is_none()
+        );
+        drop(conn);
+        scene.end_original().await?;
+    }
+    Ok(())
 }
 
 async fn can_read(scene: &Scene, person: Id, thread: Id) -> Proof<bool> {
@@ -445,6 +911,7 @@ async fn one_native_helper_keeps_its_real_owner_result_links_and_ledger_on_repla
     assert_eq!(value["images"][0]["status"], "ready");
     assert_eq!(value["helper"]["thread_id"], json!(helper));
     assert_eq!(value["helper"]["actor_id"], json!(scene.world.ada));
+    assert_eq!(value["helper"]["provider_id"], json!(provider));
     assert_eq!(
         std::fs::read(scene.directory.path().join("out/native.png"))?,
         bytes()?
@@ -1070,5 +1537,427 @@ async fn reported_free_and_unconfirmed_native_sign_in_return_the_programs_reason
         assert_eq!(count, 0);
         scene.end_original().await?;
     }
+    Ok(())
+}
+
+async fn retained_idle_close(
+    scene: &Scene,
+    helper: Id,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Proof<Id> {
+    tokio::time::timeout(common::PATIENCE, async {
+        loop {
+            scene.world.engine().close_idle_program_sessions(at).await?;
+            let close: Option<Id> = sqlx::query_scalar(
+                "SELECT idle_close_command_id FROM delegated_program_work WHERE helper_id=$1",
+            )
+            .bind(helper)
+            .fetch_one(scene.world.pool.pool())
+            .await?;
+            if let Some(close) = close {
+                return Ok(close);
+            }
+            tokio::time::sleep(common::config().sweep_every).await;
+        }
+    })
+    .await
+    .map_err(|_| "the native ending controls did not settle before the owned context could close")?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_an_idle_context_keeps_the_helper_history_and_the_provider_running() -> Proof {
+    let (scene, _) = native_scene().await?;
+    let engine = scene.world.engine();
+    publish(&scene, "idle-context", "out/idle.png").await;
+    let (helper, start) = begin_helper(&scene, "idle-context").await?;
+    assert_eq!(
+        engine
+            .close_idle_program_sessions(scene.world.clock.now() + chrono::Duration::days(1))
+            .await?,
+        0,
+        "an idle timer cannot close running work"
+    );
+    image(&scene, helper, start.turn_id, "idle-image", true).await?;
+    let answer = Scene::answer(&scene.world, scene.thread, "idle-context", None).await?;
+    assert!(answer.error.is_none(), "{answer:?}");
+    scene.world.wait_turn(start.turn_id, "completed").await;
+    scene.world.wait_followed_up(helper).await;
+    let completed: chrono::DateTime<chrono::Utc> = scene
+        .world
+        .scalar("SELECT completed_at FROM turns WHERE id=$1", start.turn_id)
+        .await;
+    let items = scene
+        .world
+        .count("SELECT count(*) FROM items WHERE thread_id=$1", helper)
+        .await;
+    assert_eq!(
+        engine
+            .close_idle_program_sessions(completed + chrono::Duration::seconds(299))
+            .await?,
+        0
+    );
+    let close =
+        retained_idle_close(&scene, helper, completed + chrono::Duration::seconds(300)).await?;
+    let commands:i64=scene.world.scalar("SELECT count(*) FROM commands WHERE kind IN ('session.close','session.close.fenced') AND body->>'thread_id'=$1::uuid::text",helper).await;
+    assert_eq!(commands, 1, "the context has exactly one durable close");
+    assert_eq!(
+        engine
+            .close_idle_program_sessions(completed + chrono::Duration::seconds(301))
+            .await?,
+        0,
+        "another worker resumes the retained close rather than queueing another one"
+    );
+    tokio::time::timeout(common::PATIENCE, async {
+        loop {
+            engine.deliver_lifecycle_controls().await?;
+            let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
+                .bind(close)
+                .fetch_one(scene.world.pool.pool())
+                .await?;
+            if state == "succeeded" {
+                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(());
+            }
+            if matches!(state.as_str(), "failed" | "expired" | "cancelled") {
+                return Err(format!("the native close ended as {state}").into());
+            }
+            tokio::time::sleep(common::config().sweep_every).await;
+        }
+    })
+    .await
+    .map_err(|_| "the retained native close was not acknowledged within the proof budget")??;
+    assert_eq!(
+        engine
+            .close_idle_program_sessions(completed + chrono::Duration::days(1))
+            .await?,
+        0
+    );
+    assert_eq!(
+        scene
+            .world
+            .count("SELECT count(*) FROM items WHERE thread_id=$1", helper)
+            .await,
+        items
+    );
+    assert_eq!(
+        scene
+            .world
+            .count("SELECT count(*) FROM turns WHERE thread_id=$1", helper)
+            .await,
+        1
+    );
+    assert!(can_read(&scene, scene.world.ada, helper).await?);
+    assert_eq!(scene.world.began(CommandKind::ProviderStop), 0);
+    assert_eq!(scene.world.began(CommandKind::AgentStop), 0);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zero_idle_time_closes_a_finished_context_without_waiting_for_another_turn() -> Proof {
+    let (scene, _) = native_scene().await?;
+    scene
+        .world
+        .set_system("delegation.session_idle_secs", json!(0))
+        .await;
+    publish(&scene, "zero-idle-context", "out/zero-idle.png").await;
+    let (helper, start) = begin_helper(&scene, "zero-idle-context").await?;
+    image(&scene, helper, start.turn_id, "zero-idle-image", true).await?;
+    let answer = Scene::answer(&scene.world, scene.thread, "zero-idle-context", None).await?;
+    assert!(answer.error.is_none(), "{answer:?}");
+    scene.world.wait_turn(start.turn_id, "completed").await;
+    scene.world.wait_followed_up(helper).await;
+    let completed = scene
+        .world
+        .scalar("SELECT completed_at FROM turns WHERE id=$1", start.turn_id)
+        .await;
+    // Wait until the native ending controls settle; the ordinary sweeper may finish first.
+    let close = retained_idle_close(&scene, helper, completed).await?;
+    assert!(!close.is_nil());
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn later_independent_helper_work_is_outside_the_delegated_contexts_idle_timer() -> Proof {
+    let (scene, _) = native_scene().await?;
+    publish(&scene, "independent-context", "out/independent-context.png").await;
+    let (helper, start) = begin_helper(&scene, "independent-context").await?;
+    image(
+        &scene,
+        helper,
+        start.turn_id,
+        "independent-context-image",
+        true,
+    )
+    .await?;
+    let answer = Scene::answer(&scene.world, scene.thread, "independent-context", None).await?;
+    assert!(answer.error.is_none(), "{answer:?}");
+    scene.world.wait_turn(start.turn_id, "completed").await;
+    let engine = scene.world.engine();
+    engine
+        .submit_input(
+            &Caller::session(scene.world.ada),
+            helper,
+            common::queued("Continue with my own independent work"),
+        )
+        .await?;
+    let independent = scene.world.turn_start(helper, 1).await;
+    scene
+        .world
+        .answer(
+            helper,
+            &independent,
+            "independent-reply",
+            "An independent answer",
+        )
+        .await;
+    scene
+        .world
+        .say(
+            helper,
+            common::turn_ended(independent.turn_id, TurnOutcome::Completed),
+        )
+        .await;
+    scene
+        .world
+        .wait_turn(independent.turn_id, "completed")
+        .await;
+    assert_eq!(
+        engine
+            .close_idle_program_sessions(scene.world.clock.now() + chrono::Duration::days(1))
+            .await?,
+        0
+    );
+    let close: Option<Id> = scene
+        .world
+        .scalar(
+            "SELECT idle_close_command_id FROM delegated_program_work WHERE helper_id=$1",
+            helper,
+        )
+        .await;
+    assert!(close.is_none());
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generated_helper_work_does_not_recursively_buy_automation_but_later_human_work_can()
+-> Proof {
+    let (scene, _) = native_scene().await?;
+    publish(&scene, "automation-context", "out/automation.png").await;
+    let (helper, start) = begin_helper(&scene, "automation-context").await?;
+    let mut conn = scene.world.pool.acquire().await?;
+    crate::summaries::due(&mut conn, helper, "milestone", scene.world.clock.now()).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM node_summary_state WHERE node_id=$1")
+            .bind(helper)
+            .fetch_one(&mut *conn)
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_summary_events WHERE target_id=$1"
+        )
+        .bind(helper)
+        .fetch_one(&mut *conn)
+        .await?,
+        0
+    );
+    let children = orch_db::queries::summaries::topic_threads(
+        &mut conn,
+        scene.world.topic,
+        None,
+        scene.world.engine().config().sweep_batch,
+    )
+    .await?;
+    assert!(!children.contains(&helper));
+    let children = orch_db::queries::summaries::topic_sources(
+        &mut conn,
+        scene.world.topic,
+        None,
+        scene.world.engine().config().sweep_batch,
+    )
+    .await?;
+    assert!(
+        !children
+            .iter()
+            .any(|child| child.kind == "thread" && child.id == helper)
+    );
+    drop(conn);
+    image(&scene, helper, start.turn_id, "automation-image", true).await?;
+    let answer = Scene::answer(&scene.world, scene.thread, "automation-context", None).await?;
+    assert!(answer.error.is_none(), "{answer:?}");
+    scene.world.wait_turn(start.turn_id, "completed").await;
+    let engine = scene.world.engine();
+    engine
+        .submit_input(
+            &Caller::session(scene.world.ada),
+            helper,
+            common::queued("My next independent question"),
+        )
+        .await?;
+    let independent = scene.world.turn_start(helper, 1).await;
+    scene
+        .world
+        .answer(
+            helper,
+            &independent,
+            "human-automation-reply",
+            "An answer to the human question",
+        )
+        .await;
+    scene
+        .world
+        .say(
+            helper,
+            common::turn_ended(independent.turn_id, TurnOutcome::Completed),
+        )
+        .await;
+    scene
+        .world
+        .wait_turn(independent.turn_id, "completed")
+        .await;
+    let mut conn = scene.world.pool.acquire().await?;
+    crate::summaries::due(&mut conn, helper, "milestone", scene.world.clock.now()).await?;
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM node_summary_state WHERE node_id=$1")
+            .bind(helper)
+            .fetch_one(&mut *conn)
+            .await?
+            > 0
+    );
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM resource_summary_events WHERE target_id=$1"
+        )
+        .bind(helper)
+        .fetch_one(&mut *conn)
+        .await?
+            > 0
+    );
+    let children = orch_db::queries::summaries::topic_threads(
+        &mut conn,
+        scene.world.topic,
+        None,
+        engine.config().sweep_batch,
+    )
+    .await?;
+    assert!(children.contains(&helper));
+    drop(conn);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delegated_image_uses_its_native_mode_and_later_human_work_keeps_the_orgs_service()
+-> Proof {
+    let (scene, provider) = native_scene().await?;
+    scene
+        .world
+        .set(
+            scene.world.root,
+            orch_settings_contract::registry::keys::AGENTS_IMAGE_GENERATION,
+            json!("service"),
+        )
+        .await;
+    scene.world.set(scene.world.root,orch_settings_contract::registry::keys::AGENTS_IMAGE_GENERATION_BACKEND,
+        json!({"route":"image_generation.delegation","offering":{"provider":provider,"offering":NATIVE_MODEL}})).await;
+    let opens = Arc::new(std::sync::Mutex::new(Vec::<
+        orch_link_contract::commands::SessionOpen,
+    >::new()));
+    for kind in [CommandKind::SessionOpen, CommandKind::SessionOpenFenced] {
+        let opens = opens.clone();
+        scene.world.machine.handler.on(kind, move |command| {
+            let (open, fenced) = match command {
+                Command::SessionOpen(open) => (open.clone(), false),
+                Command::SessionOpenFenced(open) => (open.session.as_ref().clone(), true),
+                _ => return Err(CommandError::new(ErrorCode::Conflict, "not a session open")),
+            };
+            let result = SessionOpenResult {
+                native_session_ref: open
+                    .native_session_ref
+                    .clone()
+                    .unwrap_or_else(|| format!("native-{}", open.segment_id)),
+                resumed: open.mode == orch_link_contract::commands::SessionMode::Resume,
+                import_report: None,
+                instruction_sources: vec![],
+                approval_reviewer: None,
+            };
+            opens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(open);
+            Ok(if fenced {
+                CommandResult::SessionOpenFenced(result)
+            } else {
+                CommandResult::SessionOpen(result)
+            })
+        });
+    }
+    publish(&scene, "native-mode", "out/native-mode.png").await;
+    let (helper, start) = begin_helper(&scene, "native-mode").await?;
+    let initial = opens
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|open| open.thread_id == helper)
+        .cloned()
+        .ok_or("no helper open")?;
+    image(&scene, helper, start.turn_id, "native-mode-image", true).await?;
+    let answer = Scene::answer(&scene.world, scene.thread, "native-mode", None).await?;
+    assert!(answer.error.is_none(), "{answer:?}");
+    scene.world.wait_turn(start.turn_id, "completed").await;
+    scene
+        .world
+        .engine()
+        .submit_input(
+            &Caller::session(scene.world.ada),
+            helper,
+            common::queued("Continue with my own independent question"),
+        )
+        .await?;
+    let independent = scene
+        .world
+        .run_turn(helper, 1, "An independent answer")
+        .await;
+    let mode = independent
+        .native_model
+        .as_ref()
+        .and_then(|native| native.capabilities.as_array())
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["capability"] == "image_generation")
+        })
+        .and_then(|row| row["mode"].as_str())
+        .map(str::to_owned);
+    scene.end_original().await?;
+    assert_eq!(
+        initial.image_generation,
+        Some(true),
+        "the actual owned native request enables its required tool even when the program defaults off"
+    );
+    assert!(
+        initial.orch_tools.is_empty(),
+        "native work cannot recurse through the service's Orch tool"
+    );
+    assert_eq!(
+        mode.as_deref(),
+        Some("service"),
+        "the next human input uses its ordinary inherited choice"
+    );
+    let mut conn = scene.world.pool.acquire().await?;
+    let thread = threads::thread(&mut conn, helper)
+        .await?
+        .ok_or("missing helper")?;
+    let tools = scene
+        .world
+        .engine()
+        .offered_tools_for_session(&mut conn, &thread, true, scene.world.clock.time())
+        .await?;
+    assert!(
+        tools.contains(&orch_agent_contract::events::OrchTool::ImageGeneration),
+        "the ordinary helper remains usable for later work"
+    );
     Ok(())
 }
