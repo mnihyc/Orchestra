@@ -5,6 +5,8 @@ import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { holderParam, peopleQuery, type AccessTarget } from '@/api/access';
 import type { AccessChoice, PermissionPage } from '@/generated/api-types';
+import { useNow } from '@/lib/time';
+import { useServerNow } from '@/lib/serverClock';
 import { useAppearance } from '@/lib/appearance';
 import { denial } from '@/lib/permissions';
 import { Avatar } from '@/ui/Avatar';
@@ -50,6 +52,8 @@ export function HolderPeople({ target, param, level, via }: { target: AccessTarg
 function RosterRow({ holder, line, ...props }: Omit<Props, 'lines'> & { holder: LineHolder; line: LineId }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
+  const now=useServerNow(useNow());
+  const expired=now!==null&&holder.entries.length>0&&holder.entries.every((entry)=>entry.expires_at!==null&&Date.parse(entry.expires_at)<=now);
   const permissionName = usePermissionName();
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -98,7 +102,7 @@ function RosterRow({ holder, line, ...props }: Omit<Props, 'lines'> & { holder: 
               : <span key={from === 'system' ? from : from.id}>{words}</span>;
           })}
           {givenBy.map((words) => <span key={words}>{words}</span>)}
-          {holder.until !== null && <span>{t('access.holder.until', { date: shortDate(locale, holder.until) })}</span>}
+          {holder.until !== null && <span>{t(expired?'access.holder.expired':'access.holder.until', { date: shortDate(locale, holder.until) })}</span>}
         </div>
         {line === 'custom' && <p className="mt-0.5 text-xs text-text-muted wrap-anywhere">{new Intl.ListFormat(locale, { type: 'conjunction' }).format(customHeld(holder, permissionName))}</p>}
       </div>

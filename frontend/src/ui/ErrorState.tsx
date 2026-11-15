@@ -9,7 +9,9 @@ import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { isReadCancelled } from '@/api/reads';
 import { WhereNames } from '@/features/access/WhereField';
+import { purposeNames } from '@/features/access/purposes';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
 import { permissionDenial } from '@/lib/permissions';
@@ -59,6 +61,7 @@ export function ErrorState({
   recovery,
   className,
 }: ErrorStateProps) {
+  if (isReadCancelled(error)) return null;
   // Verification is a workflow, not a generic retry or a second status paragraph.
   if (waitsForSecondStep(error)) return <SecondStepGate error={error} onDone={onRetry} className={className} />;
   return <FailureLine error={error} title={title} titleAs={titleAs} message={message} onRetry={onRetry} onReadback={onReadback} retrying={retrying} compact={compact} action={action} recovery={recovery} className={className} />;
@@ -118,6 +121,7 @@ export function MissingAccessList({ missing, className }: { missing: readonly Mi
               <span className="font-medium">{what}</span>
             </span>
             {entry.options?.where !== undefined && entry.options.where !== null && entry.options.where.length > 0 && <span><Trans i18nKey="access.missing.notWhere" components={{ names: <WhereNames names={entry.options.where} unreadable={t('access.missing.thatPlace')} /> }} /></span>}
+            {entry.options?.purposes !== undefined && entry.options.purposes !== null && <span>{t('access.options.purposes')}{': '}{purposeNames(t, entry.options.purposes)}</span>}
             {entry.closed !== null || entry.ask.length === 0 ? <span className="text-text-muted">{answer}</span> : <span className="flex flex-wrap items-center gap-1 text-text-muted">
               <span className="sr-only">{answer}</span>
               <Trans i18nKey="access.missing.askPeople" components={{ people: entry.ask.length === 1 && entry.ask_more === 0 && entry.ask[0] !== undefined ? <UserChip user={entry.ask[0]} size={24} /> : <AvatarStack users={entry.ask} total={entry.ask.length + entry.ask_more} size={24} /> }} />
@@ -140,5 +144,6 @@ export interface ErrorAlertProps {
 
 /** A request that was refused, said beside the form that made it. */
 export function ErrorAlert({ error, message, action, onReadback, className }: ErrorAlertProps) {
+  if (isReadCancelled(error)) return null;
   return <FailureLine error={error} message={message} action={action} onReadback={onReadback} compact className={className} />;
 }
