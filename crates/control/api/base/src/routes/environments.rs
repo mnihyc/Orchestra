@@ -111,6 +111,23 @@ orch_api_base::api_family_callback! {
 }
 
 /// Opaque existing Environment view facts; no ordinary permission or operation is selected here.
+orch_api_base::api_family_callback! {
+    bind __api_bind_environment_row_preparation, __api_install_environment_row_preparation, __api_callback_environment_row_preparation;
+    slot __ApiCallbackEnvironmentRowPreparation, __API_CALLBACK_ENVIRONMENT_ROW_PREPARATION, __api_set_environment_row_preparation;
+    base orch_api_base::routes::environments;
+
+    async fn prepare_inventory_rows<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: &'__api [orch_authz::resources::Seen]) -> orch_api_base::middleware::requests::ApiResult<orch_api_base::routes::environments::PreparedInventory>;
+}
+
+orch_api_base::api_family_callback! {
+    bind __api_bind_environment_list_rows, __api_install_environment_list_rows, __api_callback_environment_list_rows;
+    slot __ApiCallbackEnvironmentListRows, __API_CALLBACK_ENVIRONMENT_LIST_ROWS, __api_set_environment_list_rows;
+    base orch_api_base::routes::environments;
+
+    async fn show_inventory_rows_prepared<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: &'__api orch_api_base::routes::environments::PreparedInventory) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::resource_rows::EnvironmentListRow>>;
+}
+
+/// Native Environment authority and references, shared by full and compact projections.
 pub struct PreparedInventory {
     pub rows: Vec<EnvironmentFull>,
     pub standing: HashMap<Id, Standing>,
