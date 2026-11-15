@@ -1034,6 +1034,14 @@ impl Engine {
             .map_or(0, |count| count.bytes)
             .saturating_add(home.as_ref().map_or(0, |home| home.total_bytes));
         let files = FilesPlan {
+            source_policy: Some(crate::fork_source::workspace_copy_policy()),
+            home_policy: home
+                .as_ref()
+                .filter(|home| home.measured)
+                .map(|_| crate::fork_source::owned_copy_policy()),
+            file_states_policy: recorded
+                .as_ref()
+                .map(|_| crate::fork_source::owned_copy_policy()),
             source: FilesSource::Live,
             source_as_of: parsed.header().generated_at,
             file_count: listed.file_count,
