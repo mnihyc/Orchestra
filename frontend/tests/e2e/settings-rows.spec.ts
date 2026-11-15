@@ -231,25 +231,16 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
         expect(Math.abs(measured.height - measured.intrinsicHeight), label).toBeLessThanOrEqual(1);
       }
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      const contents = page.locator('[data-settings-contents]');
-      const group = page.getByRole('combobox', { name: words.settings.editor.groupsNav, exact: true });
+      // The groups are one list or one strip of the same names (inside the page's own section list it is the strip), never a dropdown.
+      const contents = page.getByRole('navigation', { name: words.settings.editor.groupsNav, exact: true });
+      await expect(contents).toBeVisible();
+      await expect(page.getByRole('combobox', { name: words.settings.editor.groupsNav, exact: true })).toHaveCount(0);
       const presentation = await contentsMode(contents);
       expect(presentation.position).toBe('sticky');
-      // CSS links remain in the DOM while the narrow locator is shown; both must reach this exact section.
       const destination = contents.locator('a[href]').last();
       const href = await destination.getAttribute('href');
       if (href?.startsWith('#') !== true) throw new Error('The contents link must name its settings section');
-      if (presentation.wide) {
-        await expect(contents).toBeVisible();
-        await expect(group).toBeHidden();
-        await destination.focus(); await destination.press('Enter');
-      } else {
-        await expect(contents).toBeHidden();
-        await expect(group).toBeVisible();
-        await group.focus();
-        await expect(page.getByRole('listbox', { name: words.settings.editor.groupsNav, exact: true })).toBeVisible();
-        await group.press('End'); await group.press('Enter');
-      }
+      await destination.focus(); await destination.press('Enter');
       await expect(page.locator('[id]:focus')).toHaveCount(1);
       await expect(page.locator('[id]:focus')).toHaveAttribute('id', href.slice(1));
       await expect(destination).toHaveAttribute('aria-current', 'location');

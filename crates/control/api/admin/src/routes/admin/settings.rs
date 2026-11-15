@@ -181,6 +181,7 @@ async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<Resol
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     crate::routes::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
+    crate::routes::resources::validation::named_things_exist(&mut tx, &key, &body.value).await?;
     let written = write(
         &mut tx,
         &Write {
@@ -209,6 +210,15 @@ async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<Resol
     tx.commit().await.map_err(DbError::from)?;
     if key == orch_settings_contract::registry::keys::AUTH_SECOND_STEP {
         crate::routes::settings::second_step_policy_changed(&ctx).await;
+    }
+    if orch_engine::environments::is_workspace_setting(&key)
+        && let Err(error) = ctx
+            .app
+            .engine
+            .workspace_scope_changed(orch_db::queries::access::SYSTEM_ID)
+            .await
+    {
+        tracing::warn!(%error, "system workspace changes remain pending");
     }
     Ok(reply)
 }
@@ -250,6 +260,15 @@ async fn delete(
     tx.commit().await.map_err(DbError::from)?;
     if key == orch_settings_contract::registry::keys::AUTH_SECOND_STEP {
         crate::routes::settings::second_step_policy_changed(&ctx).await;
+    }
+    if orch_engine::environments::is_workspace_setting(&key)
+        && let Err(error) = ctx
+            .app
+            .engine
+            .workspace_scope_changed(orch_db::queries::access::SYSTEM_ID)
+            .await
+    {
+        tracing::warn!(%error, "system workspace changes remain pending");
     }
     Ok(reply)
 }
