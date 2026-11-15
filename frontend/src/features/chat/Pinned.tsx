@@ -25,7 +25,7 @@ const LINE_CHARS = 100;
 export function Pinned({ chatId, onJump }: { chatId: string; onJump: (messageId: string) => void }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const pinned = useQuery({ ...pinnedQuery(chatId), enabled: open, staleTime: 0 });
+  const pinned = useQuery({ ...pinnedQuery(chatId), enabled: open });
   return (
     <Popover
       label={t('chat.pinned.label')}
