@@ -14,6 +14,8 @@ export function askModelExclusionText(reason: string, t: TFunction): string {
     case 'disabled': return t('ask.modelExclusion_disabled');
     case 'provider_unavailable': return t('ask.modelExclusion_provider_unavailable');
     case 'generation_unsupported': return t('ask.modelExclusion_generation_unsupported');
+    case 'shared_for_ask_only':return t('ask.modelExclusion_shared_for_ask_only');
+    case 'shared_for_other_work_only':return t('ask.modelExclusion_shared_for_other_work_only');
     case 'no_use': return t('ask.modelExclusion_no_use');
     case 'parameters_unavailable': return t('ask.modelExclusion_parameters_unavailable');
     case 'excluded_by_policy': return t('ask.modelExclusion_excluded_by_policy');

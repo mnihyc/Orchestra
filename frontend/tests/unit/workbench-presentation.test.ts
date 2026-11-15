@@ -10,17 +10,18 @@ import { useWorkbench } from '@/features/workbench/store';
 import { capturePresentations, keepPresentation, readPresentation } from '@/features/workbench/presentation';
 import { parsePageAddress, openPage } from '@/features/workbench/PageView';
 import { allTabs } from '@/features/workbench/layout';
+import { openThreadChanges } from '@/features/inspector/reviewTarget';
 
 const state = () => useWorkbench.getState();
 beforeEach(() => { state().leave(); localStorage.clear(); state().enter('reader-a', 'thread'); });
 afterEach(() => { state().leave(); localStorage.clear(); });
 
-it('recovers scroll/folds after close and reload without sharing another instance or another person’s state', () => {
+it('recovers scroll and what was opened after close and reload without sharing another instance or another person’s state', () => {
   const owner = state().openTab('page', { href: '/thread/thread-a?continuation=history-a' });
   const duplicate = state().openTab('page', { href: '/thread/thread-a' }, 'new');
   const read = contentThreadRead('thread-a', owner), other = contentThreadRead('thread-a', duplicate);
   const position = { key: 'item-older', item: 'item-older', offset: 19, atEnd: false };
-  timelineUi.setStep(read, 'tool', true); timelineUi.toggleFold(read, 'turn');
+  timelineUi.setStep(read, 'tool', true); timelineUi.setStep(read, 'work:first-step', false);
   keepTimelinePosition(read, 'history-a', position);
   state().close({ kind: 'tab', tab: owner }); timelineUi.forget(read);
   state().leave(); state().enter('reader-a', 'page'); state().reopen();
@@ -30,7 +31,7 @@ it('recovers scroll/folds after close and reload without sharing another instanc
   expect(readTimelinePosition(other, 'history-a')).toBeNull();
   expect(readTimelinePosition(read, null)).toBeNull();
   const ui = renderHook(() => useThreadUi('thread-a'), { wrapper: ({ children }: { children: ReactNode }) => createElement(ThreadReadProvider, { read, children }) });
-  expect(ui.result.current.steps.get('tool')).toBe(true); expect(ui.result.current.folds.has('turn')).toBe(true); ui.unmount();
+  expect(ui.result.current.steps.get('tool')).toBe(true); expect(ui.result.current.steps.get('work:first-step')).toBe(false); ui.unmount();
   state().leave(); state().enter('reader-b', 'thread');
   expect(readTimelinePosition(read, 'history-a')).toBeNull();
   expect(capturePresentations(new Set([owner]))).toEqual({});
@@ -64,4 +65,12 @@ it.each([['/settings', '/settings/profile'], ['/settings/usage', '/usage'], ['/a
 
 it('recognizes the root entrance as its existing full page adapter', () => {
   expect(parsePageAddress('/')?.route).toBe('/');
+});
+
+it('opens the header’s selected turn in turn scope and keeps the whole-thread act available', () => {
+  const panel = state().openTab('changes', { thread: 'thread-a', scope: 'thread' });
+  openThreadChanges('thread-a', 'turn-two');
+  expect(allTabs(state().layout).find((tab) => tab.id === panel)?.of).toEqual({ thread: 'thread-a', scope: 'turn', turn: 'turn-two' });
+  openThreadChanges('thread-a');
+  expect(allTabs(state().layout).find((tab) => tab.id === panel)?.of).toEqual({ thread: 'thread-a', scope: 'thread' });
 });
