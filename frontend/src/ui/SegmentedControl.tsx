@@ -12,6 +12,8 @@ import { ActionIcon, type ActionId } from '@/ui/actions';
 import { Choice, hasChoiceDescription, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
+import { deviceChoiceOf, offeredDeviceChoice } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
 
 export type Segment<Value extends string> = ChoiceName & ChoiceDetails & {
   value: Value;
@@ -59,6 +61,9 @@ export function SegmentedControl<Value extends string>({
 }: SegmentedControlProps<Value>) {
   const group=useRef<HTMLDivElement>(null);
   const id = useId();
+  const receipt = deviceChoiceOf(onValueChange);
+  const selected = segments.find((segment) => segment.value === value), saved = segments.find((segment) => segment.value === receipt?.saved);
+  const observation = receipt === undefined ? undefined : offeredDeviceChoice(receipt, value, segments.map((option) => option.value));
   return (
     <div data-choice-selector className={cx('inline-grid min-w-0 max-w-full self-start justify-items-start gap-1', block ? 'w-full' : 'w-fit', className)}>
     <RadioGroup.Root
@@ -133,6 +138,7 @@ export function SegmentedControl<Value extends string>({
         }}</Choice>
       ))}
     </RadioGroup.Root>
+    {observation !== undefined && <DeviceChoiceFacts observation={observation} current={selected?.name ?? selected?.label} saved={saved?.name ?? saved?.label} />}
     </div>
   );
 }
