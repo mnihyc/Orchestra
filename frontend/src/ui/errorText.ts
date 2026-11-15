@@ -36,6 +36,14 @@ function sentence(code: string, t: TFunction, locale: string): string | null {
   return hasErrorSentence(key,locale) ? t(key as TranslationKey) : null;
 }
 
+/** What a refused Ask says: the API names the reason it refused for, and the catalogue gives its sentence in the reader's language. */
+function refusalSentence(error: ApiError, t: TFunction, locale: string): string | null {
+  const reason = error.problem.reason;
+  if (error.status !== 403 || typeof reason !== 'string') return null;
+  const key = `errors.ask.${reason}`;
+  return hasErrorSentence(key, locale) ? t(key as TranslationKey) : null;
+}
+
 /** Puts an error into words. `t` is the catalogue; the time of a "try again at" is said in `context`. */
 export function errorText(
   error: unknown,
@@ -48,8 +56,8 @@ export function errorText(
   };
   if (error instanceof ApiError) {
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
-    const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
-      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
+    const message = refusalSentence(error, t, context.locale) ?? (invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
+      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale));
     return {
       message,
       code: error.code,

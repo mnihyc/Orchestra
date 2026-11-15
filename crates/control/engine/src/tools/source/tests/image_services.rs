@@ -56,6 +56,10 @@ async fn configured_with_input_keys(
     } else {
         Scene::new().await?
     };
+    configured_scene(shape, scene).await
+}
+
+async fn configured_scene(shape: Shape, scene: Scene) -> Proof<(Scene, Id, Arc<AtomicBool>)> {
     let provider = new_id();
     let mut sources = orch_provider_contract::builtins::BuiltinSources::default();
     let mut binding = None;
