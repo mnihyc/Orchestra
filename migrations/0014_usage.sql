@@ -340,6 +340,103 @@ CREATE INDEX usage_events_user_idx ON usage_events USING btree (user_id, at);
 
 CREATE TRIGGER usage_events_change BEFORE INSERT OR UPDATE ON usage_events FOR EACH ROW EXECUTE FUNCTION usage_mark_change();
 
+-- A radix-16 timestamp tree keeps exact microsecond ranges read-only in authorization snapshots.
+-- Four bits per level cover a signed bigint in sixteen folds, independent of request rate.
+CREATE TABLE usage_health_tree (
+    provider_id uuid NOT NULL,
+    level smallint NOT NULL CHECK (level BETWEEN 0 AND 15),
+    prefix bigint NOT NULL,
+    totals jsonb NOT NULL,
+    PRIMARY KEY(provider_id,level,prefix)
+);
+
+CREATE FUNCTION usage_health_scale(counts jsonb, direction bigint) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(jsonb_object_agg(key,value::bigint*direction),'{}'::jsonb)
+    FROM jsonb_each_text(COALESCE(counts,'{}'::jsonb))
+$$;
+
+CREATE FUNCTION usage_health_projection(event usage_events, direction bigint) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN (event).outcome IS NULL THEN NULL ELSE jsonb_build_object(
+        'requests',direction,
+        'hidden_requests',direction*CASE WHEN (event).measurement_states->>'reasoning_hidden'='true' THEN 1 ELSE 0 END,
+        'short_requests',direction*CASE WHEN (event).measurement_states->'speed_milli'->>'state'='empty' THEN 1 ELSE 0 END,
+        'speed_tokens',direction*CASE WHEN (event).speed_milli IS NOT NULL THEN COALESCE((event).streamed_output_tokens,0) ELSE 0 END,
+        'generation_ms_sum',direction*CASE WHEN (event).speed_milli IS NOT NULL THEN COALESCE((event).generation_ms,0) ELSE 0 END,
+        'errors',jsonb_build_object((event).outcome,direction),
+        'speed_buckets',usage_health_scale(usage_hist_add('{}'::jsonb,(event).speed_milli::double precision/1000),direction),
+        'first_token_buckets',usage_health_scale(usage_hist_add('{}'::jsonb,(event).first_token_ms::double precision),direction)
+    ) END
+$$;
+
+CREATE FUNCTION usage_health_add(state jsonb, part jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_build_object(
+        'requests',COALESCE((state->>'requests')::bigint,0)+COALESCE((part->>'requests')::bigint,0),
+        'hidden_requests',COALESCE((state->>'hidden_requests')::bigint,0)+COALESCE((part->>'hidden_requests')::bigint,0),
+        'short_requests',COALESCE((state->>'short_requests')::bigint,0)+COALESCE((part->>'short_requests')::bigint,0),
+        'speed_tokens',COALESCE((state->>'speed_tokens')::bigint,0)+COALESCE((part->>'speed_tokens')::bigint,0),
+        'generation_ms_sum',COALESCE((state->>'generation_ms_sum')::bigint,0)+COALESCE((part->>'generation_ms_sum')::bigint,0),
+        'errors',usage_counts_merge(COALESCE(state->'errors','{}'::jsonb),COALESCE(part->'errors','{}'::jsonb)),
+        'speed_buckets',usage_counts_merge(COALESCE(state->'speed_buckets','{}'::jsonb),COALESCE(part->'speed_buckets','{}'::jsonb)),
+        'first_token_buckets',usage_counts_merge(COALESCE(state->'first_token_buckets','{}'::jsonb),COALESCE(part->'first_token_buckets','{}'::jsonb))
+    )
+$$;
+CREATE AGGREGATE usage_health_merge(jsonb) (SFUNC=usage_health_add,STYPE=jsonb,INITCOND='{}');
+
+CREATE FUNCTION usage_health_prefix(ticks bigint, level integer) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+    -- Integer division keeps the last microsecond below a large prefix boundary exact.
+    SELECT CASE WHEN ticks>=0 THEN ticks/width ELSE -((-(ticks+1))/width)-1 END
+    FROM (SELECT 1::bigint << (level*4) AS width) range_value
+$$;
+
+CREATE FUNCTION usage_health_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE before_event usage_events; after_event usage_events;
+BEGIN
+    IF TG_OP<>'INSERT' THEN before_event:=OLD; END IF;
+    IF TG_OP<>'DELETE' THEN after_event:=NEW; END IF;
+    IF TG_OP='UPDATE' AND OLD.provider_id=NEW.provider_id AND OLD.at=NEW.at
+       AND usage_health_projection(OLD,1) IS NOT DISTINCT FROM usage_health_projection(NEW,1) THEN RETURN NULL; END IF;
+    INSERT INTO usage_health_tree(provider_id,level,prefix,totals)
+        WITH observations AS MATERIALIZED (
+            SELECT (entry.observation).provider_id AS provider_id,
+                (extract(epoch FROM (entry.observation).at)*1000000)::bigint AS ticks,
+                usage_health_projection(entry.observation,entry.direction) AS totals
+            FROM (VALUES(before_event,-1::bigint),(after_event,1::bigint)) AS entry(observation,direction)
+            WHERE (entry.observation).outcome IS NOT NULL
+        )
+        SELECT o.provider_id,levels.level,usage_health_prefix(o.ticks,levels.level),usage_health_merge(o.totals)
+        FROM observations o CROSS JOIN generate_series(0,15) AS levels(level)
+        GROUP BY 1,2,3 ORDER BY 1,2,3
+        ON CONFLICT(provider_id,level,prefix) DO UPDATE SET totals=usage_health_add(usage_health_tree.totals,EXCLUDED.totals);
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER usage_health_changed AFTER DELETE OR UPDATE OF provider_id,at,outcome,first_token_ms,speed_milli,generation_ms,streamed_output_tokens,measurement_states ON usage_events
+    FOR EACH ROW EXECUTE FUNCTION usage_health_changed();
+
+CREATE FUNCTION usage_health_inserted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO usage_health_tree(provider_id,level,prefix,totals)
+        WITH observations AS MATERIALIZED (
+            SELECT e.provider_id,(extract(epoch FROM e.at)*1000000)::bigint AS ticks,
+                usage_health_projection(e::usage_events,1) AS totals
+            FROM inserted_health e WHERE e.outcome IS NOT NULL
+        )
+        SELECT o.provider_id,levels.level,usage_health_prefix(o.ticks,levels.level),usage_health_merge(o.totals)
+        FROM observations o CROSS JOIN generate_series(0,15) AS levels(level)
+        GROUP BY 1,2,3 ORDER BY 1,2,3
+        ON CONFLICT(provider_id,level,prefix) DO UPDATE SET totals=usage_health_add(usage_health_tree.totals,EXCLUDED.totals);
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER usage_health_inserted AFTER INSERT ON usage_events REFERENCING NEW TABLE AS inserted_health
+    FOR EACH STATEMENT EXECUTE FUNCTION usage_health_inserted();
+
+CREATE FUNCTION usage_health_cleared() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN DELETE FROM usage_health_tree; RETURN NULL; END;
+$$;
+CREATE TRIGGER usage_health_cleared AFTER TRUNCATE ON usage_events FOR EACH STATEMENT EXECUTE FUNCTION usage_health_cleared();
+
 CREATE TABLE usage_limit_bypasses (
     id uuid NOT NULL,
     cap_id uuid,

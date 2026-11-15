@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test forks -- moving_routes::
+test -p orch-api-core --test loss -- recipient_scopes::
+test -p orch-person-notices --lib
