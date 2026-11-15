@@ -27,7 +27,8 @@ import { useCandidates, useTargetOrg } from './candidates';
 import type { Asked } from './ChangePreview';
 import type { Changes, PageSource } from './changes';
 import { gaveText, HolderView, holderName, placeName } from './holders';
-import { useAppearance } from '@/lib/appearance';
+import { useAppearance, useFormatContext } from '@/lib/appearance';
+import { formatDateTime } from '@/lib/time';
 import { addToRowChange, type Cell, cellHolders, followChange, forkRowChange, lockChange, removeChange } from './model';
 import { permissionNameOf } from './names';
 import { EntryOptions, optionFields } from './EntryOptions';
@@ -79,7 +80,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
   const chooseRole = (key: string) => {
     const role = catalogue.data?.roles.find((entry) => entry.key === key);
     if (role === undefined) return;
-    const expires = until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+    const expires = until === '' ? null : new Date(until).toISOString();
     setOpen(false);
     void changes.run({ label: t('access.cell.adding', { name: choiceOption(t, `accessRole.${role.key}`).name, permission: label }),
       make: (page) => addToRowChange(page, row.permission, profile, { kind: 'role', role: role.key }, { expires_at: expires }) });
@@ -116,7 +117,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
           onSelect={(option) => {
             const found = candidates.byValue.get(option.value);
             if (found === undefined) return;
-            const expires = until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+            const expires = until === '' ? null : new Date(until).toISOString();
             setOpen(false);
             void changes.run({
               label: t('access.cell.adding', { name: found.name, permission: label }),
@@ -124,7 +125,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
             });
           }}
         />
-        <DateField label={t('access.cell.until')} optional value={until} onValueChange={setUntil} />
+        <DateField type="datetime-local" label={t('access.cell.until')} optional value={until} onValueChange={setUntil} />
       </div>
     </Popover>
   );
@@ -142,6 +143,7 @@ export function RowCell({ cell, target, source, changes, ask, place, profile, on
   const canAdd = row.can_give && !decidedAbove;
   const me = useQuery(meQuery).data;
   const locale = useAppearance((state) => state.locale);
+  const format = useFormatContext();
   const mayTakeBack = (entry: { created_by: { id: string } | null }) => canChange || (canAdd && me !== undefined && entry.created_by?.id === me.id);
   const [editing, setEditing] = useState<{ id: string; holder: Holder; followed: boolean } | null>(null);
   const hasOptions = optionFields(def.options_schema).length > 0;
@@ -219,7 +221,7 @@ export function RowCell({ cell, target, source, changes, ask, place, profile, on
               <FollowMark place={holder.from} />
             ) : (
               <span className="text-text-muted">
-                {[gaveText(t, locale, holder.entry), holder.entry.expires_at === null ? null : t('access.holder.until', { date: new Date(holder.entry.expires_at).toLocaleDateString(locale) })]
+                {[gaveText(t, locale, holder.entry), holder.entry.expires_at === null ? null : t('access.holder.until', { date: formatDateTime(holder.entry.expires_at, format) })]
                   .filter((text) => text !== null)
                   .join(t('startFlow.separator'))}
               </span>

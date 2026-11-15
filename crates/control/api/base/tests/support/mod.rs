@@ -1087,6 +1087,7 @@ thread_local! {
 
 tokio::task_local! {
     static MEASURED_COUNT: std::cell::Cell<usize>;
+    static MEASURED_ROWS: std::cell::Cell<usize>;
 }
 
 impl Statements {
@@ -1098,6 +1099,18 @@ impl Statements {
             let _ = tracing::subscriber::set_global_default(Statements);
         });
         COUNT.with(std::cell::Cell::get)
+    }
+
+    /// Counts database rows actually returned to one request, including native authorization graph reads.
+    /// This observes SQLx's completed-query counter without retaining SQL bindings or row contents.
+    pub async fn measure_rows<F: std::future::Future>(future: F) -> (F::Output, usize) {
+        Self::now();
+        MEASURED_ROWS
+            .scope(std::cell::Cell::new(0), async {
+                let output = future.await;
+                (output, MEASURED_ROWS.with(std::cell::Cell::get))
+            })
+            .await
     }
 
     /// Counts statements while one request future is polled, excluding separately spawned tasks.
@@ -1172,6 +1185,22 @@ impl tracing::Subscriber for Statements {
             }
         }
         if event.metadata().target() == "sqlx::query" {
+            struct ReturnedRows(usize);
+            impl tracing::field::Visit for ReturnedRows {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "rows_returned" {
+                        self.0 = format!("{value:?}").parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut returned = ReturnedRows(0);
+            event.record(&mut returned);
+            let _ =
+                MEASURED_ROWS.try_with(|count| count.set(count.get().saturating_add(returned.0)));
             COUNT.with(|count| count.set(count.get() + 1));
             let _ = MEASURED_COUNT.try_with(|count| count.set(count.get() + 1));
             static TIMINGS: OnceLock<bool> = OnceLock::new();

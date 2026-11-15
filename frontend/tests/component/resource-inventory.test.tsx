@@ -10,7 +10,7 @@ import type { EverythingFilter } from '@/api/everything';
 import { ResourceList } from '@/features/resources/ResourceList';
 import { resourceReaders } from '@/features/resources/inventory';
 import type { EverythingRow, Host } from '@/generated/api-types';
-import { inventoryRow } from '../doubles/everything-row';
+import { resourceInventoryRow as inventoryRow } from '../doubles/everything-row';
 import { me, userRef } from '../doubles/fixtures';
 import { show, skipOverflowFallback, tableDataRows } from './support';
 
@@ -39,7 +39,7 @@ const row = (value: Host): EverythingRow => inventoryRow({ id: value.id, kind: '
   owner: value.owner, participating: value.access.participating, admin_access: value.access.admin_access,
   resource: { kind: 'host', value } });
 
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['resource-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['resource-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
 vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: string | null, filter: EverythingFilter) => ({
   queryKey: ['everything', person, parent, filter], initialPageParam: null as string | null,
   queryFn: ({ pageParam }: { pageParam: string | null }) => {
@@ -54,7 +54,7 @@ vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: s
 }) }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name: string | null }) => place.name }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (place: { name: string | null }) => place.name }));
 
 function List() {
   const [text, setText] = useState('');
@@ -76,7 +76,7 @@ it('loads one page on demand and preserves rich columns, the owner and native-on
   expect(await screen.findByRole('link', { name: 'Build host' })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'Later host' })).not.toBeInTheDocument();
   expect(requests).toHaveLength(1);
-  expect(requests[0]).toMatchObject({ parent: 'resources', cursor: null, filter: { kinds: ['host'], resource: { state: 'open', details: true } } });
+  expect(requests[0]).toMatchObject({ parent: 'resources', cursor: null, filter: { kinds: ['host'], resource: { state: 'open', rows: true } } });
   expect(within(screen.getByRole('table')).getByText('Docker')).toBeVisible();
   expect(screen.getByText('1 environments · 2 providers')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Show more' }));
@@ -120,7 +120,7 @@ it('asks the server for a match outside the loaded page instead of filtering the
   await user.type(screen.getByRole('searchbox', { name: 'Search hosts' }), 'Later');
   expect(await screen.findByRole('link', { name: 'Later host' })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'Build host' })).not.toBeInTheDocument();
-  expect(requests.at(-1)).toMatchObject({ cursor: null, filter: { q: 'Later', resource: { state: 'open', details: true } } });
+  expect(requests.at(-1)).toMatchObject({ cursor: null, filter: { q: 'Later', resource: { state: 'open', rows: true } } });
 });
 
 it('keeps loaded rows on a continuation failure and lets the same pager retry', async () => {
