@@ -11,7 +11,7 @@ import { show } from './support';
 
 const host = vi.hoisted(() => ({ guide: undefined as Guide | undefined, open: vi.fn() }));
 vi.mock('@/help/localized', () => ({ useLocalizedGuide: () => host.guide }));
-vi.mock('@/features/ask/open', () => ({ openAskWithDraft: host.open }));
+vi.mock('@/features/ask/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAskWithDraft: host.open }));
 const guide = makeGuide({
   'first.md': '---\nsummary: First quartz summary.\nkeywords: quartz\n---\n# Quartz first\n\nText.',
   'second.md': '---\nsummary: Second quartz summary.\nkeywords: quartz\n---\n# Quartz second\n\nText.',

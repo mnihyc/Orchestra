@@ -528,10 +528,24 @@ pub enum McpTransport {
     Http,
 }
 
-/// An MCP server found in the configuration of a harness that is installed in an environment.
-/// None is used until somebody imports it.
+/// The readable name of the agent profile whose native configuration was found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpProfileRef {
+    /// Its profile identifier.
+    pub id: Id,
+    /// Its readable name.
+    pub name: String,
+}
+
+/// An MCP server found in a program's own configuration, independently of its optional Orch copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpFound {
+    /// Opaque identity of this actual native profile and configuration entry, used by Import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Its profile's name where this reader may see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<McpProfileRef>,
     /// What it is called there.
     pub name: String,
     /// The harness whose configuration it is in, such as `codex` or `claude-code`.
@@ -544,6 +558,30 @@ pub struct McpFound {
     pub transport: McpTransport,
     /// The server it became, once it was imported.
     pub imported: Option<Id>,
+    /// This thread's last reported program connection state; absent without an observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<McpState>,
+    /// The definition the program reports using for this name; absent without an observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<McpDefinitionSource>,
+}
+
+/// Which definition was supplied to the program for a reported MCP connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDefinitionSource {
+    /// The program's own global or directory configuration.
+    Native,
+    /// The server enabled in Orch for this environment.
+    Orch,
+}
+
+/// A thread's current native connection observations, or the environment's unscoped discoveries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentMcpGetQuery {
+    /// Read this thread's selected native segment; requires its View and its current environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
 }
 
 /// Whether the tree of an environment is indexed.
@@ -831,6 +869,8 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that
@@ -1120,10 +1160,25 @@ pub struct McpImportRight {
     pub reason: Option<McpImportReason>,
 }
 
-/// The MCP servers of one environment: those switched on for it and what became of each there,
-/// and those found in the harness configuration there that nobody imported yet.
+/// A program's current connection, including one whose static configuration was not reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpConnection {
+    /// Its name in the running program.
+    pub name: String,
+    /// The program kind.
+    pub source: String,
+    /// Its reported state, absent while this opening has reported none.
+    pub state: Option<McpState>,
+    /// The definition selected for this opening, where it is known.
+    pub using: Option<McpDefinitionSource>,
+}
+
+/// Managed servers of one environment and the programs' own native configuration, imported or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMcp {
+    /// Current scoped program connections, including those without a static importable definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<McpConnection>,
     /// The servers switched on for it.
     pub servers: Vec<EnvironmentMcpServer>,
     /// When a change here reaches a thread that is at work.
@@ -1743,11 +1798,13 @@ impl EnvironmentUpdateResponse {
     }
 }
 
-/// Imports an MCP server found in the configuration of a harness there: the connector keeps a
-/// copy of its definition, which is what runs from then on.
+/// Copies one native definition into an Orch resource, leaving the program's own configuration alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentMcpImportCreateBody {
+    /// The native entry chosen in the received list; omitted only for an unambiguous entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// The harness whose configuration it is in.
     pub source: String,
     /// The user's own configuration, or a directory of the workspace.
@@ -2478,8 +2535,8 @@ crate::endpoints! {
     /// Changes an environment; what the running unit cannot take is stored and listed in `updates`.
     EnvironmentUpdate: PATCH "/environments/{id}", Rule("environment.manage, and for another home also node.interact on the new home"), none, json EnvironmentUpdateBody, json EnvironmentUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::environment_sources::UPDATE_FACETS));
-    /// Lists the MCP servers of an environment and those found in the harness configuration there that nobody imported.
-    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), none, none, json EnvironmentMcp, 200,
+    /// Lists managed servers and native configuration, optionally with a readable thread's connection state.
+    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment; thread.view for thread_id"), query EnvironmentMcpGetQuery, none, json EnvironmentMcp, 200,
         operation Op::facets(&crate::environment_sources::MCP_GET_FACETS);
     /// Imports an MCP server found in the harness configuration of an environment; the connector keeps a copy of its definition.
     EnvironmentMcpImportCreate: POST "/environments/{id}/mcp/imports", Rule("environment.manage; on a person's machine also being the machine's owner, or managing every environment of that machine once its owner handed the policy key for imports over"), none, json EnvironmentMcpImportCreateBody, json EnvironmentMcpCreateResponse, 201,

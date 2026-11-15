@@ -261,6 +261,7 @@ fn serve_native_generations(world: &World, missing: bool) {
         }
         Ok(CommandResult::SessionOpen(
             orch_link_contract::commands::SessionOpenResult {
+                mcp: None,
                 native_session_ref: if resume {
                     body.native_session_ref.clone().unwrap()
                 } else {
@@ -957,6 +958,7 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
     let opened = NativePrefixOpened {
         session: orch_agent_contract::session::SessionOpened {
+            mcp: None,
             native_session_ref: history.native_session_ref.clone(),
             resumed: false,
             import_report: None,
@@ -980,6 +982,7 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
     let created = serde_json::to_value(&opened).unwrap();
     let prefix = serde_json::to_value(&opened.prefix).unwrap();
     let resumed = orch_link_contract::commands::SessionOpenResult {
+        mcp: None,
         native_session_ref: history.native_session_ref.clone(),
         resumed: true,
         import_report: None,

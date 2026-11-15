@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test syncs
+test -p orch-engine --test context_fill --test usage_rows --test background_wake
