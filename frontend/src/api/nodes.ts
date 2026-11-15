@@ -13,7 +13,8 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
-import { CancelledError, infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { supersededRead } from '@/api/reads';
+import { infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
 
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
 import { outsideOpeningsQuery } from '@/api/ports';
@@ -34,6 +35,7 @@ import type {
   DeletedNodePage,
   HiddenItem,
   Node,
+  NodeKind,
   NodeArchivePlan,
   NodeArchiveResult,
   NodeDeleteBody,
@@ -92,7 +94,7 @@ async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal, op
     const data = await ok(api.GET('/nodes/{id}/overview', { params: { path: { id }, query: {
       from: opening.from, to: opening.to, breakdowns: opening.breakdowns.join(','), limit: opening.limit ?? null,
     } }, signal }));
-    if (!current() || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
+    if (!current() || reader !== client.session.getState().readerVersion) throw supersededRead();
     if (data.node.id !== id) throw new Error('The node overview returned a different node');
     const keys: QueryKey[] = [];
     const usage = usageQuery(opening).queryKey, outside = outsideOpeningsQuery(id).queryKey;
@@ -292,40 +294,37 @@ export const deletedQuery = (id: string) =>
     getNextPageParam: (last) => last.next_cursor,
   });
 
-/**
- * The nodes of a root org's tree that the caller may view: all of them, or with `since` those that
- * changed after that sequence. This is the request the tree's live feed is loaded and repaired by.
- */
-export async function fetchTree(orgId: string, since: number | null, signal?: AbortSignal): Promise<TreeReply> {
-  const reader = client.session.getState().readerVersion;
-  let reply: OrgTreeGetReply = await ok(
-    api.GET('/orgs/{id}/tree', {
-      params: { path: { id: orgId }, query: since === null ? {} : { since } },
-      ...(signal ? { signal } : {}),
-    }),
-  );
-  const seq = reply.seq;
-  signal?.throwIfAborted();
-  if (client.session.getState().readerVersion !== reader) throw new DOMException('The tree reader changed', 'AbortError');
-  // Prime an absent observer only. A setting already supplied by a newer live/native read wins.
-  if (reply.settings !== undefined && reply.settings !== null && queryClient.getQueryData(settingsKey(orgId)) === undefined) {
-    queryClient.setQueryData(settingsKey(orgId), reply.settings);
-  }
-  const rows = [...reply.nodes];
-  while (since === null && reply.next_cursor !== null && reply.next_cursor !== undefined) {
-    reply = await ok(api.GET('/orgs/{id}/tree', {
-      params: { path: { id: orgId }, query: { cursor: reply.next_cursor } },
-      ...(signal ? { signal } : {}),
-    }));
-    rows.push(...reply.nodes);
-  }
-  return { ...reply, seq, ...splitListed(rows) };
+/** Exact bounded hierarchy page, shared by navigation and place selectors. */
+export interface TreeSelection {
+  parent_id?: string;
+  path_to?: string;
+  q?: string;
+  kind?: NodeKind;
+  below_id?: string;
+  cursor?: string;
+  limit?: number;
+  since?: number;
 }
 
-/** A tree as the page holds it: the rows its reader may read, and apart from them the minimal rows of private places they administer. */
-export type TreeReply = Omit<OrgTreeGetReply, 'nodes'> & TreeRows;
+export async function fetchTreePage(orgId: string, selection: TreeSelection, signal?: AbortSignal): Promise<TreeReply> {
+  const reader=client.session.getState().readerVersion;
+  signal?.throwIfAborted();
+  const reply=await ok(api.GET('/orgs/{id}/tree', { params:{path:{id:orgId},query:selection}, ...(signal===undefined?{}:{signal}) }));
+  signal?.throwIfAborted();
+  if (reader!==client.session.getState().readerVersion) throw new DOMException('The tree reader changed','AbortError');
+  if (reply.settings!==undefined && reply.settings!==null && queryClient.getQueryData(settingsKey(orgId))===undefined) queryClient.setQueryData(settingsKey(orgId),reply.settings);
+  const ancestry=splitListed(reply.ancestors ?? []);
+  return { ...reply,...splitListed(reply.nodes),ancestors:ancestry.nodes,ancestorHidden:ancestry.hidden };
+}
 
-/** Rows of a tree, readable and minimal apart. */
+/** The first level is one page. A continuation is read only when its screen requests it. */
+export function fetchTree(orgId: string, since: number | null, signal?: AbortSignal): Promise<TreeReply> {
+  return fetchTreePage(orgId,since===null?{parent_id:orgId}:{since},signal);
+}
+
+export const treePageKey = (orgId:string,selection:TreeSelection,reader=client.session.getState().readerVersion) => ['tree-places',orgId,selection,reader] as const;
+export type TreeReply = Omit<OrgTreeGetReply,'nodes'|'ancestors'> & TreeRows & {ancestors?:TreeNode[];ancestorHidden?:HiddenItem[]};
+
 export interface TreeRows {
   nodes: TreeNode[];
   hidden: HiddenItem[];

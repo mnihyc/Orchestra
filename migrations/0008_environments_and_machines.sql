@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -607,6 +608,8 @@ CREATE TABLE port_open_requests (
 CREATE UNIQUE INDEX port_open_requests_thread_idx ON port_open_requests USING btree (environment_id, thread_id, client_id) WHERE (thread_id IS NOT NULL);
 
 CREATE UNIQUE INDEX port_open_requests_user_idx ON port_open_requests USING btree (environment_id, user_id, client_id) WHERE (user_id IS NOT NULL);
+
+CREATE INDEX port_open_requests_opening_idx ON port_open_requests USING btree (opening_id);
 
 CREATE TRIGGER port_open_requests_live AFTER INSERT OR DELETE OR UPDATE ON port_open_requests FOR EACH ROW EXECUTE FUNCTION machine_views_notify();
 
