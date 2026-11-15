@@ -55,7 +55,7 @@ export function adminTokenActivityQuery(person: string, token: string, query: Ap
     }, retry: false, staleTime: 0, gcTime: 0,
   });
 }
-export const ownUploadsQuery = () => pages<UploadInventoryItem>(reachKeys.uploads, false, (cursor, signal) => ok(api.GET('/me/uploads', { params: { query: pageQuery(cursor) }, signal })));
+export const ownUploadsQuery = (q = '') => pages<UploadInventoryItem>(q.trim() === '' ? reachKeys.uploads : [...reachKeys.uploads, q.trim()], false, (cursor, signal) => ok(api.GET('/me/uploads', { params: { query: { ...pageQuery(cursor), ...(q.trim() === '' ? {} : { q: q.trim() }) } }, signal })));
 /** The API content endpoint is distinct from the administrative page routes. */
 export function uploadInventoryContentPath(row: UploadInventoryItem, name: string, admin: boolean): string | null {
   if (row.state !== 'complete') return null;

@@ -70,18 +70,19 @@ export function documentPage(page: { items: readonly unknown[]; next_cursor: str
 // ---------------------------------------------------------------- reading
 
 /** The documents written beside a node, the most recently changed first; with `under`, those beside the nodes below it too. */
-export const documentsOfNodeQuery = (nodeId: string, options: { under?: boolean; deleted?: boolean; participating?: boolean; batch?: boolean } = {}) =>
+export const documentsOfNodeQuery = (nodeId: string, options: { under?: boolean; deleted?: boolean; participating?: boolean; batch?: boolean; q?: string } = {}) =>
   infiniteQueryOptions({
-    queryKey: [...documentsKey(nodeId), options.under === true, options.deleted === true, options.participating === true] as const,
+    queryKey: [...documentsKey(nodeId), options.under === true, options.deleted === true, options.participating === true, ...(options.q?.trim() ? [options.q.trim()] : [])] as const,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
-      (options.batch === true && pageParam === null && options.under !== true && options.deleted !== true && options.participating !== true
+      (options.batch === true && pageParam === null && options.under !== true && options.deleted !== true && options.participating !== true && !options.q?.trim()
         ? firstDocumentPage(nodeId, DOCUMENTS_PAGE, signal) : ok(
         api.GET('/nodes/{id}/documents', {
           params: {
             path: { id: nodeId },
             query: {
               limit: DOCUMENTS_PAGE,
+              ...(options.q?.trim() ? { q: options.q.trim() } : {}),
               ...(pageParam === null ? {} : { cursor: pageParam }),
               ...(options.under === true ? { under: true } : {}),
               ...(options.participating === true ? { participating: true } : {}),

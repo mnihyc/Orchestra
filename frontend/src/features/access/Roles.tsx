@@ -1,3 +1,6 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
 /** People: who holds which role in a place, who holds one from above, and what each role does there as things stand; a role as a name and a count, with its people on request.
  *
  * A table of the people and groups who hold a role in this place, with a menu to change the role or
@@ -6,14 +9,14 @@
  * and open their people on request. "Add people…" gives a role. A sentence under the table says what each
  * role does here as things stand, read from the defaults, and leads to the tab where that is changed.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronRight, Ellipsis, Pencil, Plus, Trash2, Users } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 import type { TFunction } from 'i18next';
 
-import { type AccessTarget, changeRole, changeRoleDetails, defaultsQuery, giveRole, permissionsQuery, rolesQuery, roleSubject, takeRole } from '@/api/access';
+import { type AccessTarget, changeRole, changeRoleDetails, defaultsQuery, giveRole, permissionsQuery, rolesPageQuery, roleSubject, takeRole } from '@/api/access';
 import { usePlaceLabel } from '@/features/navigation/placeLabels';
 import { meQuery } from '@/api/auth';
 import { ApiError } from '@/api/client';
@@ -243,10 +246,12 @@ function GivesLine({ place, givable }: { place: string; givable: readonly Role[]
   return <p className="text-sm text-text-muted">{t(`access.gives.youAre.${top}`, { place, choice, above: t(`roles.${above}`) })}</p>;
 }
 
-export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?: (() => void) | undefined }) {
+function RoleAssignments({ place, onDefaults }: { place: AccessTarget; onDefaults?: (() => void) | undefined }) {
   const { t } = useTranslation();
   const label = usePlaceLabel();
-  const roles = useQuery(rolesQuery(place.id));
+  const search = useCollectionSearch('place-roles:' + place.id);
+  const pages = useInfiniteQuery(rolesPageQuery(place.id, search.q));
+  const roles = pages.data?.pages.at(-1);
   const node = useQuery(nodeQuery(place.id));
   const me = useQuery(meQuery).data;
   const locale = useAppearance((state) => state.locale);
@@ -260,7 +265,7 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
   const traceEntry = useTraceEntry(scope ?? null, allowed);
   const reason = denial(t, 'access.manage', place.name, node.data?.owner);
   // Whoever shares without managing the page gives the roles up to their own, and takes back, and changes, the ones they gave.
-  const givable: readonly Role[] = roles.data?.can_give ?? [];
+  const givable: readonly Role[] = roles?.can_give ?? [];
   const mayTouch = (row: RoleHeld) => may || (me?.id === row.created_by.id && givable.includes(row.role));
 
   const change = useMutation({
@@ -279,9 +284,10 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
     },
   });
 
-  if (roles.isPending) return <SkeletonRows read={roles} rows={4} />;
-  if (roles.isError) return <ErrorState compact error={roles.error} retrying={roles.isRefetching} onRetry={() => void roles.refetch()} />;
-  const own = roles.data.own;
+  const controls = <CollectionSearch name={t('access.roles.table', { name: place.name })} {...search} />;
+  if (pages.isError && !pages.isFetchNextPageError) return <>{controls}<ErrorState compact error={pages.error} retrying={pages.isRefetching} onRetry={() => void pages.refetch()} /></>;
+  if (pages.isPending || roles === undefined) return <>{controls}<SkeletonRows read={pages} rows={4} /></>;
+  const own = pages.data?.pages.flatMap((page) => page.own) ?? [];
 
   const columns: Column<RoleHeld>[] = [
     {
@@ -369,19 +375,21 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
           {t('access.roles.add')}
         </Button>
       </div>
-      {roles.data.owners.length > 0 && <section aria-label={t('access.owners.label')}>
-        <ul className="flex flex-wrap gap-2">{roles.data.owners.map((holder) => <li key={holderKey(holder)}>
+      {controls}
+      {roles.owners.length > 0 && <section aria-label={t('access.owners.label')}>
+        <ul className="flex flex-wrap gap-2">{roles.owners.map((holder) => <li key={holderKey(holder)}>
           <HolderView holder={holder} target={place} note={holder.kind === 'user' && holder.user.id === node.data?.owner.id ? t('access.roster.primaryOwner') : t('access.roster.owner')} />
         </li>)}</ul>
       </section>}
       {own.length === 0 ? (
-        roles.data.owners.length === 0 ? <EmptyState compact icon={<Users aria-hidden />} title={t('access.roles.none')} description={t('access.roles.noneMore')} /> : null
+        roles.owners.length === 0 ? <EmptyState compact icon={<Users aria-hidden />} title={t('access.roles.none')} description={t('access.roles.noneMore')} /> : null
       ) : (
-        <Table label={t('access.roles.table', { name: place.name })} columns={columns} rows={own} rowKey={(row) => row.id} />
+        <Table label={t('access.roles.table', { name: place.name })} virtual columns={columns} rows={own} rowKey={(row) => row.id} />
       )}
+      <Pagination hasMore={pages.hasNextPage} loading={pages.isFetchingNextPage} error={pages.isFetchNextPageError ? pages.error : null} onMore={() => void pages.fetchNextPage()} />
       {change.error !== null && <ErrorAlert error={change.error} />}
       <GivesLine place={place.name} givable={givable} />
-      <Above rows={roles.data.above} scope={scope} allowed={allowed} />
+      <Above rows={roles.above} scope={scope} allowed={allowed} />
       <WhatRolesDo place={place} onDefaults={onDefaults} />
 
       {adding && <AddPeople place={place} open onClose={() => setAdding(false)} givable={givable} />}
@@ -425,4 +433,9 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
       </Dialog>
     </div>
   );
+}
+
+export function Roles(props: { place: AccessTarget; onDefaults?: (() => void) | undefined }) {
+  const { scope } = useCollectionSearch('place-roles:' + props.place.id);
+  return <RoleAssignments key={scope} {...props} />;
 }

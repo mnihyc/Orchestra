@@ -250,7 +250,8 @@ async fn a_session_begun_by_hand_becomes_a_thread_in_the_folder_that_holds_its_d
         .token(&s.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let by_ref: Vec<(&str, Option<Id>)> = listed
         .iter()
         .map(|each| (each.native_session_ref.as_str(), each.adopted_thread_id))

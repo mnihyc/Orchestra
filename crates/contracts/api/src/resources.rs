@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::access::{NewResourceAccess, ResourceAccess};
 use crate::approvals::{ApproverScope, Risk};
 use crate::binding::ArrangementType;
-use crate::common::{PageQuery, absent_or_null};
+use crate::common::{CollectionQuery, Page, PageQuery, absent_or_null};
 use crate::documents::Document;
 use crate::environment::{
     Amounts, Environment, EnvironmentRef, HostStorage, McpScope, PendingUpdate, Placement,
@@ -73,6 +73,9 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.
@@ -828,6 +831,47 @@ pub enum ModelSource {
     Suggested,
 }
 
+/// A page of the provider's saved models.
+pub type ProviderModelPage = Page<ProviderModel>;
+/// A page of the source's proposals, optionally only those not saved on the provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelSuggestionListQuery {
+    /// Words of a visible model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// The continuation from this same source and filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Omit names already saved on this provider before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlisted: Option<bool>,
+    /// Ask the source again instead of reading its last successful catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+}
+impl ProviderModelSuggestionListQuery {
+    /// Its ordinary named-collection page.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
+/// A page of model suggestions, retaining their original offered facts.
+pub type ModelSuggestionPage = Page<ModelSuggestion>;
+
 /// A model that a provider lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderModel {
@@ -887,6 +931,50 @@ pub struct NativeSession {
     pub updated_at: Option<Time>,
     /// The thread that adopted it, if one did.
     pub adopted_thread_id: Option<Id>,
+}
+
+/// Search and continuation within one captured native-session catalogue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionListQuery {
+    /// Words in the session title or folder, matched before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same captured source and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// The source returned by the first page; omit to ask the native program afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Id>,
+}
+impl NativeSessionListQuery {
+    /// The common page, whose scope also includes its captured native source.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
+/// Native source identity stays outside the row window and is checked again on every page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NativeSessionPage {
+    /// This page's readable sessions.
+    pub items: Vec<NativeSession>,
+    /// The next page of the same captured source and search.
+    pub next_cursor: Option<String>,
+    /// Its opaque captured catalogue; not authority to read a provider.
+    pub source: Id,
 }
 
 /// An environment that holds a provider's credential for a while.
@@ -2596,9 +2684,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3345,6 +3434,29 @@ pub struct HostRuntimeListQuery {
     /// Only those of this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UnitKind>,
+    /// Words in the admitted visible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Requested page size; any positive u32, defaulting to fifty.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// The continuation returned for this collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl HostRuntimeListQuery {
+    /// Shared native search and continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// The span of a host's load to read, as for the system's own metrics.
@@ -3858,7 +3970,7 @@ crate::endpoints! {
     ProviderHarnessRestart: POST "/providers/{id}/harnesses/{agent_id}/restart", Permission("provider.manage"), none, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the conversations a provider's harness already holds, for adapters that can discover them.
-    ProviderHarnessSessionList: GET "/providers/{id}/harnesses/{agent_id}/sessions", Permission("provider.use"), none, none, json Vec<NativeSession>, 200,
+    ProviderHarnessSessionList: GET "/providers/{id}/harnesses/{agent_id}/sessions", Permission("provider.use"), query NativeSessionListQuery, none, json NativeSessionPage, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::PermissionObject);
     /// Saves an API key, asks the configured facts/model sources, and returns the provider; never the key.
     ProviderKeySet: PUT "/providers/{id}/key", Permission("provider.manage"), none, json ProviderKeySetBody, json Provider, 200,
@@ -3911,7 +4023,7 @@ crate::endpoints! {
     ProviderSourcesSet: PUT "/providers/{id}/sources", Permission("provider.manage"), none, json ProviderSourcesSetBody, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the models a provider lists.
-    ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
+    ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), query CollectionQuery, none, json ProviderModelPage, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Lists explicit capability backends of this provider at a governed place.
     ProviderCapabilityBackendList: GET "/providers/{id}/capability-backends", Permission("provider.view"), query CapabilityBackendQuery, none, json crate::common::Page<CapabilityBackendCandidate>, 200,
@@ -3925,7 +4037,7 @@ crate::endpoints! {
     /// Removes a model from a provider.
     ProviderModelDelete: DELETE "/providers/{id}/models/{model_id}", Permission("provider.manage"), none, none, none, 204;
     /// Lists the models that discovery suggests for a provider.
-    ProviderModelSuggestionList: GET "/providers/{id}/models/suggestions", Permission("provider.manage"), none, none, json Vec<ModelSuggestion>, 200;
+    ProviderModelSuggestionList: GET "/providers/{id}/models/suggestions", Permission("provider.manage"), query ProviderModelSuggestionListQuery, none, json ModelSuggestionPage, 200;
     /// Adds the suggested models that were chosen; the speeds, the access programs and the larger context they list are put under `offered`, and none of them is enabled.
     ProviderModelSuggestionAccept: POST "/providers/{id}/models/suggestions/accept", Permission("provider.manage"), none, json ProviderModelSuggestionAcceptBody, json ProviderModelSuggestionAcceptResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -4144,7 +4256,7 @@ crate::endpoints! {
     HostUpdate: PATCH "/hosts/{id}", Permission("host.manage"), none, json HostUpdateBody, json Host, 200,
         operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Lists everything that runs on a host, whoever's it is.
-    HostRuntimeList: GET "/hosts/{id}/runtimes", Permission("host.manage"), query HostRuntimeListQuery, none, json Vec<Runtime>, 200;
+    HostRuntimeList: GET "/hosts/{id}/runtimes", Permission("host.manage"), query HostRuntimeListQuery, none, json crate::common::Page<Runtime>, 200;
     /// Reads a host's load over time: CPU, memory used, disk used and free.
     HostMetricsList: GET "/hosts/{id}/metrics", Permission("host.manage"), query HostMetricsListQuery, none, json Vec<MetricSeries>, 200;
     /// Stops a runtime of a host.
