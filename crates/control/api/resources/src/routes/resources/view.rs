@@ -90,6 +90,7 @@ pub(crate) fn machine_refs_from_rows(
                     online: is_online(app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
             ))
         })
