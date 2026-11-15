@@ -1239,6 +1239,9 @@ pub enum ArchivedFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeChildListQuery {
+    /// Words in the admitted visible name, before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Only ordinary page access, independent of native administrator reach; before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub participating: Option<bool>,
@@ -1720,6 +1723,64 @@ pub enum SharedListItem {
     },
 }
 
+/// The independently searchable kinds in Shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedListKind {
+    /// An organization.
+    Org,
+    /// A project or hierarchy folder.
+    Project,
+    /// A topic.
+    Topic,
+    /// A thread.
+    Thread,
+    /// A document-only folder.
+    DocumentContainer,
+    /// A text document.
+    Document,
+}
+
+/// Search visible shared names, descriptions and disclosed path names before paging.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SharedListQuery {
+    /// All kinds by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SharedListKind>,
+    /// Literal visible words, with no minimum length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries requested in this page; fifty by default, any positive u32.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same actor, kind and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl SharedListQuery {
+    /// A page size is a default, never the collection's total.
+    pub fn limit(&self) -> u32 {
+        self.limit.unwrap_or(crate::common::DEFAULT_LIMIT).max(1)
+    }
+    /// Shared bound continuation fields.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+    /// Ordinary candidate paging can retain its existing empty-page continuation.
+    pub fn filtered(&self) -> bool {
+        self.kind.is_some() || self.q.as_deref().is_some_and(|q| !q.trim().is_empty())
+    }
+}
+
 /// Newest named shares, including documents and owned document folders. The cursor
 /// advances over scanned candidates, including any whose access was withdrawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2147,7 +2208,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Org)],Target::ResolvedCollection("tree_settings")),
         ]);
     /// Lists named places whose parent is unreadable and current named/owned document folders.
-    SharedList: GET "/shared", User, query crate::common::PageQuery, none, json SharedListReply, 200,
+    SharedList: GET "/shared", User, query SharedListQuery, none, json SharedListReply, 200,
         operation Op::facets(&list_reader_facets(Read, &[
             Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread),
             Object(K::Document), Object(K::DocumentContainer),

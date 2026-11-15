@@ -224,6 +224,7 @@ async fn a_page_tells_what_its_reader_may_give_and_how_many_people_a_role_stands
         .call(PermissionPeopleList, &[&"nodes", &f.web])
         .token(&f.dan.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("role:{}:developer", f.web),
             limit: Some(200),
             cursor: None,

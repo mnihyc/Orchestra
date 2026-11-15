@@ -1021,7 +1021,8 @@ async fn the_sessions_of_a_person_are_listed_with_the_one_that_asks_and_ended_on
         .token(made.token.as_deref().unwrap())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(by_token.iter().all(|session| !session.current));
 
     // Not somebody else's, and not one that is none.
@@ -1079,7 +1080,8 @@ async fn bobs_session(world: &World, bobs: &Signed) -> Id {
         .token(bobs.token())
         .send()
         .await
-        .ok()[0]
+        .ok()
+        .items[0]
         .id
 }
 
@@ -1134,7 +1136,8 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
         .token(made.token.as_deref().unwrap())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(after[0].last_used_at.is_some());
     // But it makes none of its own: it is not a browser session.
     let refused = world
@@ -1359,6 +1362,7 @@ async fn a_revoked_api_token_stops_working_at_once_and_only_its_person_revokes_i
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     assert_eq!(

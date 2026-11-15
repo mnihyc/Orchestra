@@ -605,7 +605,7 @@ async fn a_carried_history_is_told_to_the_new_thread_in_pages_and_in_order() {
 
 #[tokio::test]
 async fn a_harness_older_than_the_range_is_refused_and_a_newer_one_is_untested() {
-    for version in ["0.159.0", "0.162.1"] {
+    for version in ["0.159.0", "0.162.1", "0.166.9"] {
         let mut old = setup(FakeLauncher::plain());
         old.fake.state.set_version(version);
         let error = old

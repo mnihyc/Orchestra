@@ -2,6 +2,7 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Filter, HardDrive, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import type { TFunction } from 'i18next';
 import { ApiError } from '@/api/client';
 import { useTranslation } from 'react-i18next';
 import { storagePagesQuery } from '@/api/storage';
@@ -19,6 +20,7 @@ import { formatBytes, formatNumber } from '@/lib/format';
 import { useScreenHeading } from '@/shell/screen';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
+import { CopyId } from '@/ui/CopyId';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
@@ -44,8 +46,10 @@ function Reason({ row }: { row: KeptRecord }) {
   return <div className="flex flex-col gap-1"><StatusDot showLabel label={t(`storage.whys.${row.why}`)} tone={row.why === 'unknown' ? 'warning' : 'idle'} />{row.until !== null && <RelativeTime at={row.until} className="text-sm text-text-muted" />}{row.blocker !== null && <span className="text-sm text-text-muted">{t(`storage.blockers.${row.blocker}`,{defaultValue:row.blocker})}</span>}</div>;
 }
 
-export function DependentName({ row }: { row: Pick<VisibleDependent, 'object' | 'name'> }) {
+export function DependentName({ row }: { row: Pick<VisibleDependent, 'object' | 'name'> & Partial<Pick<VisibleDependent, 'relation'>> }) {
+  const { t } = useTranslation();
   const object = row.object;
+  if (object === null && row.relation === 'native_dependency') return <span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('storage.cleanup.itemUnknown')}</span><CopyId value={row.name} /></span>;
   if (object === null) return <span className="min-w-0 truncate" title={row.name}>{row.name}</span>;
   const subject = resourceSubjectOf(object, row.name);
   if (subject !== null) return <ResourceChip subject={subject} hint={false} />;
@@ -53,12 +57,19 @@ export function DependentName({ row }: { row: Pick<VisibleDependent, 'object' | 
   return <span className="min-w-0 truncate" title={row.name}>{row.name}</span>;
 }
 
-/** Logical retained data names its resource; physical artifacts keep their own inventory name. */
+const NATIVE_KINDS: readonly StorageKind[] = ['unit','volume','network','image','kept_layer','build','tool_version'];
+
+/** Native handles stay available for support; a person reads their kind beside the report's host, time and dependents. */
+export function recordLabel(row: KeptRecord, t: TFunction): string {
+  return NATIVE_KINDS.includes(row.kind) ? t(`storage.kinds.${row.kind}`) : row.name || t(`storage.kinds.${row.kind}`);
+}
+
+/** Logical retained data names its resource; physical inventory offers its handle through Copy ID. */
 export function RecordName({ row }: { row: KeptRecord }) {
   const { t } = useTranslation();
-  const name = row.name || t(`storage.kinds.${row.kind}`);
+  const name = recordLabel(row, t);
   const subject = row.resource !== null && (row.kind === 'environment_files' || row.kind === 'mount_data') ? resourceSubjectOf(row.resource, name) : null;
-  return subject !== null ? <ResourceChip subject={subject} hint={false} /> : <Tooltip content={name}><span className="truncate font-medium">{name}</span></Tooltip>;
+  return subject !== null ? <ResourceChip subject={subject} hint={false} /> : <span className="flex min-w-0 items-center gap-1"><Tooltip content={name}><span className="truncate font-medium">{name}</span></Tooltip>{NATIVE_KINDS.includes(row.kind) && <CopyId value={row.name || row.id} />}</span>;
 }
 
 /** Logical place and physical host are independently permission-filtered by the report. */
@@ -129,8 +140,8 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
   </>;
   const rows = query.data?.pages.flatMap((page) => page.items) ?? [];
   const columns: Column<KeptRecord>[] = [
-    ...(onCleanup === undefined ? [] : [{id:'selected',header:<Checkbox label={<span className="sr-only">{t('storage.selectAll')}</span>} checked={rows.length > 0 && rows.every((row) => selected.has(row.id))} onCheckedChange={(value) => setSelected(value ? new Set(rows.map((row) => row.id)) : new Set())} />,className:'w-9',cell:(row:KeptRecord) => <Checkbox label={<span className="sr-only">{t('storage.select', {name:row.name || t(`storage.kinds.${row.kind}`)})}</span>} checked={selected.has(row.id)} onCheckedChange={(value) => setSelected((before) => {const next=new Set(before);if(value)next.add(row.id);else next.delete(row.id);return next;})} />}]),
-    {id:'name',header:t('storage.name'),grow:true,cell:(row,shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={row} /><span className="text-sm text-text-muted">{t(`storage.kinds.${row.kind}`)}</span>{!shown.has(COLUMN.why) && <Reason row={row} />}{!shown.has(COLUMN.bytes) && <span className="text-sm text-text-muted">{row.bytes === null ? '—' : formatBytes(row.bytes,locale)}</span>}{!shown.has(COLUMN.owner) && row.owner !== null && <UserChip user={row.owner} />}{!shown.has(COLUMN.where) && <Where row={row} />}{!shown.has(COLUMN.dependents) && <Dependents row={row} />}{!shown.has(COLUMN.observed) && <RelativeTime at={row.observed_at} className="text-sm text-text-muted" />}</div>},
+    ...(onCleanup === undefined ? [] : [{id:'selected',header:<Checkbox label={<span className="sr-only">{t('storage.selectAll')}</span>} checked={rows.length > 0 && rows.every((row) => selected.has(row.id))} onCheckedChange={(value) => setSelected(value ? new Set(rows.map((row) => row.id)) : new Set())} />,className:'w-9',cell:(row:KeptRecord) => <Checkbox label={<span className="sr-only">{t('storage.select', {name:recordLabel(row,t)})}</span>} checked={selected.has(row.id)} onCheckedChange={(value) => setSelected((before) => {const next=new Set(before);if(value)next.add(row.id);else next.delete(row.id);return next;})} />}]),
+    {id:'name',header:t('storage.name'),grow:true,cell:(row,shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={row} />{recordLabel(row,t) !== t(`storage.kinds.${row.kind}`) && <span className="text-sm text-text-muted">{t(`storage.kinds.${row.kind}`)}</span>}{!shown.has(COLUMN.why) && <Reason row={row} />}{!shown.has(COLUMN.bytes) && <span className="text-sm text-text-muted">{row.bytes === null ? '—' : formatBytes(row.bytes,locale)}</span>}{!shown.has(COLUMN.owner) && row.owner !== null && <UserChip user={row.owner} />}{!shown.has(COLUMN.where) && <Where row={row} />}{!shown.has(COLUMN.dependents) && <Dependents row={row} />}{!shown.has(COLUMN.observed) && <RelativeTime at={row.observed_at} className="text-sm text-text-muted" />}</div>},
     {id:'open',header:t('adminArtifacts.open'),hideHeader:true,align:'end',cell:(row) => <StorageOpening row={row} />},
     {id:'why',header:t('storage.why'),from:'sm',cell:(row) => <Reason row={row} />},
     {id:'bytes',header:t('storage.size'),from:'sm',align:'end',cell:(row) => row.bytes === null ? <Tooltip content={t('storage.notMeasured')}><span>—</span></Tooltip> : <span className="tabular-nums">{formatBytes(row.bytes,locale)}</span>},

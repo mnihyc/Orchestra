@@ -35,6 +35,18 @@ export const topicSchedulesQuery = (topic: string) => {
     }, retry: false });
 };
 
+/** A visible directory page is independent of the complete topic-opening operand. */
+export const inputSchedulesPageQuery = (topic: string, q: string, thread?: string) => {
+  const reader = libraryReader();
+  return infiniteQueryOptions({ queryKey: ['input-schedule-pages', topic, reader, 'pages', thread ?? null, q] as const,
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam, signal }): Promise<{ items: InputSchedule[]; next_cursor: string | null }> => {
+      current(reader, signal);
+      const page = await ok(api.GET('/topics/{id}/input-schedules', { params: { path: { id: topic }, query: { q, limit: 50, ...(thread === undefined ? {} : { thread_id: thread }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal }));
+      current(reader, signal); return page;
+    }, getNextPageParam: (last) => last.next_cursor, retry: false });
+};
+
 const PENDING = 'thread-pending-agent-schedules';
 const pendingKey = (thread: string, topic: string, reader: ReturnType<typeof libraryReader>) => [PENDING, thread, topic, reader] as const;
 const publicLine = (value: unknown): value is PendingAgentSchedule => record(value)

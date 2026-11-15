@@ -12,9 +12,9 @@ import { id, MADE_AT } from '../doubles/fixtures';
 import { ADA } from '../unit/general-access-fixtures';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ read: vi.fn<(cursor: string | null) => Promise<SharedListReply>>() }));
-vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null) => ({
-  queryKey: ['shared-document-lifecycle', cursor], queryFn: () => calls.read(cursor),
+const calls = vi.hoisted(() => ({ read: vi.fn<(cursor: string | null, q?: string) => Promise<SharedListReply>>() }));
+vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null, q = '', kind?: string) => ({
+  queryKey: ['shared-document-lifecycle', cursor, q, kind], queryFn: () => calls.read(cursor, q),
 }) }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(),
@@ -52,3 +52,13 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(calls.read.mock.calls.map(([cursor]) => cursor)).toEqual([null, 'after-hidden', 'after-hidden']);
   });
 }
+
+it('searches later shared documents on the server instead of filtering the loaded page', async () => {
+  calls.read.mockImplementation((_cursor, q) => Promise.resolve({ items: q === 'Later research' ? [{ kind: 'document', document: { ...document, title: 'Later research' }, path: [document.node], participating: true }] : [], partial: false, next_cursor: null }));
+  show(<SharedScreen />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('searchbox'));
+  await user.paste('Later research');
+  expect(await screen.findByRole('link', { name: 'Later research' })).toBeVisible();
+  expect(calls.read).toHaveBeenLastCalledWith(null, 'Later research');
+});

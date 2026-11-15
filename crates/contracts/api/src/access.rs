@@ -1494,6 +1494,9 @@ pub struct PermissionPeopleListReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionPeopleListQuery {
+    /// Visible person-name or username words, before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Which holder to list. The forms are `role:<place>:<role>` with the place a node identifier
     /// or `system`; `group:<id>`; `node:<id>`, for those with a role in a
     /// place named in a Use row; and `admins`, for the admins of the page's place. Only holders
@@ -1505,6 +1508,16 @@ pub struct PermissionPeopleListQuery {
     /// The `next_cursor` of the page before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+impl PermissionPeopleListQuery {
+    /// Shared name search and bound continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// The history of a thing, newest first.
