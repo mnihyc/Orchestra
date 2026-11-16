@@ -156,6 +156,7 @@ impl Commands for DispatchCommands {
                     machine: row.machine_id,
                     kind: row.kind,
                     key,
+                    after: row.after_command_id,
                     body: row.body,
                 }
             }))
@@ -211,6 +212,7 @@ impl Commands for DispatchCommands {
         command: Outgoing,
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
+        let after = command.after;
         let stored = StoredCommand {
             authority: command.authority,
             id: Some(command.id),
@@ -220,19 +222,26 @@ impl Commands for DispatchCommands {
             deadline: command.deadline,
             body: command.body,
         };
-        match before {
-            Some(before) => self.dispatcher.issue_stored_before(stored, before).await,
-            None => self.dispatcher.issue_stored(stored).await,
-        }
-        .map(|_| ())
-        .map_err(commands_error)
+        self.dispatcher
+            .issue_after(stored, after, before)
+            .await
+            .map(|_| ())
+            .map_err(commands_error)
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
         let Some(row) = self.dispatcher.status(id).await.map_err(commands_error)? else {
             return Ok(None);
         };
-        let stage = stage_of(&row.state);
+        let mut stage = stage_of(&row.state);
+        if (row.after_command_id.is_some()
+            || matches!(row.kind.as_str(), "turn.start" | "turn.start.fenced"))
+            && row.key_phase == orch_link_contract::commands::CommandKeyPhase::Queued as i16
+            && stage == Stage::Accepted
+        {
+            // The peer has the input but has not begun it; Stop can still cancel its opening.
+            stage = Stage::Sent;
+        }
         // A command that is over answers at once.
         let outcome = if stage == Stage::Over {
             Some(outcome_of(
@@ -244,6 +253,10 @@ impl Commands for DispatchCommands {
         Ok(Some(Info {
             stage,
             issued_at: row.created_at,
+            work_started_at: row
+                .work_started_at
+                .or_else(|| (stage == Stage::Over).then_some(row.updated_at)),
+            completed_at: (stage == Stage::Over).then_some(row.updated_at),
             outcome,
         }))
     }

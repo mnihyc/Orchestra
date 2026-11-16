@@ -341,7 +341,7 @@ function ProjectScreen({ projectId, search, onSearch: navigate }: ProjectProps) 
           />
         </>
       )}
-      {data.readme !== null && <PlaceReadme readme={data.readme} />}
+      {data.readme !== null && <PlaceReadme readme={data.readme} nodeId={data.id} />}
       {view !== 'activity' && <UsageSection nodeId={data.id} name={data.name} compact />}
       {data.access.administers && <OutsideOpenings placeId={data.id} />}
     </Page>

@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-engine --lib
+test -p orch-engine --test turns -- --nocapture
+test -p orch-engine --test source
+test -p orch-engine --test failures -- unissued_start
+test -p orch-engine --test forks -- confirmed_source::
+test -p orch-engine --test measurement_jobs -- native_source::completed_ordinary_observation_is_data_for_a_new_current_operation_without_adopting_the_job
+test -p orch-engine --test temporary_environments
+test -p orch-api-core --lib --features test-observers
