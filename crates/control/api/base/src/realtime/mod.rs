@@ -308,6 +308,13 @@ pub struct Registry {
     pub(crate) sources: HashMap<Source, Entry>,
 }
 
+/// A fixture's SQL subscriber and its completion callback for one owed delivery.
+#[cfg(any(test, feature = "test-support"))]
+pub type FrameSqlTrace = (tracing::Dispatch, Box<dyn FnOnce() + Send>);
+
+#[cfg(any(test, feature = "test-support"))]
+type FrameSqlTraceFactory = Arc<dyn Fn(&Feed, Id, &'static str) -> FrameSqlTrace + Send + Sync>;
+
 /// What every part of the server shares.
 pub struct Inner {
     pub(crate) db: Db,
@@ -323,6 +330,8 @@ pub struct Inner {
     pub(crate) ephemeral: ephemeral::Feeds,
     engine: OnceLock<Engine>,
     registry: Mutex<Registry>,
+    #[cfg(any(test, feature = "test-support"))]
+    frame_sql_trace: Mutex<Option<FrameSqlTraceFactory>>,
     numbers: AtomicU64,
     /// Whether the topics are being compared with the database.
     pub(crate) looking: AtomicBool,
@@ -347,6 +356,34 @@ impl std::fmt::Debug for Inner {
 }
 
 impl Inner {
+    /// A fixture can observe each read and final publication phase without changing its work.
+    pub(super) async fn traced_frame_sql<T>(
+        &self,
+        feed: Option<&Feed>,
+        user: Id,
+        phase: &'static str,
+        work: impl std::future::Future<Output = T>,
+    ) -> T {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let factory = self
+                .frame_sql_trace
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let trace = feed.and_then(|feed| factory.map(|factory| factory(feed, user, phase)));
+            if let Some((dispatch, finished)) = trace {
+                use tracing::instrument::WithSubscriber as _;
+                let result = work.with_subscriber(dispatch).await;
+                finished();
+                return result;
+            }
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = (feed, user, phase);
+        work.await
+    }
+
     pub(crate) fn registry(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -432,6 +469,8 @@ impl Realtime {
                 ephemeral: ephemeral::Feeds::default(),
                 engine: OnceLock::new(),
                 registry: Mutex::new(Registry::default()),
+                #[cfg(any(test, feature = "test-support"))]
+                frame_sql_trace: Mutex::new(None),
                 numbers: AtomicU64::new(0),
                 looking: AtomicBool::new(false),
                 listening: watch::channel(false).0,
@@ -447,6 +486,19 @@ impl Realtime {
     /// connection, and a second call changes nothing.
     pub fn attach_app(&self, app: &App) {
         let _ = self.inner.app.set(Arc::downgrade(app));
+    }
+
+    /// Supplies a fresh SQL recorder for each owed delivery in a fixture; no recorder is installed by default.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trace_frame_sql(
+        &self,
+        factory: impl Fn(&Feed, Id, &'static str) -> FrameSqlTrace + Send + Sync + 'static,
+    ) {
+        *self
+            .inner
+            .frame_sql_trace
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(factory));
     }
 
     /// Where the thread engine hands growing text to. Give it to the engine

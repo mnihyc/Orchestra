@@ -274,7 +274,8 @@ CREATE INDEX permission_entries_ending_idx ON permission_entries USING btree (ex
 
 CREATE INDEX permission_entries_hierarchy_idx ON permission_entries USING btree (object_id) WHERE ((object_kind = 'node'::text) AND (page = 'live'::text) AND (permission <> 'access.own'::text) AND (removed_at IS NULL));
 
-CREATE INDEX permission_entries_holder_idx ON permission_entries USING btree (holder_kind, holder_id) WHERE (removed_at IS NULL);
+CREATE INDEX permission_entries_holder_idx ON permission_entries USING btree (holder_kind, holder_id)
+    INCLUDE (object_kind, object_id, holder_role, expires_at) WHERE (removed_at IS NULL);
 
 CREATE INDEX related_agent_entrances_idx ON permission_entries USING btree (holder_id, expires_at, object_kind, object_id, permission) WHERE ((holder_kind = 'agents'::text) AND (removed_at IS NULL));
 

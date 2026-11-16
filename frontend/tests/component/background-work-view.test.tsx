@@ -10,7 +10,7 @@ import { i18n } from '@/i18n';
 import { snapshot } from '../unit/continuation-fixtures';
 import { show } from './support';
 const supplied = vi.hoisted(() => ({ shown: true, passive: false, mount: vi.fn(), unmount: vi.fn() }));
-vi.mock('@/features/workbench/viewOpening', () => ({ useViewShown: () => supplied.shown }));
+vi.mock('@/features/workbench/viewOpening', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewShown: () => supplied.shown }));
 vi.mock('@/features/inspector/ThreadPanel', () => ({ ThreadPanel: ({ threadId, children }: { threadId?: string; children: (thread: Thread) => ReactNode }) => children({ ...snapshot(null).thread, id: threadId ?? 'route-thread', environment: null }) }));
 vi.mock('@/realtime/stores/thread', async (original) => ({ ...await original<typeof Store>(), useThreadPart: () => supplied.passive }));
 vi.mock('@/features/running/Running', () => ({ RunningWorkPanel: ({ thread }: { thread: string }) => {
