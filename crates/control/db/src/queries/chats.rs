@@ -724,6 +724,7 @@ pub struct MessageRow {
     /// Emoji to the people who reacted with it, in the order they did.
     pub reactions: Json,
     /// The value its author sent to make sending it again harmless.
+    #[sqlx(try_from = "crate::storage::OptionalText")]
     pub client_id: Option<String>,
     /// Its text and the names of what it carries; none when it is not searched.
     pub search_text: Option<String>,
@@ -804,7 +805,7 @@ pub async fn insert_message(conn: &mut Conn, new: &NewMessage<'_>) -> Result<Mes
     .bind(new.reply_to_id)
     .bind(new.mentions)
     .bind(new.mentions_all)
-    .bind(new.client_id)
+    .bind(new.client_id.map(orch_types::storable::encode_key))
     .bind(new.search_text)
     .bind(new.seq)
     .bind(new.at)
@@ -900,7 +901,7 @@ pub async fn message_by_client(
     ))
     .bind(chat)
     .bind(author)
-    .bind(client_id)
+    .bind(orch_types::storable::encode_key(client_id))
     .fetch_optional(conn)
     .await?)
 }

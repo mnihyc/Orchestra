@@ -14,6 +14,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{str::FromStr, time::Duration};
+use tracing::instrument::WithSubscriber as _;
 
 /// One connection, alone or inside a transaction.
 pub type Conn = sqlx::PgConnection;
@@ -110,6 +111,7 @@ struct Serving {
     route: &'static str,
     open: Cell<u32>,
     refused: Cell<bool>,
+    text_replacements: u64,
 }
 
 /// Runs a request's work so that the development guard can name it: a transaction of this task open
@@ -122,12 +124,22 @@ pub async fn serving<T>(route: &'static str, work: impl Future<Output = T>) -> T
 /// [`serving`], also saying whether a commit of the work was refused because who may do what
 /// changed while it ran: a request that may be served once more.
 pub async fn serving_watched<T>(route: &'static str, work: impl Future<Output = T>) -> (T, bool) {
+    serving_watched_with_text(route, source_text_replacements(), work).await
+}
+
+/// Carries the immutable request's repair receipt through its accepted write, including retries.
+pub async fn serving_watched_with_text<T>(
+    route: &'static str,
+    replacements: u64,
+    work: impl Future<Output = T>,
+) -> (T, bool) {
     SERVING
         .scope(
             Serving {
                 route,
                 open: Cell::new(0),
                 refused: Cell::new(false),
+                text_replacements: replacements,
             },
             async move {
                 let out = work.await;
@@ -140,6 +152,13 @@ pub async fn serving_watched<T>(route: &'static str, work: impl Future<Output = 
             },
         )
         .await
+}
+
+/// Replacements in the source request of this task, never inferred from an existing replacement glyph.
+pub fn source_text_replacements() -> u64 {
+    SERVING
+        .try_with(|serving| serving.text_replacements)
+        .unwrap_or_default()
 }
 
 /// Notes that a commit of the work being served was refused because an authorization epoch it decided
@@ -269,8 +288,17 @@ impl Tx {
     /// Commits. The commit runs what the transaction left for it (`orch_commit_work`): a change
     /// of authority it decided under refuses it as [`DbError::Retry`].
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        let Self { inner, held } = self;
-        let done = inner.commit().await;
+        let Self { mut inner, held } = self;
+        let done = finish_boundary(async move {
+            // Run deferred checks while a rejected transaction still needs its
+            // rollback. A failed PostgreSQL COMMIT has already ended it, while
+            // SQLx would otherwise queue another rollback on the same session.
+            sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+                .execute(&mut *inner)
+                .await?;
+            inner.commit().await
+        })
+        .await;
         drop(held);
         done
     }
@@ -278,10 +306,22 @@ impl Tx {
     /// Rolls back.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         let Self { inner, held } = self;
-        let done = inner.rollback().await;
+        let done = finish_boundary(async move { inner.rollback().await }).await;
         drop(held);
         done
     }
+}
+
+/// Once BEGIN, COMMIT or ROLLBACK is sent, one task owns it through the
+/// server's answer. Cancelling its waiter cannot return a half-finished boundary
+/// to the pool. A BEGIN whose caller disappeared drops its completed transaction
+/// normally; a COMMIT already begun finishes even if the HTTP request goes away.
+async fn finish_boundary<T: Send + 'static>(
+    work: impl Future<Output = Result<T, sqlx::Error>> + Send + 'static,
+) -> Result<T, sqlx::Error> {
+    tokio::spawn(work.with_current_subscriber())
+        .await
+        .map_err(|error| sqlx::Error::Io(std::io::Error::other(error)))?
 }
 
 /// What went wrong in the database, by what a caller can do about it.
@@ -317,6 +357,12 @@ pub enum DbError {
     /// The transaction lost a race with another and can be run again.
     #[error("the transaction lost a race and can be run again")]
     Retry,
+    /// This representation is invalid or exceeds a database program limit; retrying it cannot help.
+    #[error("the value cannot be stored ({code})")]
+    Data {
+        /// PostgreSQL SQLSTATE, without an offending value or statement.
+        code: String,
+    },
     /// Anything else.
     #[error(transparent)]
     Other(sqlx::Error),
@@ -324,6 +370,12 @@ pub enum DbError {
 
 impl From<sqlx::Error> for DbError {
     fn from(error: sqlx::Error) -> Self {
+        if matches!(&error, sqlx::Error::ColumnDecode {source,..} | sqlx::Error::Decode(source) if source.downcast_ref::<orch_types::storable::InvalidEncoding>().is_some())
+        {
+            return Self::Data {
+                code: "22000".to_owned(),
+            };
+        }
         let Some(database) = error.as_database_error() else {
             return Self::Other(error);
         };
@@ -353,12 +405,31 @@ impl From<sqlx::Error> for DbError {
                 }
                 Self::Retry
             }
+            Some(code) if code.starts_with("22") || code.starts_with("54") => Self::Data {
+                code: code.to_owned(),
+            },
             _ => Self::Other(error),
         }
     }
 }
 
+impl From<orch_types::storable::InvalidEncoding> for DbError {
+    fn from(_: orch_types::storable::InvalidEncoding) -> Self {
+        Self::Data {
+            code: "22000".to_owned(),
+        }
+    }
+}
+
 impl DbError {
+    /// A deterministic data/program-limit refusal, with no secret-bearing database message.
+    #[must_use]
+    pub fn data_code(&self) -> Option<&str> {
+        match self {
+            Self::Data { code } => Some(code),
+            _ => None,
+        }
+    }
     /// Whether a unique value was taken, on the constraint or index named
     /// `constraint`.
     #[must_use]
@@ -501,7 +572,8 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let inner = finish_boundary(async move { pool.begin().await }).await?;
         self.measure(asked.elapsed());
         let mut tx = Tx {
             inner,
@@ -524,7 +596,8 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let mut inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let mut inner = finish_boundary(async move { pool.begin().await }).await?;
         self.measure(asked.elapsed());
         sqlx::query(isolation).execute(&mut *inner).await?;
         let mut tx = Tx {

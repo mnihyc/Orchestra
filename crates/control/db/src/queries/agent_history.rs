@@ -18,6 +18,7 @@ pub struct History {
     /// The immutable machine that owns the segment's stream.
     pub machine_id: Option<Id>,
     /// The adapter's native identity.
+    #[sqlx(try_from = "crate::storage::Text")]
     pub native_session_ref: String,
     /// Last recorded physical size, or unknown.
     pub bytes: Option<i64>,
@@ -188,7 +189,7 @@ pub async fn has_dependents(conn: &mut Conn, history: &History) -> Result<bool, 
             AND s.native_session_ref=requested.native_session_ref
             AND (EXISTS(SELECT 1 FROM jobs job WHERE job.id=cut.job_id AND job.state IN ('queued','running'))
                 OR cut.owner_thread_id IS NOT NULL AND cut.owner_thread_id<>cut.thread_id AND NOT (cut.artifacts ? 'side_native_result')))")
-        .bind(&history.native_session_ref).bind(history.id)
+        .bind(orch_types::storable::encode_key(&history.native_session_ref)).bind(history.id)
         .fetch_one(conn).await?)
 }
 
@@ -278,7 +279,7 @@ pub async fn claim(
     Ok(sqlx::query("UPDATE segments SET agent_history_claim=$2,agent_history_claimed_at=$3,
         agent_history_removed_by=$4,agent_history_error=NULL WHERE id=$1 AND agent_history_claim IS NULL
         AND agent_history_removed_at IS NULL AND native_session_ref=$5")
-        .bind(current.id).bind(command).bind(at).bind(by).bind(&current.native_session_ref)
+        .bind(current.id).bind(command).bind(at).bind(by).bind(orch_types::storable::encode_key(&current.native_session_ref))
         .execute(conn).await?.rows_affected()==1)
 }
 
@@ -304,7 +305,7 @@ pub async fn measured(
         agent_history_removed_at=CASE WHEN $4 AND $5::text IS NULL THEN COALESCE(s.agent_history_removed_at,$6) ELSE s.agent_history_removed_at END,
         agent_history_error=$5 FROM segments requested WHERE requested.id=$1 AND requested.native_session_ref=$2
         AND s.machine_id IS NOT DISTINCT FROM requested.machine_id AND s.provider_id=requested.provider_id AND s.agent_id=requested.agent_id AND s.native_session_ref=requested.native_session_ref")
-        .bind(segment).bind(native).bind(bytes).bind(removed).bind(error).bind(at).execute(conn).await?;
+        .bind(segment).bind(orch_types::storable::encode_key(native)).bind(bytes).bind(removed).bind(error).bind(at).execute(conn).await?;
     Ok(())
 }
 
@@ -334,6 +335,18 @@ pub async fn measured_batch(
     if observations.is_empty() {
         return Ok(());
     }
+    let mut values = serde_json::to_value(observations)
+        .map_err(|error| DbError::Other(sqlx::Error::Protocol(error.to_string())))?;
+    if let Some(rows) = values.as_array_mut() {
+        for row in rows {
+            if let Some(native) = row.get("native").and_then(Json::as_str) {
+                row["native"] = Json::String(orch_types::storable::encode_key(native));
+            }
+            if let Some(Json::String(error)) = row.get_mut("error") {
+                orch_types::storable::normalize_text(error);
+            }
+        }
+    }
     sqlx::query("WITH observations AS (
         SELECT requested.machine_id,requested.provider_id,requested.agent_id,o.*
         FROM jsonb_to_recordset($1::jsonb) AS o(segment uuid,native text,bytes bigint,removed boolean,error text,revision bigint)
@@ -346,7 +359,7 @@ pub async fn measured_batch(
         agent_history_error=o.error FROM observations o
         WHERE s.provider_id=o.provider_id AND s.agent_id=o.agent_id AND s.native_session_ref=o.native
           AND s.machine_id IS NOT DISTINCT FROM o.machine_id")
-        .bind(sqlx::types::Json(observations)).bind(at).execute(conn).await?;
+        .bind(values).bind(at).execute(conn).await?;
     Ok(())
 }
 

@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --lib -- redaction::tests::
+test -p orch-engine --test ingest --test search_projections

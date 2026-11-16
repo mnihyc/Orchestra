@@ -1062,6 +1062,7 @@ pub struct FirstInput {
     /// What to say to the agent.
     pub content: Vec<ContentPart>,
     /// A value of the client's own that makes sending it again safe.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1376,6 +1377,7 @@ pub struct ThreadAdoptBody {
     /// The agent profile.
     pub agent_id: Id,
     /// The harness's own reference to the session.
+    #[schemars(extend("x-storage-exact" = true))]
     pub native_session_ref: String,
     /// The environment; the caller's one on that machine whose root holds the
     /// session's directory when left out.

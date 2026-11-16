@@ -110,6 +110,7 @@ fn failure_facts(error: &orch_engine::error::EngineError) -> FailureFacts {
     if let orch_engine::error::EngineError::Db(error) = error {
         facts.category = "database";
         let (state, constraint) = match error {
+            DbError::Data { code } => (Some(code.clone()), None),
             DbError::Unique { constraint } => (Some("23505".to_owned()), Some(constraint.as_str())),
             DbError::Reference { constraint } => {
                 (Some("23503".to_owned()), Some(constraint.as_str()))
