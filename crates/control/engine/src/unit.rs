@@ -69,7 +69,30 @@ pub struct Finished {
     pub touched: BTreeMap<Id, Seq>,
 }
 
+/// In-memory notifications rolled back with one native event's SQL savepoint.
+pub(crate) struct EventCheckpoint {
+    touched: BTreeMap<Id, Seq>,
+    wakes: BTreeSet<Id>,
+    approval_deciders: BTreeSet<Id>,
+    source_checked: bool,
+}
+
 impl<'c> Unit<'c> {
+    pub(crate) fn event_checkpoint(&self) -> EventCheckpoint {
+        EventCheckpoint {
+            touched: self.touched.clone(),
+            wakes: self.wakes.clone(),
+            approval_deciders: self.approval_deciders.clone(),
+            source_checked: self.source_checked,
+        }
+    }
+
+    pub(crate) fn restore_event(&mut self, checkpoint: EventCheckpoint) {
+        self.touched = checkpoint.touched;
+        self.wakes = checkpoint.wakes;
+        self.approval_deciders = checkpoint.approval_deciders;
+        self.source_checked = checkpoint.source_checked;
+    }
     /// A unit over the connection of a transaction, at the moment `now`.
     pub fn new(conn: &'c mut Conn, now: DateTime<Utc>) -> Self {
         Self {

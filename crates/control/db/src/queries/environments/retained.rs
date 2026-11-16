@@ -322,10 +322,11 @@ pub async fn definition(conn: &mut Conn, runtime: Id) -> Result<Option<Json>, Db
     let frozen = sqlx::query_scalar("SELECT plan->'retained_spec' FROM jobs WHERE kind='environment_remove' AND plan->>'retained_runtime'=$1::text AND plan->'retained_spec' IS NOT NULL AND plan->'retained_spec'<>'null'::jsonb ORDER BY created_at DESC,id DESC LIMIT 1")
         .bind(runtime).fetch_optional(&mut *conn).await?;
     if frozen.is_some() {
-        return Ok(frozen);
+        return Ok(frozen.map(orch_types::storable::decode_exact).transpose()?);
     }
     let mut saved: Option<Json> = sqlx::query_scalar("SELECT plan->'created_spec' FROM jobs WHERE plan->>'runtime'=$1::text AND plan->'created_spec' IS NOT NULL ORDER BY created_at DESC,id DESC LIMIT 1")
         .bind(runtime).fetch_optional(&mut *conn).await?;
+    saved = saved.map(orch_types::storable::decode_exact).transpose()?;
     if let Some(spec) = saved.as_mut()
         && let Some(mounts) = crate::queries::resources::mounts::applied(conn, runtime).await?
     {
@@ -371,9 +372,11 @@ pub async fn started_purge(
     environment: Id,
     revision: i64,
 ) -> Result<Option<(Option<Id>, Json)>, DbError> {
-    Ok(sqlx::query_as("SELECT created_by,plan FROM jobs WHERE
+    let row:Option<(Option<Id>,Json)> = sqlx::query_as("SELECT created_by,plan FROM jobs WHERE
         (environment_id=$1 AND kind='environment_purge' AND plan->>'removal_revision'=$2::text AND plan->>'purge_started'='true')
         OR (kind='storage_cleanup' AND plan->'cleanup_purges' @> jsonb_build_object($1::uuid::text,jsonb_build_object('revision',$2::bigint,'started',true)))
         ORDER BY created_at,id LIMIT 1")
-        .bind(environment).bind(revision).fetch_optional(conn).await?)
+        .bind(environment).bind(revision).fetch_optional(conn).await?;
+    row.map(|(by, plan)| Ok((by, orch_types::storable::decode_exact(plan)?)))
+        .transpose()
 }

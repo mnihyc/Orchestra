@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -116,6 +117,13 @@ CREATE TABLE commands (
 CREATE INDEX commands_busy_detach_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'env.detach'::text) AND (state = 'failed'::text));
 
 CREATE INDEX commands_open_idx ON commands USING btree (machine_id) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
+
+CREATE TABLE command_storage_gaps (
+    command_id uuid PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE,
+    sqlstate text NOT NULL,
+    recorded_at timestamp with time zone NOT NULL,
+    applied boolean NOT NULL DEFAULT false
+);
 CREATE INDEX commands_mcp_import_open_idx ON commands ((body->>'server_id'), id)
     WHERE kind='mcp.import' AND state IN ('queued','sent','accepted');
 

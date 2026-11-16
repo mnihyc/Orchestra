@@ -1108,6 +1108,9 @@ pub enum DiscussionResolvedFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDocumentListQuery {
+    /// A literal case-insensitive substring of the document title, applied before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Only ordinary page access, independent of native administrator reach; before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub participating: Option<bool>,
@@ -1232,6 +1235,7 @@ pub struct DocumentOpsCreateBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_seq: Option<Seq>,
     /// A client-generated UUID: a repeated pair of author and value returns what the first did.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// The operations, at most [`DOCUMENT_OPS_MAX`].
     pub ops: Vec<DocumentOp>,
@@ -1352,14 +1356,19 @@ pub struct DocumentFileGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentFileArchiveListQuery {
+    /// Continue the same immutable archive selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Match child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Inspect retained deleted content under this object's current restoration authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspect_deleted: Option<bool>,
     /// A directory within it to list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside: Option<String>,
-    /// How many entries at most, [`crate::workspace::ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and
-    /// at most [`crate::workspace::ARCHIVE_LIST_LIMIT_MAX`].
+    /// Entries in this page; omitted uses the place's archive-row default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -1447,6 +1456,7 @@ pub struct DocumentDiscussionCreateBody {
     /// The first comment.
     pub content: Vec<Inline>,
     /// A client-generated UUID: a repeated request answers as the first did.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1457,6 +1467,7 @@ pub struct DocumentCommentCreateBody {
     /// What it says.
     pub content: Vec<Inline>,
     /// A client-generated UUID: a repeated request answers as the first did.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1477,6 +1488,7 @@ pub struct DocumentCommentUpdateBody {
     pub content: Vec<Inline>,
     /// A client-generated UUID for this exact edit attempt. Paired with `expected_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: Option<String>,
     /// The comment revision when the draft was authored, never a newer revision
     /// silently adopted on retry. Paired with `client_id`. A stale unrecorded
@@ -1680,6 +1692,7 @@ pub struct NodeDocumentCopyBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<NewDocumentAccess>,
     /// Stable identity of this copy, reused after a lost answer.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1718,6 +1731,7 @@ pub struct DocumentImportRequest {
     /// The selected uploaded sources.
     pub files: Vec<DocumentImportRequestFile>,
     /// Stable identity of this import across retries.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
