@@ -1,4 +1,5 @@
 /** Compact resource detail bodies and their permitted quick actions, mounted only by an open inspection card. */
+import { Link } from '@tanstack/react-router';
 import { CardSharing } from '@/features/access/CardSharing';
 import { CopySetupResult } from '@/features/duplicate/CopySetup';
 import { CardHome, cardHome } from '@/features/navigation/CardHome';
@@ -80,7 +81,7 @@ function ProviderDetails({ provider }: { provider: Provider }) {
     <ProviderUsageCard compact allWindows provider={provider} />
     <Limits caps={usage?.caps ?? []} />
     {usage !== undefined && usage !== null && <RelativeTime at={usage.observed_at} className="text-xs text-text-subtle" />}
-    <a href={`/resources/providers/${provider.id}`} className="self-start text-sm text-accent-text hover:underline">{t('resourceFacts.openProvider')}</a>
+    <Link to="/resources/providers/$id" params={{ id: provider.id }} className="self-start text-sm text-accent-text hover:underline">{t('resourceFacts.openProvider')}</Link>
   </>;
 }
 
@@ -100,7 +101,7 @@ function ModelDetails({ subject }: { subject: Extract<ResourceSubject, { kind: '
       ...(subject.impact === undefined ? [] : [{ name: t('resourceFacts.applies'), value: subject.impact }]),
     ]} />
     <Limits caps={modelCaps(subject)} />
-    <a href={`/resources/providers/${subject.providerId}?tab=models`} className="self-start text-sm text-accent-text hover:underline">{t('resourceFacts.openModels')}</a>
+    <Link to="/resources/providers/$id" params={{ id: subject.providerId }} search={{ tab: 'models' }} className="self-start text-sm text-accent-text hover:underline">{t('resourceFacts.openModels')}</Link>
   </>;
 }
 
@@ -108,8 +109,8 @@ function HostDetails({ host, subject }: { host: Host; subject: Extract<ResourceS
   const { t } = useTranslation();
   const format = useFormatContext();
   const place = subject.place;
-  const declared = place?.declared ?? host.declared;
   const capacity = place?.capacity ?? host.capacity;
+  const measured = place?.used.memory_mb ?? host.usage?.memory_used_mb;
   const manage = holds(host.access, 'host.manage');
   return <>
     <Facts compact rows={[
@@ -123,9 +124,10 @@ function HostDetails({ host, subject }: { host: Host; subject: Extract<ResourceS
       ...(host.usage === null || host.usage === undefined ? [] : [{ name: t('resourceFacts.observed'), value: <RelativeTime at={host.usage.observed_at} /> }]),
       ...(place?.storages ?? host.storages).map((storage) => ({ name: storage.name, value: t('resourceFacts.free', { size: formatBytes(storage.free_gb * DISK_BYTES_PER_GB, format.locale) }) })),
     ]} />
-    {capacity.memory_mb > 0 && <Meter neutral showActual value={declared.memory_mb / capacity.memory_mb * 100} label={t('resourceFacts.declaredMemory', { used: formatBytes(declared.memory_mb * MEMORY_BYTES_PER_MB, format.locale), total: formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, format.locale) })} />}
+    {capacity.memory_mb > 0 && measured !== undefined && measured !== null && <Meter neutral showActual value={measured / capacity.memory_mb * 100}
+      label={t('resourceFacts.memoryFree', { free: formatBytes(Math.max(0, capacity.memory_mb - measured) * MEMORY_BYTES_PER_MB, format.locale), total: formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, format.locale) })} />}
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <a href={`/resources/hosts/${host.id}`} className="text-sm text-accent-text hover:underline">{t('resourceFacts.openHost')}</a>
+      <Link to="/resources/hosts/$id" params={{ id: host.id }} className="text-sm text-accent-text hover:underline">{t('resourceFacts.openHost')}</Link>
       {manage && <Button size="sm" admin={adminSpec(host, 'host.manage')} onClick={() => openChange({ kind: 'host', id: host.id, name: host.name }, { kind: 'recycle' })}>{t('change.menu.recycle')}</Button>}
     </div>
   </>;
@@ -141,7 +143,7 @@ function EnvironmentActions({ environment }: { environment: Environment }) {
   const guarded = environment.network.required_mode === 'restricted' && environment.network.mode === 'open';
   return <>
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <a href={`/resources/environments/${environment.id}`} className="text-sm text-accent-text hover:underline">{t('resourceFacts.openEnvironment')}</a>
+      <Link to="/resources/environments/$id" params={{ id: environment.id }} className="text-sm text-accent-text hover:underline">{t('resourceFacts.openEnvironment')}</Link>
       {may && !guarded && (environment.status === 'stopped' || environment.status === 'none') && <Button size="sm" admin={adminSpec(environment, 'environment.manage')} pending={start.isPending} onClick={() => start.mutate()}>{t('resources.act.start')}</Button>}
       {may && environment.status === 'running' && <Button size="sm" onClick={() => setStopping(true)}>{t('resources.act.stop')}</Button>}
     </div>
@@ -211,9 +213,10 @@ export default function ResourceCard({ subject }: { subject: ResourceSubject }) 
       : resolved.kind === 'mcp_server' ? resolved.server : resolved.kind === 'template' ? resolved.template
         : resolved.kind === 'agent' ? resolved.agent : resolved.kind === 'skill' ? resolved.skill : provider.data ?? null;
   const home = cardHome(named !== null && 'home' in named ? named.home : null);
+  const destination = resolved.kind === 'model' ? `/resources/providers/${resolved.providerId}` : resourceAddress(resolved);
   const ownDetails = resolved.kind === 'provider' || resolved.kind === 'host' || resolved.kind === 'environment' || resolved.kind === 'model';
   return <div className="flex w-[min(20rem,calc(100vw-2rem))] max-w-full flex-col gap-3 p-3" data-resource-card={subject.kind}>
-    <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-1"><h3 className="min-w-0 text-base font-semibold wrap-anywhere"><a href={resourceAddress(resolved)} className="hover:underline">{resourceName(resolved)}</a></h3><Hint id="resource-facts" popover /></div><ResourceHint subject={resolved} wrap /></div>
+    <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-1"><h3 className="min-w-0 text-base font-semibold wrap-anywhere"><Link to={destination} {...(resolved.kind === 'model' ? { search: { tab: 'models' } } : {})} className="hover:underline">{resourceName(resolved)}</Link></h3><Hint id="resource-facts" popover /></div><ResourceHint subject={resolved} wrap /></div>
     {ownDetails && home !== null && <CardHome place={home} />}
     {content}
     {(resolved.kind === 'provider' || resolved.kind === 'mcp_server') && named !== null && <CopySetupResult kind={resolved.kind} id={named.id} />}
