@@ -2,7 +2,7 @@
 group: access
 title: How approvals work
 screens: /thread/$threadId, /approvals, /resources/environments/$id, /topic/$topicId, /project/$projectId
-keywords: how do I approve, approvals, permission, request, approval.mode, approval.allowed_modes, requests.expiry_hours, ask, on request, auto, bypass, reviewer, capability.policy, rules
+keywords: how do I approve, approvals, permission, request, approval.mode, approval.allowed_modes, requests.expiry_minutes, ask, on request, auto, bypass, reviewer, capability.policy, rules
 summary: Read a request’s effects and authority before approving work or changing a boundary.
 ---
 
@@ -99,7 +99,7 @@ is confirmed. If an answer is refused, its reason appears beside the choices;
 reload the request before trying an option that is no longer offered.
 
 Agent action requests last while the program waits. Agent boundary requests use
-`requests.expiry_hours`, initially 24 hours and bounded to 1–168; the shortest
+`requests.expiry_minutes`, initially 1,440 minutes (one day) with no fixed upper cap; the shortest
 setting above the place wins. A link may lapse sooner. A person's access
 request initially lasts 14 days. Repeating the same denied agent boundary
 request within an hour returns its first denial and note rather than another

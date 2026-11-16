@@ -43,6 +43,16 @@ use orch_types::{Id, Json, Time, new_id};
 use serde_json::json;
 use std::collections::BTreeSet;
 
+/// A lasting allowance belongs to the binding the person answered, even if settlement has to wait.
+fn decision_binding(thread: &ThreadRow) -> Json {
+    json!([
+        thread.agent_id,
+        thread.provider_id,
+        thread.environment_id,
+        thread.workspace_dir
+    ])
+}
+
 fn notice_event(
     notice: SourceNotice,
     thread: &ThreadRow,
@@ -284,56 +294,63 @@ impl Engine {
 
     /// Announces backfilled waits and closes obsolete source requests through the ordinary shared lifecycle.
     pub(crate) async fn reconcile_source_requests(&self) -> Result<(), EngineError> {
-        let mut tx = self.inner.db.begin().await?;
-        let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-        let rows =
-            queries::source_reconciliation(&mut *unit.conn, self.inner.config.sweep_batch).await?;
+        let rows = {
+            let mut conn = self.inner.db.acquire().await?;
+            queries::source_reconciliation(&mut conn, self.inner.config.sweep_batch).await?
+        };
+        // Each wait is settled in a transaction of its own, so that the rows of the threads it touches are held
+        // for that wait alone and not until the last of the batch is settled.
         for row in rows {
             let Some(thread) = row.thread_id else {
                 continue;
             };
-            let Some(owner) = threads::lock(&mut *unit.conn, thread).await? else {
-                continue;
+            let mut tx = self.inner.db.begin().await?;
+            let finished = {
+                let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+                let Some(owner) = threads::lock(&mut *unit.conn, thread).await? else {
+                    continue;
+                };
+                let source = if row.kind == "plan" {
+                    orch_db::queries::notifications::inbox::RequestSource::Plan(
+                        row.object_id
+                            .ok_or_else(|| EngineError::unreadable("a plan has no source"))?,
+                    )
+                } else {
+                    orch_db::queries::notifications::inbox::RequestSource::Input(
+                        row.object_id.ok_or_else(|| {
+                            EngineError::unreadable("a message wait has no source")
+                        })?,
+                    )
+                };
+                let open = if row.kind == "input" {
+                    threads::input(
+                        &mut *unit.conn,
+                        row.object_id
+                            .ok_or_else(|| EngineError::unreadable("a model wait has no source"))?,
+                    )
+                    .await?
+                    .is_some_and(|input| {
+                        input.state == "pending"
+                            && input.state_detail.as_deref() == Some(threads::HELD_MODEL_USE)
+                            && input.approval_id == Some(row.id)
+                    })
+                } else {
+                    sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM items i JOIN turns t ON t.id=i.turn_id WHERE i.id=$1 AND i.payload->>'approval_id'=$2 AND t.plan AND t.state='completed' AND NOT EXISTS(SELECT 1 FROM turns later WHERE later.thread_id=i.thread_id AND later.continuation_id=i.continuation_id AND later.ordinal>t.ordinal) AND NOT EXISTS(SELECT 1 FROM thread_inputs q WHERE q.thread_id=i.thread_id AND q.continuation_id=i.continuation_id AND q.state IN ('pending','delivering')))").bind(row.object_id).bind(row.id.to_string()).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?
+                };
+                if open {
+                    Box::pin(self.source_requested(&mut unit, &owner, source, row.turn_id)).await?;
+                } else {
+                    Box::pin(self.cancel_source_request(
+                        &mut unit,
+                        orch_db::queries::notifications::inbox::RequestSource::Approval(row.id),
+                        None,
+                    ))
+                    .await?;
+                }
+                unit.finish().await?
             };
-            let source = if row.kind == "plan" {
-                orch_db::queries::notifications::inbox::RequestSource::Plan(
-                    row.object_id
-                        .ok_or_else(|| EngineError::unreadable("a plan has no source"))?,
-                )
-            } else {
-                orch_db::queries::notifications::inbox::RequestSource::Input(
-                    row.object_id
-                        .ok_or_else(|| EngineError::unreadable("a message wait has no source"))?,
-                )
-            };
-            let open = if row.kind == "input" {
-                threads::input(
-                    &mut *unit.conn,
-                    row.object_id
-                        .ok_or_else(|| EngineError::unreadable("a model wait has no source"))?,
-                )
-                .await?
-                .is_some_and(|input| {
-                    input.state == "pending"
-                        && input.state_detail.as_deref() == Some(threads::HELD_MODEL_USE)
-                        && input.approval_id == Some(row.id)
-                })
-            } else {
-                sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM items i JOIN turns t ON t.id=i.turn_id WHERE i.id=$1 AND i.payload->>'approval_id'=$2 AND t.plan AND t.state='completed' AND NOT EXISTS(SELECT 1 FROM turns later WHERE later.thread_id=i.thread_id AND later.continuation_id=i.continuation_id AND later.ordinal>t.ordinal) AND NOT EXISTS(SELECT 1 FROM thread_inputs q WHERE q.thread_id=i.thread_id AND q.continuation_id=i.continuation_id AND q.state IN ('pending','delivering')))").bind(row.object_id).bind(row.id.to_string()).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?
-            };
-            if open {
-                Box::pin(self.source_requested(&mut unit, &owner, source, row.turn_id)).await?;
-            } else {
-                Box::pin(self.cancel_source_request(
-                    &mut unit,
-                    orch_db::queries::notifications::inbox::RequestSource::Approval(row.id),
-                    None,
-                ))
-                .await?;
-            }
+            self.commit(tx, finished).await?;
         }
-        let finished = unit.finish().await?;
-        self.commit(tx, finished).await?;
         Ok(())
     }
 
@@ -1242,7 +1259,7 @@ impl Engine {
             .filter(|row| row.kind == "harness")
             .ok_or(ApprovalError::NotFound)?;
         let thread_id = approval.thread_id.ok_or(ApprovalError::NotFound)?;
-        let thread: ThreadRow = threads::lock(&mut tx, thread_id)
+        let thread: ThreadRow = threads::thread(&mut tx, thread_id)
             .await?
             .ok_or(ApprovalError::NotFound)?;
         let principal =
@@ -1261,7 +1278,7 @@ impl Engine {
         let now = self.inner.clock.now();
         let caller = principal.caller().clone();
         let (finished, row) = {
-            let mut unit = Unit::new(&mut tx, now);
+            let unit = Unit::new(&mut tx, now);
             let permission = Box::pin(deciding_permission(
                 &mut *unit.conn,
                 thread_id,
@@ -1290,28 +1307,18 @@ impl Engine {
                 })?;
             let settled = settle(&request, decision)?;
             let stored = serde_json::to_value(decision).map_err(EngineError::from)?;
-            if !queries::decide(
+            if !queries::record_harness_decision(
                 &mut *unit.conn,
                 approval.id,
                 settled.state,
-                Some(caller.user()),
+                caller.user(),
                 &stored,
+                &decision_binding(&thread),
                 now,
             )
             .await?
             {
                 return Err(ApprovalError::AlreadyDecided);
-            }
-            crate::notifications::approval_settled(&mut unit, approval.id).await?;
-            // Allowing for this thread keeps the rule the option showed, in this transaction.
-            if let ApprovalDecision::Option(chosen) = decision
-                && let Some(option) = request
-                    .options
-                    .iter()
-                    .find(|option| option.id == chosen.option_id)
-            {
-                crate::approval_rules::keep(&mut unit, &thread, approval.id, option, caller.user())
-                    .await?;
             }
             let _ = settled.for_harness;
             crate::audit_facts::person(
@@ -1323,29 +1330,113 @@ impl Engine {
                 now,
             )
             .await?;
-            let seq = unit.stamp(thread_id).await?;
-            if let Some(item) = approval.item_id {
-                threads::set_item_status(
-                    &mut *unit.conn,
-                    item,
-                    &["pending"],
-                    settled.state,
-                    now,
-                    seq,
-                )
-                .await?;
-            }
-            self.after_approval_left_pending(&mut unit, thread_id)
-                .await?;
-            unit.wake(thread_id);
-            let _ = thread;
             let row = queries::approval(&mut *unit.conn, approval.id)
                 .await?
                 .ok_or(ApprovalError::NotFound)?;
             (unit.finish().await?, row)
         };
         self.commit(tx, finished).await?;
+        // The harness is told at once, by a task of its own: the thread's phases may be waiting for something
+        // else, and a person who decided is not made to wait behind it.
+        self.spawn_decision_delivery(thread_id);
+        self.spawn_decision_settlement(thread_id);
         Ok(row)
+    }
+
+    fn spawn_decision_settlement(&self, thread_id: Id) {
+        if !crate::engine::lock(&self.inner.decision_settlements).insert(thread_id) {
+            return;
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = engine.settle_decisions(thread_id).await {
+                tracing::warn!(%error, %thread_id, "the decision's thread effects await the next sweep");
+            }
+            crate::engine::lock(&engine.inner.decision_settlements).remove(&thread_id);
+        });
+    }
+
+    pub(crate) async fn keep_decision_settlements(&self) -> Result<(), EngineError> {
+        let threads = {
+            let mut conn = self.inner.db.acquire().await?;
+            queries::unsettled_threads(&mut conn, self.inner.config.sweep_batch).await?
+        };
+        for thread in threads {
+            self.spawn_decision_settlement(thread);
+            self.spawn_decision_delivery(thread);
+        }
+        Ok(())
+    }
+
+    async fn settle_decisions(&self, thread_id: Id) -> Result<(), EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let Some(thread) = threads::lock(&mut tx, thread_id).await? else {
+            return Ok(());
+        };
+        let rows = queries::unsettled_of_thread(&mut tx, thread_id).await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let finished = {
+            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+            self.apply_open_stops_in(&mut unit, thread_id).await?;
+            for row in rows {
+                // All writers that still need both rows take Thread, then Approval.
+                let Some(row) = queries::lock(&mut *unit.conn, row.id).await? else {
+                    continue;
+                };
+                let Some(binding) = queries::decision_settlement(&mut *unit.conn, row.id).await?
+                else {
+                    continue;
+                };
+                crate::notifications::approval_settled(&mut unit, row.id).await?;
+                if binding == decision_binding(&thread)
+                    && let (Some(decision), Some(by)) = (&row.decision, row.decided_by)
+                    && let ApprovalDecision::Option(chosen) =
+                        serde_json::from_value::<ApprovalDecision>(decision.clone())?
+                {
+                    let request: HarnessRequest = serde_json::from_value(row.request.clone())?;
+                    if let Some(option) = request
+                        .options
+                        .iter()
+                        .find(|option| option.id == chosen.option_id)
+                    {
+                        crate::approval_rules::keep(&mut unit, &thread, row.id, option, by).await?;
+                    }
+                }
+                let seq = unit.stamp(thread_id).await?;
+                if let Some(item) = row.item_id {
+                    let now = unit.now();
+                    threads::set_item_status(
+                        &mut *unit.conn,
+                        item,
+                        &["pending"],
+                        &row.state,
+                        now,
+                        seq,
+                    )
+                    .await?;
+                }
+                queries::finish_decision_settlement(&mut *unit.conn, row.id).await?;
+            }
+            self.after_approval_left_pending(&mut unit, thread_id)
+                .await?;
+            unit.wake(thread_id);
+            unit.finish().await?
+        };
+        self.commit(tx, finished).await?;
+        Ok(())
+    }
+
+    /// Hands the decisions of a thread to its harness in a task of its own. Safe beside the thread's phases, which
+    /// do the same: a command asked for twice under one identifier is made once.
+    fn spawn_decision_delivery(&self, thread_id: Id) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = engine.drive_approvals(thread_id).await {
+                tracing::warn!(%error, %thread_id, "a decision could not be handed to its harness; the thread's work tries again");
+            }
+        });
     }
 
     /// The threads whose decided approvals the harness has not yet been told
@@ -1523,7 +1614,7 @@ pub mod access {
     use crate::engine::Engine;
     use crate::notifications::{self, Event, Kind};
     use crate::views;
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{DateTime, Utc};
     use orch_access_contract::audit::AuditAction;
     use orch_access_contract::decisions::{Decision, ObjectRef, Refusal};
     use orch_access_contract::permissions::Permission;
@@ -1543,8 +1634,8 @@ pub mod access {
     use serde_json::json;
     use std::collections::HashMap;
 
-    /// How many days a request waits for an answer when no setting says.
-    pub(crate) const EXPIRY_DAYS: i64 = 14;
+    /// How many minutes a request waits for an answer when no setting says.
+    pub(crate) const EXPIRY_MINUTES: i64 = 20160;
     /// How many batches of requests one person may have waiting when no setting says.
     pub(crate) const MOST_WAITING: i64 = 10;
     /// How many requests that ran out are let lapse in one look.
@@ -1732,12 +1823,12 @@ pub mod access {
         words.join(", ")
     }
 
-    fn day(span: i64) -> Duration {
-        Duration::days(span)
-    }
-
-    fn expiry(now: DateTime<Utc>, days: i64) -> DateTime<Utc> {
-        now + day(days)
+    fn expiry(now: DateTime<Utc>, minutes: i64) -> DateTime<Utc> {
+        Time::new(now)
+            .checked_add_minutes(minutes)
+            .unwrap_or_else(Time::maximum)
+            .to_minute()
+            .get()
     }
 
     impl Engine {
@@ -1812,6 +1903,7 @@ pub mod access {
             for_thread: Option<Id>,
             requested_expires_at: Option<Time>,
         ) -> Result<PreparedAccessRequests, RaiseError> {
+            let requested_expires_at = requested_expires_at.map(Time::to_minute);
             let caller = principal.caller().clone();
             let caller = &caller;
             rows::lock_requester(&mut *conn, caller.user()).await?;
@@ -1823,6 +1915,15 @@ pub mod access {
             };
             let principal = &current;
             let now = principal.now().get();
+            if requested_expires_at.is_some_and(|end| end.get() <= now) {
+                return Err(RaiseError::Item {
+                    index: 0,
+                    error: AskError::Invalid {
+                        path: "expires_at",
+                        message: "must be in a future minute".to_owned(),
+                    },
+                });
+            }
             let mut objects = std::collections::HashSet::new();
             for (index, ask) in asks.iter().enumerate() {
                 if !objects.insert(ask.object.id) {
@@ -1859,14 +1960,14 @@ pub mod access {
                     waiting,
                 });
             }
-            let days: i64 = get(
+            let minutes: i64 = get(
                 &mut *conn,
                 SettingsPlace::System,
-                keys::ACCESS_REQUEST_EXPIRY_DAYS,
+                keys::ACCESS_REQUEST_EXPIRY_MINUTES,
             )
             .await
             .map_err(EngineError::from)?
-            .unwrap_or(EXPIRY_DAYS);
+            .unwrap_or(EXPIRY_MINUTES);
             if let Some(thread) = for_thread
                 && threads::thread(&mut *conn, thread)
                     .await
@@ -1930,7 +2031,7 @@ pub mod access {
                 who,
                 for_thread,
                 requested_expires_at,
-                expires_at: expiry(now, days),
+                expires_at: expiry(now, minutes),
                 items,
             })
         }
@@ -2163,6 +2264,11 @@ pub mod access {
             decided: &Decided,
             origin: &Origin,
         ) -> Result<ApprovalRow, DecideError> {
+            let normalized = Decided {
+                expires_at: decided.expires_at.map(Time::to_minute),
+                ..decided.clone()
+            };
+            let decided = &normalized;
             let body = orch_api_contract::approvals::ApprovalDecision::Capability(
                 orch_api_contract::approvals::CapabilityDecision {
                     approve: decided.approve,
