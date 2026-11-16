@@ -44,14 +44,15 @@ export function PortRequestCard({ request, live = true, onChanged, onSettled }: 
     finally { if (mounted.current) setBusy(false); }
   };
   const state = result?.request.state ?? current.state;
+  const refusedUntil = result?.opening?.refused_until ?? current.approval?.request.opening.refused_until ?? null;
   // Granting the audience's capability lets later requests of this kind open without a card; offered where those deciding the card are its approvers.
   const canGrant = current.approval?.request.can_grant ?? false;
   const body = <div className="min-w-0" data-testid="port-request" data-approval={current.id}>
-    <div className="flex flex-wrap items-center gap-2">{current.approval === undefined && <h3 className="text-sm font-semibold">{t('ports.requestTitle')}</h3>}<span className="rounded-full bg-bg-muted px-2 py-1 text-xs">{t(`ports.requestState.${state}`)}</span></div>
+    <div className="flex flex-wrap items-center gap-2">{current.approval === undefined && <h3 className="text-sm font-semibold">{t('ports.requestTitle')}</h3>}<span className="rounded-full bg-bg-muted px-2 py-1 text-xs">{refusedUntil !== null ? t('ports.previouslyRefused') : t(`ports.requestState.${state}`)}</span></div>
     <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"><dt>{t('approvals.capability.environment')}</dt><dd>{current.approval?.request.environment.name ?? t('ports.unreported')}</dd><dt>{t('usage.chip.agent')}</dt><dd>{current.agent}</dd><dt>{t('ports.insidePort')}</dt><dd>{current.port}</dd><dt>{t('ports.audience')}</dt><dd>{t(`ports.way.${current.way}`)}</dd></dl>
     <p className="mt-1 text-sm text-text-muted">{current.reason}</p>
     {current.address !== null && <p className="mt-2 break-all font-mono text-sm">{current.address}</p>}
-    <p className="mt-2 text-sm">{current.audience}</p><p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted"><span>{t(`ports.transport.${current.transports}`)}</span>{current.link_carriers!==null && <span>{t(`ports.carrier.${current.link_carriers}`)}</span>}</p>
+    <p className="mt-2 text-sm">{current.audience}</p><p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted"><span>{t(`ports.transport.${current.transports}`)}</span>{current.link_carriers!==null && <span>{t(`ports.carrier.${current.link_carriers}`)}</span>}{refusedUntil !== null && <span className="inline-flex items-center gap-1"><span>{t('ports.askAgainAfter')}</span><RelativeTime at={refusedUntil} /></span>}</p>
     {current.until !== null && <p className="text-sm text-text-muted">{t('ports.until')} <RelativeTime at={current.until} /></p>}
     {current.approval?.expires_at !== undefined && current.approval.expires_at !== null && state === 'pending' && <p className="mt-2 text-xs text-text-muted">{t('ports.requestPendingUntil', { time: new Date(current.approval.expires_at).toLocaleString(i18n.language) })}</p>}
     {plan !== undefined && <div className="mt-3"><PortEntries entries={current.approval?.request.opening.entries ?? []} />{plan.blockers.map((blocker) => <p key={blocker.code} className="text-sm text-danger-text">{blocker.message}</p>)}</div>}

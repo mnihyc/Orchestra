@@ -33,6 +33,17 @@ macro_rules! covers {
     };
 }
 
+// A grouped message is indivisible: each disclosed root must allow this channel.
+macro_rules! inbox_coverage {
+    () => { concat!(
+        "CASE WHEN n.kind='environment.attention' AND n.data ? 'operation_id' THEN ",
+        "n.data->'operation_version'='1'::jsonb AND jsonb_array_length(n.data->'operation_roots')>0 AND NOT EXISTS (",
+        "SELECT 1 FROM jsonb_array_elements(n.data->'operation_roots') scope WHERE NOT COALESCE(",
+        covers!("(scope.value #>> '{}')::uuid", "$3::bool"), ",false)) ELSE ",
+        covers!("COALESCE(ch.org_id, nd.org_id)", "$3::bool"), " END"
+    ) };
+}
+
 macro_rules! route_columns {
     () => {
         "id, user_id, channel_id, channel_snapshot, enabled, address, link_hash, link_expires_at, linked_at, kinds, unread_delay_minutes, min_interval_minutes, sent_seq, last_sent_at, last_ok_at, last_error, failure_episode, failed_at, health, held, created_at, updated_at"
@@ -172,7 +183,9 @@ pub async fn waiting_count(conn: &mut Conn, route: Id) -> Result<i64, DbError> {
             AND NOT COALESCE(p.disabled_kinds ? n.kind,false)
             AND (cardinality(r.kinds) = 0 OR n.kind = ANY(r.kinds))
             AND (r.channel_snapshot ->> 'org_id' IS NULL
-                 OR (r.channel_snapshot ->> 'org_id')::uuid = COALESCE(ch.org_id, nd.org_id))",
+                 OR CASE WHEN n.kind='environment.attention' AND n.data ? 'operation_id'
+                     THEN n.data->'operation_roots'=jsonb_build_array((r.channel_snapshot ->> 'org_id')::uuid)
+                     ELSE (r.channel_snapshot ->> 'org_id')::uuid = COALESCE(ch.org_id, nd.org_id) END)",
     )
     .bind(route)
     .fetch_one(conn)
@@ -511,6 +524,13 @@ pub async fn record_failure(
     Ok(episode.flatten())
 }
 
+/// Clears only a resolved quiet-zone problem, preserving unrelated delivery failures.
+pub async fn clear_quiet_problem(conn: &mut Conn, route: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE notification_routes SET last_error = NULL WHERE id = $1 AND last_error ->> 'code' = 'invalid_timezone'")
+        .bind(route).execute(conn).await?;
+    Ok(())
+}
+
 /// Notes that a sample message reached a route's person: when it last accepted moves, and
 /// nothing else, since a test sends no work that waited and repairs no failure by itself.
 pub async fn record_test_taken(
@@ -729,7 +749,7 @@ pub async fn waiting_inbox(
         "AND NOT COALESCE(p.disabled_kinds ? n.kind,false) ",
         "AND ($2::timestamptz IS NULL OR n.created_at <= $2) ",
         "AND (cardinality(r.kinds) = 0 OR n.kind = ANY(r.kinds)) AND ",
-        covers!("COALESCE(ch.org_id, nd.org_id)", "$3::bool"),
+        inbox_coverage!(),
         " ORDER BY n.inbox_seq"
     ))
     .bind(route)
@@ -820,6 +840,22 @@ pub async fn immediate_routes(
     .await?)
 }
 
+/// Whether a channel currently covers every root represented by one grouped notification.
+pub async fn covers_roots(
+    conn: &mut Conn,
+    channel: Id,
+    roots: &[Option<Id>],
+    mail_shared: bool,
+) -> Result<bool, DbError> {
+    if roots.is_empty() {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(concat!(
+        "SELECT c.enabled AND NOT EXISTS (SELECT 1 FROM unnest($2::uuid[]) scope(org_id) WHERE NOT COALESCE(",
+        covers!("scope.org_id", "$3::bool"), ",false)) FROM notification_channels c WHERE c.id=$1"
+    )).bind(channel).bind(roots).bind(mail_shared).fetch_optional(conn).await?.unwrap_or(false))
+}
+
 /// Writes the outbox rows that tell a notification at once: one for each
 /// route that tells it. Says how many.
 pub async fn tell_routes(
@@ -830,7 +866,44 @@ pub async fn tell_routes(
     mail_shared: bool,
     at: DateTime<Utc>,
 ) -> Result<usize, DbError> {
-    let routes = immediate_routes(conn, user, &snapshot.kind, place_org, mail_shared).await?;
+    let grouped =
+        snapshot.kind == "environment.attention" && snapshot.data.get("operation_id").is_some();
+    let roots = if grouped {
+        if snapshot
+            .data
+            .get("operation_version")
+            .and_then(Json::as_u64)
+            != Some(1)
+        {
+            return Ok(0);
+        }
+        let Ok(roots) = serde_json::from_value::<Vec<Option<Id>>>(
+            snapshot
+                .data
+                .get("operation_roots")
+                .cloned()
+                .unwrap_or(Json::Null),
+        ) else {
+            return Ok(0);
+        };
+        roots
+    } else {
+        vec![place_org]
+    };
+    let candidates = immediate_routes(
+        conn,
+        user,
+        &snapshot.kind,
+        roots.first().copied().flatten(),
+        mail_shared,
+    )
+    .await?;
+    let mut routes = Vec::new();
+    for route in candidates {
+        if !grouped || covers_roots(conn, route.channel_id, &roots, mail_shared).await? {
+            routes.push(route);
+        }
+    }
     let payload = Payload::of(std::slice::from_ref(snapshot)).to_json();
     for route in &routes {
         outbox::insert(
