@@ -1010,8 +1010,10 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
     let path = query
         .path
         .as_deref()
-        .filter(|path| orch_documents::references::relative_path(path))
-        .ok_or_else(|| invalid("path", "is a file path from the workspace root"))?;
+        .filter(|path| orch_documents::references::file_path(path))
+        .ok_or_else(|| invalid("path", "is an environment file path"))?;
+    let normalized = crate::routes::workspace::paths::clean("path", path, false)?;
+    let path = normalized.as_str();
     // Keep the card's ordinary unavailable path before opening a native byte source.
     // The live source repeats this door and all current/raw checks after every actual wait.
     let mut conn = ctx.app.db.acquire().await?;
@@ -1049,7 +1051,15 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
         None
     };
     let machine = crate::routes::workspace::live::machine_of(ctx, &mut conn, &env).await?;
-    let cached = orch_db::queries::storage::cached_latest(&mut conn, env.id, path).await?;
+    let key = crate::routes::workspace::paths::cache_key(None, path);
+    let cached = orch_db::queries::storage::cached_latest(&mut conn, env.id, &key)
+        .await?
+        .filter(|file| {
+            opening
+                .access()
+                .view
+                .is_some_and(|reach| reach >= file.minimum_reach)
+        });
     drop(conn);
     let (stat, missing): (Option<FileStat>, bool) = match machine {
         Some(machine) => match opening
@@ -1057,6 +1067,7 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                 ctx,
                 machine,
                 &FsStat {
+                    access: opening.access(),
                     environment_id: env.id,
                     mount: None,
                     path: path.to_owned(),
@@ -1114,6 +1125,7 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                     ctx,
                     machine,
                     &FsFetch {
+                        access: opening.access(),
                         environment_id: env.id,
                         mount: None,
                         path: path.to_owned(),
@@ -1124,14 +1136,18 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                 .await?
                 .ok();
             if let Some(file) = fetched.filter(|file| {
-                stat.as_ref().is_some_and(|stat| {
-                    stat.entry.size == file.size
-                        && stat.entry.mtime.get().timestamp_millis()
-                            == file
-                                .mtime_ns
-                                .div_euclid(orch_db::queries::storage::NANOS_PER_MILLI)
-                        && stat.hash.is_none_or(|hash| hash == file.hash)
-                })
+                opening
+                    .access()
+                    .view
+                    .is_some_and(|reach| reach >= file.minimum_reach)
+                    && stat.as_ref().is_some_and(|stat| {
+                        stat.entry.size == file.size
+                            && stat.entry.mtime.get().timestamp_millis()
+                                == file
+                                    .mtime_ns
+                                    .div_euclid(orch_db::queries::storage::NANOS_PER_MILLI)
+                            && stat.hash.is_none_or(|hash| hash == file.hash)
+                    })
             }) {
                 let mut conn = ctx.app.db.begin().await?;
                 let frame = opening.current(ctx, &mut conn).await?;
@@ -1146,7 +1162,8 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                     &mut conn,
                     env.id,
                     &orch_db::queries::storage::CachedFile {
-                        path: path.to_owned(),
+                        minimum_reach: file.minimum_reach,
+                        path: key.clone(),
                         size: file.size,
                         mtime_ns: file.mtime_ns,
                         hash: file.hash,
@@ -1513,6 +1530,7 @@ pub mod tests {
             &mut conn,
             scene.on.environment,
             &orch_db::queries::storage::CachedFile {
+                minimum_reach: orch_access_contract::permissions::FileReach::Roots,
                 path: "src/auth.rs".into(),
                 size: file.size,
                 mtime_ns: scene.rig.world.now().timestamp_nanos_opt().unwrap(),

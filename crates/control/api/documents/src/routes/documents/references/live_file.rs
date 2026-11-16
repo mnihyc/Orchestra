@@ -36,9 +36,37 @@ pub(super) fn mapped(error: continuing::Error) -> ApiError {
 impl Opening {
     pub async fn capture(ctx: &Ctx, environment: Id, path: &str) -> ApiResult<Self> {
         let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
-        let source = FileSource::capture(&mut tx, guard.principal().caller(), environment, path)
-            .await
-            .map_err(ApiError::engine)?;
+        let reach = match orch_authz::file_reach::effective(
+            &mut tx,
+            guard.principal(),
+            environment,
+            orch_authz::Policy::default(),
+        )
+        .await
+        {
+            Ok(reach) => reach,
+            Err(error) => {
+                return Err(crate::middleware::authorization::engine_problem(
+                    &mut tx,
+                    guard.principal(),
+                    error,
+                )
+                .await);
+            }
+        };
+        let access = orch_link_contract::commands::FsAccess {
+            view: reach.view,
+            manage: None,
+        };
+        let source = FileSource::capture(
+            &mut tx,
+            guard.principal().caller(),
+            environment,
+            path,
+            access,
+        )
+        .await
+        .map_err(ApiError::engine)?;
         let raw = http_origin::capture_operation(ctx, &mut tx, source.origin()).await?;
         let frame = raw
             .prepare::<Reader>(&mut tx, ctx.app.clock.as_ref(), source.clone())
@@ -54,6 +82,9 @@ impl Opening {
             .check_deadline(ctx.app.clock.as_ref())
             .map_err(mapped)?;
         Ok(Self { source, raw })
+    }
+    pub fn access(&self) -> orch_link_contract::commands::FsAccess {
+        self.source.access()
     }
     pub async fn current(
         &self,

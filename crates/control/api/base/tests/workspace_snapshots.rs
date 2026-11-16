@@ -106,6 +106,7 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
             site.machine,
             &orch_link_contract::commands::SerialKey::Environment(site.environment),
             &orch_link_contract::commands::FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: Some(orch_link_contract::commands::WorkReport {
                     job_id: id,
                     phase: "measure".into(),

@@ -72,7 +72,17 @@ CREATE INDEX nodes_everything_parent_idx ON nodes USING btree (((parent_id)::tex
 
 CREATE INDEX nodes_name_trgm_idx ON nodes USING gin (name gin_trgm_ops) WHERE (deleted_at IS NULL);
 
+-- Match navigation's numeric base-letter ordering in its supported languages.
+CREATE COLLATION orch_navigation_en (provider=icu,locale='en-u-kn-true-ks-level1',deterministic=false);
+CREATE COLLATION orch_navigation_zh (provider=icu,locale='zh-u-kn-true-ks-level1',deterministic=false);
+CREATE INDEX nodes_navigation_newest_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),id DESC);
+CREATE INDEX nodes_navigation_name_en_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),name COLLATE orch_navigation_en,id);
+CREATE INDEX nodes_navigation_name_zh_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),name COLLATE orch_navigation_zh,id);
+CREATE INDEX nodes_navigation_changed_en_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),(GREATEST(activity_at,updated_at,created_at)) DESC,tree_seq DESC,name COLLATE orch_navigation_en,id);
+CREATE INDEX nodes_navigation_changed_zh_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),(GREATEST(activity_at,updated_at,created_at)) DESC,tree_seq DESC,name COLLATE orch_navigation_zh,id);
+
 CREATE INDEX nodes_org_id_idx ON nodes USING btree (org_id, id);
+CREATE INDEX nodes_org_parent_id_idx ON nodes USING btree (org_id, parent_id, id);
 
 CREATE INDEX nodes_org_tree_idx ON nodes USING btree (org_id, tree_seq);
 

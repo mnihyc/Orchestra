@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-api-core --test workspace_connector
+test -p orch-api-core --test workspace_files
+test -p orch-api-core --test workspace_pages
+test -p orch-api-core --test blob_housekeeping
+test -p orch-api-core --test realtime_machine_views
+test -p orch-api-core --test kfix_envreads
+test -p orch-api-core --test reference_preview
