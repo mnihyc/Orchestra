@@ -293,3 +293,69 @@ async fn activity_names_the_actual_resource_and_its_place_without_a_server_langu
         matches!(&row.actor, Some(orch_api_contract::access::HistoryActor::User(user)) if user.id == s.ada.id())
     );
 }
+
+#[tokio::test]
+async fn history_kind_selection_finds_an_older_matching_act_before_its_one_row_page() {
+    use orch_api_contract::access::{HistoryList, HistoryListQuery};
+    let world = World::new().await;
+    let ada = person(&world, "history-owner").await;
+    let org = make_org(&world, &ada, "History kinds", "history-kinds")
+        .await
+        .base
+        .id;
+    let mut older = Entry::new(
+        Actor::User(ada.id()),
+        "node.updated",
+        "org",
+        Some(org),
+        "Older matching change",
+    );
+    older.history = true;
+    older.node_id = Some(org);
+    older.org_id = Some(org);
+    audit::append(
+        &mut *world.conn().await,
+        &older,
+        &Origin::default(),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    world.advance(Duration::minutes(1));
+    for _ in 0..13 {
+        let mut newer = Entry::new(
+            Actor::User(ada.id()),
+            "thread.created",
+            "org",
+            Some(org),
+            "Newer creation",
+        );
+        newer.history = true;
+        newer.node_id = Some(org);
+        newer.org_id = Some(org);
+        audit::append(
+            &mut *world.conn().await,
+            &newer,
+            &Origin::default(),
+            world.now(),
+        )
+        .await
+        .unwrap();
+    }
+    let page = world
+        .app
+        .call(HistoryList, &[&"nodes", &org])
+        .token(&ada.token)
+        .query(&HistoryListQuery {
+            kinds: Some("changed".into()),
+            depth: Some(ActivityDepth::Every),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].action, "node.updated");
+    assert!(page.next_cursor.is_none());
+}

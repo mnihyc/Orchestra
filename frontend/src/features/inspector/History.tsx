@@ -9,7 +9,7 @@ import { ApiError } from '@/api/client';
 import { openAccess } from '@/features/access/AccessDialog';
 import { openFile } from '@/features/files/FileTabs';
 import { PlaceLink } from '@/features/navigation/places';
-import { kindOf } from '@/features/trace/catalogue';
+import { AUDIT_KINDS } from '@/features/trace/params';
 import { PersonLocator } from '@/features/people/PersonLocator';
 import type { AuditKind, Thread, UserRef } from '@/generated/api-types';
 import type { ViewProps } from '@/features/workbench/views';
@@ -27,11 +27,11 @@ function History({ thread }: { thread: Thread }) {
   const [depth, setDepth] = useListChoice<'summary' | 'every'>('inspector-history', 'depth', 'summary');
   const [kind, setKind] = useListChoice<AuditKind | ''>('inspector-history', 'kind', '');
   const [person, setPerson] = useListChoice<UserRef | null>('inspector-history', 'person', null);
-  const query = useInfiniteQuery(historyQuery({ kind: 'thread', id: thread.id }, depth, person?.id));
+  const query = useInfiniteQuery(historyQuery({ kind: 'thread', id: thread.id }, depth, person?.id, kind === '' ? undefined : kind));
   if (query.error instanceof ApiError && (query.error.status === 403 || query.error.status === 404)) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const lines = query.data?.pages.flatMap((page) => page.items) ?? [];
-  const actions = [...new Set([...(kind === '' ? [] : [kind]), ...lines.flatMap((line) => { const kind = kindOf(line.action); return kind === undefined ? [] : [kind]; })])];
-  const shown = lines.filter((line) => kind === '' || kindOf(line.action) === kind);
+  const actions = AUDIT_KINDS;
+  const shown = lines;
   return <div className="flex h-full min-h-0 flex-col" data-testid="thread-history">
     <div className="flex flex-wrap gap-2 border-b border-border p-3">
       <SegmentedControl label={t('places.activity.depth')} value={depth} onValueChange={setDepth} segments={[{ value: 'summary', ...choiceOption(t, 'activityDepth.summary') }, { value: 'every', ...choiceOption(t, 'activityDepth.every') }]} />

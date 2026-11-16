@@ -6,7 +6,10 @@
 //! [`CommandServer`] is the machine's end. It writes a command down before it
 //! says that it has it, runs commands that share a serial key one at a time in
 //! the order they arrived and the rest side by side, does not start one whose
-//! deadline has passed, writes the result down before it says how the command
+//! deadline had passed when it came, does not count the time one waited between
+//! reaching the machine and starting (the disk writing it down, the line of its
+//! key behind other commands) against its deadline (a deadline is for the
+//! work), writes the result down before it says how the command
 //! ended, and answers a command it has seen before from what it wrote down
 //! instead of running it again.
 //! A transport-only session rebind retains the same serial queue and in-flight ownership,
@@ -19,6 +22,7 @@
 //! handed to a machine expire at its deadline, and lets whoever issued a
 //! command wait for its result.
 
+use crate::framing::Refused;
 use crate::journal::{Entry, Journal, JournalError, Step};
 use crate::session::SessionSender;
 use async_trait::async_trait;
@@ -153,6 +157,40 @@ fn too_late() -> CommandError {
     )
 }
 
+/// How a command fails when it is larger than a message on the link may be: the system says so at once,
+/// with the size and the setting, instead of leaving the machine to never answer.
+#[must_use]
+pub fn command_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// How a command fails when its answer is larger than a message on the link may be.
+#[must_use]
+pub fn reply_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the answer to the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// What the system is told when the answer to a command cannot be sent.
+fn unsendable_reply(refused: Refused) -> CommandError {
+    match refused {
+        Refused::TooLarge { bytes, limit } => reply_too_large(bytes, limit),
+        Refused::SessionOver | Refused::Unwritable => CommandError::new(
+            ErrorCode::Internal,
+            "the answer to the command could not be written",
+        ),
+    }
+}
+
 // ---------------------------------------------------------------- the machine's end
 
 /// What a handler is told about the command it runs.
@@ -234,6 +272,9 @@ struct InHand {
     /// A live transport replacement is acknowledged and executed entirely in memory.
     transport_only: bool,
     accepted: Instant,
+    /// The system's time when the command reached the machine: what passes from then until it starts (the
+    /// disk writing it down, the line of its key) is not counted against its deadline, which is for its work.
+    accepted_at: Time,
     finishing: bool,
     finalizer: Option<tokio::task::JoinHandle<()>>,
 }
@@ -312,7 +353,7 @@ impl CommandServer {
     /// as long as it is not cancelled and its deadline has not passed, and is not failed for good.
     async fn handler_for(
         &self,
-        cmd: &Cmd,
+        deadline: Time,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn CommandHandler>, CommandError> {
         let mut registered = self.inner.handler.subscribe();
@@ -320,7 +361,7 @@ impl CommandServer {
             if let Some(handler) = registered.borrow_and_update().clone() {
                 return Ok(handler);
             }
-            let left = (cmd.deadline.get() - self.system_now().get())
+            let left = (deadline.get() - self.system_now().get())
                 .to_std()
                 .unwrap_or_default();
             tokio::select! {
@@ -366,10 +407,55 @@ impl CommandServer {
         Time::new(self.inner.clock.now() - chrono::Duration::milliseconds(offset))
     }
 
+    /// Says a word to the system that is small by its kind: an acknowledgement.
     fn send(&self, frame: impl Into<Frame>) {
         let session = lock(&self.inner.state).session.clone();
-        if let Some(session) = session {
-            let _ = session.send(frame);
+        if let Some(session) = session
+            && let Err(refused @ (Refused::TooLarge { .. } | Refused::Unwritable)) =
+                session.send(frame)
+        {
+            tracing::error!(%refused, "a word to the system was not sent");
+        }
+    }
+
+    /// Says how a command ended. An answer that this session cannot carry is
+    /// not lost in silence: the system is told that the command cannot be
+    /// answered, and why, which is what its caller is shown.
+    fn send_result(&self, result: CmdRes) {
+        let session = lock(&self.inner.state).session.clone();
+        let Some(session) = session else {
+            return;
+        };
+        let id = result.id;
+        let refused = match session.send(result) {
+            Ok(()) | Err(Refused::SessionOver) => return,
+            Err(refused) => refused,
+        };
+        tracing::error!(command = %id, %refused, "the answer to a command was not sent as it was");
+        metrics::counter!("orch_link_replies_refused_total").increment(1);
+        self.send(CmdRes {
+            id,
+            outcome: Err(unsendable_reply(refused)),
+        });
+    }
+
+    /// What a command ended with, or, where the session it is to be answered
+    /// on cannot carry that answer, the failure that says so: this is what is
+    /// written down, so that a command asked for again is answered the same.
+    fn fitting(&self, id: Id, outcome: Result<Json, CommandError>) -> Result<Json, CommandError> {
+        let limit = lock(&self.inner.state)
+            .session
+            .as_ref()
+            .map(SessionSender::max_message_bytes);
+        let Some(limit) = limit else {
+            return outcome;
+        };
+        let result = CmdRes { id, outcome };
+        match orch_link_contract::frames::encode(&Frame::from(result.clone()), limit) {
+            Err(orch_link_contract::frames::FrameError::TooLarge { bytes, .. }) => {
+                Err(unsendable_reply(Refused::TooLarge { bytes, limit }))
+            }
+            _ => result.outcome,
         }
     }
 
@@ -458,7 +544,7 @@ impl CommandServer {
             }) => {
                 drop(state);
                 self.send(CmdAck { id });
-                self.send(result);
+                self.send_result(result);
                 return;
             }
             Some(Entry {
@@ -486,6 +572,7 @@ impl CommandServer {
                 written,
                 transport_only,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
                 finishing: false,
                 finalizer: None,
             },
@@ -664,8 +751,23 @@ impl CommandServer {
         if let (Ok(kind), Some(accepted)) = (cmd.kind.parse::<CommandKind>(), accepted) {
             command_phase(kind, CommandPhase::KeyWait, accepted.elapsed());
         }
+        // A deadline is for the work: the time between a command reaching the machine and starting (the
+        // disk writing it down, the line of its key behind other commands) is not the command's. Measured
+        // in the system's time, as the deadline is.
+        let waited = lock(&self.inner.state)
+            .in_hand
+            .get(&id)
+            .map_or_else(chrono::Duration::zero, |hand| {
+                (self.system_now().get() - hand.accepted_at.get()).max(chrono::Duration::zero())
+            });
+        let deadline = Time::new(
+            cmd.deadline
+                .get()
+                .checked_add_signed(waited)
+                .unwrap_or_else(|| cmd.deadline.get()),
+        );
         let captured = Instant::now();
-        let execution = self.run(&cmd, cancel).await;
+        let execution = self.run(&cmd, cancel, deadline).await;
         if cmd.kind == CommandKind::FsRecord.as_str() {
             command_phase(
                 CommandKind::FsRecord,
@@ -718,10 +820,13 @@ impl CommandServer {
         }
     }
 
+    /// Starts a command. `deadline` is the command's own, moved later by the time it waited in the line
+    /// of its key.
     async fn run(
         &self,
         cmd: &Cmd,
         cancel: CancellationToken,
+        deadline: Time,
     ) -> Result<(CommandKind, CommandExecution), CommandError> {
         if cancel.is_cancelled() {
             return Err(CommandError::new(
@@ -729,7 +834,7 @@ impl CommandServer {
                 "cancelled before it started",
             ));
         }
-        if cmd.deadline <= self.system_now() {
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let command = match cmd.command() {
@@ -754,8 +859,8 @@ impl CommandServer {
                 format!("this machine does not take {kind} commands"),
             ));
         }
-        let handler = self.handler_for(cmd, &cancel).await?;
-        if cmd.deadline <= self.system_now() {
+        let handler = self.handler_for(deadline, &cancel).await?;
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let id = cmd.id;
@@ -768,7 +873,7 @@ impl CommandServer {
         let context = CommandContext {
             id,
             key: cmd.key.clone(),
-            deadline: cmd.deadline,
+            deadline,
             cancel,
         };
         // On a task of its own, so that a handler that panics fails its
@@ -803,6 +908,7 @@ impl CommandServer {
                 written: true,
                 transport_only: false,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
                 finishing: false,
                 finalizer: None,
             });
@@ -817,7 +923,7 @@ impl CommandServer {
             return;
         }
         if transport_only {
-            self.send(CmdRes { id, outcome });
+            self.send_result(CmdRes { id, outcome });
             drop(hold);
             {
                 let mut state = lock(&self.inner.state);
@@ -846,7 +952,7 @@ impl CommandServer {
                 "the live observation expired; read the current session again",
             ))
         } else {
-            outcome
+            self.fitting(id, outcome)
         };
         loop {
             match self.write_finished(id, outcome.clone()).await {
@@ -854,7 +960,7 @@ impl CommandServer {
                     if let Some(kind) = kind {
                         command_phase(kind, CommandPhase::Finalization, started.elapsed());
                     }
-                    self.send(live.unwrap_or(result));
+                    self.send_result(live.unwrap_or(result));
                     drop(hold);
                     {
                         let mut state = lock(&self.inner.state);

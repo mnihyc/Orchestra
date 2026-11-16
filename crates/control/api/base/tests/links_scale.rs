@@ -568,6 +568,7 @@ async fn the_answers_to_the_api_at_that_size_are_one_page_whatever_cites_the_doc
         &s,
         c.hub,
         &DocumentReferencesListQuery {
+            q: None,
             direction: LinkDirection::In,
             limit: Some(20),
             cursor: None,
@@ -599,6 +600,7 @@ async fn the_answers_to_the_api_at_that_size_are_one_page_whatever_cites_the_doc
         &s,
         c.hub,
         &DocumentReferencesListQuery {
+            q: None,
             direction: LinkDirection::In,
             limit: Some(20),
             cursor: first.next_cursor.clone(),
@@ -670,6 +672,7 @@ async fn a_document_that_refers_to_thousands_of_things_lists_them_a_page_at_a_ti
             &s,
             index,
             &DocumentReferencesListQuery {
+                q: None,
                 direction: LinkDirection::Out,
                 limit: Some(200),
                 cursor: cursor.take(),

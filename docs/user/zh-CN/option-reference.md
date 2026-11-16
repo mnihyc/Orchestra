@@ -1,9 +1,9 @@
 ---
 group: providers
-screens: [/help, /thread/$threadId, /resources/providers/$id]
+screens: [/help, /thread/$threadId, /resources/providers/$id, /settings/interface, /topic/$topicId]
 keywords: [选项, 字段, 搜索, 参考, options, fields]
 heading_id.条目: entries
-summary: 提供方接口接受的每个请求选项，以及它改变什么。
+summary: 随产品提供的请求与界面选项，以及它们改变什么。
 ---
 
 # 选项字段参考
@@ -14,6 +14,114 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `option:HistoryListQuery.kinds` | 环境历史使用原有 HistoryKind 值；节点和其他资源历史使用准确的 AuditKind 分类，包括当前页尚未出现的类型。在限制结果数量与汇总分组前筛选。 |
+| `option:DocumentRelatedListQuery.q` | 在填充排名页之前匹配当前可读条目的名称。保留原有关联分数、原因和可见条件。 |
+| `option:DocumentRelatedListQuery.limit` | 每页条目数，接受任意正 u32；省略时采用场所已有的关联数量默认值。 |
+| `option:DocumentRelatedListQuery.cursor` | 延续同一来源、人员、搜索词和可见排名结果。来源或搜索变更时从头读取。 |
+| `option:DocumentReferencesListQuery.q` | 匹配可读来源或目标名称、上下文及文档中已写出的标签或路径。指定 of 时搜索该来源全部提及的已呈现文本。无权读取的目标名称不会匹配。 |
+| `option:DocumentReferencesListQuery.limit` | 每页来源、目标或指定 of 后匹配的提及数，接受任意正 u32。默认值来自场所已有的链接分页和提及设置。访问检查工作预算耗尽时提供续页，不限制列表总量。 |
+| `option:NodeTagListQuery.q` | 在分页前匹配可见标签名称中的词语，精确名称优先于部分匹配。 |
+| `option:NodeTagListQuery.picker` | 选择器空输入时，优先显示此人最近使用且当前可用的标签定义。其他读取保持原有定义场所顺序。 |
+| `option:NodeTagListQuery.limit` | 每页标签定义数，默认五十，接受任意正 u32。 |
+| `option:NodeTagListQuery.cursor` | 延续同一人员、场所、搜索词和个人顺序。顺序改变时从头读取。 |
+| `option:HolderSearchQuery.picker` | 打开人员或主体选择器时，优先提供此人最近使用的人员和群组；从首个字符搜索，保留原有场所定位语法。 |
+| `option:HolderSearchQuery.kinds` | 逗号分隔的主体类型，原生筛选在填充结果页前执行。省略时包含全部类型。 |
+| `option:HolderSearchQuery.limit` | 每页主体数，默认五十，接受任意正 u32，不限制可发现的人员和群组总数。 |
+| `option:HolderSearchQuery.cursor` | 延续同一人员、来源场所、组织树、主体类型和精确定位搜索。可见来源变更时从头读取。 |
+| `option:HolderSearchReply.next_cursor` | 同一可见来源的原生续页游标，到达末尾时省略。 |
+| `option:SemanticSearchOverview.orgs_next_cursor` | 继续同一管理员和根组织名称搜索。先确定可显示的组织并匹配名称，再分页；仅为本页读取实时索引详情。 |
+| `option:CapabilityListQuery.q` | 在分页前匹配可见定义名称、键或说明中的字面词语。 |
+| `option:CapabilityListQuery.limit` | 每页权限定义默认 50，可设为任意正 u32。 |
+| `option:CapabilityListQuery.cursor` | 继续同一管理员、搜索词和公共别名键选择。 |
+| `option:CapabilityListQuery.aliases` | 以逗号分隔的公共权限项键，对应同时匹配其内置本地化名称或说明的条目。在分页前补充存储文本搜索，不会绕过系统管理员权限。 |
+| `option:MePickerRecentReceipt.count` | 写入回执中的当前系统分组长度。仅写权限的操作不会返回保存的私有历史。 |
+| `option:MePickerRecentReceipt.remembered` | 此次选择已记住时为 true；关闭记忆时为 false。关闭时不记录此次选择，也不删除先前偏好。 |
+| `option:UserSearchQuery.include_external` | 已选组织时，也提供组织外原有的共同组织成员与精确公开身份搜索。默认关闭；分页前仍检查当前组织查看权限和账户范围。 |
+| `option:UserSearchReply.org_member_ids` | include_external 为 true 时，给出本页结果中实际属于所选组织的人员 ID。其他情况省略；选择器不会根据已加载页面猜测访客身份。 |
+| `option:UserSearchQuery.picker` | 选择器从首个字符开始筛选；空输入提供此人最近使用的活跃账户及共同组织的人。指定组织仍会限制成员范围；分页前检查当前账户作用域。 |
+| `option:UserSearchQuery.limit` | 每页人数默认 20，可设为任意正 u32；不限制能找到的总人数。 |
+| `option:UserSearchQuery.cursor` | 继续同一操作者、组织、选择模式及字面搜索。打开时的顺序改变后重新读取。 |
+| `option:MePickerRecentChoice.kind` | 原生资源类型或 model。同一类型的所有页面共用此人的私有历史。 |
+| `option:MePickerRecentChoice.key` | 稳定的不透明选项键；模型选项包含提供者。只记录主动选择，不记录权限或名称。 |
+| `option:MePickerRecents.count` | 每个类型记住并显示的条目数，来自系统设置；零表示不再记住。 |
+| `option:MePickerRecents.choices` | 按类型返回此人最近选择的去重键，一次读取。可用选项仍由当前原生选择器决定。 |
+| `option:PersonalStateKey.picker_recents` | 所有选择器共用的私有服务器偏好。POST /me/picker-recents 原子更新一个类型的选项；向 PUT /me/state/picker_recents 提交空对象可清空。 |
+| `option:NameSearchListQuery.picker` | 选择模式：空输入提供所有当前可见的名称，最近选择排在前面；输入首个字符即可在服务器筛选。 |
+| `option:NameSearchListQuery.cursor` | 继续同一操作者、范围、类型、参与和收藏条件及搜索。最近使用的顺序改变后重新读取。 |
+| `option:NameSearchPage.next_cursor` | 继续读取当前授权名称的下一页；没有更多时省略。 |
+| `option:ProviderModelSuggestionListQuery.refresh` | 为 true 时显式重新读取源；否则分页和搜索使用最近成功读取的目录，尚未读取的源会加载一次。也可使用提供方的“刷新”。 |
+| `option:ProviderModelSuggestionListQuery.q` | 按源建议的可见模型名称搜索，在分页之前匹配。 |
+| `option:ProviderModelSuggestionListQuery.limit` | 本页建议的条目数，默认 50；可继续读取后续各页。 |
+| `option:ProviderModelSuggestionListQuery.cursor` | 同一提供方、搜索词及 unlisted 选择返回的 next_cursor。 |
+| `option:ProviderModelSuggestionListQuery.unlisted` | 为 true 时，在分页之前排除提供方中已保存的模型名称。为 false 或省略时仍可读取完整发现目录。 |
+| `option:AdminRuntimeListQuery.q` | 在分页前按可见的单元、资源或模板名称搜索。 |
+| `option:AdminRuntimeListQuery.limit` | 每页条目数；默认 50，可设为任意正的 u32。 |
+| `option:AdminRuntimeListQuery.cursor` | 继续读取相同主机、类型和名称搜索的结果。 |
+| `option:EverythingListQuery.resource_kind` | 按模板的单元类型、环境的 machine/template 来源，或用 system 选择没有归属位置的代理配置；在名称搜索和分页前筛选。 |
+| `option:NativeSessionListQuery.q` | 在已读取的原生会话目录中，按标题或文件夹中的词搜索，再分页。 |
+| `option:NativeSessionListQuery.limit` | 每页条目数；默认 50，可设为任意正的 u32。 |
+| `option:NativeSessionListQuery.cursor` | 继续读取相同来源和搜索的结果，不能借此选择其他目录。 |
+| `option:NativeSessionListQuery.source` | 第一页返回的来源引用；省略时重新读取原生程序。引用绑定调用者、提供方、配置和凭据代次；过期或来源变化时返回字段错误，界面重新开始这次读取。 |
+| `option:InvitationListQuery.active` | 为 true 时，在分页前排除过期、撤回及用尽的链接；false 或省略时仍可读取有权查看的完整历史。 |
+| `option:InvitationListQuery.q` | 按可见的目标位置、邮箱地址、备注或邀请者中的词搜索。 |
+| `option:InvitationListQuery.limit` | 每页条目数；默认 50，可设为任意正的 u32。 |
+| `option:InvitationListQuery.cursor` | 继续读取相同组织、有效性选择和搜索的结果。 |
+| `option:NotificationChannelListQuery.q` | 分页前按可见的渠道名称或通知器类型搜索。 |
+| `option:NotificationChannelListQuery.limit` | 每页条目数；默认 50，可设为任意正的 u32。 |
+| `option:NotificationChannelListQuery.cursor` | 继续读取相同归属范围和搜索的结果。 |
+| `option:EnvironmentMcpListQuery.collection` | 原生目录：默认是 servers 连接，或 found 发现的定义。 |
+| `option:EnvironmentMcpListQuery.q` | 在选定目录的可见名称、程序或目录路径中搜索词语。 |
+| `option:EnvironmentMcpListQuery.limit` | 每页条目数；默认 50，可用任意正 u32。 |
+| `option:EnvironmentMcpListQuery.cursor` | 继续同一环境、目录和搜索。 |
+| `option:HostRuntimeListQuery.q` | 在可读的环境或提供者名称、驱动或状态中搜索词语。 |
+| `option:HostRuntimeListQuery.limit` | 每页条目数；默认 50，可用任意正 u32。 |
+| `option:HostRuntimeListQuery.cursor` | 继续同一主机、类型和搜索。 |
+| `option:MachineMountListQuery.collection` | 默认 locations 位置、available 可添加项，或 mount_id 所挂接的 environments。 |
+| `option:MachineMountListQuery.mount_id` | 当 collection=environments 时，选择要读取其挂接环境的已有挂载。 |
+| `option:MachineMountListQuery.q` | 在可见挂载名称、路径或挂接的环境名称中搜索词语。 |
+| `option:MachineMountListQuery.limit` | 每页条目数；默认 50，可用任意正 u32。 |
+| `option:MachineMountListQuery.cursor` | 继续同一机器、集合、挂载和搜索。 |
+| `option:NotificationRouteListQuery.retained` | true 只保留渠道已移除的路由，false 只保留当前路由；省略则列出所有已保存的路由。 |
+| `option:NotificationRouteListQuery.q` | 分页前，在安全的渠道名称、类型或连接标签中搜索词语。 |
+| `option:NotificationRouteListQuery.limit` | 每页条目数；默认 50，可用任意正 u32。 |
+| `option:NotificationRouteListQuery.cursor` | 继续同一用户、保留项选择和搜索。 |
+| `option:NodeChildListQuery.q` | 用原生索引名称匹配，在分页前搜索可见子项名称中的词语。 |
+| `option:NodeDocumentListQuery.q` | 分页前，在可读和仅管理名称两个阶段中搜索可见标题词语。 |
+| `option:InputScheduleListQuery.q` | 分页前搜索可见的计划名称词语。 |
+| `option:InputScheduleListQuery.thread_id` | 仅保留可读目标及代理来源均指向此线程的计划。 |
+| `option:SharedListQuery.q` | 在原生投影后、分页前，匹配可见名称、描述及已披露路径中的词语。 |
+| `option:SharedListQuery.kind` | 仅选择 org、project、topic、thread、document 或 document_container；省略则包含所有类型。 |
+| `option:SharedListQuery.limit` | 每页请求条目数；默认 50，可用任意正 u32。 |
+| `option:SharedListQuery.cursor` | 用返回的游标继续同一用户、类型和搜索。 |
+| `option:PermissionPeopleListQuery.q` | 分页前匹配可见姓名或用户名词语；实际人员目录包含所有符合条件的人，不受拒绝提示预览数量限制。 |
+| `option:OrgChatListQuery.include_empty` | 在 nodes 范围中包含尚无消息的可读场所会话，供转发选择。默认关闭；普通活动列表仍保持原意。 |
+| `option:OrgChatListQuery.ids` | 可选的逗号分隔会话 ID，批量经过原有组织、范围、参与状态和当前账户权限检查。无权访问的会话省略；提供 ID 不会授予权限。 |
+| `option:OrgChatListQuery.limit` | 每页会话数，默认五十，接受任意正 u32。 |
+| `option:OrgChatListQuery.cursor` | 延续同一人员、根组织、范围、参与状态、身份筛选和搜索文字。条件变更时从首页重读。 |
+| `option:OrgChatListQuery.q` | 分页前，通过原生名称投影匹配可见会话标题、参与者姓名或已披露的节点名称。 |
+| `option:ChatGetQuery.members_q` | 在分页前，由 ChatGet 投影可见群组成员的姓名和用户名；省略时保留普通完整元数据视图。 |
+| `option:ChatGetQuery.members_limit` | 请求的成员页条目数；可用任意正 u32，成员页面默认请求 50。 |
+| `option:ChatGetQuery.members_cursor` | 同一聊天和搜索返回的 members_next_cursor。 |
+| `option:CollectionQuery.q` | 在服务器上按已公开的目录文字搜索词语或引号内的短语，无最短长度要求。引号内的空格按原样匹配。更改搜索时从新的游标开始。 |
+| `option:CollectionQuery.limit` | 本页请求的条目数，默认 50，可指定任意正的 u32 数值。它只决定分页大小，不限制集合总量。 |
+| `option:CollectionQuery.cursor` | 同一集合、同一搜索返回的 next_cursor；继续读取直到为 null。不可用于其他父级或搜索。 |
+| `option:ChildCollectionQuery.collection` | 子目录：MachineGet 为 agents/providers/environments；HostGet 为 kept_layers/kept_data；MountGet 为 locations/kept/lost_locations。只返回所选子目录；其他子目录数组为空。省略全部子目录查询字段时，返回完整的原生资源读取。 |
+| `option:ChildCollectionQuery.q` | 按所选子目录中已公开的名称和位置文字搜索。不检索隐藏的名称或路径。 |
+| `option:ChildCollectionQuery.limit` | 单页的正整数条目数，默认 50；不会限制结果总数。 |
+| `option:ChildCollectionQuery.cursor` | 同一阅读者、资源、子目录和搜索条件下的游标。更改子目录或搜索时从第一页开始。 |
+| `option:HostKeptLayers.latest` | 这是否是该工作区最新的可见保留版本。原生完整观察会在分页前决定此标记。 |
+| `option:EnvironmentGetQuery.inspect_deleted` | 查看保留数据时，使用工作区当前的恢复权限。普通实时读取不变。 |
+| `option:EnvironmentGetQuery.threads_q` | 按已公开的绑定线程、话题、所有者或目录文字搜索。服务器先检索完整的原生可见投影，再选择分页。 |
+| `option:EnvironmentGetQuery.threads_limit` | 显式请求绑定线程分页时的正整数页大小（默认 50）。省略所有 threads_* 字段时，保留功能输入所用的完整环境读取。 |
+| `option:EnvironmentGetQuery.threads_cursor` | 同一阅读者、工作区和搜索条件下的下一页游标。更改搜索时清除游标。 |
+| `option:AdminTokenListQuery.q` | 按管理令牌目录中可见的名称搜索，然后分页。游标只适用于同一管理员、所有者和搜索条件。 |
+| `option:NodeDeletedEnvironmentListQuery.q` | 在服务器上按保留工作区的当前名称搜索，然后分页。更改搜索时清除游标。 |
+| `option:OrgGroupListQuery.q` | 分页前按组名中的词搜索。 |
+| `option:OrgGroupListQuery.limit` | 每页条目数；默认 50，可设为任意正数。 |
+| `option:OrgGroupListQuery.cursor` | 继续读取相同组织、子组织范围和搜索的结果。 |
+| `option:PersonalState.sidebar.open_links` | 个人的“链接打开方式”，与侧栏状态一同保存：默认自动，也可选择当前视图或新视图。自动时，同一目标区域共用一个视图；当前视图会替换正在查看的页面，新视图会另开页面。目标已经打开时会切换到它。在“界面”或标签菜单中选择；显式复制视图及浏览器的修饰键点击仍遵循原有行为。 |
+| `option:TopicSearch.q` | 话题“概览”和“会话”页中的会话名称搜索。它筛选当前可见的实时集合，随话题地址传递，不作为设备默认值保存。 |
+| `option:codex.cyber_access_program` | 模型提供、且已在提供方启用的 Codex 访问计划。所选名称会原样传给原生轮次，不限于 Daybreak 系列；模型、账号资格及提供方使用权限仍须满足。 |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
@@ -26,6 +134,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |

@@ -6,6 +6,7 @@
  * written. A screen that reads the few settings it explains itself by (the rules an org gives its
  * invitations) uses the same list as the editor, under the same key.
  */
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { joinedDefaultsRegistry } from '@/api/defaultsOpening';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { queryOptions } from '@tanstack/react-query';
@@ -216,14 +217,16 @@ export const notifiersQuery = queryOptions({
 export const channelsKey = (orgId: string) => ['channels', orgId] as const;
 
 /** The ways out of Orch that a root org gives its members, to look after: for whoever makes the rules there. */
-export const channelsQuery = (orgId: string) =>
-  queryOptions({
-    queryKey: channelsKey(orgId),
-    queryFn: async ({ signal }): Promise<NotificationChannel[]> => {
-      const channels = await ok(api.GET('/notification-channels', { params: { query: orgId === 'system' ? {} : { org_id: orgId } }, signal }));
-      return orgId === 'system' ? channels.filter((channel) => channel.owner === 'system') : channels;
-    },
-  });
+export const channelsQuery = (orgId: string) => queryOptions({
+  queryKey: channelsKey(orgId),
+  queryFn: ({ signal }): Promise<NotificationChannel[]> => readAllPages((cursor) => ok(api.GET('/notification-channels', { params: { query: {
+    ...(orgId === 'system' ? { system: true } : { org_id: orgId }), ...(cursor === null ? {} : { cursor }),
+  } }, signal })), signal),
+});
+export const channelsPageQuery = (orgId: string, q: string) => collectionQuery(channelsKey(orgId), q, (query, signal) => ok(api.GET('/notification-channels', { params: { query: {
+  ...query, ...(orgId === 'system' ? { system: true } : { org_id: orgId }),
+} }, signal })));
+
 
 /** What a channel or a destination is made or changed with: its name, the values of its fields, the secrets that were typed, and its texts. */
 export interface NotifierWrite {
@@ -270,7 +273,7 @@ export const destinationsKey = (nodeId: string) => ['destinations', nodeId] as c
 export const destinationsQuery = (nodeId: string) =>
   queryOptions({
     queryKey: destinationsKey(nodeId),
-    queryFn: ({ signal }): Promise<Destination[]> => ok(api.GET('/nodes/{id}/destinations', { params: { path: { id: nodeId } }, signal })),
+    queryFn: ({ signal }): Promise<Destination[]> => readAllPages((cursor) => ok(api.GET('/nodes/{id}/destinations', { params: { path: { id: nodeId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /** What a destination is made with, beside what a channel is. */
@@ -301,3 +304,5 @@ export function deleteDestination(id: string): Promise<void> {
 export function testDestination(id: string): Promise<NotificationTestReply> {
   return ok(api.POST('/destinations/{id}/test', { params: { path: { id } } }));
 }
+
+export const destinationsPageQuery = (nodeId: string, q: string) => collectionQuery(destinationsKey(nodeId), q, (query, signal) => ok(api.GET('/nodes/{id}/destinations', { params: { path: { id: nodeId }, query }, signal })));

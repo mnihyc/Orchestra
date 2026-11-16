@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** One cell of the full form: a row of the page with whom it names and whom it follows from a place, the lock that decides it, and the acts on it.
  *
  * A cell shows the holders its row names itself and those it follows from the place above (quietly,
@@ -14,7 +15,6 @@ import { type AccessRowTarget, permissionsQuery } from '@/api/access';
 import { choiceOption } from '@/i18n/choices';
 import { meQuery } from '@/api/auth';
 import type { Holder, NodeOrSystem, PermissionRow, RowProfile } from '@/generated/api-types';
-import { Combobox } from '@/ui/Combobox';
 import { DateField } from '@/ui/DateField';
 import { IconButton } from '@/ui/IconButton';
 import { LockBadge } from '@/ui/LockBadge';
@@ -104,7 +104,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
           options={(catalogue.data?.roles ?? []).map((entry) => ({ value: entry.key, ...choiceOption(t, `accessRole.${entry.key}`) }))}
           onValueChange={chooseRole} />}
         {candidates.placePicker}
-        <Combobox
+        <CandidatePicker candidates={candidates}
           label={t('access.cell.addTo', { permission: label })}
           placeholder={t('access.add.placeholder')}
           query={query}

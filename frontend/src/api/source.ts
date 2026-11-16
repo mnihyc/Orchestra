@@ -18,11 +18,11 @@ export const sourceKeys = {
 };
 
 /** A recorded file source is chosen a page at a time, using the server's page-size default. */
-export const threadSnapshotsQuery = (id: string) => infiniteQueryOptions({
-  queryKey: sourceKeys.snapshots(id),
+export const threadSnapshotsQuery = (id: string, q = '') => infiniteQueryOptions({
+  queryKey: [...sourceKeys.snapshots(id), q],
   initialPageParam: null as string | null,
   queryFn: ({ pageParam, signal }): Promise<SnapshotPage> => ok(api.GET('/threads/{id}/snapshots', {
-    params: { path: { id }, query: { ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+    params: { path: { id }, query: { ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
   })),
   getNextPageParam: (page) => page.next_cursor ?? undefined,
   retry: false,

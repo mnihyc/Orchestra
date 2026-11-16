@@ -11,16 +11,16 @@
  */
 import { liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { ArrowRightLeft, Ban, Boxes, CirclePlay, Hourglass } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { environmentKey, environmentQuery, updateEnvironment } from '@/api/environments';
+import { environmentKey, environmentQuery, environmentThreadsPageQuery, updateEnvironment } from '@/api/environments';
 import { ApiError } from '@/api/client';
-import { DetailPages, DetailSections, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
+import { DetailSections, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { PortsPanel } from '@/features/ports/Ports';
 import { BrowsersPanel } from '@/features/browser/Browsers';
 import { portsBrowser } from '@/features/browser/View';
@@ -57,6 +57,9 @@ import { formatDateTime, useNow } from '@/lib/time';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -193,6 +196,14 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
 
 function Threads({ environment, manage }: { environment: EnvironmentRow; manage: boolean }) {
   const { t } = useTranslation();
+  const search = useCollectionSearch('environment-threads:' + environment.id);
+  const version = useMemo(() => JSON.stringify(environment.threads.map((row) => [row.thread.id, row.thread.name, row.topic.name, row.owner.id, row.owner.display_name, row.owner.username, row.directory])), [environment.threads]);
+  const paged = environment.threads.length > 50 || typeof environment.threads_next_cursor === 'string' || search.q !== '';
+  const pages = useInfiniteQuery({ ...environmentThreadsPageQuery(environment.id, search.q, version), enabled: paged });
+  const current = useMemo(() => new Map(environment.threads.map((row) => [row.thread.id, row])), [environment.threads]);
+  const rows = paged ? pages.data?.pages.flatMap((page) => page.items).map((row) => current.get(row.thread.id) ?? row) ?? [] : environment.threads;
+  const hidden = paged ? pages.data?.pages[0]?.hidden ?? environment.threads_hidden : environment.threads_hidden;
+
   const columns: Column<EnvironmentRow['threads'][number]>[] = [
     {
       id: 'thread',
@@ -246,14 +257,16 @@ function Threads({ environment, manage }: { environment: EnvironmentRow; manage:
         ) : undefined
       }
     >
-      {environment.threads.length === 0 && environment.threads_hidden === 0 ? (
+      <CollectionSearch name={t('environments.threads.title')} {...search} />
+      {paged && pages.isPending ? <SkeletonRows read={pages} rows={3} /> : paged && pages.isError && !pages.isFetchNextPageError ? <ErrorState compact error={pages.error} onRetry={() => void pages.refetch()} /> : rows.length === 0 && hidden === 0 ? (
         <EmptyState compact icon={<Boxes aria-hidden />} title={t('environments.threads.none')} />
       ) : (
         <div className="flex flex-col gap-2">
-          {environment.threads.length > 0 && <DetailPages items={environment.threads}>{(page) => <Table label={t('environments.threads.title')} columns={columns} rows={page} rowKey={(row) => row.thread.id} />}</DetailPages>}
-          {environment.threads_hidden > 0 && <p className="text-sm text-text-muted">{t('environments.threads.hidden', { count: environment.threads_hidden })}</p>}
+          {rows.length > 0 && <Table key={search.q} virtual label={t('environments.threads.title')} columns={columns} rows={rows} rowKey={(row) => row.thread.id} />}
+          {hidden > 0 && <p className="text-sm text-text-muted">{t('environments.threads.hidden', { count: hidden })}</p>}
         </div>
       )}
+      <Pagination hasMore={paged && pages.hasNextPage} loading={pages.isFetchingNextPage} error={paged && pages.isFetchNextPageError ? pages.error : null} onMore={() => void pages.fetchNextPage()} />
     </Section>
   );
 }
