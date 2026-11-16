@@ -57,6 +57,12 @@ A bell shows the served notification level. Chat's Off is separate from a place'
 A change is pending until its answer arrives. A refused discussion change keeps the served level
 and opens its error beside the bell. Escape closes that error and returns focus to the bell.
 
+Things are named by their name, their kind and their time: a container by the host it is on, a program by its release,
+a set of files by the time it was kept. A hash, an identifier or a revision number is never a word of a sentence.
+Where support or an operator asks for one, the thing's menu or details offer **Copy ID**; it goes to the clipboard
+and stays out of sight. Source-control views keep the short commit hash, and a page that asks you to check a
+download or a backup keeps its checksum.
+
 ## Reading documents and files
 
 Document titles, headings and file contents are the author's data. Repeated words in them are kept.

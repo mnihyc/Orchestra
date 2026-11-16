@@ -277,6 +277,11 @@ impl Connection {
         lock(&self.subs).insert(sub.tag().id, Arc::clone(sub));
     }
 
+    /// Finds only a subscription owned by this connection, without replacing it.
+    pub(crate) fn subscription(&self, id: SubId) -> Option<Arc<Subscription>> {
+        lock(&self.subs).get(&id).cloned()
+    }
+
     /// Takes away the subscription with this number, if it has one.
     pub(crate) fn take(&self, id: SubId) -> Option<Arc<Subscription>> {
         lock(&self.subs).remove(&id)
@@ -708,6 +713,7 @@ async fn serve(
         server_time: inner.clock.time(),
         access_expires_at: login.expires.map(Time::new),
         heartbeat_secs: inner.tuning.heartbeat_secs,
+        max_client_frame_bytes: u32::try_from(MAX_CLIENT_FRAME_BYTES).unwrap_or(u32::MAX),
         build: app.build.to_string(),
     });
     if let Ok(text) = ready.encode() {

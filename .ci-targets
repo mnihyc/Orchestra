@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test workspace_connector
+test -p orch-api-core --test workspace_files
+test -p orch-api-core --test workspace_pages

@@ -269,6 +269,7 @@ orch_api_base::__api_bind_cfc8a895c0!();
 /// nothing to say is empty, off or null.
 pub(crate) fn through_a_thread(view: Environment) -> Environment {
     Environment {
+        file_reach: None,
         provenance: Default::default(),
         sandbox_readiness: None,
         can_declare_lost: false,
