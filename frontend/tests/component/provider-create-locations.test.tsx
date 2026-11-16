@@ -1,12 +1,13 @@
 import type * as RouterModule from '@tanstack/react-router';
 /** The one provider form keeps native/key credentials and runtime location independent. */
-import { cleanup,screen,waitFor } from '@testing-library/react';
+import { cleanup,screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach,beforeEach,expect,it,vi } from 'vitest';
 import { createProvider, createTemplate, createModel } from '@/api/resources';
 import type * as ResourcesApi from '@/api/resources';
 import { AddProviderDialog } from '@/features/resources/providers/AddProvider';
+import { EnvironmentProviderConnections } from '@/features/resources/environments/ProviderConnections';
 import type { HomePickerProps } from '@/features/resources/HomePicker';
 import type { ArrangementType,ProviderSetup,Template,ProviderModel,Provider } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
@@ -15,10 +16,13 @@ import { NetworkError } from '@/lib/requests';
 import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show, skipOverflowFallback } from './support';
 import { harnessName } from '../doubles/harness-names';
+import { detailEnvironment, detailHost } from './resource-detail-fixtures';
+
+const placementHost = { ...detailHost, access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } };
 
 skipOverflowFallback();
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 const navigate=vi.hoisted(()=>vi.fn());
 const readProvider=vi.hoisted(()=>vi.fn<(id:string)=>Promise<Provider>>());
@@ -27,11 +31,12 @@ vi.mock('@/features/resources/HomePicker',()=>({
   HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose home</option><option value="org">Acme</option></select>,
   useHomeChoices:()=>({choices:[{id:'org',label:'Acme',personal:false,department:false}],pending:false,error:null}),
 }));
-vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),createProvider:vi.fn(),createTemplate:vi.fn(),createModel:vi.fn(),providerQuery:(id:string)=>({queryKey:['created-provider',id],queryFn:()=>readProvider(id)}),templatesQuery:()=>({queryKey:['local-templates'],queryFn:()=>Promise.resolve(localTemplates)}),providerSetupQuery:()=>({queryKey:['location-setup'],queryFn:()=>Promise.resolve(setup)})}));
+vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),createProvider:vi.fn(),createTemplate:vi.fn(),createModel:vi.fn(),providerQuery:(id:string)=>({queryKey:['created-provider',id],queryFn:()=>readProvider(id)}),providersQuery:(_scope:unknown,_org:unknown,environment:string)=>({queryKey:['connection-providers',environment],queryFn:()=>Promise.resolve(connectionProviders)}),hostsQuery:()=>({queryKey:['local-hosts'],queryFn:()=>Promise.resolve([placementHost])}),templatesQuery:()=>({queryKey:['local-templates'],queryFn:()=>Promise.resolve(localTemplates)}),providerSetupQuery:()=>({queryKey:['location-setup'],queryFn:()=>Promise.resolve(setup)})}));
+let connectionProviders:Provider[]=[];
 let localTemplates: Template[] = [];
 const keeper={id:'keeper',name:'Keeper',online:true,placement:'connected' as const,platform_os:'linux' as const};
 const runner={...keeper,id:'runner',name:'Runner'};
-const setup:ProviderSetup={ grouping: [],
+let setup:ProviderSetup={ grouping: [],
   machines:[keeper,runner].map((machine)=>({machine,directory_runtime:true,roles:['agent','provider'],harnesses:['fake'],upstreams:['*']})),
   key_machines:[keeper,runner],http_allowed:false,subscriptions_unshared:[],subscriptions_withheld:[],runtime_templates:[],
   subscriptions:[{agent:{id:'native-profile',name:'Native profile',harness_kind:'fake', harness: harnessName('fake'),address:'acme.native',machine:null,disabled:false},harness:{kind:'fake',name:'Fake'},
@@ -41,7 +46,9 @@ const setup:ProviderSetup={ grouping: [],
   api_arrangements:[{type:'separated',allowed:true,available:true,puts:'The key stays in its keeper.',form:null}],
   sources:[{by:'builtin',name:'adapter',descriptor:SOURCE_DESCRIPTOR,default_for:[],machine:null,template:null,command:null}],
 };
+const initialSetup = structuredClone(setup);
 beforeEach(()=>{
+  setup=structuredClone(initialSetup);localTemplates=[];connectionProviders=[];
   vi.clearAllMocks();const profile=setup.subscriptions[0];
   if(profile!==undefined){profile.agent.machine=null;profile.arrangements=[{type:'separated',allowed:true,available:true,puts:'',form:null}];}
   for(const choice of setup.machines ?? [])choice.arrangements=['separated','key_separated'];
@@ -50,10 +57,84 @@ beforeEach(()=>{
 });
 afterEach(async()=>{cleanup();await setLocale('en');});
 
+it.each(['template first', 'host first'] as const)('keeps the chosen provider host and template with %s', async (order) => {
+  localTemplates = [{ id: 'chosen-template', name: 'Chosen runtime', kind: 'provider', driver: detailHost.drivers[0]?.name ?? '', enabled: true,
+    description: '', access: { permissions: ['template.use'] } } as Template];
+  try {
+    const user = userEvent.setup();
+    show(<AddProviderDialog initialHome="org" onClose={vi.fn()} />);
+    await chooseLocation(user, i18n.t('providerCreation.examples'), 'Example API');
+    await user.click(namedButton(i18n.t('common.next')));
+    if (order === 'host first') await chooseLocation(user, i18n.t('start.where.host'), detailHost.name);
+    await chooseLocation(user, i18n.t('start.where.template'), 'Chosen runtime');
+    if (order === 'template first') await chooseLocation(user, i18n.t('start.where.host'), detailHost.name);
+    else {
+      expect(screen.getByRole('combobox', { name: i18n.t('start.where.host') })).toHaveDisplayValue(detailHost.name);
+      await chooseLocation(user, i18n.t('start.where.template'), i18n.t('start.where.templateDefault'));
+      expect(screen.getByRole('combobox', { name: i18n.t('start.where.host') })).toHaveDisplayValue(detailHost.name);
+      await chooseLocation(user, i18n.t('start.where.template'), 'Chosen runtime');
+    }
+    await user.click(namedButton(i18n.t('providerCreation.create')));
+    await waitFor(() => expect(createProvider).toHaveBeenCalledOnce());
+    expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({ runtime_config: { 'runtime.host_id': detailHost.id, 'runtime.template_id': 'chosen-template' } });
+  } finally { localTemplates = []; }
+});
+
 async function chooseLocation(user:ReturnType<typeof userEvent.setup>,label:string,value:string) {
-  await user.click(screen.getByRole('combobox',{name:label}));
-  await user.click(screen.getByRole('option',{name:value}));
+  const trigger=screen.getByLabelText(label,{selector:'input,button',exact:true});
+  expect(trigger).toHaveAttribute('role','combobox');
+  await user.click(trigger);
+  const controlled=trigger.getAttribute('aria-controls');
+  const popup=controlled===null?null:document.getElementById(controlled);
+  const choices=popup ?? screen.queryByRole('dialog',{name:label}) ?? screen.getByRole('listbox');
+  await user.click(await within(choices).findByRole('option',{name:value}));
 }
+
+it.each(['en', 'zh-CN'] as const)('runs a connection in an existing environment through the one location field (%s)',async(locale)=>{
+  await setLocale(locale);
+  setup.environments=[{environment:{...detailEnvironment,id:'shared-workspace',name:'Shared workspace',status:'running'},
+    connector:{machine:{...runner,id:'environment-connector',placement:'managed'},directory_runtime:true,roles:['agent','provider','environment'],harnesses:['fake'],upstreams:['*'],arrangements:['separated','key_separated']}}];
+  const user=userEvent.setup();show(<AddProviderDialog initialHome="org" onClose={vi.fn()}/>);
+  await chooseLocation(user,i18n.t('providerCreation.examples'),'Example API');
+  await user.click(namedButton(i18n.t('common.next')));
+  await chooseLocation(user,i18n.t('providerCreation.runtime'),'Shared workspace');
+  expect(screen.getByText(i18n.t('providerCreation.environmentConnection',{name:'Shared workspace'}))).toBeVisible();
+  expect(screen.queryByRole('combobox',{name:i18n.t('start.where.host')})).not.toBeInTheDocument();
+  await user.click(namedButton(i18n.t('providerCreation.create')));
+  await waitFor(()=>expect(createProvider).toHaveBeenCalledOnce());
+  const body=vi.mocked(createProvider).mock.calls[0]?.[0];
+  expect(body).toMatchObject({runtime_location:{kind:'environment',environment_id:'shared-workspace'}});
+  expect(body).not.toHaveProperty('runtime_machine_id');
+});
+
+it('keeps an unavailable environment named with the actual missing-service reason',async()=>{
+  setup.environments=[{environment:{...detailEnvironment,id:'stopped-workspace',name:'Stopped workspace',status:'stopped'},connector:null}];
+  const user=userEvent.setup();show(<AddProviderDialog initialHome="org" onClose={vi.fn()}/>);
+  await chooseLocation(user,i18n.t('providerCreation.examples'),'Example API');
+  await user.click(namedButton(i18n.t('common.next')));
+  await user.click(screen.getByRole('combobox',{name:i18n.t('providerCreation.runtime')}));
+  expect(await screen.findByRole('option',{name:'Stopped workspace'})).toHaveAttribute('aria-disabled','true');
+  expect(screen.getByText(i18n.t('providerCreation.environmentStopped'))).toBeVisible();
+  expect(createProvider).not.toHaveBeenCalled();
+});
+
+function namedButton(name:string) {
+  const button=screen.getByText(name,{selector:'button'});
+  expect(button).toHaveAccessibleName(name);
+  return button;
+}
+
+it.each(['en','zh-CN'] as const)('lists readable provider connections on the environment page (%s)',async(locale)=>{
+  await setLocale(locale);
+  connectionProviders=Array.from({length:12},(_,index)=>({...planProvider(),id:`connection-${index}`,name:`Connection ${index}`}));
+  Object.assign(connectionProviders,{privateRows:[{id:'hidden-provider',name:'Hidden connection',content_hidden:true}]});
+  const user=userEvent.setup();show(<EnvironmentProviderConnections environmentId="shared-workspace"/>);
+  expect(await screen.findByRole('link',{name:'Connection 11'})).toHaveAttribute('href','/resources/providers/connection-11');
+  expect(screen.getByText(i18n.t('providerCreation.environmentConnectionsFact'))).toBeVisible();
+  expect(screen.queryByText('Hidden connection')).not.toBeInTheDocument();
+  await user.type(screen.getByRole('textbox',{name:i18n.t('providerCreation.searchConnections')}),'Connection 11');
+  expect(screen.getAllByRole('link')).toHaveLength(1);
+});
 
 it.each(['en', 'zh-CN'] as const)('keeps Add provider named the same through both steps and Back in %s', async (locale) => {
   await setLocale(locale);
@@ -65,13 +146,13 @@ it.each(['en', 'zh-CN'] as const)('keeps Add provider named the same through bot
   await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
   await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
   await chooseLocation(user, i18n.t('providerCreation.examples'), 'Example API');
-  await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+  await user.click(namedButton(i18n.t('common.next')));
   expect(dialog).toHaveAccessibleName(name);
   expect(screen.getAllByRole('button', { name })).toHaveLength(1);
   expect(createProvider).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: i18n.t('common.back') }));
+  await user.click(namedButton(i18n.t('common.back')));
   expect(dialog).toHaveAccessibleName(name);
-  expect(screen.getByRole('button', { name: i18n.t('common.next') })).toBeVisible();
+  expect(namedButton(i18n.t('common.next'))).toBeVisible();
   expect(createProvider).not.toHaveBeenCalled();
 });
 
@@ -81,15 +162,15 @@ it.each([false,true])('creates a provider with independent locations (native=%s)
   await user.selectOptions(screen.getByRole('combobox',{name:'Home'}),'org');
   await screen.findByRole('combobox',{name:i18n.t('providerCreation.examples')});
   await chooseLocation(user,i18n.t('providerCreation.examples'),native?'Native profile (Fake)':'Example API');
-  await user.click(screen.getByRole('button',{name:i18n.t('common.next')}));
+  await user.click(namedButton(i18n.t('common.next')));
   await chooseLocation(user,i18n.t(native?'providerCreation.signInMachine':'providerCreation.keyMachine'),'Keeper');
   await chooseLocation(user,i18n.t('providerCreation.runtime'),'Runner');
   const name=screen.getByLabelText(i18n.t('providers.add.name'));
   await user.clear(name);await user.paste('Independent account');
-  await user.click(screen.getByRole('button',{name:i18n.t('providerCreation.create')}));
+  await user.click(namedButton(i18n.t('providerCreation.create')));
   await waitFor(()=>expect(createProvider).toHaveBeenCalled());
   const body=vi.mocked(createProvider).mock.calls[0]?.[0];
-  expect(body).toMatchObject({kind:native?'subscription':'api',runtime_machine_id:'runner',keeper_machine_id:'keeper'});
+  expect(body).toMatchObject({kind:native?'subscription':'api',runtime_location:{kind:'machine',machine_id:'runner'},keeper_machine_id:'keeper'});
   expect(body).not.toHaveProperty('placement');
   expect(body).not.toHaveProperty('runtime_config');
   if (native) {expect(body).toHaveProperty('agent_id','native-profile');expect(body).not.toHaveProperty('api_key');}
@@ -105,15 +186,15 @@ it('keeps a registered native profile on its declared keeper while choosing anot
   await user.selectOptions(screen.getByRole('combobox',{name:'Home'}),'org');
   await screen.findByRole('combobox',{name:i18n.t('providerCreation.examples')});
   await chooseLocation(user,i18n.t('providerCreation.examples'),'Native profile (Fake)');
-  await user.click(screen.getByRole('button',{name:i18n.t('common.next')}));
+  await user.click(namedButton(i18n.t('common.next')));
   expect(screen.getByRole('combobox',{name:i18n.t('providerCreation.signInMachine')})).toBeDisabled();
   expect(screen.getByText(/This native profile is registered on Keeper/)).toBeVisible();
   await chooseLocation(user,i18n.t('providerCreation.runtime'),'Runner');
   await user.click(screen.getByLabelText(i18n.t('providers.add.name')));
   await user.paste('Registered native');
-  await user.click(screen.getByRole('button',{name:i18n.t('providerCreation.create')}));
+  await user.click(namedButton(i18n.t('providerCreation.create')));
   await waitFor(()=>expect(createProvider).toHaveBeenCalled());
-  expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({kind:'subscription',agent_id:'native-profile',keeper_machine_id:'keeper',runtime_machine_id:'runner'});
+  expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({kind:'subscription',agent_id:'native-profile',keeper_machine_id:'keeper',runtime_location:{kind:'machine',machine_id:'runner'}});
 });
 
 it.each(['en','zh-CN'] as const)('creates a native subscription under the keeper policy and opens its acknowledged provider in %s',async(locale)=>{
@@ -125,7 +206,7 @@ it.each(['en','zh-CN'] as const)('creates a native subscription under the keeper
   await user.selectOptions(screen.getByRole('combobox',{name:'Home'}),'org');
   await screen.findByRole('combobox',{name:i18n.t('providerCreation.examples')});
   await chooseLocation(user,i18n.t('providerCreation.examples'),'Native profile (Fake)');
-  await user.click(screen.getByRole('button',{name:i18n.t('common.next')}));
+  await user.click(namedButton(i18n.t('common.next')));
   await chooseLocation(user,i18n.t('providerCreation.signInMachine'),'Keeper');
   await chooseLocation(user,i18n.t('providerCreation.runtime'),'Runner');
   await user.click(screen.getByText(i18n.t('providers.add.arrangements'),{exact:true}));
@@ -135,11 +216,11 @@ it.each(['en','zh-CN'] as const)('creates a native subscription under the keeper
   }
   expect(createProvider).not.toHaveBeenCalled();
   await user.click(screen.getByLabelText(i18n.t('providers.add.name')));await user.paste('Native subscription');
-  await user.click(screen.getByRole('button',{name:i18n.t('providerCreation.create')}));
+  await user.click(namedButton(i18n.t('providerCreation.create')));
   await waitFor(()=>expect(navigate).toHaveBeenCalledExactlyOnceWith({to:'/resources/providers/$id',params:{id:planProvider().id},search:{tab:'key'}}));
   expect(close).toHaveBeenCalledOnce();
   expect(createProvider).toHaveBeenCalledTimes(1);
-  expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({kind:'subscription',agent_id:'native-profile',keeper_machine_id:'keeper',runtime_machine_id:'runner',arrangements:['separated','key_separated']});
+  expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({kind:'subscription',agent_id:'native-profile',keeper_machine_id:'keeper',runtime_location:{kind:'machine',machine_id:'runner'},arrangements:['separated','key_separated']});
 });
 
 it.each(['en','zh-CN'] as const)('explains when the selected keeper permits none of the native profile’s ways in %s',async(locale)=>{
@@ -151,11 +232,11 @@ it.each(['en','zh-CN'] as const)('explains when the selected keeper permits none
   await user.selectOptions(screen.getByRole('combobox',{name:'Home'}),'org');
   await screen.findByRole('combobox',{name:i18n.t('providerCreation.examples')});
   await chooseLocation(user,i18n.t('providerCreation.examples'),'Native profile (Fake)');
-  await user.click(screen.getByRole('button',{name:i18n.t('common.next')}));
+  await user.click(namedButton(i18n.t('common.next')));
   await chooseLocation(user,i18n.t('providerCreation.signInMachine'),'Keeper');
   expect(screen.getByText(i18n.t('providerCreation.noAllowedArrangement'))).toBeVisible();
   await user.click(screen.getByLabelText(i18n.t('providers.add.name')));await user.paste('No admitted way');
-  await user.click(screen.getByRole('button',{name:i18n.t('providerCreation.create')}));
+  await user.click(namedButton(i18n.t('providerCreation.create')));
   expect(createProvider).not.toHaveBeenCalled();expect(navigate).not.toHaveBeenCalled();
 });
 
@@ -173,7 +254,7 @@ it.each(['en', 'zh-CN'] as const)('keeps proposed and optional arrangements dist
   show(<AddProviderDialog initialHome="org" onClose={vi.fn()} />);
   await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
   await chooseLocation(user, i18n.t('providerCreation.examples'), 'Native profile (Fake)');
-  await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+  await user.click(namedButton(i18n.t('common.next')));
   await chooseLocation(user, i18n.t('providerCreation.signInMachine'), 'Keeper');
   await user.click(screen.getByText(i18n.t('providers.add.arrangements'), { exact: true }));
   const proposed = screen.getByRole('checkbox', { name: i18n.t('providerCreation.arrangements.separated') });
@@ -194,7 +275,7 @@ it.each(['en', 'zh-CN'] as const)('keeps proposed and optional arrangements dist
   expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   expect(createProvider).not.toHaveBeenCalled();
   await user.click(screen.getByLabelText(i18n.t('providers.add.name'))); await user.paste('Explicit native setup');
-  await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+  await user.click(namedButton(i18n.t('providerCreation.create')));
   await waitFor(() => expect(createProvider).toHaveBeenCalledTimes(1));
   expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({ kind: 'subscription', keeper_machine_id: 'keeper', arrangements: ['separated', 'key_separated'] });
 });
@@ -227,8 +308,8 @@ it.each([true, false])('Local embeddings uses a live ordinary template or create
     expect(await screen.findByRole('textbox', {name: i18n.t('admin.semantic.fields.model')})).toHaveValue('embeddinggemma-2');
     expect(screen.getByRole('textbox', {name: i18n.t('admin.semantic.fields.dimensions')})).toHaveValue('256');
     expect(screen.getByRole('button', {name: i18n.t('taskGuides.open', {title: i18n.t('taskGuides.addProvider')})})).toHaveAttribute('data-help-heading', 'local-embeddings');
-    await user.click(screen.getByRole('button', {name: i18n.t('common.next')}));
-    await user.click(screen.getByRole('button', {name: i18n.t('providerCreation.create')}));
+    await user.click(namedButton(i18n.t('common.next')));
+    await user.click(namedButton(i18n.t('providerCreation.create')));
     await waitFor(() => expect(done).toHaveBeenCalledOnce());
     expect(createProvider).toHaveBeenCalledWith(expect.anything(),expect.any(String));
     const given=vi.mocked(createProvider).mock.calls[0]?.[0];
@@ -257,8 +338,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const failed of ['model', 'r
       const close = vi.fn(); const done = vi.fn(); const user = userEvent.setup();
       show(<AddProviderDialog initialHome="org" initialPreset="Local embeddings" onClose={close} onCreated={done} />);
       await screen.findByRole('textbox', { name: i18n.t('admin.semantic.fields.model') });
-      await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
-      await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+      await user.click(namedButton(i18n.t('common.next')));
+      await user.click(namedButton(i18n.t('providerCreation.create')));
       expect(await screen.findByText(i18n.t('providerCreation.partial', { name: planProvider().name }))).toBeVisible();
       expect(screen.getByRole('alert')).toHaveTextContent(i18n.t('network.offline'));
       expect(screen.queryByLabelText(i18n.t('providers.add.name'))).not.toBeInTheDocument();
@@ -300,14 +381,15 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
       const key = `fixture-${admin ? 'admin' : 'model'}-private-value`;
       const field = screen.getByLabelText(i18n.t('providerFill.key'), { exact: true });
-      await user.type(field, key);
+      await user.click(field);await user.paste(key);
       expect(field).toHaveAttribute('type', 'password');
+      const usePreset=await screen.findByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) });
       expect(screen.getByTestId('credential-proposal')).toHaveTextContent(i18n.t('providerFill.sources.format'));
-      await user.click(screen.getByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) }));
+      await user.click(usePreset);
       expect(screen.getByLabelText(i18n.t('resources.endpoint.address'), { exact: true })).toHaveValue('https://models.example/v1');
       expect(screen.getByText(i18n.t('providerFill.sources.catalogue'), { exact: true })).toBeVisible();
       expect(createProvider).not.toHaveBeenCalled();
-      await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+      await user.click(namedButton(i18n.t('common.next')));
       const review = screen.getByRole('region', { name: i18n.t('providerFill.review') });
       expect(review).toHaveTextContent(i18n.t(admin ? 'providerFill.adminKey' : 'providerFill.modelKey'));
       expect(review).toHaveTextContent(i18n.t('providerFill.sources.format'));
@@ -316,14 +398,14 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       await chooseLocation(user, i18n.t('providerCreation.runtime'), 'Runner');
       const name = screen.getByLabelText(i18n.t('providers.add.name'));
       await user.clear(name); await user.paste('Kept personal name');
-      await user.click(screen.getByRole('button', { name: i18n.t('common.back') }));
+      await user.click(namedButton(i18n.t('common.back')));
       expect(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true })).toHaveValue(key);
-      await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+      await user.click(namedButton(i18n.t('common.next')));
       expect(screen.getByLabelText(i18n.t('providers.add.name'))).toHaveValue('Kept personal name');
-      await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+      await user.click(namedButton(i18n.t('providerCreation.create')));
       await waitFor(() => expect(createProvider).toHaveBeenCalledTimes(1));
       const body = vi.mocked(createProvider).mock.calls[0]?.[0];
-      expect(body).toMatchObject({ kind: 'api', name: 'Kept personal name', runtime_machine_id: 'runner', keeper_machine_id: 'keeper' });
+      expect(body).toMatchObject({ kind: 'api', name: 'Kept personal name', runtime_location: {kind:'machine',machine_id:'runner'}, keeper_machine_id: 'keeper' });
       if (admin) {
         expect(body).not.toHaveProperty('api_key');
         expect(body).toMatchObject({ sources: { facts: { by: 'default', secrets: { admin_key: key } } } });
@@ -351,20 +433,21 @@ it.each(['en', 'zh-CN'] as const)('keeps an unsupported admin draft out of the m
     show(<AddProviderDialog onClose={vi.fn()} />);
     await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
     await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
-    await user.type(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true }), 'fixture-admin-private');
-    await user.click(screen.getByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) }));
-    await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
-    expect(screen.getByText(i18n.t('providerFill.adminSourceRequired'))).toBeVisible();
-    const save = screen.getByRole('button', { name: i18n.t('providerCreation.create') });
+    await user.click(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true }));
+    await user.paste('fixture-admin-private');
+    await user.click(await screen.findByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) }));
+    await user.click(namedButton(i18n.t('common.next')));
+    expect(screen.queryByRole('region', { name: i18n.t('providerFill.review') })?.textContent).toContain(i18n.t('providerFill.adminSourceRequired'));
+    const save = namedButton(i18n.t('providerCreation.create'));
     expect(save).toHaveAttribute('aria-disabled', 'true');
     await user.click(save);
     expect(createProvider).not.toHaveBeenCalled();
-    await user.click(screen.getByRole('button', { name: i18n.t('common.back') }));
+    await user.click(namedButton(i18n.t('common.back')));
     expect(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true })).toHaveValue('fixture-admin-private');
     await chooseLocation(user, i18n.t('providerFill.role'), i18n.t('providerFill.modelKey'));
-    await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+    await user.click(namedButton(i18n.t('common.next')));
     expect(screen.getByRole('region', { name: i18n.t('providerFill.review') })).toHaveTextContent(i18n.t('providerFill.sources.choice'));
-    await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+    await user.click(namedButton(i18n.t('providerCreation.create')));
     await waitFor(() => expect(createProvider).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toHaveProperty('api_key', 'fixture-admin-private');
   } finally { setup.presets = presets; }

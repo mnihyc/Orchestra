@@ -340,9 +340,100 @@ pub struct PlanHostBlocker {
     pub message: String,
 }
 
+/// The scheduler's actual inputs and consequence, captured before a host is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementCalculation {
+    /// When this calculation was captured.
+    pub captured_at: Time,
+    /// Existing units' declared needs before runtime overhead.
+    pub declared_totals: Amounts,
+    /// The exact totals used by this scheduler's capacity tests.
+    pub applied_totals: Amounts,
+    /// Runtime overhead, kept distinct from unit needs and measured usage.
+    pub runtime_overhead: PlacementRuntimeOverhead,
+    /// Reported host capacities; missing members are named by sources.capacity_unreported.
+    pub capacities: Amounts,
+    /// When this capacity report was received; absent when not reported.
+    pub capacities_as_of: Option<Time>,
+    /// The memory tests' effective settings and incoming need.
+    pub thresholds: PlacementThresholds,
+    /// Whether a full or undersized host warns or blocks.
+    pub consequence: WhenFull,
+    /// Actual declaration/setting layers used for these values.
+    pub sources: PlacementCalculationSources,
+    /// Isolation resolved from the same selected driver, runtime and template.
+    pub isolation: Option<orch_driver_contract::isolation::RuntimeIsolation>,
+}
+
+/// Memory additional to the unit's declared resources, without assuming unknown means zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementRuntimeOverhead {
+    /// Additional memory actually included for existing units.
+    pub existing_memory_mb: i64,
+    /// The selected class's additional memory for the incoming unit, when declared.
+    pub incoming_memory_mb: Option<i64>,
+    /// Whether this scheduler included incoming overhead in its room test.
+    pub incoming_included: bool,
+    /// The selected class's overhead provenance.
+    pub source: orch_driver_contract::isolation::RuntimeAssumptionSource,
+}
+
+/// The actual memory threshold and incoming declaration used by the scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementThresholds {
+    /// Fullness percentage resolved for this calculation.
+    pub full_percent: i64,
+    /// The incoming unit's memory need used by the room test.
+    pub incoming_memory_mb: i64,
+}
+
+/// Layers, rather than concealed resource names or machine policy, behind a calculation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementCalculationSources {
+    /// One source per incoming CPU, memory and disk need.
+    pub needs: std::collections::BTreeMap<String, PlacementNeedSource>,
+    /// Capacity members absent from the actual report; absence never becomes measured zero.
+    pub capacity_unreported: Vec<String>,
+    /// The revision of the actual template read by this calculation.
+    pub template_revision: i64,
+    /// Fullness is the system's hosts.full_percent setting.
+    pub full_percent: PlacementSettingSource,
+    /// A host's explicit answer, otherwise the system's hosts.when_full setting.
+    pub consequence: PlacementSettingSource,
+}
+
+/// The branch of the normal needs resolver that supplied a resource value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementNeedSource {
+    /// Explicit or inherited env.needs/runtime.needs.
+    ResolvedNeeds,
+    /// The template's needs member.
+    TemplateNeeds,
+    /// Effective resource limits, including the template's ceilings.
+    ResolvedResources,
+    /// The template's resource declaration.
+    TemplateResources,
+    /// No value was declared; the calculation used its existing zero fallback.
+    NotReported,
+}
+
+/// The authority level at which the existing setting was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementSettingSource {
+    /// The system setting, including its declared default.
+    System,
+    /// The host's explicit when-full choice.
+    Host,
+}
+
 /// A host an environment could be placed on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaceHost {
+    /// Scheduler inputs captured for this proposal, never reconstructed for an old result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculation: Option<Box<PlacementCalculation>>,
     /// Stored home, protected origin and the native placement verdict.
     #[serde(default, flatten)]
     pub grouping: crate::resource_groups::ResourceGrouping,
@@ -831,6 +922,8 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that
