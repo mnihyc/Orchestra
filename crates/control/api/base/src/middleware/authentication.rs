@@ -148,6 +148,12 @@ pub fn new_token(prefix: &str) -> String {
     )
 }
 
+/// A new API key names its actual stored identity and carries 256 random secret bits.
+#[must_use]
+pub fn new_api_token(id: Id) -> String {
+    orch_api_contract::api_keys::encode(id, &rand::random::<[u8; 32]>())
+}
+
 /// The bearer token of a request, where it carries one.
 #[must_use]
 pub fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -178,8 +184,11 @@ pub fn on_surface(
     headers: &HeaderMap,
 ) -> ApiResult<()> {
     use orch_api_contract::surface::HttpSurface;
-    // Keep the existing resolver's classification: opat_ names a key; other bearers
-    // must still resolve as actual session access tokens. This is not a new token-format rule.
+    if bearer(headers).is_some_and(|token| {
+        token.starts_with(API_TOKEN_PREFIX) && orch_api_contract::api_keys::key_id(token).is_none()
+    }) {
+        return Err(invalid_token());
+    }
     if bearer(headers)
         .is_some_and(|token| (surface == HttpSurface::Key) != token.starts_with(API_TOKEN_PREFIX))
         || (surface == HttpSurface::Key
@@ -212,10 +221,15 @@ pub async fn authenticate(
     let Some(token) = bearer(headers) else {
         return Ok(Caller::Anonymous);
     };
+    let key_id = if token.starts_with(API_TOKEN_PREFIX) {
+        Some(orch_api_contract::api_keys::key_id(token).ok_or_else(invalid_token)?)
+    } else {
+        None
+    };
     let hash = token_hash(token);
     let mut conn = app.db.acquire().await?;
-    let (user_id, via, as_admin) = if token.starts_with(API_TOKEN_PREFIX) {
-        let row = identity::api_token_by_hash(&mut conn, &hash, now)
+    let (user_id, via, as_admin) = if let Some(key_id) = key_id {
+        let row = identity::api_token_by_identity(&mut conn, key_id, &hash, now)
             .await?
             .ok_or_else(invalid_token)?;
         let scope = operation_scope(row.operation_scope)?;
@@ -283,9 +297,10 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     fn surface_headers_reject_foreign_kinds_before_public_and_cookie_shortcuts() {
         use orch_api_contract::surface::HttpSurface;
+        let api_key = new_api_token(orch_types::new_id());
         for (token, origin, foreign) in [
             ("oat_synthetic", HttpSurface::Browser, HttpSurface::Key),
-            ("opat_synthetic", HttpSurface::Key, HttpSurface::Browser),
+            (api_key.as_str(), HttpSurface::Key, HttpSurface::Browser),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -294,6 +309,15 @@ pub mod tests {
             );
             assert!(on_surface(origin, &headers).is_ok());
             assert!(on_surface(foreign, &headers).is_err());
+        }
+        for malformed in ["opat_synthetic".to_owned(), format!("{api_key}x")] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {malformed}").parse().unwrap(),
+            );
+            assert!(on_surface(HttpSurface::Key, &headers).is_err());
+            assert!(on_surface(HttpSurface::Browser, &headers).is_err());
         }
         let mut cookie = HeaderMap::new();
         cookie.insert(

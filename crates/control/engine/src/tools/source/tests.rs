@@ -608,6 +608,7 @@ impl Scene {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".into(),
                     descriptor: reported.clone(),
@@ -653,6 +654,7 @@ impl Scene {
                 let dir = body.path != "web/out/result.bin";
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: if dir { "web" } else { "result.bin" }.into(),
                             path: body.path.clone(),
@@ -734,6 +736,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -1610,6 +1614,7 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
         link::insert_command(
             &mut conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: machine,
                 kind: &command.kind,
@@ -1845,6 +1850,7 @@ async fn download_peer(
             })?;
             Ok(CommandResult::FsWrite(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "copied-doc.md".into(),
                         path: body.path.clone(),
@@ -1899,6 +1905,7 @@ async fn download_peer(
             };
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: if is_source {
                             "result.bin"
@@ -2092,10 +2099,6 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         None
     };
     scene.end_original().await?;
-    common::eventually("the genuine original end-file observation finishes before the native write is issued",||async {
-        sqlx::query_scalar::<_,bool>("SELECT NOT files_end_due AND NOT files_work_pending AND end_work IS NULL FROM turns WHERE id=$1")
-            .bind(scene.start.turn_id).fetch_one(scene.world.pool.pool()).await.unwrap_or(false)
-    }).await;
     let accepted = scene
         .request_selection("queued-native-effect-fence")
         .await?;
@@ -2283,6 +2286,10 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         result
     };
     assert_eq!(result.thread_id, scene.thread);
+    common::eventually("the original end-file observation finishes after the admitted native effect drains",||async {
+        sqlx::query_scalar::<_,bool>("SELECT NOT files_end_due AND NOT files_work_pending AND end_work IS NULL FROM turns WHERE id=$1")
+            .bind(scene.start.turn_id).fetch_one(scene.world.pool.pool()).await.unwrap_or(false)
+    }).await;
     scene.selected(&accepted).await?;
     assert_eq!(scene.world.machine.handler.runs_of(id), 1);
     assert_eq!(
@@ -3347,6 +3354,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     let environment = scene.world.environment;
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             environment_id: environment,
             workspace_root: Some(root.display().to_string()),
             resources: None,

@@ -25,3 +25,9 @@ pub mod mount_locations;
 
 /// Exact native Skill creation sources and original command phases.
 pub mod skill_creation;
+
+/// Native temporary-file sources of shared browser upload sessions.
+pub mod upload_session;
+
+/// Original public model-call sources and their immutable native association.
+pub mod provider_relay;

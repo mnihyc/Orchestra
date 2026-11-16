@@ -76,10 +76,47 @@ pub enum ContentError {
     Local(String),
 }
 
+/// One request to a command-bound memory relay, separate from hash-addressed stored content.
+#[derive(Clone)]
+pub enum RelayRequest {
+    /// The destination reports the prefix it has durably written.
+    Stand { received: i64 },
+    /// The destination asks for its next piece.
+    Pull { offset: i64, len: i64 },
+    /// The source offers a piece for a browser response.
+    Push { offset: i64, bytes: Bytes },
+}
+
+/// The bounded answer to a memory relay request.
+pub enum RelayReply {
+    /// A prefix acknowledged by the destination.
+    Progress(i64),
+    /// A piece for the destination to write.
+    Piece(Bytes),
+    /// No piece was available during this poll.
+    Idle,
+    /// The source completed the transfer.
+    End,
+}
+
 /// The requests of content transfer as a machine makes them. Every one names
 /// the command it is made for.
 #[async_trait]
 pub trait BlobEndpoint: Send + Sync {
+    /// Moves a piece through memory, without granting access to any stored blob.
+    /// Endpoints used only as stored-content stand-ins need not implement a memory transport.
+    async fn relay(
+        &self,
+        _command: Id,
+        _relay: Id,
+        _request: RelayRequest,
+        _within: Duration,
+    ) -> Result<RelayReply, PutRefusal> {
+        Err(PutRefusal::Refused(
+            "this endpoint does not carry memory relays".into(),
+        ))
+    }
+
     /// `HEAD`: how much of the content the server has, or `None` if it knows
     /// nothing of it.
     async fn head(&self, command: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal>;
@@ -329,7 +366,8 @@ impl Transfers {
         }
     }
 
-    fn note(&self, rate: &mut Option<i64>, bytes: i64, started: Instant, up: bool) {
+    /// Records a completed piece for adaptive sizing and the shared link measurements.
+    pub fn note(&self, rate: &mut Option<i64>, bytes: i64, started: Instant, up: bool) {
         let seconds = started.elapsed().as_secs_f64().max(0.001);
         // A piece's rate is bytes over the time it took; an average of the
         // last few steers the next piece.

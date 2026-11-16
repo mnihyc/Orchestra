@@ -12,15 +12,15 @@ import { me } from '../doubles/fixtures';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ admin: true, mode: true, figures: vi.fn<(params: Usage.UsageParams) => void>(), node: vi.fn(), provider: vi.fn(), requests: vi.fn<(scope: { kind: string }) => void>() }));
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(), meQuery: { queryKey: ['system-report-me'], queryFn: () => Promise.resolve(me(1, 'admin', 'Administrator', { is_system_admin: calls.admin })) } }));
-vi.mock('@/features/access/AdminMode', () => ({ useAdminMode: () => ({ data: { as_admin: calls.mode }, isPending: false, isError: false, error: null, refetch: () => Promise.resolve() }), AdminModeEnableAction: () => <button type="button">Enable system reach</button> }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAdminMode: () => ({ data: { as_admin: calls.mode }, isPending: false, isError: false, error: null, refetch: () => Promise.resolve() }), AdminModeEnableAction: () => <button type="button">Enable system reach</button> }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), nodeQuery: (id: string) => ({ queryKey: ['system-report-node', id], queryFn: () => { calls.node(); return Promise.resolve(null); } }) }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof Resources>(), providerQuery: (id: string) => ({ queryKey: ['system-report-provider', id], queryFn: () => { calls.provider(); return Promise.resolve(null); } }) }));
 vi.mock('@/features/usage/Requests', () => ({ Requests: ({ scope }: { scope: { kind: string } }) => { calls.requests(scope); return <p>System request snapshot</p>; } }));
 vi.mock('@/features/usage/Chart', () => ({ UsageChart: () => null }));
 vi.mock('@/features/usage/Limits', () => ({ Limits: ({ of }: { of: { kind: string } }) => <span data-testid="scope-limits">{of.kind}</span> }));
 vi.mock('@/features/usage/Export', () => ({ Export: () => <button type="button">Export current scope</button> }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/usage', async (original) => {
   const actual = await original<typeof Usage>();
   return { ...actual, usageQuery: (params: Usage.UsageParams) => ({ ...actual.usageQuery(params), queryFn: (): Promise<UsageAnalytics> => {

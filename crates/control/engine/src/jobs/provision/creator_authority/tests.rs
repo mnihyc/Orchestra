@@ -267,6 +267,7 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
             .is_some_and(|value| value > 0)
     );
     let canonical = Outgoing {
+        content_transit: false,
         id,
         machine: s.world.machine_id,
         kind: CommandKind::FsSnapshot,
