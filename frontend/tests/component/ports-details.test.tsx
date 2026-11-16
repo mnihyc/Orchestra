@@ -16,8 +16,8 @@ import { portsEnvironment, portsProjection } from './ports-fixtures';
 import { show } from './support';
 import type { PortOpenReply } from '@/generated/api-types';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 function withQuery(body: ReactNode) { const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }); return { ...show(<QueryClientProvider client={cache}>{body}</QueryClientProvider>), cache }; }
 const request: PortRequest = { id: 'request-1', revision: 1, environment_id: 'environment-1', port: 3000, way: 'link', reason: 'A webhook must call this port.', agent: 'Main', address: 'https://port.example', audience: 'Anyone with this link can enter.', until: new Date(Date.now() + 3_600_000).toISOString(), can_decide: true, state: 'pending', transports: 'tcp_udp', link_carriers: 'both' };
 describe('intentional audience and entry facts', () => {

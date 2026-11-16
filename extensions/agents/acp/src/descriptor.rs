@@ -281,6 +281,7 @@ pub fn descriptor(program: &AcpProgram, learned: &Learned) -> AgentDescriptor {
         sandbox_modes: program.sandbox_modes.clone(),
         side_thread_modes: Vec::new(),
         capabilities,
+        features: Default::default(),
         parameters,
         extensions,
     }
