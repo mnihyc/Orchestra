@@ -1,6 +1,6 @@
 //! The actual environment offering and creation parent across native copy waits.
 
-use super::{ImportSelection, may_import, select_import};
+use super::{ImportSelection, discovery_origin, may_import, select_import_from};
 use crate::EngineError;
 use crate::operation_scope::{
     continuing::{Error, Source},
@@ -79,6 +79,14 @@ impl Input {
         orch_link_contract::commands::SerialKey::Environment(self.environment())
     }
 
+    /// The same locator as the native discovery row, retained across the copy wait.
+    pub fn origin(&self) -> String {
+        discovery_origin(
+            self.environment(),
+            &serde_json::json!({"profile":self.command.profile,"source":self.command.source,"scope":self.command.scope,"directory":self.command.directory,"name":self.command.name}),
+        )
+    }
+
     /// Reuse a retained copy only for the same immutable native request.
     pub fn matches_request(
         &self,
@@ -87,12 +95,14 @@ impl Input {
         scope: &Json,
         directory: Option<&str>,
         name: &str,
+        origin: Option<&str>,
     ) -> bool {
         self.environment() == environment
             && self.command.source == source
             && &self.scope == scope
             && self.command.directory.as_deref() == directory
             && self.command.name == name
+            && origin.is_none_or(|origin| origin == self.origin())
     }
 }
 
@@ -121,13 +131,15 @@ impl Source for Offering {
         _: Time,
     ) -> BoxFuture<'a, Result<(ImportSelection, Vec<Facts<Role>>), Error>> {
         Box::pin(async move {
-            let selected = select_import(
+            let origin = input.origin();
+            let selected = select_import_from(
                 conn,
                 input.environment(),
                 &input.command.source,
                 input.scope.clone(),
                 input.command.directory.clone(),
                 &input.command.name,
+                Some(&origin),
             )
             .await
             .map_err(native_error)?;

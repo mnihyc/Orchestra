@@ -1536,6 +1536,76 @@ impl CertificateService {
         frontend::keep(&self.inner.authority, config, self.inner.clock.as_ref())
     }
 
+    /// Publish the committed HTTPS policy; serialize publishers sharing the deployment's directory.
+    pub async fn publish_frontend_transport(
+        &self,
+        config: &ServerConfig,
+    ) -> Result<Duration, LinkFault> {
+        let mut tx = self.inner.db.pool().begin().await.map_err(DbError::from)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('orch.frontend.transport', 0))")
+            .execute(&mut *tx)
+            .await
+            .map_err(DbError::from)?;
+        let policy = Box::pin(orch_settings::get::<transport::Transport>(
+            &mut tx,
+            orch_settings::Place::System,
+            orch_settings_contract::registry::keys::EDGE_TRANSPORT,
+        ))
+        .await
+        .map_err(|error| LinkFault::internal(&error))?
+        .ok_or_else(|| LinkFault::internal(&"the HTTPS transport setting is absent"))?;
+        transport::publish(
+            &Path::new(&config.storage.root).join("frontend-tls/transport.include"),
+            &policy.render(),
+        )?;
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(Duration::from_secs(policy.reload_secs.get()))
+    }
+
+    /// A committed settings notification wakes the publisher; idle work does no database polling.
+    pub async fn keep_frontend_transport(
+        self,
+        config: Arc<ServerConfig>,
+        stop: tokio_util::sync::CancellationToken,
+        mut retry: Duration,
+    ) {
+        use orch_db::sequences::{self, Notice};
+        while !stop.is_cancelled() {
+            let listening = tokio::select! {
+                () = stop.cancelled() => return,
+                result = sequences::listen(&self.inner.db, &[sequences::EDGE_CHANNEL]) => result,
+            };
+            let mut notices = match listening {
+                Ok(notices) => notices,
+                Err(error) => {
+                    tracing::warn!(%error, "the HTTPS policy publisher cannot listen to settings");
+                    tokio::select! { () = stop.cancelled() => return, () = tokio::time::sleep(retry) => {} }
+                    continue;
+                }
+            };
+            // Re-read after joining: changes before the listener or during an interruption are covered.
+            loop {
+                match self.publish_frontend_transport(&config).await {
+                    Ok(interval) => retry = interval,
+                    Err(error) => {
+                        tracing::warn!(detail = %error.detail, "the HTTPS policy could not be published; it will be retried");
+                        tokio::select! { () = stop.cancelled() => return, () = tokio::time::sleep(retry) => {} }
+                        continue;
+                    }
+                }
+                let heard = tokio::select! { () = stop.cancelled() => return, result = notices.next() => result };
+                match heard {
+                    Ok(Notice::Heard { .. } | Notice::Reconnected) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "the HTTPS policy publisher lost its settings listener");
+                        tokio::select! { () = stop.cancelled() => return, () = tokio::time::sleep(retry) => {} }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Checks that a certificate chains to the authority and names somebody
     /// of the system, as the gateway that gave it says it did. An expired
     /// machine certificate passes for as long as renewal forgives it.
@@ -1784,6 +1854,9 @@ pub(crate) async fn endpoints_for_machine(
 
 #[path = "certificates/frontend.rs"]
 pub mod frontend;
+
+#[path = "certificates/transport.rs"]
+mod transport;
 
 #[path = "certificates/revocation.rs"]
 pub mod revocation;

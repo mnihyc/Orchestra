@@ -1,0 +1,3 @@
+# b43y-7: the same on the trial head 544180edf (flaky or real)
+test -p orch-envhost --lib -- environment::directory_watch_tests::
+test -p orch-api-core --test summaries
