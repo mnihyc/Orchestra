@@ -817,6 +817,8 @@ DECLARE
   n       bigint;
   expect  text := COALESCE(current_setting('orch.cache_expect', true), '');
   root    record;
+  epoch_place uuid;
+  epoch_value bigint;
 BEGIN
   -- 1. Authorization: every epoch decided under and every one moved, locked in org order, compared, then moved.
   places := ARRAY(SELECT DISTINCT p FROM (SELECT k::uuid FROM jsonb_object_keys(seen) k UNION ALL SELECT unnest(advance)) x(p) ORDER BY 1);
@@ -824,10 +826,18 @@ BEGIN
   -- the first competing authority change cannot insert past an absent-row lock.
   INSERT INTO authz_epochs (org_id) SELECT unnest(places) ORDER BY 1 ON CONFLICT (org_id) DO NOTHING;
   IF cardinality(advance) > 0 THEN
-    -- Consume the complete locked set before comparing it. A mismatch filter or
-    -- LIMIT in the locking query can skip equal rows and leave them unfenced.
-    SELECT COALESCE(jsonb_object_agg(e.org_id::text,e.epoch),'{}') INTO locked_epochs
-      FROM (SELECT org_id, epoch FROM authz_epochs WHERE org_id = ANY(places) ORDER BY org_id FOR NO KEY UPDATE) e;
+    -- Lock every dependency in one org order. Only advanced epochs need a write lock;
+    -- unchanged dependencies, including the system epoch of an org-only change, stay shared.
+    FOR epoch_place IN SELECT unnest(places) ORDER BY 1 LOOP
+      IF epoch_place=ANY(advance) THEN
+        SELECT e.epoch INTO epoch_value FROM authz_epochs e
+         WHERE e.org_id=epoch_place FOR NO KEY UPDATE;
+      ELSE
+        SELECT e.epoch INTO epoch_value FROM authz_epochs e
+         WHERE e.org_id=epoch_place FOR SHARE;
+      END IF;
+      locked_epochs:=locked_epochs || jsonb_build_object(epoch_place::text,epoch_value);
+    END LOOP;
   ELSIF cardinality(places) > 0 THEN
     SELECT COALESCE(jsonb_object_agg(e.org_id::text,e.epoch),'{}') INTO locked_epochs
       FROM (SELECT org_id, epoch FROM authz_epochs WHERE org_id = ANY(places) ORDER BY org_id FOR SHARE) e;
@@ -841,21 +851,7 @@ BEGIN
   IF cardinality(advance) > 0 THEN
     UPDATE authz_epochs SET epoch = epoch + 1 WHERE org_id = ANY(advance);
   END IF;
-  -- 2. The cache epoch: moved once and announced with its new value, or checked for a background decision.
-  IF COALESCE(current_setting('orch.authz_bump', true), '') <> '' THEN
-    INSERT INTO authz_state (id, epoch) VALUES (true, 1)
-      ON CONFLICT (id) DO UPDATE SET epoch = authz_state.epoch + 1 RETURNING epoch INTO n;
-    IF expect <> '' AND n - 1 <> expect::bigint THEN
-      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
-    END IF;
-    PERFORM pg_notify('orch_authz', n::text);
-  ELSIF expect <> '' THEN
-    SELECT COALESCE((SELECT s.epoch FROM authz_state s WHERE s.id FOR SHARE), 0) INTO n;
-    IF n <> expect::bigint THEN
-      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
-    END IF;
-  END IF;
-  -- 3. Trees: each root org's next number, for the nodes stamped in it (already locked by this transaction).
+  -- 2. Trees: each root org's next number, for the nodes stamped in it (already locked by this transaction).
   FOR root IN SELECT key::uuid AS org, value AS stamps FROM jsonb_each(orch_setting_json('orch.tree_stamps', '{}')) ORDER BY 1 LOOP
     UPDATE orgs SET tree_seq = tree_seq + 1,
                     tree_changed_at = GREATEST(tree_changed_at, COALESCE((root.stamps ->> 'at')::timestamptz, now()))
@@ -870,7 +866,7 @@ BEGIN
       PERFORM pg_notify('orch_tree', root.org::text || ':' || n::text);
     END IF;
   END LOOP;
-  -- 4. Number each changed row once, in its first-write order within this commit.
+  -- 3. Number each changed row once, in its first-write order within this commit.
   -- Replay of an already committed immutable event keeps its original cursor.
   WITH touched AS MATERIALIZED (
     SELECT table_name, id, min(ordinal) AS first_ordinal
@@ -900,6 +896,21 @@ BEGIN
    WHERE numbered.table_name='usage_running' AND target.id=numbered.id;
   DELETE FROM usage_commit_rows WHERE xact=NEW.xact;
   DELETE FROM commit_work WHERE xact = NEW.xact;
+  -- 4. The cache epoch is last: no tree counter or local journal can make its owner wait.
+  -- Move it once and announce the actual value, or check the background decision's version.
+  IF COALESCE(current_setting('orch.authz_bump', true), '') <> '' THEN
+    INSERT INTO authz_state (id, epoch) VALUES (true, 1)
+      ON CONFLICT (id) DO UPDATE SET epoch = authz_state.epoch + 1 RETURNING epoch INTO n;
+    IF expect <> '' AND n - 1 <> expect::bigint THEN
+      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
+    END IF;
+    PERFORM pg_notify('orch_authz', n::text);
+  ELSIF expect <> '' THEN
+    SELECT COALESCE((SELECT s.epoch FROM authz_state s WHERE s.id FOR SHARE), 0) INTO n;
+    IF n <> expect::bigint THEN
+      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
+    END IF;
+  END IF;
   RETURN NULL;
 END
 $$;
@@ -934,6 +945,41 @@ BEGIN
       WHERE source_kind='comment' AND part_id=NEW.id AND source_moment IS DISTINCT FROM NEW.created_at;
   END IF;
   RETURN NEW;
+END
+$$;
+
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
 END
 $$;
 
@@ -1098,7 +1144,7 @@ $$;
 CREATE FUNCTION public.orch_participation_objects_changed() RETURNS trigger
     LANGUAGE plpgsql
     AS $_$
-DECLARE kind text; home_column text; live_sql text; joins text:=''; keys_sql text;
+DECLARE kind text; home_column text; live_sql text; joins text:=''; keys_sql text; changed boolean;
 BEGIN
  keys_sql:=CASE TG_OP WHEN 'INSERT' THEN 'SELECT id FROM participation_new_objects'
   WHEN 'DELETE' THEN 'SELECT id FROM participation_old_objects'
@@ -1116,6 +1162,19 @@ BEGIN
   ('mounts','mount','home_id','o.deleted_at IS NULL'),
   ('skills','skill','home_id','o.deleted_at IS NULL')
  ) x(table_name,kind,home_column,live_sql) WHERE x.table_name=TG_TABLE_NAME;
+ IF TG_OP='UPDATE' THEN
+  -- Only placement and liveness feed these projections. Content, clocks and factual reports
+  -- must not lock assignment rows or re-plan their maintenance for every streaming update.
+  keys_sql:=format('SELECT COALESCE(n.id,o.id) id FROM participation_new_objects n
+   FULL JOIN participation_old_objects o USING(id) WHERE n.id IS NULL OR o.id IS NULL OR %s',
+   CASE kind
+    WHEN 'node' THEN '(n.path,n.org_id,n.deleted_at) IS DISTINCT FROM (o.path,o.org_id,o.deleted_at)'
+    WHEN 'host' THEN '(n.home_id,n.org_id,n.machine_id) IS DISTINCT FROM (o.home_id,o.org_id,o.machine_id)'
+    ELSE format('(n.%1$I,n.org_id,n.deleted_at) IS DISTINCT FROM (o.%1$I,o.org_id,o.deleted_at)',home_column)
+   END);
+  EXECUTE 'SELECT EXISTS('||keys_sql||')' INTO changed;
+  IF NOT changed THEN RETURN NULL; END IF;
+ END IF;
  IF kind='host' THEN joins:=' LEFT JOIN machines m ON m.id=o.machine_id '; END IF;
  EXECUTE format('WITH changed AS (%s) SELECT f.object_id FROM participation_object_facts f
   WHERE f.object_kind=%L AND f.object_id IN(SELECT id FROM changed) ORDER BY f.object_id FOR UPDATE OF f',keys_sql,kind);
@@ -2537,6 +2596,50 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+
+CREATE FUNCTION public.orch_provider_source_choices(sources jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$
+WITH elements AS (
+    SELECT name,COALESCE(NULLIF(sources->name,'null'::jsonb),'{}'::jsonb) choice
+    FROM unnest(ARRAY['facts','models','presenter']) name
+)
+SELECT jsonb_object_agg(name,jsonb_build_object(
+    'by',COALESCE(choice->>'by','default'),
+    -- A default's name is learned from its credential/endpoints, never selected by the person.
+    'name',CASE WHEN choice->>'by' IN ('builtin','program') THEN choice->'name' END,
+    'address',CASE WHEN choice->>'by'='address' THEN choice->'address' END,
+    'config',COALESCE(NULLIF(choice->'config','null'::jsonb),'{}'::jsonb),
+    'secrets',COALESCE(NULLIF(choice->'secrets','null'::jsonb),'[]'::jsonb)))
+FROM elements
+$$;
+
+CREATE FUNCTION public.orch_provider_revision() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    -- The form's revision follows editable configuration. Runtime placement, custody, status,
+    -- sign-in reports and learned source metadata advance only the observation counter.
+    IF (NEW.id,NEW.name,NEW.owner_id,NEW.org_id,NEW.home_id,NEW.home_overridden_at,
+        NEW.kind,NEW.harness_kind,NEW.agent_id,NEW.upstreams,NEW.model_group_options,NEW.service_offerings,
+        NEW.config,NEW.protocols,NEW.key_machine_id,NEW.arrangements,NEW.runtime_config,NEW.credential_home,
+        NEW.facts_overrides,NEW.deleted_at,
+        NEW.status='disabled',CASE WHEN NEW.status='disabled' THEN NEW.status_detail END,
+        orch_provider_source_choices(NEW.sources))
+       IS DISTINCT FROM
+       (OLD.id,OLD.name,OLD.owner_id,OLD.org_id,OLD.home_id,OLD.home_overridden_at,
+        OLD.kind,OLD.harness_kind,OLD.agent_id,OLD.upstreams,OLD.model_group_options,OLD.service_offerings,
+        OLD.config,OLD.protocols,OLD.key_machine_id,OLD.arrangements,OLD.runtime_config,OLD.credential_home,
+        OLD.facts_overrides,OLD.deleted_at,
+        OLD.status='disabled',CASE WHEN OLD.status='disabled' THEN OLD.status_detail END,
+        orch_provider_source_choices(OLD.sources)) THEN
+        NEW.revision := OLD.revision+1;
+        NEW.observation_revision := OLD.observation_revision;
+    ELSE
+        NEW.revision := OLD.revision;
+        NEW.observation_revision := OLD.observation_revision + CASE WHEN NEW IS DISTINCT FROM OLD THEN 1 ELSE 0 END;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 CREATE FUNCTION public.orch_group_holder_revision() RETURNS trigger
     LANGUAGE plpgsql

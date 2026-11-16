@@ -168,9 +168,10 @@ pub async fn current_transaction_id(conn: &mut Conn) -> Result<i64, DbError> {
         .await?)
 }
 
-/// Holds a machine's row against deletion and owner change for the rest of the transaction.
+/// Pins machine authority until commit. Its schema guard orders every non-observation change
+/// against this key share, while hardware measurements and link rates can still be reported.
 pub async fn share_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR KEY SHARE")
         .bind(machine)
         .fetch_optional(conn)
         .await?;
@@ -424,9 +425,10 @@ async fn identity_in(
     // PostgreSQL's row-lock conflict-table lines:
     // SHARE conflicts with NO KEY UPDATE and UPDATE; SHARE and KEY SHARE coexist.
     // KEY SHARE conflicts only with UPDATE.
-    // Session end, token scopes/end and access-token expiry are non-key updates,
-    // so they require SHARE. Suspension/admin writers explicitly lock users FOR
-    // UPDATE; KEY SHARE also permits inbox counters and foreign-key references.
+    // Session security changes acquire UPDATE through sessions_authority_changed;
+    // KEY SHARE lets independent activity/lifetime extensions proceed. Token
+    // scopes/end and access-token expiry still require SHARE. Suspension/admin
+    // writers explicitly lock users FOR UPDATE.
     // Row locking rechecks tuples changed during a wait; later permission statements
     // obtain new snapshots after that wait.
     let personal = matches!(
@@ -472,7 +474,7 @@ async fn identity_in(
                JOIN access_tokens a ON a.session_id = s.id
               WHERE u.id = $1 AND s.id = $2 AND a.token_hash = $3
                 AND s.revoked_at IS NULL
-              FOR {user_lock} OF u FOR SHARE OF s, a",
+              FOR {user_lock} OF u FOR KEY SHARE OF s FOR SHARE OF a",
             id,
             hash,
         ),

@@ -1,5 +1,5 @@
 /** File-only work belongs in History under its actual thread, without invented block differences. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Documents from '@/api/documents';
@@ -8,16 +8,19 @@ import type { Author, Document, DocumentChanges, DocumentVersion } from '@/gener
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { World } from '../doubles/world';
+import { deferred } from './deferred';
 import { show } from './support';
 
+interface VersionsPage { items: DocumentVersion[]; next_cursor: string | null }
+
 const calls = vi.hoisted(() => ({
-  versions: vi.fn<(id: string, author: string | null) => Promise<{ items: DocumentVersion[]; next_cursor: string | null }>>(),
+  versions: vi.fn<(id: string, author: string | null, cursor: string | null) => Promise<VersionsPage>>(),
   changes: vi.fn<(id: string, from: string, to: number | null) => Promise<DocumentChanges>>(),
 }));
 vi.mock('@/api/documents', async (load) => {
   const real = await load<typeof Documents>();
   return { ...real,
-    versionsQuery: (id: string, author: string | null) => ({ ...real.versionsQuery(id, author), queryFn: () => calls.versions(id, author) }),
+    versionsQuery: (id: string, author: string | null) => ({ ...real.versionsQuery(id, author), queryFn: ({ pageParam }: { pageParam: string | null }) => calls.versions(id, author, pageParam) }),
     changesQuery: (id: string, from: string, to: number | null) => ({ ...real.changesQuery(id, from, to), queryFn: () => calls.changes(id, from, to) }),
   };
 });
@@ -72,8 +75,62 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
     expect(screen.queryByText(i18n.t('documents.history.nothing'))).not.toBeInTheDocument();
     expect(screen.queryByRole('list', { name: i18n.t('documents.history.difference') })).not.toBeInTheDocument();
     expect(screen.queryByRole('radiogroup', { name: i18n.t('documents.history.layout') })).not.toBeInTheDocument();
-    expect(calls.versions).toHaveBeenCalledExactlyOnceWith(doc.id, null);
+    expect(calls.versions).toHaveBeenCalledExactlyOnceWith(doc.id, null, null);
     await user.keyboard('{Escape}');
     expect(close).toHaveBeenCalledWith(false);
   },
 );
+
+function version(number: number, authors: Author[] = [writer]): DocumentVersion {
+  return { version: number, title: `Saved ${number}`, bytes: 4096, block_count: 1, cause: 'window', authors,
+    changed: { inserted: 0, updated: 1, moved: 0, removed: 0 },
+    from: '2026-10-01T02:00:00Z', to: '2026-10-01T02:01:00Z' };
+}
+
+it.each(['en', 'zh-CN'] as const)('counts loaded versions through another page and an author filter without inventing retention in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  const other: Author = { agent: 'Review agent', thread: { id: 'review-thread', kind: 'thread', name: 'Review results', redacted: false } };
+  const open = { ...version(8), version: null, cause: null };
+  calls.versions.mockImplementation((_id, author, cursor) => Promise.resolve(author === null
+    ? cursor === null ? { items: [open, version(7), version(6, [other])], next_cursor: 'older' }
+      : { items: [version(5, [other])], next_cursor: null }
+    : { items: [open, version(7)], next_cursor: null }));
+  show(<HistoryDrawer doc={doc} open onOpenChange={vi.fn()} />);
+  const loaded = (count: number) => locale === 'en' ? `Loaded ${count} ${count === 1 ? 'version' : 'versions'}` : `已加载 ${count} 个版本`;
+  const first = await screen.findByText(loaded(2));
+  expect(first).not.toHaveTextContent(/Kept|back to|已保留|最早到/);
+  await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
+  await screen.findByText(loaded(3));
+  expect(calls.versions).toHaveBeenLastCalledWith(doc.id, null, 'older');
+  await user.click(screen.getByRole('combobox', { name: i18n.t('documents.history.author') }));
+  await user.click(screen.getByRole('option', { name: 'Build agent' }));
+  await screen.findByText(loaded(1));
+  expect(calls.versions).toHaveBeenLastCalledWith(doc.id, 'thread:writer-thread', null);
+  expect(screen.getByRole('list', { name: i18n.t('documents.history.entries') }).querySelectorAll('[data-version]')).toHaveLength(2);
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps an empty author result separate from global retention in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  calls.versions.mockImplementation((_id, author) => Promise.resolve({ items: author === null ? [version(7)] : [], next_cursor: null }));
+  show(<HistoryDrawer doc={doc} open onOpenChange={vi.fn()} />);
+  await screen.findByRole('list', { name: i18n.t('documents.history.entries') });
+  await user.click(screen.getByRole('combobox', { name: i18n.t('documents.history.author') }));
+  await user.click(screen.getByRole('option', { name: 'Build agent' }));
+  expect(await screen.findByText(locale === 'en' ? 'Loaded 0 versions' : '已加载 0 个版本')).toBeVisible();
+  expect(screen.getByText(locale === 'en' ? 'No history entries' : '没有历史记录')).toBeVisible();
+  expect(screen.queryByText(/No version has been kept|尚未保留任何版本/)).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('makes no version count or retention claim before a read succeeds in %s', async (locale) => {
+  await setLocale(locale);
+  const pending = deferred<VersionsPage>();
+  calls.versions.mockReturnValue(pending.promise);
+  show(<HistoryDrawer doc={doc} open onOpenChange={vi.fn()} />);
+  const claim = /Loaded \d+ versions|已加载.*个版本|No version has been kept|尚未保留任何版本/;
+  expect(screen.queryByText(claim)).not.toBeInTheDocument();
+  await act(async () => { pending.reject(new Error('History read failed')); await pending.promise.catch(() => undefined); });
+  await screen.findByRole('alert');
+  expect(screen.queryByText(claim)).not.toBeInTheDocument();
+});
