@@ -5,6 +5,7 @@
  * answer for that state, the device keeps it, for this person alone, and says nothing: a tip that comes
  * back on another device is a small thing, and it is not an error.
  */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useStore } from 'zustand';
@@ -87,7 +88,7 @@ export function useDismissed(): Dismissed {
       if (client.session.getState().userId !== change.userId) return change.next;
       let before: HelpState;
       try {
-        const current = await queryClient.query({ ...meStateQuery, staleTime: 0 });
+        const current = await queryClient.query({ ...meStateQuery, ...READ_NOW });
         before = readHelpState(current[KEY]);
       } catch {
         before = change.next;

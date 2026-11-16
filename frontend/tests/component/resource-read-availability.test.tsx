@@ -37,14 +37,19 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(reads.catalogue).toHaveBeenCalledTimes(1);
   });
 
-  it(`keeps a refused sharing projection nameless and does not reuse the old audience (${locale})`, async () => {
+  it(`keeps a refused sharing projection nameless and retries its own reader (${locale})`, async () => {
     await setLocale(locale);
-    reads.defaults.mockRejectedValue(new ApiError({ type: '', title: 'Denied', status: 403, code: 'authz.denied', detail: 'Private audience detail', request_id: 'private-request' }, null));
+    const user = userEvent.setup();
+    reads.defaults.mockRejectedValueOnce(new ApiError({ type: '', title: 'Denied', status: 403, code: 'authz.denied', detail: 'Private audience detail', request_id: 'private-request' }, null));
     const view = show(<ResourceSharingSummary home={detailHome} kinds={['template']} />);
     expect(await screen.findByText(i18n.t('implicitAvailability.sharingUnavailable'))).toBeVisible();
     expect(view.container.querySelector('[data-resource-sharing]')).toBeNull();
     expect(screen.queryByText('Private audience detail')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+    await waitFor(() => expect(view.container.querySelector('[data-resource-sharing]')).not.toBeNull());
+    expect(reads.defaults).toHaveBeenCalledTimes(2);
+    expect(reads.catalogue).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Private audience detail')).not.toBeInTheDocument();
   });
 
   it(`names truly empty host facts without claiming unsupported drivers or storage (${locale})`, async () => {

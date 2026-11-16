@@ -12,6 +12,23 @@ use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRe
 use orch_types::Id;
 use std::sync::Arc;
 
+/// What a model's own parameters say about reasoning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reasoning {
+    /// Whether output room is reserved for known or unrecorded upstream reasoning.
+    pub reasons: bool,
+    /// The lowest effort the model offers that the writer may use, to ask a summary for.
+    pub lowest_effort: Option<String>,
+}
+impl Default for Reasoning {
+    fn default() -> Self {
+        Self {
+            reasons: true,
+            lowest_effort: None,
+        }
+    }
+}
+
 /// The host's permission-checked API-provider completion port.
 #[async_trait]
 pub trait Complete: Send + Sync {
@@ -21,6 +38,18 @@ pub trait Complete: Send + Sync {
         node: Id,
         request: ProviderComplete,
     ) -> Result<ProviderCompleteResult, SummarizeError>;
+
+    /// Reasoning room and allowed tuning for work at this node. A host with no model facts reserves
+    /// the configured room and offers no effort control.
+    async fn reasoning(
+        &self,
+        node: Id,
+        provider_id: Id,
+        model_name: &str,
+    ) -> Result<Reasoning, SummarizeError> {
+        let _ = (node, provider_id, model_name);
+        Ok(Reasoning::default())
+    }
 }
 
 /// The built-in model producer over a host's completion port.
@@ -62,11 +91,20 @@ impl Summarizer for Model {
             request.activity = crate::context::fill(input, budget, None, total)?.activity;
         }
         let (system, input) = prompts::render(&request, &config);
+        let reasoning = self
+            .complete
+            .reasoning(request.node.id, config.provider_id, &config.model_name)
+            .await?;
         let answer = self
             .complete
             .complete(
                 request.node.id,
-                config.completion(system, input, config.max_output_tokens),
+                config.completion_with(
+                    &reasoning,
+                    system,
+                    input,
+                    config.answer_tokens(request.field),
+                ),
             )
             .await?;
         let tokens: TokenUsage = answer.usage;

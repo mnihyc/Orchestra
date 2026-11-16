@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-db --lib --test provider_keeper --test provider_credit_history --test migration_progress --test released_migrations
+test -p orch-authz --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test providers --test provider_creation_scopes --test provider_duplicates --test provider_sources --test agent_list_scopes --test resource_getter_scopes
+test -p orch-api-core --test everything_scale --test search_content --test search_names --test search_native_scopes --test holder_search_native_scopes --test realtime_feeds -- --nocapture
+test -p orch-worker-core --lib --test usage_jobs --test provider_renewals
+test -p orch-engine --test person_notice_preparation --test provider_homes
