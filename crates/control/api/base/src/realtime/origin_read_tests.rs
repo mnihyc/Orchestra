@@ -70,7 +70,8 @@ async fn raw_deadline_after_identity_wait(key: bool) -> Proof {
     let lock = if key {
         "SELECT id FROM api_tokens WHERE id=$1 FOR NO KEY UPDATE"
     } else {
-        "SELECT id FROM sessions WHERE id=$1 FOR NO KEY UPDATE"
+        // This is a security-change wait; ordinary lifetime extensions deliberately coexist.
+        "SELECT id FROM sessions WHERE id=$1 FOR UPDATE"
     };
     let _: orch_types::Id = sqlx::query_scalar(lock)
         .bind(id)
@@ -111,7 +112,7 @@ async fn raw_deadline_after_identity_wait(key: bool) -> Proof {
         pending.abort();
         let _ = pending.await;
         return Err(
-            format!("actual socket identity SHARE-row wait was not reached: {reached:?}").into(),
+            format!("actual socket credential-row wait was not reached: {reached:?}").into(),
         );
     }
     // No revocation/authority SQL substitutes for the natural deadline crossing.
