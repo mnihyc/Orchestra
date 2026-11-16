@@ -18,6 +18,29 @@ function summary(resolved: Resolved) {
 }
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`names the unusable inherited environment beside the fresh quick-start proposal (${locale})`, async () => {
+    await setLocale(locale);
+    const failed = { ...environment('spare', { usable: false }), reason: 'environment_failed' };
+    const resolved = resolve(options({ environments: [failed], default_environment: { environment: 'spare', from: null, reason: 'environment_failed' } }), NO_PICKS, mode);
+    expect(resolved.fresh).toBe(true);
+    const view = summary(resolved);
+    const value = view.querySelector('[data-start-value="environment"]');
+    expect(value).toHaveTextContent(i18n.t('start.quick.inNew'));
+    expect(value).toHaveTextContent(locale === 'en' ? 'Env spare unavailable' : 'Env spare 无法使用');
+    expect(value).toHaveTextContent(i18n.t('start.reason.environment_failed'));
+    expect(view.querySelectorAll('p')).toHaveLength(0);
+  });
+
+  it(`keeps an unreadable default unnamed in the quick-start reason (${locale})`, async () => {
+    await setLocale(locale);
+    const resolved = resolve(options({ environments: [], default_environment: { environment: 'unreadable', from: null, reason: 'environment_not_seen' } }), NO_PICKS, mode);
+    const view = summary(resolved);
+    const value = view.querySelector('[data-start-value="environment"]');
+    expect(value).toHaveTextContent(locale === 'en' ? 'Default environment unavailable' : '默认环境无法使用');
+    expect(value).toHaveTextContent(i18n.t('start.reason.environment_not_seen'));
+    expect(value).not.toHaveTextContent('environment_not_seen');
+  });
+
   it(`says Suggested once for the whole automatic setup without separators (${locale})`, async () => {
     await setLocale(locale);
     const resolved = resolve(options({ defaults: unset, environments: [environment('ranked')] }), NO_PICKS, mode);

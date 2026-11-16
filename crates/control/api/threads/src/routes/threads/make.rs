@@ -152,6 +152,7 @@ pub(super) async fn binding_of(
         .provider_use(
             conn,
             &ProviderUse {
+                purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                 person,
                 node: topic,
                 provider,
