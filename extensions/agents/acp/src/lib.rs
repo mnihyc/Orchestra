@@ -145,12 +145,74 @@ fn raw_tap(sink: EventSink, thread: ThreadId, segment: Id) -> FrameTap {
         move |direction: Direction, frame: &Json| -> futures::future::BoxFuture<'static, bool> {
             let mut payload = frame.clone();
             redact(&mut payload);
+            let mut spans = Vec::new();
+            if direction.name() == "out"
+                && frame.get("method").and_then(Json::as_str) == Some("session/prompt")
+            {
+                spans.extend(
+                    ["agent_message_chunk", "agent_thought_chunk"]
+                        .into_iter()
+                        .map(|kind| orch_agent_contract::events::NativeTraceText {
+                            start: true,
+                            stream: kind.into(),
+                            pointer: None,
+                            end: false,
+                        }),
+                );
+            }
+            let update = frame.pointer("/params/update");
+            let kind = update
+                .and_then(|update| update.get("sessionUpdate"))
+                .and_then(Json::as_str);
+            if let Some(kind @ ("agent_message_chunk" | "agent_thought_chunk")) = kind {
+                spans.push(orch_agent_contract::events::NativeTraceText {
+                    start: update.is_some_and(|update| {
+                        crate::extensions::committed_attempt(update).is_some()
+                    }),
+                    stream: kind.into(),
+                    pointer: Some("/params/update/content/text".into()),
+                    end: update.is_some_and(|update| {
+                        crate::extensions::committed_attempt(update).is_some()
+                    }),
+                });
+            }
+            if frame.pointer("/result/stopReason").is_some() {
+                spans.extend(
+                    ["agent_message_chunk", "agent_thought_chunk"]
+                        .into_iter()
+                        .map(|kind| orch_agent_contract::events::NativeTraceText {
+                            start: false,
+                            stream: kind.into(),
+                            pointer: None,
+                            end: true,
+                        }),
+                );
+            }
+            let complete = direction.name() == "out"
+                || frame.get("result").is_some()
+                || frame.get("error").is_some()
+                || matches!(
+                    kind,
+                    Some(
+                        "agent_message_chunk"
+                            | "agent_thought_chunk"
+                            | "tool_call"
+                            | "tool_call_update"
+                            | "plan"
+                            | "available_commands_update"
+                            | "current_mode_update"
+                            | "usage_update"
+                            | "session_info_update"
+                    )
+                );
             let sink = sink.clone();
             Box::pin(async move {
                 sink.session(
                     thread,
                     segment,
                     SessionEvent::RawFrame(RawFrame {
+                        text: spans,
+                        text_complete: complete,
                         direction: direction.name().to_owned(),
                         payload,
                     }),
@@ -1031,6 +1093,7 @@ impl AgentAdapter for AcpAdapter {
             stderr: launched.stderr.clone(),
             learned,
             mapper: MapperConfig {
+                output_capture_bytes: settings.output_capture_bytes,
                 thread_id: settings.thread_id,
                 segment_id: settings.segment_id,
                 program: Arc::clone(&program),
@@ -1114,6 +1177,19 @@ impl AgentAdapter for AcpAdapter {
 
     async fn steer(&mut self, steer: TurnSteer) -> Result<(), AdapterError> {
         self.session(steer.thread_id)?.steer(steer).await
+    }
+
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let shared = Arc::clone(&self.running.as_ref()?.shared);
+        Some(Arc::new(move |thread, turn| {
+            let session = lock(&shared.sessions).get(&thread).cloned();
+            Box::pin(async move {
+                session
+                    .ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?
+                    .interrupt(turn)
+                    .await
+            })
+        }))
     }
 
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {

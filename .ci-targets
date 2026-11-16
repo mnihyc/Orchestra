@@ -1,0 +1,4 @@
+test -p orch-adapter-codex --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-acp --lib
+test -p orch-api-contract --lib

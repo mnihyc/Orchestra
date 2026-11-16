@@ -25,10 +25,10 @@ export const mountUsesQuery = (id: string) => queryOptions({ queryKey: ['mount-u
 export const createMcp = (body: McpServerCreateBody, key: string): Promise<McpServer> => ok(api.POST('/mcp-servers', { body, ...repeatable(key) }));
 export const updateMcp = (id: string, body: McpServerUpdateBody): Promise<McpServer> => ok(api.PATCH('/mcp-servers/{id}', { params: { path: { id } }, body }));
 export const reimportMcp = (id: string): Promise<McpServer> => ok(api.POST('/mcp-servers/{id}/reimport', { params: { path: { id } } }));
-export const deleteMcp = (id: string): Promise<void> => done(api.DELETE('/mcp-servers/{id}', { params: { path: { id } } }));
+export const deleteMcp = (id: string, notification?: {notify:boolean;notification_review?:string}): Promise<void> => done(api.DELETE('/mcp-servers/{id}', { params: { path: { id },...(notification===undefined?{}:{query:notification}) } }));
 export const createMount = (body: MountCreateBody, key: string): Promise<Mount> => ok(api.POST('/mounts', { body, ...repeatable(key) }));
 export const updateMount = (id: string, body: MountUpdateBody): Promise<Mount> => ok(api.PATCH('/mounts/{id}', { params: { path: { id } }, body }));
-export const deleteMount = (id: string): Promise<void> => done(api.DELETE('/mounts/{id}', { params: { path: { id } } }));
+export const deleteMount = (id: string, notification?: {notify:boolean;notification_review?:string}): Promise<void> => done(api.DELETE('/mounts/{id}', { params: { path: { id },...(notification===undefined?{}:{query:notification}) } }));
 export const setMountLocation = (id: string, machine: string, body: MountLocationSetBody): Promise<Mount> => ok(api.PUT('/mounts/{id}/locations/{machine_id}', { params: { path: { id, machine_id: machine } }, body }));
 export const setMountLocationDataKind = (id: string, machine: string, dataKind: MountDataKind | null): Promise<Mount> => ok(api.PATCH('/mounts/{id}/locations/{machine_id}', { params: { path: { id, machine_id: machine } }, body: { data_kind: dataKind } }));
 export const purgeKeptMountData = (id: string, kept: string, confirm?: string): Promise<void> => done(api.DELETE('/mounts/{id}/kept/{kept_id}', { params: { path: { id, kept_id: kept }, query: confirm === undefined ? {} : { confirm } } }));
