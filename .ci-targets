@@ -1,0 +1,8 @@
+fmt
+contracts
+clippy
+test -p orch-db --lib -- sequences::tests::
+test -p orch-api-core --lib
+test -p orch-api-core --test bootstrap
+test -p orch-api-core --test account_native_scopes -- bootstrap::
+test -p orch-engine --lib

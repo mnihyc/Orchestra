@@ -24,6 +24,50 @@ use orch_api_contract::personal::{
 use serde_json::json;
 
 #[tokio::test]
+async fn an_unchanged_shell_keeps_its_live_cut_and_a_personal_change_advances_only_its_own_cut() {
+    let room = Room::new().await;
+    let app = &room.world.app;
+    let read = || async {
+        serde_json::to_value(
+            app.call(MeBootstrapGet, &[])
+                .token(&room.ada.token)
+                .send()
+                .await
+                .ok(),
+        )
+        .unwrap()
+    };
+    let before = read().await;
+    assert!(before["personal_revision"].is_object());
+    assert_eq!(
+        before["meta"]["interface_defaults"]["connection_quality"],
+        json!({
+            "recent_samples":3, "usual_samples":20, "slow_increase_percent":100, "slow_extra_ms":200
+        })
+    );
+    assert_eq!(
+        before["personal_revision"],
+        read().await["personal_revision"]
+    );
+    app.call(MeStateSet, &[&"sidebar"])
+        .token(&room.ada.token)
+        .body(&json!({"open":false}))
+        .send()
+        .await
+        .ok();
+    let after = read().await;
+    assert!(
+        after["personal_revision"]["personal"].as_i64().unwrap()
+            > before["personal_revision"]["personal"].as_i64().unwrap()
+    );
+    assert_eq!(
+        after["personal_revision"]["meta"],
+        before["personal_revision"]["meta"]
+    );
+    assert_eq!(after["state"]["sidebar"], json!({"open":false}));
+}
+
+#[tokio::test]
 async fn one_shell_answer_contains_the_same_personal_projections_as_their_reads() {
     let room = Room::new().await;
     let app = &room.world.app;

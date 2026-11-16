@@ -19,6 +19,11 @@ export function keepPresentation(owner: string, key: string, value: unknown): vo
   entries.set(key, value);
 }
 
+/** Expired owners cannot accumulate presentation after their history entry has left the workspace. */
+export function prunePresentations(owners: ReadonlySet<string>): void {
+  for (const owner of held.keys()) if (!owners.has(owner)) held.delete(owner);
+}
+
 /** Only tabs still open or available through Reopen belong to the saved workspace. */
 export function capturePresentations(owners: ReadonlySet<string>): Presentations {
   return Object.fromEntries([...held].filter(([owner]) => owners.has(owner)).map(([owner, entries]) => [owner, Object.fromEntries(entries)]));
