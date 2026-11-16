@@ -507,10 +507,10 @@ impl AgentAdapter for FakeAdapter {
         let live = LiveSession::new(shared.home.clone(), file, spec, notes);
         lock(&shared.sessions).insert(live.thread_id, Arc::clone(&live));
         events::announce(
-            &shared.sink,
+            &shared.sink.for_opening(live.spec.opening_id),
             live.thread_id,
             live.segment_id,
-            events::session_opened(&native_session_ref, resumed),
+            events::session_opened(live.spec.opening_id, &native_session_ref, resumed),
         )
         .await;
         Ok(SessionOpened {
@@ -605,6 +605,7 @@ impl AgentAdapter for FakeAdapter {
         Shared::end_turn(&session).await;
         let _ = shared
             .sink
+            .for_opening(session.spec.opening_id)
             .session(
                 thread,
                 session.segment_id,
@@ -767,6 +768,7 @@ impl AgentAdapter for FakeAdapter {
         for event in told {
             let _ = shared
                 .sink
+                .for_opening(session.spec.opening_id)
                 .session(session.thread_id, session.segment_id, event)
                 .await;
         }
@@ -984,7 +986,7 @@ async fn scripted_background_end(
             reason: Some("this session never observed that scripted command".to_owned()),
         };
     };
-    let _=shared.sink.session(session.thread_id,session.segment_id,orch_agent_contract::events::SessionEvent::ItemCompleted(orch_agent_contract::events::ItemCompleted {
+    let _=shared.sink.for_opening(session.spec.opening_id).session(session.thread_id,session.segment_id,orch_agent_contract::events::SessionEvent::ItemCompleted(orch_agent_contract::events::ItemCompleted {
         native_ref:command.native_item_ref.unwrap_or_else(||id.to_owned()),status:orch_agent_contract::events::ItemStatus::Failed,
         payload:serde_json::json!({"title":"Scripted command ended","duration_ms":null,
             "tool":{"kind":"command","command":command.command.unwrap_or_default(),"cwd":command.cwd.unwrap_or_default(),"exit_code":-1,"background":true,"process_id":id,"actions":[],"output":{"inline":"","total_len":0,"truncated":false,"blob":null}},

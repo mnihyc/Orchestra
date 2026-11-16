@@ -408,6 +408,7 @@ impl effects::ApplyOwned for Import {
                 .dispatcher()
                 .issue_stored_before(
                     StoredCommand {
+                        native_target: command.native_target.clone(),
                         id: Some(command.id),
                         machine: command.machine,
                         kind: command.kind.as_str().to_owned(),

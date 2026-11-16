@@ -14,6 +14,10 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `error:public_address.busy` | 另一个公共地址更改仍在准备，当前地址继续生效。 |
+| `error:public_address.unverified` | 无法验证此浏览器来源地址，当前地址继续生效。 |
+| `error:public_address.mismatch` | 此浏览器来源地址未能证明其提供的是此安装。 |
+| `error:public_address.frontend_not_ready` | 前端尚未载入准备好的证书，当前地址继续生效。 |
 | `error:request.invalid` | 请求中有内容不符合要求。请检查填写的内容后重试。 |
 | `error:request.value_refused` | 请求中有一个值无法保存。请检查填写的内容后重试。 |
 | `error:admin.risk_not_acknowledged` | 这项更改有风险，需要先确认。请勾选确认后重试。 |

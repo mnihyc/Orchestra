@@ -57,6 +57,13 @@ export const startOptionsQuery = (nodeId: string, environmentId: string | null, 
   });
 };
 
+/** What an existing thread could be bound to instead, as `GET /threads/{id}/binding/options` answers: for whoever manages the thread. */
+export const threadBindingOptionsQuery = (threadId: string) =>
+  queryOptions({
+    queryKey: ['thread-binding-options', threadId] as const,
+    queryFn: (): Promise<BindingOptions> => ok(api.GET('/threads/{id}/binding/options', { params: { path: { id: threadId } } })),
+  });
+
 /** Tells the server that a topic's default environment is to be this one: for the person who manages the topic. */
 export function setDefaultEnvironment(topicId: string, environmentId: string | null): Promise<Topic> {
   return ok(api.PUT('/topics/{id}/default-environment', { params: { path: { id: topicId } }, body: { environment_id: environmentId } }));
