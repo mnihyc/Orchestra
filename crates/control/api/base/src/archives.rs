@@ -10,8 +10,8 @@
 //!
 //! The format is found from the first bytes and not from the name. A zip has an index at its end, so
 //! its entry is found and read by asking the store for those bytes alone (ranges), however large the
-//! zip is. A compressed tar has no index, so it is read through once; the reading stops at the limit
-//! of entries or at the time limit, whichever comes first, and says so. The reading is blocking work
+//! zip is. The continuing listing keeps a bounded reader of directory records or tar headers
+//! across result windows, including the decompressor when present. The reading is blocking work
 //! of a thread of its own, which asks the store for ranges through the runtime that started it.
 
 use crate::blobs::Blobs;
@@ -59,6 +59,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use std::time::Instant;
+#[path = "archives/paging.rs"]
+mod paging;
+pub use paging::{ArchiveRead, ArchiveReads};
+
 /// How long the reading of a compressed archive runs before it says it stopped short: the same
 /// twenty seconds a machine gives itself.
 pub const READ_TIME: Duration = Duration::from_secs(20);
@@ -79,11 +83,9 @@ const TAR_CHECKSUM: std::ops::Range<usize> = 148..156;
 /// How many bytes at the start of a file say what kind of archive it is.
 const MAGIC_BYTES: usize = 8;
 
-/// The most entries of a zip that are listed. The index of a zip is read whole into memory by the
-/// reader, and an index that claims more entries than this is the work of someone who wants the
-/// memory: a zip of this many entries is a hundred thousand files, more than a person looks through
-/// one directory at a time.
-pub const ZIP_ENTRIES_MAX: u64 = 100_000;
+/// ZIP's three u16-sized variable fields, decoded names and parsed extra-field records.
+/// The live pool reserves this working allowance until the parser actually finishes.
+const ZIP_READER_BYTES: usize = 32 * u16::MAX as usize;
 
 /// How far from the end of a zip its end-of-index record lies at most: the record and the longest
 /// comment that follows it.
@@ -100,6 +102,14 @@ const ZIP64_END: [u8; 4] = *b"PK\x06\x06";
 /// Why an archive was not looked into.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArchiveError {
+    /// A continuation no longer names this selection.
+    #[error(
+        "the archive continuation expired or belongs to another selection; restart this folder"
+    )]
+    Stale,
+    /// Existing readers retain the metadata allowance until their actual work ends.
+    #[error("the archive metadata allowance is in use; try again when a reader finishes")]
+    Busy,
     /// The file is not an archive of a format that can be looked into.
     #[error("this file is not an archive that can be looked into")]
     NotAnArchive,
@@ -147,6 +157,7 @@ struct Source {
     position: u64,
     window_start: u64,
     window: Bytes,
+    cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Source {
@@ -159,6 +170,7 @@ impl Source {
             position: 0,
             window_start: 0,
             window: Bytes::new(),
+            cancel: None,
         }
     }
 
@@ -171,13 +183,17 @@ impl Source {
             end: i64::try_from(end).unwrap_or(i64::MAX),
         };
         let (store, hash) = (Arc::clone(&self.store), self.hash);
-        let bytes = self
-            .runtime
-            .block_on(async move {
-                let read = store.get(&hash, Some(range)).await?;
-                read_all(read.body).await
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let cancel = self.cancel.clone();
+        let bytes = self.runtime.block_on(async move {
+            let read = async {
+                let read = store.get(&hash, Some(range)).await.map_err(|error| std::io::Error::other(error.to_string()))?;
+                read_all(read.body).await.map_err(|error| std::io::Error::other(error.to_string()))
+            };
+            match cancel {
+                Some(cancel) => tokio::select! { biased; () = cancel.cancelled() => Err(std::io::Error::other("archive read cancelled")), result = read => result },
+                None => read.await,
+            }
+        })?;
         self.window_start = start;
         self.window = bytes;
         Ok(())
@@ -186,6 +202,13 @@ impl Source {
 
 impl Read for Source {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(std::io::Error::other("archive read cancelled"));
+        }
         if self.position >= self.size || buffer.is_empty() {
             return Ok(0);
         }
@@ -376,18 +399,6 @@ pub async fn preview_count(blobs: &Blobs, meta: BlobMeta) -> Result<i64, Archive
     .map_err(|error| ArchiveError::Failed(error.to_string()))?
 }
 
-/// Refuses a zip whose index claims more entries than are looked into.
-fn check_zip_entries(source: &mut Source) -> Result<(), ArchiveError> {
-    let size = source.size;
-    let claimed = zip_entries(source, size)?;
-    if claimed > ZIP_ENTRIES_MAX {
-        return Err(ArchiveError::Unreadable(format!(
-            "the zip holds {claimed} entries, and one that holds more than {ZIP_ENTRIES_MAX} is not looked into"
-        )));
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------- listing
 
 /// An entry's path as the listing writes it: no leading `./` or `/`, no trailing `/`.
@@ -517,17 +528,16 @@ impl Children {
     }
 }
 
-/// Reads the index of a zip into the children of a directory; says whether any entry asks for a
-/// password. Only the index is read: `by_index_data` describes an entry from it, where an entry
-/// opened for its bytes would have the local header, wherever it lies in the file, fetched from the
-/// store for each of them.
-fn list_zip(mut source: Source, children: &mut Children) -> Result<bool, ArchiveError> {
-    check_zip_entries(&mut source)?;
-    let archive = zip::ZipArchive::new(source).map_err(unreadable)?;
+/// Reads directory records one at a time; says whether any entry asks for a password.
+/// Only metadata is read, without fetching each local file header from the store.
+fn list_zip(source: Source, children: &mut Children) -> Result<bool, ArchiveError> {
+    let mut archive =
+        zip::unstable::read::ZipIterable::try_new(source, zip::read::Config::default())
+            .map_err(unreadable)?;
     let mut encrypted = false;
     let mut enough = false;
-    for index in 0..archive.len() {
-        let entry = archive.by_index_data(index).map_err(unreadable)?;
+    for entry in archive.files().map_err(unreadable)? {
+        let entry = entry.map_err(unreadable)?;
         encrypted |= entry.encrypted();
         if enough {
             continue;
@@ -618,6 +628,7 @@ pub async fn list(
         };
         let (entries, over_limit) = children.finish();
         Ok(ArchiveListing {
+            next_cursor: None,
             format,
             compression,
             entries,
@@ -751,7 +762,13 @@ pub async fn documents(
         match shape {
             Shape::Zip => {
                 let mut source = open();
-                check_zip_entries(&mut source)?;
+                let size = source.size;
+                let declared = zip_entries(&mut source, size)?;
+                if declared > u64::try_from(most).unwrap_or(u64::MAX) {
+                    return Err(unreadable(format!(
+                        "an import archive holds at most {most} entries"
+                    )));
+                }
                 let mut archive = zip::ZipArchive::new(source).map_err(unreadable)?;
                 if archive.len() > most {
                     return Err(unreadable(format!(
@@ -830,28 +847,31 @@ fn read_bounded(reader: &mut dyn Read, entry: &str, limit: u64) -> Result<Vec<u8
     Ok(bytes)
 }
 
-fn read_zip(mut source: Source, wanted: &str, limit: u64) -> Result<Vec<u8>, ArchiveError> {
-    check_zip_entries(&mut source)?;
-    let mut archive = zip::ZipArchive::new(source).map_err(unreadable)?;
+fn read_zip(source: Source, wanted: &str, limit: u64) -> Result<Vec<u8>, ArchiveError> {
+    let mut archive =
+        zip::unstable::read::ZipIterable::try_new(source, zip::read::Config::default())
+            .map_err(unreadable)?;
+    let files = archive.files().map_err(unreadable)?;
     let mut found = None;
-    for index in 0..archive.len() {
-        let entry = archive.by_index_data(index).map_err(unreadable)?;
+    for entry in files.by_ref() {
+        let entry = entry.map_err(unreadable)?;
         if entry.name().is_ok_and(|name| clean(&name) == wanted) {
-            if entry.encrypted() {
-                return Err(ArchiveError::Encrypted(wanted.to_owned()));
-            }
-            if entry.is_dir() || entry.is_symlink() {
-                return Err(ArchiveError::NotAFile(wanted.to_owned()));
-            }
-            if entry.size() > limit {
-                return Err(too_large(wanted, limit));
-            }
-            found = Some(index);
-            break;
+            found = Some(entry);
         }
     }
-    let index = found.ok_or_else(|| ArchiveError::NotFound(wanted.to_owned()))?;
-    let mut entry = archive.by_index(index).map_err(unreadable)?;
+    let entry = found.ok_or_else(|| ArchiveError::NotFound(wanted.to_owned()))?;
+    if entry.encrypted() {
+        return Err(ArchiveError::Encrypted(wanted.to_owned()));
+    }
+    if entry.is_dir() || entry.is_symlink() {
+        return Err(ArchiveError::NotAFile(wanted.to_owned()));
+    }
+    if entry.size() > limit {
+        return Err(too_large(wanted, limit));
+    }
+    let mut entry = entry
+        .with_reader(files.reader_mut(), zip::ZipReadOptions::new())
+        .map_err(unreadable)?;
     read_bounded(&mut entry, wanted, limit)
 }
 
@@ -1000,6 +1020,161 @@ pub mod tests {
     }
 
     const TIME: Duration = Duration::from_secs(20);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repeated_stored_zip_name_opens_the_last_member_its_listing_describes() {
+        let blobs = Blobs::in_memory();
+        let mut bytes = zip_of(
+            &[("a.txt", b"old"), ("b.txt", b"newer")],
+            zip::CompressionMethod::Stored,
+        );
+        let mut offset = 0;
+        while let Some(at) = bytes[offset..].windows(5).position(|name| name == b"b.txt") {
+            let at = offset + at;
+            bytes[at..at + 5].copy_from_slice(b"a.txt");
+            offset = at + 5;
+        }
+        let meta = stored(&blobs, bytes).await;
+        let listing = list(&blobs, meta, None, 100, TIME).await.unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].size, Some(5));
+        assert_eq!(
+            read_entry(&blobs, meta, "a.txt", 100, TIME).await.unwrap(),
+            b"newer"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_large_zip_keeps_its_last_member_reachable_with_a_small_metadata_allowance() {
+        let blobs = Blobs::in_memory();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for n in 0..100_001 {
+            writer
+                .start_file(
+                    format!("member-{n:06}"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+        }
+        let meta = stored(&blobs, writer.finish().unwrap().into_inner()).await;
+        let reads = ArchiveReads::default();
+        let policy = orch_link_contract::commands::WorkspaceLimits {
+            directory_cache_bytes: 8 * 1024 * 1024,
+            ..Default::default()
+        };
+        let page = reads
+            .list(
+                &blobs,
+                ArchiveRead {
+                    meta,
+                    inside: None,
+                    query: Some("member-100000".to_owned()),
+                    cursor: None,
+                    limit: 2,
+                },
+                &policy,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].path, "member-100000");
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_completed_archive_page_does_not_take_the_next_readers_only_slot() {
+        let blobs = Blobs::in_memory();
+        let meta = stored(
+            &blobs,
+            zip_of(
+                &[("one", b"one"), ("two", b"two")],
+                zip::CompressionMethod::Stored,
+            ),
+        )
+        .await;
+        let reads = ArchiveReads::default();
+        let policy = orch_link_contract::commands::WorkspaceLimits {
+            directory_slots: 1,
+            ..Default::default()
+        };
+        let request = ArchiveRead {
+            meta,
+            inside: None,
+            query: Some("one".to_owned()),
+            cursor: None,
+            limit: 100,
+        };
+        assert!(
+            reads
+                .list(&blobs, request.clone(), &policy)
+                .await
+                .unwrap()
+                .next_cursor
+                .is_none()
+        );
+        let next = reads
+            .list(
+                &blobs,
+                ArchiveRead {
+                    query: Some("two".to_owned()),
+                    ..request
+                },
+                &policy,
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.entries[0].path, "two");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stored_archive_replays_each_page_and_keeps_every_member_reachable() {
+        let blobs = Blobs::in_memory();
+        let names: Vec<_> = (0..17).map(|n| format!("member-{n:02}")).collect();
+        let files: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), b"x".as_slice()))
+            .collect();
+        let meta = stored(&blobs, zip_of(&files, zip::CompressionMethod::Stored)).await;
+        let reads = ArchiveReads::default();
+        let policy = orch_link_contract::commands::WorkspaceLimits::default();
+        let mut request = ArchiveRead {
+            meta,
+            inside: None,
+            query: None,
+            cursor: None,
+            limit: 3,
+        };
+        let mut found = std::collections::BTreeSet::new();
+        loop {
+            let page = reads.list(&blobs, request.clone(), &policy).await.unwrap();
+            if request.cursor.is_some() {
+                assert_eq!(
+                    page,
+                    reads.list(&blobs, request.clone(), &policy).await.unwrap()
+                );
+            }
+            found.extend(page.entries.into_iter().map(|entry| entry.path));
+            request.cursor = page.next_cursor;
+            if request.cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 17);
+        let filtered = reads
+            .list(
+                &blobs,
+                ArchiveRead {
+                    query: Some("member-16".to_owned()),
+                    cursor: None,
+                    ..request
+                },
+                &policy,
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.entries.len(), 1);
+        assert_eq!(filtered.entries[0].path, "member-16");
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     async fn one_entry_of_a_large_zip_is_read_by_asking_the_store_for_a_small_part_of_it() {
@@ -1263,7 +1438,6 @@ pub mod tests {
         let size = zip.len() as u64;
         let claimed = zip_entries(&mut std::io::Cursor::new(zip), size).unwrap();
         assert_eq!(claimed, 1_000_000_000);
-        assert!(claimed > ZIP_ENTRIES_MAX);
 
         // An ordinary zip says how many it has in its own end record.
         let ordinary = zip_of(

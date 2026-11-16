@@ -229,11 +229,8 @@ impl Inner {
         let Some((after, upto)) = st.cursor.owed(target) else {
             return Ok(());
         };
-        // The current credential and shared authority gate stay pinned through projection
-        // and serialization; authority writers cannot commit halfway through this frame.
-        let Some(_identity) = super::watches::delivery_guard(self, sub.connection()).await? else {
-            return Ok(());
-        };
+        // read_rows refreshes the exact credential through key_reads::admit before any
+        // projection. The epoch and credential are checked again before queueing it below.
         let rows = self
             .read_rows(sub, after, upto, cache, sub.thread_scope(st))
             .await?;
@@ -341,19 +338,34 @@ impl Inner {
             if !st.open {
                 continue;
             }
-            match self.recheck(&sub, &mut st, epoch).await {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    tracing::warn!(%error, ?source, "the access of a subscription could not be asked again");
-                    continue;
-                }
-            }
-            if let Err(error) = self.deliver(&sub, &mut st, target, &mut cache).await {
-                tracing::warn!(%error, ?source, "rows could not be read for a subscription; the next pass reads them");
-            }
+            let feed = st.cursor.owed(target).map(|_| sub.feed());
+            let work = self.pass_subscriber(&sub, &mut st, epoch, source, target, &mut cache);
+            self.traced_frame_sql(feed, sub.connection().user, "read", work)
+                .await;
         }
         Ok(())
+    }
+
+    async fn pass_subscriber(
+        self: &Arc<Self>,
+        sub: &Arc<Subscription>,
+        state: &mut SubState,
+        epoch: i64,
+        source: Source,
+        target: Seq,
+        cache: &mut Cache,
+    ) {
+        match self.recheck(sub, state, epoch).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(%error,?source,"the access of a subscription could not be asked again");
+                return;
+            }
+        }
+        if let Err(error) = self.deliver(sub, state, target, cache).await {
+            tracing::warn!(%error,?source,"rows could not be read for a subscription; the next pass reads them");
+        }
     }
 
     /// The work of one source: passes, spaced by the gap, for as long as

@@ -1,5 +1,5 @@
 /** The registered thread Usage view never mistakes a failed provider read for missing View permission. */
-import { cleanup, screen } from '@testing-library/react';
+import { act, cleanup, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
@@ -11,7 +11,9 @@ import { NetworkError } from '@/lib/requests';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 const read = vi.hoisted(() => vi.fn<() => Promise<Provider>>());
+const named = vi.hoisted(() => ({ provider: null as Provider | null }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof Resources>(), providerQuery: () => ({ queryKey: ['thread-provider-observations'], queryFn: read, retry: false }) }));
+vi.mock('@/api/threads', async (original) => ({ ...await original<object>(), parametersQuery: () => ({ queryKey: ['thread-parameters-access'], initialData: { provider: named.provider }, staleTime: Infinity, queryFn: () => Promise.resolve({ provider: named.provider }) }) }));
 vi.mock('@/api/provider-plan', () => ({ threadLedgerQuery: () => ({ queryKey: ['thread-ledger-read'], queryFn: () => Promise.resolve({ totals: {} }) }) }));
 vi.mock('@/features/resources/providers/Ledger', () => ({ LedgerFigures: () => <span>Ordinary ledger</span> }));
 vi.mock('@/features/resources/providers/PlanPanel', () => ({ PlanPanel: () => <span>Ordinary provider plan</span> }));
@@ -21,9 +23,16 @@ vi.mock('@/features/usage/Limits', () => ({ Limits: () => null }));
 vi.mock('@/features/usage/PerformancePlaces', () => ({ useProviderHealth: () => undefined }));
 const thread = { id: 'thread', created_at: '2026-11-01T00:00:00Z', name: 'Thread', blocked: null,
   binding: { provider: { id: 'provider', name: 'Known provider', status: 'ready' } }, access: { permissions: [] } } as unknown as Thread;
-beforeEach(() => { read.mockReset().mockResolvedValue(planProvider()); });
+beforeEach(() => { read.mockReset().mockResolvedValue(planProvider()); named.provider = planProvider({ id: 'provider' }); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`leaves related provider reads closed when the thread parameters omit provider View (${locale})`, async () => {
+    await setLocale(locale); named.provider = null;
+    show(<ThreadUsage thread={thread} />);
+    expect(await screen.findByText(i18n.t('providerPlan.viewMissing'))).toBeVisible();
+    await act(async () => { await Promise.resolve(); });
+    expect(read).not.toHaveBeenCalled();
+  });
   it(`keeps a failed provider observation read separate from View refusal and retries (${locale})`, async () => {
     await setLocale(locale); read.mockRejectedValueOnce(new NetworkError('offline'));
     const user = userEvent.setup(); show(<ThreadUsage thread={thread} />);
