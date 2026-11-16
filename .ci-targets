@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-api-core --test uploads
+test -p orch-link --test slow_link -- --nocapture
+test -p orch-connector-core --lib --test file_transfers --test recording_keys

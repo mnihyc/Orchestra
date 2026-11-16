@@ -7,8 +7,12 @@
  * Any file can be opened as text, so the code viewer takes everything and comes last among those
  * that show content; the viewer for what has none is the very last.
  */
-import type { ComponentType } from 'react';
-import { create } from 'zustand';
+import { type ComponentType, useMemo } from 'react';
+import { create, useStore } from 'zustand';
+import { client } from '@/api/client';
+import { requestReader } from '@/lib/readAttempts';
+import type { DeviceChoiceObservation, DeviceChoiceRead, DeviceChoiceSave } from '@/lib/viewChoiceFacts';
+import { recordDeviceChoiceSave } from '@/lib/viewChoices';
 
 import type { Door } from '@/api/workspace';
 import type { FileStat, Thread } from '@/generated/api-types';
@@ -59,8 +63,6 @@ export interface ViewerProps {
 
 /** Why a file cannot be edited where it is shown. */
 export type ReadOnlyReason =
-  /** Phone sheets are for reading; editing remains in the wide code view. */
-  | { kind: 'small_screen' }
   /** The reader holds no `files.manage` on the thread. */
   | { kind: 'permission' }
   /** The environment is offline, and this is its copy from a time. */
@@ -197,35 +199,70 @@ export const kindOf = (name: string): string => {
 
 /** What the person chose, by kind of file, on this device. */
 export function readChoices(userId: string | null): Record<string, ViewerId> {
-  if (userId === null) return {};
+  return readChoiceSnapshot(userId).choices;
+}
+
+interface ViewerChoiceSnapshot {
+  choices: Record<string, ViewerId>;
+  read_result: DeviceChoiceRead;
+  saved?: Record<string, ViewerId>;
+  pending?: Record<string, ViewerId>;
+  writes?: Record<string, DeviceChoiceSave>;
+}
+function readChoiceSnapshot(userId: string | null): ViewerChoiceSnapshot {
+  if (userId === null) return { choices: {}, read_result: 'available' };
+  let raw: string | null;
+  try { raw = localStorage.getItem(CHOICE_KEY(userId)); }
+  catch { return { choices: {}, read_result: 'unavailable' }; }
   try {
-    const raw = localStorage.getItem(CHOICE_KEY(userId));
     const parsed: unknown = raw === null ? {} : JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, ViewerId>) : {};
-  } catch {
-    return {};
-  }
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? { choices: Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, ViewerId] => typeof entry[1] === 'string')), read_result: 'available' }
+      : { choices: {}, read_result: 'invalid' };
+  } catch { return { choices: {}, read_result: 'invalid' }; }
 }
 
 /** The choices of the person signed in, held so that a tab follows a choice made in a menu. */
-const useChoices = create<{ userId: string | null; choices: Record<string, ViewerId> }>(() => ({ userId: null, choices: {} }));
+const useChoices = create<{ userId: string | null; reader: string | null; choices: Record<string, ViewerId>; saved: Record<string, ViewerId>; pending: Record<string, ViewerId>; read_result: DeviceChoiceRead; writes: Record<string, DeviceChoiceSave> }>(() => ({ userId: null, reader: null, choices: {}, saved: {}, pending: {}, read_result: 'available', writes: {} }));
 
 /** The viewer the person chose for this kind of file, if they did. */
 export function useViewerChoice(userId: string | null, name: string): ViewerId | null {
+  return useViewerChoiceObservation(userId, name)[0];
+}
+
+/** The value and receipt share the existing read, including a refused aggregate write's in-memory choices. */
+export function useViewerChoiceObservation(userId: string | null, name: string): [ViewerId | null, DeviceChoiceObservation<ViewerId | null>?] {
   const held = useChoices((state) => state);
-  if (userId === null) return null;
-  const choices = held.userId === userId ? held.choices : readChoices(userId);
-  return choices[kindOf(name)] ?? null;
+  const state = useStore(client.session, (state) => state);
+  const reader = state.userId === userId ? requestReader(userId, state.readerVersion) : null;
+  const snapshot = useMemo<ViewerChoiceSnapshot>(() => held.userId === userId && held.reader === reader ? held : readChoiceSnapshot(userId), [held, userId, reader]);
+  const kind = kindOf(name), chosen = snapshot.choices[kind] ?? null;
+  if (userId === null || reader === null) return [chosen];
+  const saved = snapshot.saved === undefined ? snapshot.choices[kind] : snapshot.saved[kind];
+  const pending = snapshot.pending !== undefined && Object.hasOwn(snapshot.pending, kind);
+  return [chosen, { reader, scope: { kind: 'file-viewers', key: 'viewer', thing: kind }, chosen, effective: chosen, saved,
+    origin: pending ? 'page' : chosen === null ? 'default' : 'kind',
+    saved_choice_availability: snapshot.read_result === 'invalid' ? 'unavailable' : saved === undefined ? 'unreported' : 'available',
+    read_result: pending ? 'memory' : snapshot.read_result, write_result: snapshot.writes?.[kind] ?? 'not_checked' }];
 }
 
 /** Remembers the viewer chosen for a kind of file, for this person on this device. */
 export function rememberChoice(userId: string | null, name: string, viewer: ViewerId): void {
   if (userId === null) return;
-  const choices = { ...readChoices(userId), [kindOf(name)]: viewer };
-  useChoices.setState({ userId, choices });
+  const state = client.session.getState(), reader = state.userId === userId ? requestReader(userId, state.readerVersion) : null;
+  const held = useChoices.getState(), same = held.userId === userId && held.reader === reader, pending = same ? held.pending : {};
+  const read = readChoiceSnapshot(userId), kind = kindOf(name);
+  const choices = { ...read.choices, ...pending, [kind]: viewer };
   try {
     localStorage.setItem(CHOICE_KEY(userId), JSON.stringify(choices));
+    useChoices.setState({ userId, reader, choices, saved: choices, pending: {}, read_result: read.read_result, writes: Object.fromEntries(Object.keys(choices).map((kind) => [kind, 'saved' as const])) });
   } catch {
-    // A device that keeps nothing keeps no choice; the next file opens in its default viewer.
+    useChoices.setState({ userId, reader, choices, saved: read.choices, pending: { ...pending, [kind]: viewer }, read_result: read.read_result, writes: { ...(same ? held.writes : {}), [kind]: 'failed' } });
+    recordDeviceChoiceSave(userId, 'file-viewers', 'failed');
   }
+}
+
+/** Called only after the same person's stored viewer record was removed successfully. */
+export function forgetViewerChoices(userId: string): void {
+  if (useChoices.getState().userId === userId) useChoices.setState({ userId: null, reader: null, choices: {}, saved: {}, pending: {}, writes: {}, read_result: 'available' });
 }
