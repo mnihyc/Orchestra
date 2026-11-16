@@ -33,6 +33,7 @@ struct Input {
     workspace: String,
     facts: Json,
     writer: Option<Id>,
+    #[sqlx(try_from = "orch_db::storage::OptionalJson")]
     applied_mounts: Option<Json>,
 }
 

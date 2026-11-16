@@ -237,6 +237,7 @@ pub struct AskGetQuery {
 #[serde(deny_unknown_fields)]
 pub struct AskMessageBody {
     /// Reusing this value for the same sender/thread returns the same receipt.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// Ordinary composer content and references.
     pub content: Vec<crate::threads::ContentPart>,
