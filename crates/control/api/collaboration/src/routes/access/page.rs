@@ -417,7 +417,24 @@ async fn permission_page_with(
                 |kind| same::<_, String>(&kind).unwrap_or_default(),
             ),
     };
+    let file_reach = match view_of.target {
+        orch_authz::pages::Target::Resource(object)
+            if object.kind == orch_access_contract::permissions::ObjectKind::Environment =>
+        {
+            Some(
+                orch_authz::file_reach::effective(
+                    conn,
+                    principal,
+                    object.id,
+                    orch_authz::Policy::default(),
+                )
+                .await?,
+            )
+        }
+        _ => None,
+    };
     Ok(api::PermissionPage {
+        file_reach,
         object: api::ObjectRef {
             kind: kind_word,
             id: target.unwrap_or_else(Id::nil),

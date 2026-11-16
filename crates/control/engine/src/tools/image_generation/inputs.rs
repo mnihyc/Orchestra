@@ -190,11 +190,13 @@ impl Read {
         };
         let expected = match kind {
             "fs.stat" => serde_json::to_value(FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.proof.site.environment,
                 mount: None,
                 path: path.into(),
             })?,
             "fs.fetch" => serde_json::to_value(FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.proof.site.environment,
                 mount: None,
                 path: path.into(),

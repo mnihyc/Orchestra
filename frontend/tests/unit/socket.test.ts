@@ -4,13 +4,14 @@ import { treeNode } from '../doubles/tree-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Approval, HarnessRequest, Item, ServerFrame, TreeNode } from '@/generated/api-types';
-import { type ClientFrame, createRealtimeSocket, type SocketLike } from '@/realtime/socket';
+import { type ClientFrame, createRealtimeSocket, type SocketLike, type HierarchyPage } from '@/realtime/socket';
 import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import { threadWriter, threadViewOf, waitingInputs, type ThreadRows } from '@/realtime/stores/thread';
 import { approvalItem, harnessApproval, threadInput, AT } from '../doubles/thread-rows';
 import { me, userRef } from '../doubles/fixtures';
 import { type DurableFeed, FeedRegistry, followFeed, type Loaded, UNSUBSCRIBE_AFTER_MS } from '@/realtime/sync';
 import { beginOpening, openingId } from '@/lib/opening';
+import { hierarchyFeed } from '@/api/hierarchyFeed';
 
 /** A socket that a test plays the server for. */
 class FakeSocket implements SocketLike {
@@ -49,7 +50,7 @@ class FakeSocket implements SocketLike {
 
   ready(): void {
     this.accept();
-    this.say({ op: 'ready', connection_id: 'c1', user_id: 'u1', server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b1' });
+    this.say({ op: 'ready', connection_id: 'c1', user_id: 'u1', server_time: '', access_expires_at: '', heartbeat_secs: 25, max_client_frame_bytes:16*1024, build: 'b1' });
   }
 
   of<Op extends ClientFrame['op']>(op: Op): Extract<ClientFrame, { op: Op }>[] {
@@ -200,7 +201,7 @@ describe('the connection', () => {
     const { socket, last } = harness();
     socket.start();
     last().accept();
-    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, build: 'b1' });
+    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, max_client_frame_bytes:16*1024, build: 'b1' });
     expect(socket.status.getState().phase).toBe('ready');
     expect(last().sent[0]).toEqual({ op: 'auth', token: 'token-1' });
     socket.stop();
@@ -611,6 +612,21 @@ describe('a feed that is kept in order', () => {
     expect(last().of('sub')).toEqual([]);
   });
 
+  it('keeps the affected view and a readable capacity reason while its subscription waits', async () => {
+    const { socket, last } = harness(); socket.start(); last().ready();
+    const acme = tree('acme', [node('thread', 1, 'Kept selection')], 1);
+    const failed = vi.fn<(error: unknown) => void>();
+    const follower = followFeed(socket, { ...acme.feed, failed }); await settle();
+    const id = last().of('sub').find((frame) => frame.feed === 'org:acme')?.id;
+    last().say({ op: 'error', id, code: 'too_many_subscriptions', detail: 'opaque native capacity detail' });
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed.mock.calls[0]?.[0]).toMatchObject({ code: 'too_many_subscriptions' });
+    expect(JSON.stringify(failed.mock.calls[0]?.[0])).toBe('{}');
+    expect(acme.names()).toEqual(['Kept selection']); expect(follower.lastSeq()).toBe(1);
+    expect(acme.loads).toEqual([null]);
+    follower.stop();
+  });
+
   it('is loaded over HTTP first and subscribed from the sequence of that answer', async () => {
     const { socket, last } = harness();
     socket.start();
@@ -897,4 +913,42 @@ describe('a feed that several views show', () => {
     vi.advanceTimersByTime(5 * 60_000);
     expect(evict).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it('hundreds of hierarchy pages and a long search keep every reconnect frame inside the announced native budget', async () => {
+  const {socket,last}=harness();
+  const queries:HierarchyPage[]=Array.from({length:100},(_,index)=>({window:index+1,root:'root',query:{parent_id:'root',cursor:`root|parent|123|scope|${index}`}}));
+  queries.push({window:101,root:'root',query:{parent_id:'root',q:'名字'.repeat(12_000)}});
+  socket.start();last().ready();
+  const feed=hierarchyFeed();
+  const frames:unknown[]=[];
+  const source=socket.subscribe(feed,{since:()=>null,hierarchy:()=>queries,onFrame:(frame)=>frames.push(frame)});
+  const accept=()=>{
+    const sub=last().of('sub').find((frame)=>frame.feed===feed&&frame.window===undefined);
+    expect(sub).toBeDefined();
+    last().say({op:'subscribed',id:sub?.id,feed,seq:null,mode:'ephemeral'});
+  };
+  accept();
+  const registered=()=>last().of('sub').filter((frame)=>frame.window?.kind==='query');
+  expect(new Set(registered().map((frame)=>frame.window?.window)).size).toBe(101);
+  const verify=()=>{
+    const payloads=new Map<number,number[]>();
+    for(const frame of last().sent) {
+      expect(new TextEncoder().encode(JSON.stringify(frame)).length).toBeLessThanOrEqual(16*1024);
+      if(frame.op!=='sub'||frame.window?.kind!=='query')continue;
+      const held=payloads.get(frame.window.window)??[];
+      held.push(...Uint8Array.from(atob(frame.window.data.replaceAll('-','+').replaceAll('_','/')),(character)=>character.charCodeAt(0)));
+      payloads.set(frame.window.window,held);
+    }
+    expect(JSON.parse(new TextDecoder().decode(Uint8Array.from(payloads.get(101)??[])))).toEqual(queries.at(-1)?.query);
+  };
+  verify();
+  last().drop();await vi.advanceTimersByTimeAsync(500);last().ready();accept();verify();
+  expect(new Set(registered().map((frame)=>frame.window?.window)).size).toBe(101);
+  queries.splice(0,1);source.updateViews?.();
+  expect(last().of('sub').at(-1)?.window).toEqual({kind:'remove',window:1});
+  last().say({op:'event',id:last().of('sub')[0]?.id,feed,data:{window:100,hierarchy:{nodes:[],seq:7}}});
+  expect(frames.at(-1)).toMatchObject({data:{window:100}});
+  source.unsubscribe();socket.stop();
 });
