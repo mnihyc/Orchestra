@@ -1,7 +1,11 @@
 /** The same announcement controls and inherited tag limit are visible on orgs, projects and topics. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { client } from '@/api/client';
+import { setNodeTags } from '@/api/nodes';
+import type * as RecentsApi from '@/api/pickerRecents';
+import type { PageOf } from '@/api/collection';
 import { announce } from '@/api/announcements';
 import type * as AnnouncementsApi from '@/api/announcements';
 import { PlaceAnnouncements } from '@/features/announcements/Composer';
@@ -16,24 +20,32 @@ vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
 vi.mock('@/api/announcements', async (load) => ({ ...await load<typeof AnnouncementsApi>(), announce: vi.fn(), announcementsQuery: (id: string) => ({ queryKey: ['announcements', id], initialPageParam: null,
   queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined }) }));
-const settingsState = vi.hoisted(() => ({ wake: true }));
-vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([{ key: 'tags.max_per_place', value: 1 }, { key: 'broadcast.wake_idle', value: settingsState.wake }]) }) }));
-vi.mock('@/api/nodes', () => ({ tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
-  nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: () => Promise.resolve(root) }), setNodeTags: vi.fn() }));
+const settingsState = vi.hoisted(() => ({ wake: true, tags: 1 }));
+const tagReads = vi.hoisted(() => ({ scope: vi.fn<(id: string) => void>(), page: vi.fn<(id: string, q: string, cursor: string | null) => Promise<PageOf<Tag>>>(), recent: [] as string[] }));
+vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([{ key: 'tags.max_per_place', value: settingsState.tags }, { key: 'broadcast.wake_idle', value: settingsState.wake }]) }) }));
+vi.mock('@/api/nodes', () => ({ tagsPageQuery: (id: string, q: string) => ({ queryKey: ['tags', id, 'pages', q], initialPageParam: null, queryFn: ({ pageParam }: { pageParam: string | null }) => tagReads.page(id, q, pageParam), getNextPageParam: (page: PageOf<Tag>) => page.next_cursor }), tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
+  nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: () => { tagReads.scope(id); return Promise.resolve(scopeNodes.find((node) => node.id === id) ?? root); } }), setNodeTags: vi.fn() }));
 vi.mock('@/api/day100', () => ({ createPickerTag: vi.fn() }));
 
+vi.mock('@/api/pickerRecents', async (load) => {
+  const actual = await load<typeof RecentsApi>();
+  return { ...actual, pickerRecentsQuery: (person: string) => ({ ...actual.pickerRecentsQuery(person), queryFn: () => Promise.resolve({ count: 5, choices: { project: tagReads.recent } }) }), recordPickerChoice: () => Promise.resolve({ count: 5, remembered: true }) };
+});
+const session = client.session.getState();
+afterEach(() => { cleanup(); client.session.setState(session); });
 const root = org('org', 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')), { access: { admin_only: [], participating: true, permissions: ['org.view', 'org.interact', 'org.manage'], role: 'admin', role_from: null, administers: true, owns: true, subscription: null, effective_subscription: 'off' } });
 const project: Project = { ...root, kind: 'project', id: 'project', name: 'Web', parent_id: root.id, topic_count: 1, project_count: 0,
   path: [...root.path, { id: 'project', kind: 'project', name: 'Web', redacted: false }], access: { ...root.access, permissions: ['project.view', 'project.interact', 'project.manage'] } };
 const topic: Topic = { ...root, kind: 'topic', id: 'topic', name: 'Release', parent_id: project.id, status: 'open', done_at: null, thread_display_state: null,
   path: [...project.path, { id: 'topic', kind: 'topic', name: 'Release', redacted: false }], access: { ...root.access, permissions: ['topic.view', 'topic.interact', 'topic.manage'] },
   thread_count: 0, attention: { blocked: 0, running: 0, waiting_approval: 0 }, work_attention: { uncommitted: 0, unpushed: 0, failed: 0 }, environments: [], default_environment_id: null, last_activity_at: null, seq: 0 };
+let scopeNodes: Node[] = [root, project, topic];
 const labels: Tag[] = [{ id: 'first', name: 'Ready', color: 0, node: root.path[0]! }, { id: 'second', name: 'Urgent', color: 1, node: root.path[0]! }];
 const delivered: Announcement = { id: 'announcement', topic_id: topic.id, group_id: 'group', title: 'A release', body: 'Ship it', category: 'notice', severity: 'info',
   from: { user: root.owner }, targets: 'all', files: [], delivery: 'steer', fallback: 'next_turn', wake_idle: false,
   delivered: { interrupted: 0, steered: 0, queued: 1, deferred: 0 }, created_at: '2026-10-15T05:00:00.000Z', topic_seq: 1 };
 
-beforeEach(async () => { await i18n.changeLanguage('en'); settingsState.wake = true; vi.clearAllMocks(); vi.mocked(announce).mockResolvedValue({ group_id: 'group', announcements: [delivered], topics_skipped: 2 }); });
+beforeEach(async () => { await i18n.changeLanguage('en'); settingsState.wake = true; settingsState.tags = 1; scopeNodes = [root, project, topic]; tagReads.recent = []; vi.clearAllMocks(); tagReads.page.mockReset().mockImplementation((_id, q) => Promise.resolve({ items: labels.filter((tag) => tag.name.toLowerCase().includes(q.toLowerCase())), next_cursor: null })); vi.mocked(announce).mockResolvedValue({ group_id: 'group', announcements: [delivered], topics_skipped: 2 }); });
 
 it.each([root, project, topic])('shows and sends the same scoped announcement controls in $kind', async (place) => {
   const user = userEvent.setup();
@@ -120,4 +132,53 @@ it('keeps a reader’s tags visible with no editing controls and keeps the membe
   expect(screen.getByText('Ready')).toBeVisible();
   expect(screen.queryByRole('button')).not.toBeInTheDocument();
   expect(roleSubject({ kind: 'members', id: root.id }, root.id)).toEqual({ kind: 'members', id: root.id });
+});
+
+it('reads only the selected definition place and offers recent ancestor places without changing the entered name', async () => {
+  const path = [root.path[0]!];
+  scopeNodes = [root];
+  for (let index = 0; index < 13; index++) {
+    const ref = { id: `scope-${index}`, kind: 'project' as const, name: `Scope ${index}`, redacted: false };
+    path.push(ref); scopeNodes.push({ ...project, id: ref.id, name: ref.name, path: [...path] });
+  }
+  const place = scopeNodes.at(-1); if (place === undefined) throw new Error('A native selected place is required');
+  client.session.setState({ userId: 'tag-reader', status: 'signed_in', readerVersion: 831 }); tagReads.recent = ['scope-1'];
+  const user = userEvent.setup(); show(<TagPicker place={place} allowed />);
+  await user.click(screen.getByRole('button', { name: i18n.t('placeTags.add') }));
+  await user.type(screen.getByRole('textbox', { name: i18n.t('day100.tags.name') }), 'Fresh label');
+  const field = await screen.findByRole('combobox', { name: i18n.t('day100.tags.defineIn') });
+  await waitFor(() => expect(tagReads.scope.mock.calls.map(([id]) => id)).toEqual([place.id]));
+  await user.click(field); expect(await screen.findByRole('option', { name: 'Scope 1' })).toBeVisible();
+  expect(screen.getAllByRole('option')[0]).toHaveAccessibleName('Scope 1');
+  await user.click(screen.getByRole('option', { name: 'Scope 7' }));
+  await waitFor(() => expect(tagReads.scope.mock.calls.map(([id]) => id)).toEqual([place.id, 'scope-7']));
+  expect(screen.getByRole('textbox', { name: i18n.t('day100.tags.name') })).toHaveValue('Fresh label');
+  expect(setNodeTags).not.toHaveBeenCalled();
+});
+
+it('searches native tag pages while keeping every already assigned tag in its complete change', async () => {
+  settingsState.tags = 2;
+  const late: Tag = { id: 'late-tag', name: 'Late label', color: 1, node: root.path[0]! };
+  tagReads.page.mockImplementation((_id, q, cursor) => Promise.resolve(q === 'l' ? { items: [late], next_cursor: null }
+    : cursor === null ? { items: [labels[0]!], next_cursor: 'next' } : { items: [late], next_cursor: null }));
+  const place = { ...root, tags: [labels[0]!] }; const user = userEvent.setup(); show(<TagPicker place={place} allowed />);
+  await user.click(screen.getByRole('button', { name: i18n.t('placeTags.edit') }));
+  expect(await screen.findByRole('checkbox', { name: 'Ready' })).toBeChecked();
+  await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
+  expect(await screen.findByRole('checkbox', { name: late.name })).toBeVisible();
+  await user.type(screen.getByRole('textbox', { name: i18n.t('day100.tags.name') }), 'l');
+  await waitFor(() => expect(tagReads.page).toHaveBeenCalledWith(place.id, 'l', null));
+  await user.click(await screen.findByRole('checkbox', { name: late.name }));
+  await waitFor(() => expect(setNodeTags).toHaveBeenCalledWith(place.id, [labels[0]!.id, late.id], place.revision));
+});
+
+it('retires an old tag name and definition scope when the same surface opens another target', async () => {
+  const user = userEvent.setup(), shown = show(<TagPicker place={root} allowed />);
+  await user.click(screen.getByRole('button', { name: i18n.t('placeTags.add') }));
+  await user.type(screen.getByRole('textbox', { name: i18n.t('day100.tags.name') }), 'Old target draft');
+  shown.rerender(<TagPicker place={topic} allowed />);
+  expect(screen.queryByRole('textbox', { name: i18n.t('day100.tags.name') })).toBeNull();
+  await user.click(screen.getByRole('button', { name: i18n.t('placeTags.add') }));
+  expect(screen.getByRole('textbox', { name: i18n.t('day100.tags.name') })).toHaveValue('');
+  await waitFor(() => expect(tagReads.scope.mock.calls.map(([id]) => id)).toEqual([root.id, topic.id]));
 });

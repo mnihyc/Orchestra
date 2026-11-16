@@ -1,66 +1,52 @@
-/** Choosing one place of the orgs a person belongs to, by typing part of where it lies: "Acme / Research / Web".
- *
- * A token can be kept to one place and what lies under it. The orgs, projects and topics of every root
- * org the person belongs to are listed as a path of names, narrowed as they type, and the one chosen
- * is shown with the way to take it back. Threads are left out: a token is not kept to one conversation.
- */
-import { useQueries, useQuery } from '@tanstack/react-query';
-import { X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
+/** A destination uses its native name page, without loading every organization's tree. */
+import {useInfiniteQuery} from '@tanstack/react-query';
+import {X} from 'lucide-react';
+import {useEffect,useMemo,useState} from 'react';
+import {useTranslation} from 'react-i18next';
+import {useStore} from 'zustand';
+import {client} from '@/api/client';
+import {pickerNamesQuery,type NameKind} from '@/api/search';
+import type {AdminAccess,NameHit,NodeKind,NodeRef} from '@/generated/api-types';
+import {useDebounced} from '@/lib/debounce';
+import {usePickerCursorRestart} from '@/lib/pickerPages';
+import {AsAdminMark,adminAccessOf} from '@/ui/AsAdminMark';
+import {ResourcePickerLookup} from '@/ui/ResourcePicker';
+import {IconButton} from '@/ui/IconButton';
+import type {ChoiceHelp} from '@/ui/Choice';
+import {NodeIcon} from '@/ui/NodeIcon';
+import {Button} from '@/ui/Button';
+import {ErrorState} from '@/ui/ErrorState';
 
-import { fetchTree, orgsQuery } from '@/api/nodes';
-import type { AdminAccess, NodeKind, TreeNode } from '@/generated/api-types';
-import { useTreeStore } from '@/realtime/stores/tree';
-import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
-import { Combobox, type ComboboxGroup } from '@/ui/Combobox';
-import { IconButton } from '@/ui/IconButton';
-import type { ChoiceHelp } from '@/ui/Choice';
-import { NodeIcon } from '@/ui/NodeIcon';
-import { Button } from '@/ui/Button';
-import { ErrorState } from '@/ui/ErrorState';
-
-/** The most places listed under what is typed: past it the list is no help in choosing, and typing more narrows it. */
-const MOST_LISTED = 30;
-
-const NO_ROWS: readonly TreeNode[] = [];
-
-/** A place as the picker offers it. */
 export interface PickedPlace {
-  adminAccess?: AdminAccess;
-  /** Actual root of the native tree which supplied this place. */
-  rootOrgId?: string;
-  rootName?: string;
-  id: string;
-  kind: NodeKind;
-  /** The colour it was given, 1 to 12; `null` for the colour of its kind. */
-  color: number | null;
-  /** A colour of its own, where the place has one. */
-  custom_color?: string | null;
-  /** A project that lies in a project. */
-  folder: boolean;
-  /** "Acme / Research / Web". */
-  path: string;
+  adminAccess?:AdminAccess;
+  rootOrgId?:string;
+  rootName?:string;
+  id:string;
+  kind:NodeKind;
+  color:number|null;
+  custom_color?:string|null;
+  folder:boolean;
+  path:string;
 }
 
-/** The places of one tree as paths of names, in the order of the tree. */
-export function placesOfTree(rows: readonly TreeNode[], separator: string, includeThreads = false): PickedPlace[] {
-  const byId = new Map(rows.map((row) => [row.id, row]));
-  const pathOf = (row: TreeNode): string => {
-    const names: string[] = [];
-    for (let at: TreeNode | undefined = row, steps = 0; at !== undefined && steps < 64; steps += 1) {
-      names.unshift(at.name);
-      at = at.parent_id === null ? undefined : byId.get(at.parent_id);
-    }
-    return names.join(separator);
-  };
-  return rows
-    .filter((row) => !row.deleted && (includeThreads || row.kind !== 'thread'))
-    .map((row) => {
-      const adminAccess = adminAccessOf(row);
-      return { id: row.id, kind: row.kind, color: row.color, ...(row.custom_color === undefined ? {} : { custom_color: row.custom_color }), folder: row.kind === 'project' && (row.parent_id === null ? undefined : byId.get(row.parent_id))?.kind === 'project', path: pathOf(row), ...(adminAccess === null ? {} : { adminAccess }) };
-    })
-    .sort((one, other) => one.path.localeCompare(other.path));
+/** Only the native reply supplies names; unavailable ancestors stay unnamed. */
+export function placesOfNames(rows:readonly NameHit[],separator:string,hidden:string,includeThreads=false,rootId?:string):PickedPlace[] {
+  return rows.flatMap((hit)=>{
+    const kind=hit.kind;
+    if(kind!=='org'&&kind!=='project'&&kind!=='topic'&&kind!=='thread')return [];
+    if(kind==='thread'&&!includeThreads)return [];
+    const self:NodeRef={id:hit.id,kind,name:hit.name,redacted:false};
+    const path=hit.path.at(-1)?.id===hit.id?[...hit.path.slice(0,-1),self]:[...hit.path,self];
+    const root=rootId??(path[0]?.kind==='org'?path[0].id:undefined);
+    const namedRoot=path.find((node)=>node.id===root&&!node.redacted&&node.name!==null);
+    const admin=adminAccessOf(hit);
+    return [{id:hit.id,kind,color:hit.color??null,custom_color:hit.custom_color,
+      folder:kind==='project'&&path.at(-2)?.kind==='project',
+      path:path.map((node)=>node.redacted||node.name===null?hidden:node.name).join(separator),
+      ...(root===undefined?{}:{rootOrgId:root}),...(namedRoot?.name===null||namedRoot?.name===undefined?{}:{rootName:namedRoot.name}),
+      ...(admin===null?{}:{adminAccess:admin}),
+    }];
+  });
 }
 
 export interface PlacePickerProps {
@@ -82,95 +68,50 @@ export interface PlacePickerProps {
   optionDescription?: (place: PickedPlace) => string | undefined;
 }
 
-export function PlacePicker({ label, hint, value, onChange, disabled = false, rootOrgId, only, includeThreads = false, refusal, onCandidatesChange, optionHelp, optionDescription }: PlacePickerProps) {
-  const { t } = useTranslation();
-  const [query, setQuery] = useState('');
-  const [open, setOpen] = useState(false);
-  const orgs = useQuery({ ...orgsQuery, enabled: open && value === null });
-  const live = useTreeStore((state) => state.byOrg);
-  const roots = useMemo(() => (orgs.data ?? []).filter((org) => rootOrgId === undefined || org.id === rootOrgId), [orgs.data, rootOrgId]);
-  const heldAt = (index: number) => { const id = roots[index]?.id; return id === undefined ? undefined : live.get(id); };
-  const trees = useQueries({
-    queries: roots.map((org) => ({
-      queryKey: ['tree-places', org.id] as const,
-      queryFn: ({ signal }: { signal: AbortSignal }) => fetchTree(org.id, null, signal),
-      enabled: open && value === null && live.get(org.id)?.loaded !== true,
-    })),
-    // The rows of every tree as one value, which stays the same object while nothing in it changed.
-    combine: (results) => ({ trees: results.map((result, index) => {
-      const held = heldAt(index);
-      return held?.loaded === true ? [...held.nodes.values()] : result.data?.nodes ?? NO_ROWS;
-    }), pending: results.some((result, index) => heldAt(index)?.loaded !== true && result.isPending),
-    failed: results.find((result, index) => heldAt(index)?.loaded !== true && result.isError),
-    retry: () => Promise.all(results.filter((result) => result.isError).map((result) => result.refetch())) }),
-  });
-  const loading = open && (orgs.isPending || trees.pending);
-  const places = useMemo(() => {
-    const separator = t('settings.place.separator');
-    return trees.trees.flatMap((rows, index) => {
-      const root = roots[index];
-      const namedRoot = root?.path.find((step) => step.id === root.org_id && !step.redacted);
-      const rootName = root?.id === root?.org_id ? root?.name : namedRoot?.name;
-      return placesOfTree(rows, separator, includeThreads).map((place) => ({ ...place, ...(root === undefined ? {} : { rootOrgId: root.org_id, ...(rootName === null || rootName === undefined ? {} : { rootName }) }) }));
-    });
-  }, [trees.trees, roots, t, includeThreads]);
-  const needle = query.trim().toLocaleLowerCase();
-  const found = useMemo(() => places
-    .filter((place) => only === undefined || place.kind === only)
-    .filter((place) => needle === '' || place.path.toLocaleLowerCase().includes(needle))
-    .slice(0, MOST_LISTED), [places, only, needle]);
-  useEffect(() => { onCandidatesChange?.(found); }, [found, onCandidatesChange]);
-  const groups: ComboboxGroup<string>[] = [
-    {
-      id: 'places',
-      label: t('settings.place.group'),
-      options: found.map((place) => ({
-        value: place.id,
-        label: <span className="flex min-w-0 items-center gap-2"><span>{place.path}</span><AsAdminMark of={place.adminAccess?.place} /></span>,
-        text: place.path,
-        icon: <NodeIcon kind={place.folder ? 'folder' : place.kind} color={place.color} own={place.custom_color} />,
-        description: optionDescription?.(place) ?? t(`settings.place.kinds.${place.kind}`),
-        help: optionHelp?.(place),
-        disabled: refusal?.(place) ?? false,
-      })),
-    },
-  ];
-
-  if (value !== null) {
-    return (
-      <div className="flex flex-col gap-1">
-        <span className="text-sm font-medium text-text">{label}</span>
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2">
-          <NodeIcon kind={value.folder ? 'folder' : value.kind} color={value.color} own={value.custom_color} className="size-4" />
-          <span className="min-w-0 flex-1 text-base wrap-anywhere text-text">{value.path}</span>
-          <AsAdminMark of={value.adminAccess?.place} />
-          <IconButton size="sm" label={t('settings.place.clear', { path: value.path })} icon={<X aria-hidden />} disabled={disabled} onClick={() => onChange(null)} />
-        </div>
-        {refusal?.(value) && <span className="text-sm text-text-muted">{refusal(value)}</span>}
-      </div>
-    );
-  }
-  return (
-    <Combobox
-      label={label}
-      hint={hint}
-      query={query}
-      onQueryChange={setQuery}
-      onOpenChange={setOpen}
-      groups={groups}
-      loading={loading}
-      empty={t('settings.place.none')}
-      placeholder={t('settings.place.placeholder')}
-      disabled={disabled}
-      footer={orgs.isError ? <ErrorState compact error={orgs.error} action={<Button size="sm" onClick={() => void orgs.refetch()}>{t('common.tryAgain')}</Button>} />
-        : trees.failed === undefined ? undefined : <ErrorState compact error={trees.failed.error} action={<Button size="sm" onClick={() => void trees.retry()}>{t('common.tryAgain')}</Button>} />}
-      onSelect={(option) => {
-        const place = places.find((entry) => entry.id === option.value);
-        if (place !== undefined) {
-          onChange(place);
-          setQuery('');
-        }
-      }}
-    />
-  );
+export function PlacePicker({label,hint,value,onChange,disabled=false,rootOrgId,only,includeThreads=false,refusal,onCandidatesChange,optionHelp,optionDescription}:PlacePickerProps) {
+  const {t}=useTranslation();
+  const reader=useStore(client.session,(state)=>`${state.userId}:${state.readerVersion}`);
+  const [query,setQuery]=useState('');const [open,setOpen]=useState(false);
+  const text=query.trim(),rested=useDebounced(text),waiting=text!==rested;
+  const kinds:NameKind[]=only===undefined?['org','project','topic',...(includeThreads?['thread' as const]:[])]:[only];
+  const scope=JSON.stringify([reader,rootOrgId,kinds,rested]);
+  const [page,setPage]=useState({scope,index:0});
+  if(page.scope!==scope)setPage({scope,index:0});
+  const request=pickerNamesQuery({q:rested,kinds,...(rootOrgId===undefined?{}:{orgId:rootOrgId})});
+  const source=useInfiniteQuery({...request,enabled:open&&value===null&&!waiting});
+  usePickerCursorRestart(source,request.queryKey);
+  const pages=source.data?.pages??[];
+  const index=page.scope===scope?Math.min(page.index,Math.max(0,pages.length-1)):0;
+  if(source.data!==undefined&&page.scope===scope&&page.index!==index)setPage({scope,index});
+  const rows=pages[index]?.items;
+  const places=useMemo(()=>waiting||source.isError?[]:placesOfNames(rows??[],t('settings.place.separator'),t('access.place.hidden'),includeThreads||only==='thread',rootOrgId),[rows,t,waiting,source.isError,includeThreads,only,rootOrgId]);
+  useEffect(()=>{onCandidatesChange?.(places);},[places,onCandidatesChange]);
+  const more=index+1<pages.length||source.hasNextPage;
+  const next=async()=>{
+    if(index+1>=pages.length){const result=await source.fetchNextPage();if(result.isError||result.data===undefined||result.data.pages.length<=index+1)return;}
+    setPage((before)=>before.scope===scope&&before.index===index?{scope,index:index+1}:before);
+  };
+  const retry=()=>{setPage({scope,index:0});void source.refetch();};
+  if(value!==null)return <div className="flex flex-col gap-1">
+    <span className="text-sm font-medium text-text">{label}</span>
+    <div className="flex items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2">
+      <NodeIcon kind={value.folder?'folder':value.kind} color={value.color} own={value.custom_color} className="size-4"/>
+      <span className="min-w-0 flex-1 text-base wrap-anywhere text-text">{value.path}</span><AsAdminMark of={value.adminAccess?.place}/>
+      <IconButton size="sm" label={t('settings.place.clear',{path:value.path})} icon={<X aria-hidden/>} disabled={disabled} onClick={()=>onChange(null)}/>
+    </div>{refusal?.(value)&&<span className="text-sm text-text-muted">{refusal(value)}</span>}
+  </div>;
+  return <ResourcePickerLookup pickerKey="place-destination" groupHomes={false} filterLocal={false}
+    label={label} hint={hint} query={query} onQueryChange={setQuery} onOpenChange={setOpen} disabled={disabled}
+    loading={open&&(waiting||source.isPending)} empty={t('settings.place.none')} placeholder={t('settings.place.placeholder')}
+    groups={[{id:'places',label:t('settings.place.group'),options:places.map((place)=>({value:place.id,text:place.path,
+      resource:{kind:place.kind,id:place.id},
+      label:<span className="flex min-w-0 items-center gap-2"><span>{place.path}</span><AsAdminMark of={place.adminAccess?.place}/></span>,
+      icon:<NodeIcon kind={place.folder?'folder':place.kind} color={place.color} own={place.custom_color}/>,
+      description:optionDescription?.(place)??t(`settings.place.kinds.${place.kind}`),help:optionHelp?.(place),disabled:refusal?.(place)??false,
+    }))}]}
+    footer={source.isError?<ErrorState compact error={source.error} onRetry={retry}/>:index>0||more?<div className="flex justify-end gap-2">
+      <Button size="sm" variant="ghost" disabled={index===0||waiting} onClick={()=>setPage({scope,index:index-1})}>{t('resourceDetails.layout.previous')}</Button>
+      <Button size="sm" variant="ghost" disabled={!more||waiting} pending={source.isFetchingNextPage} onClick={()=>{void next();}}>{t('resourceDetails.layout.next')}</Button>
+    </div>:undefined}
+    onSelect={(option)=>{const place=places.find((row)=>row.id===option.value);if(place!==undefined){setOpen(false);setQuery('');onChange(place);}}}/>
 }

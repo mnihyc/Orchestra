@@ -58,7 +58,9 @@ fn query(request: &api::CleanupRequest) -> api::StorageQuery {
         kind: None,
         why: None,
         age: None,
-        page: Default::default(),
+        q: None,
+        limit: None,
+        cursor: None,
     }
 }
 

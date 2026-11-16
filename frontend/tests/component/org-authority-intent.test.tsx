@@ -38,6 +38,7 @@ vi.mock('@/api/directory', async (original) => {
 vi.mock('@/api/users', async (original) => {
   const api = await original<typeof Users>();
   return { ...api, createInvitation: calls.create,
+    invitationsPageQuery: (id: string, q: string) => ({ ...api.invitationsPageQuery(id, q), queryFn: () => Promise.resolve({ items: [], next_cursor: null }) }),
     invitationsQuery: (id: string) => ({ ...api.invitationsQuery(id), queryFn: () => Promise.resolve([]) }),
   };
 });

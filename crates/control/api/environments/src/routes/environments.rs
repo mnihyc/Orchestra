@@ -674,6 +674,7 @@ pub(crate) async fn show_inventory_prepared(
                 .filter_map(|(_, topic)| seen(*topic))
                 .collect(),
             threads: shown_threads,
+            threads_next_cursor: None,
             threads_hidden: hidden,
             reach: reach.get(&row.id).copied().unwrap_or_default(),
             workspace_incarnation: Some(incarnation::of(
@@ -761,7 +762,7 @@ pub(crate) async fn show_inventory_prepared(
                 row.machine_id
                     .and_then(|machine| connector_versions.get(&machine))
                     .map(String::as_str),
-                orch_engine::updates::CONNECTOR_MINIMUM,
+                ctx.app.link.connector_minimum(),
             ),
             remote_write: switches.remote_write,
             terminal: switches.terminal,

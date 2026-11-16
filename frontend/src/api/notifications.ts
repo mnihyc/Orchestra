@@ -6,8 +6,10 @@
  * webhook of their own. The Inbox itself is kept current by the person's live feed; these are the
  * requests that load it, change it and answer for it.
  */
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { queryOptions } from '@tanstack/react-query';
 
+import { NetworkError } from '@/lib/requests';
 import { api, done, ok, repeatable } from '@/api/client';
 import type {
   MeNotificationChannelCreateBody,
@@ -17,6 +19,7 @@ import type {
   NotificationChannel,
   NotificationChannelUpdateBody,
   NotificationPage,
+  NotificationListQuery,
   NotificationPrefs,
   NotificationReadBody,
   NotificationReadReply,
@@ -36,6 +39,8 @@ export function fetchSummary(signal?: AbortSignal): Promise<NotificationSummaryG
 }
 
 export interface InboxQuery {
+  q?: string;
+  kind?: string;
   /** Only what is not read yet. */
   unread?: boolean;
   /** The `next_cursor` of the page before. */
@@ -44,11 +49,21 @@ export interface InboxQuery {
 }
 
 /** One page of the Inbox, newest first. */
-export function fetchNotifications(query: InboxQuery = {}, signal?: AbortSignal): Promise<NotificationPage> {
-  const asked: { unread?: boolean; cursor?: string; limit: number } = { limit: query.limit ?? INBOX_PAGE };
-  if (query.unread === true) asked.unread = true;
-  if (query.cursor !== undefined && query.cursor !== null) asked.cursor = query.cursor;
-  return ok(api.GET('/notifications', { params: { query: asked }, ...(signal === undefined ? {} : { signal }) }));
+export async function fetchNotifications(query: InboxQuery = {}, signal?: AbortSignal): Promise<NotificationPage> {
+  const asked: NotificationListQuery = { limit: query.limit ?? INBOX_PAGE,
+    ...(query.q === undefined || query.q === '' ? {} : {q:query.q}),
+    ...(query.kind === undefined ? {} : {kind:query.kind}),
+    ...(query.unread === true ? {unread:true} : {}),
+    ...(query.cursor === undefined || query.cursor === null ? {} : {cursor:query.cursor}) };
+  const seen=new Set<string>();
+  for (;;) {
+    const page=await ok(api.GET('/notifications',{params:{query:asked},...(signal===undefined?{}:{signal})}));
+    if ((query.q ?? '')!=='' && page.items.length===0 && page.next_cursor!==null) {
+      if(seen.has(page.next_cursor))throw new NetworkError('malformed');
+      seen.add(page.next_cursor);asked.cursor=page.next_cursor;continue;
+    }
+    return page;
+  }
 }
 
 /** Marks read the rows named, those of a place or a chat, or those written before a moment; answers with what is still unread. */
@@ -78,6 +93,7 @@ export const notifiersKey = ['notifiers'] as const;
 export const notifiersQuery = queryOptions({
   queryKey: notifiersKey,
   queryFn: ({ signal }): Promise<Notifier[]> => ok(api.GET('/notifiers', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 export const notificationChannelsKey = ['notification-channels'] as const;
@@ -85,7 +101,7 @@ export const notificationChannelsKey = ['notification-channels'] as const;
 /** The channels that can reach the caller, each with their own route through it. */
 export const notificationChannelsQuery = queryOptions({
   queryKey: notificationChannelsKey,
-  queryFn: ({ signal }): Promise<NotificationChannel[]> => ok(api.GET('/notification-channels', { params: { query: {} }, signal })),
+  queryFn: ({ signal }): Promise<NotificationChannel[]> => readAllPages((cursor) => ok(api.GET('/notification-channels', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 /** The caller's own switch for a channel: on or off, what it carries, how long a notification waits unread, how often a message goes. */
@@ -137,3 +153,5 @@ export function addPushSubscription(body: MePushSubscriptionCreateBody): Promise
 export function removePushSubscription(endpoint: string): Promise<void> {
   return done(api.DELETE('/me/push-subscriptions', { body: { endpoint } }));
 }
+
+export const notificationChannelsPageQuery = (q: string) => collectionQuery(notificationChannelsKey, q, (query, signal) => ok(api.GET('/notification-channels', { params: { query }, signal })));

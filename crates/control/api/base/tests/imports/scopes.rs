@@ -445,3 +445,20 @@ async fn import_file_publication_keeps_original_saved_names_and_live_key_after_a
         );
     }
 }
+
+#[tokio::test]
+async fn import_source_name_search_finds_a_later_file_before_a_small_page() {
+    let (o, import) = scene().await;
+    let reply =
+        o.s.rig
+            .world
+            .app
+            .call(ImportFileList, &[&import.id])
+            .token(&o.s.ada.token)
+            .query(&json!({"q":"second-source","limit":1}))
+            .send_bytes()
+            .await;
+    let page = page(reply);
+    assert_eq!(page.items, vec!["second-source.md"]);
+    assert!(page.next_cursor.is_none());
+}

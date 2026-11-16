@@ -1,7 +1,7 @@
 /** One complete picker keeps native choices while grouping, searching and folding their homes. */
 import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import { ResourcePicker, ResourcePickerLookup } from '@/ui/ResourcePicker';
 import { ResourcePickerScope } from '@/features/resources/PickerContext';
@@ -9,10 +9,20 @@ import type { ResourceGroupMeta } from '@/features/resources/groups';
 import type { CardPreview } from '@/ui/DetailCard';
 import type { NodeRef } from '@/generated/api-types';
 import { client } from '@/api/client';
+import { pickerRecentsKey } from '@/api/pickerRecents';
+import type * as Recents from '@/api/pickerRecents';
+import type { MePickerRecents } from '@/generated/api-types';
+import { QueryClient } from '@tanstack/react-query';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show, skipOverflowFallback } from './support';
 
+const recentServer=vi.hoisted(()=>({read:vi.fn<(person:string)=>Promise<MePickerRecents>>(),record:vi.fn<typeof Recents.recordPickerChoice>()}));
+vi.mock('@/api/pickerRecents',async(load)=>{const actual=await load<typeof Recents>();return {...actual,
+ pickerRecentsQuery:(person:string)=>({...actual.pickerRecentsQuery(person),queryFn:()=>recentServer.read(person)}),
+ recordPickerChoice:recentServer.record,
+};});
+beforeEach(()=>{recentServer.read.mockReset().mockResolvedValue({count:5,choices:{}});recentServer.record.mockReset().mockResolvedValue({count:5,remembered:true});});
 skipOverflowFallback();
 vi.mock('@/features/navigation/places',()=>({PlaceLink:({place,children}:{place:NodeRef;children:React.ReactNode})=><a href={`#${place.id}`}>{children}</a>}));
 vi.mock('@/features/resources/machines/MachineLink',()=>({MachineLink:({machine}:{machine:{id:string;name:string}})=><a href={`#${machine.id}`}>{machine.name}</a>}));
@@ -131,4 +141,106 @@ for (const locale of ['en', 'zh-CN'] as const) for (const lookup of [false, true
   await user.click(screen.getByRole('button', { name: i18n.t('resourceGroups.expand', { name: alpha.name }) }));
   await user.click(within(screen.getByRole('group', { name: askable })).getByRole('option', { name: 'Requestable template' }));
   expect(selected).toHaveBeenCalledExactlyOnceWith('ask');
+});
+
+
+for (const kind of ['agent','provider','environment','machine','host','user','document','topic']) {
+  it(`offers this person's recent ${kind} first, only once, without losing search or keyboard selection`, async () => {
+    client.session.setState({userId:'recent-reader'});
+    const cache=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity}}});
+    const reply={count:5,choices:{[kind]:['late','missing','blocked']}};
+    recentServer.read.mockResolvedValue(reply);cache.setQueryData(pickerRecentsKey('recent-reader'),reply);
+    const user=userEvent.setup();const selected=vi.fn();
+    show(<ResourcePicker pickerKey="recent-kind" label="Resource" value="first" onValueChange={selected}
+      options={[
+        {value:'first',name:'First entry',resource:{kind,id:'first'}},
+        {value:'middle',name:'Middle entry',resource:{kind,id:'middle'}},
+        {value:'late',name:'Recent entry',resource:{kind,id:'late'}},
+        {value:'blocked',name:'Unavailable entry',disabled:true,description:'Needs permission',resource:{kind,id:'blocked'}},
+      ]}/>,cache);
+    const input=screen.getByRole('combobox',{name:'Resource'});await user.click(input);
+    const recent=await screen.findByRole('group',{name:i18n.t('ui.picker.recent')});
+    expect(within(recent).getAllByRole('option').map((row)=>row.textContent)).toEqual(['Recent entry']);
+    expect(screen.getAllByRole('option',{name:'Recent entry'})).toHaveLength(1);
+    expect(screen.getByRole('option',{name:'Unavailable entry'})).toHaveAttribute('aria-disabled','true');
+    expect(recentServer.read).toHaveBeenCalledTimes(1);
+    await user.keyboard('{Home}{Enter}');expect(selected).toHaveBeenLastCalledWith('late');
+    expect(recentServer.record).toHaveBeenCalledWith({kind,key:'late'});
+    await user.click(input);await user.type(input,'m');
+    expect(screen.getByRole('option',{name:'Middle entry'})).toBeVisible();
+    expect(screen.queryByRole('option',{name:'Recent entry'})).not.toBeInTheDocument();
+    await user.keyboard('{Enter}');expect(selected).toHaveBeenLastCalledWith('middle');
+    await user.click(input);await user.clear(input);await user.type(input,'no such entry');
+    expect(screen.getByText(i18n.t('resourceGroups.noMatches'))).toBeVisible();
+    await user.keyboard('{Escape}');expect(input).toHaveFocus();
+  });
+}
+
+it('does not show another person’s recent choices after a reader changes',async()=>{
+  client.session.setState({userId:'other-recent-reader'});
+  const cache=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity}}});
+  cache.setQueryData(pickerRecentsKey('recent-reader'),{count:5,choices:{agent:['late']}});
+  cache.setQueryData(pickerRecentsKey('other-recent-reader'),{count:5,choices:{}});
+  show(<ResourcePicker label="Agent" value="first" onValueChange={vi.fn()} options={[
+    {value:'first',name:'First agent',resource:{kind:'agent',id:'first'}},
+    {value:'late',name:'Last agent',resource:{kind:'agent',id:'late'}},
+  ]}/>,cache);
+  await userEvent.click(screen.getByRole('combobox',{name:'Agent'}));
+  expect(screen.queryByRole('group',{name:i18n.t('ui.picker.recent')})).not.toBeInTheDocument();
+  expect(screen.getAllByRole('option').map((row)=>row.textContent)).toEqual(['First agent','Last agent']);
+});
+
+
+it('remembers the chosen program rather than another program from its same template preview',async()=>{
+ client.session.setState({userId:'program-reader'});
+ recentServer.read.mockResolvedValue({count:5,choices:{template:[JSON.stringify(['source-template','first-program'])]}});
+ const user=userEvent.setup();const chosen=vi.fn();
+ show(<ResourcePicker label="Program" value="second-program" onValueChange={chosen} options={[
+  {value:'second-program',name:'Second program',resource:{kind:'template',id:'source-template'},recent:{kind:'template',key:JSON.stringify(['source-template','second-program'])}},
+  {value:'first-program',name:'First program',resource:{kind:'template',id:'source-template'},recent:{kind:'template',key:JSON.stringify(['source-template','first-program'])}},
+ ]}/>);
+ await user.click(screen.getByRole('combobox',{name:'Program'}));
+ const recent=await screen.findByRole('group',{name:i18n.t('ui.picker.recent')});
+ expect(within(recent).getAllByRole('option')).toHaveLength(1);expect(within(recent).getByRole('option',{name:'First program'})).toBeVisible();
+ await user.keyboard('{Home}{Enter}');expect(chosen).toHaveBeenCalledExactlyOnceWith('first-program');
+ expect(recentServer.record).toHaveBeenCalledWith({kind:'template',key:JSON.stringify(['source-template','first-program'])});
+});
+
+
+it('keeps the inherited choice first while Recent leads the actual resource choices',async()=>{
+ client.session.setState({userId:'inherited-reader'});
+ recentServer.read.mockResolvedValue({count:5,choices:{provider:['late']}});
+ show(<ResourcePicker label="Provider" value="inherit" onValueChange={vi.fn()} options={[
+  {value:'inherit',name:'As Acme decides'},
+  {value:'first',name:'First provider',resource:{kind:'provider',id:'first'}},
+  {value:'late',name:'Recent provider',resource:{kind:'provider',id:'late'}},
+ ]}/>);
+ await userEvent.click(screen.getByRole('combobox',{name:'Provider'}));
+ await screen.findByRole('group',{name:i18n.t('ui.picker.recent')});
+ expect(screen.getAllByRole('option').map((row)=>row.textContent)).toEqual(['As Acme decides','Recent provider','First provider']);
+ expect(recentServer.record).not.toHaveBeenCalled();
+});
+
+
+it('keeps a native username or address match whose visible name differs from the search',async()=>{
+ const selected=vi.fn();
+ show(<ResourcePickerLookup label="Person" groupHomes={false} filterLocal={false} query="ada.handle" onQueryChange={vi.fn()} onSelect={selected}
+  groups={[{id:'people',label:'',options:[{value:'ada',label:'Ada Lovelace',text:'Ada Lovelace',description:'@ada.handle',resource:{kind:'user',id:'ada'}}]}]}/>);
+ await userEvent.click(screen.getByRole('combobox',{name:'Person'}));
+ await userEvent.click(screen.getByRole('option',{name:'Ada Lovelace'}));
+ expect(selected).toHaveBeenCalledWith(expect.objectContaining({value:'ada'}));
+});
+
+
+it('shares a resource recent across screens whose local option values differ',async()=>{
+ client.session.setState({userId:'workspace-reader'});recentServer.read.mockResolvedValue({count:5,choices:{environment:['workspace']}});
+ const selected=vi.fn();show(<ResourcePicker label="Workspace" value="other" onValueChange={selected} options={[
+  {value:'other',name:'Other workspace',resource:{kind:'environment',id:'other'}},
+  {value:'use:workspace',name:'Recent workspace',resource:{kind:'environment',id:'workspace'}},
+ ]}/>);
+ const user=userEvent.setup();await user.click(screen.getByRole('combobox',{name:'Workspace'}));
+ const recent=await screen.findByRole('group',{name:i18n.t('ui.picker.recent')});
+ expect(within(recent).getByRole('option',{name:'Recent workspace'})).toBeVisible();
+ await user.keyboard('{Home}{Enter}');expect(selected).toHaveBeenCalledExactlyOnceWith('use:workspace');
+ expect(recentServer.record).toHaveBeenCalledWith({kind:'environment',key:'workspace'});
 });

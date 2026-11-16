@@ -482,7 +482,39 @@ async fn list(ctx: Ctx, query: InputScheduleListQuery, (): ()) -> ApiResult<Page
         }
         items.push(present_bounded(&mut tx, &principal, row.clone(), Some(&data.names)).await?);
     }
-    page(items, &query.page, |row| row.id)
+    items.retain(|row| {
+        query.thread_id.is_none_or(|thread| {
+            !row.destination.new_thread
+                && row
+                    .destination
+                    .thread
+                    .as_ref()
+                    .is_some_and(|target| target.id == thread)
+                && (row.kind != Some(InputScheduleKind::Agent)
+                    || row
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| agent.thread_id == thread))
+        })
+    });
+    crate::collection::snapshot(
+        &orch_api_contract::common::CollectionQuery {
+            q: query.q,
+            limit: query.page.limit,
+            cursor: query.page.cursor,
+        },
+        &format!(
+            "topic-schedules:{}:{}:{:?}:{:?}",
+            ctx.user()?.id(),
+            ctx.id("id")?,
+            query.state,
+            query.thread_id
+        ),
+        items,
+        |row| row.id,
+        |row| row.name.clone(),
+        false,
+    )
 }
 
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<InputSchedule> {

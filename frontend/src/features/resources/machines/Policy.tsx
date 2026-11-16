@@ -8,7 +8,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, memo, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
@@ -18,7 +18,7 @@ import { useHelpOpener } from '@/features/help/open';
 import { machineExecutorsQuery } from '@/api/machineExecutors';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 import { CommandBox } from '@/features/resources/Facts';
-import { DetailPages, DetailSections, ResourceDetails } from '@/features/resources/DetailSections';
+import { DetailSections, ResourceDetails } from '@/features/resources/DetailSections';
 import { PortPolicyValue } from '@/features/resources/machines/PortPolicyValue';
 import { canonicalExecutorOffers, ExecutorOffers, executorOfferIndex } from '@/features/resources/machines/ExecutorOffers';
 import type { Machine, MachinePolicy, MachinePolicyKey, MachinePolicySection } from '@/generated/api-types';
@@ -37,6 +37,9 @@ import { SettingEditor } from '@/ui/SettingEditor';
 import { HelpHint } from '@/ui/HelpHint';
 import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
+import { CompleteCollection } from '@/ui/CompleteCollection';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 
 /** How a key's value is changed: a switch, a choice, a set of known words, or lines of text. */
 type PolicyChoice = 'read_only' | 'workspace' | 'open' | 'separated' | 'key_separated' | 'credential_shared' | 'handed_over';
@@ -141,13 +144,9 @@ function ValueText({ policyKey, value }: { policyKey: string; value: unknown }) 
   if (lines !== null) {
     if (lines.length === 0) return <span className="text-text-muted">{t('machines.policy.none')}</span>;
     return (
-      <ul className="flex flex-col gap-1">
-        {lines.map((line) => (
-          <li key={line}>
-            <code className="wrap-anywhere">{line}</code>
-          </li>
-        ))}
-      </ul>
+      <CompleteCollection label={t('machines.policy.value')} items={lines} textOf={(line) => line} scroll>{(page) => <ul className="flex flex-col gap-1">
+        {page.map((line) => <li key={line}><code className="wrap-anywhere">{line}</code></li>)}
+      </ul>}</CompleteCollection>
     );
   }
   if (typeof value === 'string') return <code className="wrap-anywhere">{value}</code>;
@@ -217,9 +216,11 @@ function EditKey({ machineId, entry, onClose }: { machineId: string; entry: Mach
                     .split('\n')
                     .map((line) => line.trim())
                     .filter((line) => line !== '');
-      return updateMachinePolicy(machineId, { [entry.key]: value });
+      const reader = libraryReader();
+      return updateMachinePolicy(machineId, { [entry.key]: value }).then((policy) => ({ policy, reader }));
     },
-    onSuccess: (policy) => {
+    onSuccess: ({ policy, reader }) => {
+      if (!sameLibraryReader(reader)) return;
       client.setQueryData(machinePolicyQuery(machineId).queryKey,policy);
       if(policy.machine_view!==null && policy.machine_view!==undefined) client.setQueryData(machineQuery(machineId).queryKey,policy.machine_view);
       toast({ tone: 'success', title: t('machines.policy.changed', { key: words.name }) });
@@ -302,9 +303,9 @@ function DriverPolicyHelp({ term, what }: { term: string; what: ReactNode }) {
     more={{label:t('help.hint.more'),onOpen:()=>open('connect-a-machine','change-driver-settings')}} />;
 }
 
-function PolicyRow({ machineId, entry, program,windows=false }: { machineId: string; entry: MachinePolicyKey; program:string;windows?:boolean }) {
+const PolicyRow = memo(function PolicyRow({ machineId, entry, program,windows=false, editing, onEditingChange }: { machineId: string; entry: MachinePolicyKey; program:string;windows?:boolean; editing:boolean;onEditingChange:(key:string,open:boolean)=>void }) {
+  const setEditing=(open:boolean)=>onEditingChange(entry.key,open);
   const { t } = useTranslation();
-  const [editing, setEditing] = useState(false);
   const words = keyWords(entry, t);
   const fixed = entry.key === 'policy.delegated';
   const nextPolicyValue = entry.key === 'mcp.import' && typeof entry.value === 'boolean' ? !entry.value : entry.value;
@@ -326,12 +327,24 @@ function PolicyRow({ machineId, entry, program,windows=false }: { machineId: str
     open={editing} onOpenChange={setEditing}>
     {entry.writable?<EditKey machineId={machineId} entry={entry} onClose={()=>setEditing(false)}/>:<ValueText policyKey={entry.key} value={entry.value}/>}
   </SettingEditor>;
+});
+
+function usePolicyEditors() {
+  const [edited, setEdited] = useState<ReadonlySet<string>>(new Set());
+  const toggle=useCallback((key:string,open:boolean)=>setEdited((before)=>{const next=new Set(before);if(open)next.add(key);else next.delete(key);return next;}),[]);
+  return {edited,toggle};
 }
 
-export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) {
+export function MachinePolicyTab(props: { machine: Pick<Machine, 'id'> }) {
+  const { scope } = useCollectionSearch(`machine-policy:${props.machine.id}`);
+  return <MachinePolicyForReader key={scope} {...props} />;
+}
+function MachinePolicyForReader({ machine }: { machine: Pick<Machine, 'id'> }) {
   const { t } = useTranslation();
+  const editors = usePolicyEditors();
   const [handover, setHandover] = useState<MachinePolicySection | null>(null);
   const policy = useQuery(machinePolicyQuery(machine.id));
+  const searchable = useMemo(() => new Map((policy.data?.keys ?? []).map((entry) => { const words = keyWords(entry, t); return [entry.key, `${entry.key} ${words.name} ${words.description}`]; })), [policy.data?.keys, t]);
   if (policy.isPending) return <SkeletonRows read={policy} rows={4} />;
   if (policy.isError) return <ErrorState compact error={policy.error} retrying={policy.isRefetching} onRetry={() => void policy.refetch()} />;
   const { keys, reported_at: reportedAt } = policy.data;
@@ -349,21 +362,22 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
       {keys.length === 0 ? (
         <EmptyState compact title={t('machines.policy.noKeys')} />
       ) : (
-        <DetailSections label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
+        <DetailSections stacked label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
           // Shared keys (for example directory roots) keep one row and one editor on this page.
           const rows = keys.filter((entry) => SECTIONS.find((candidate)=>entry.definition.sections.includes(candidate))===section);
           if (rows.length === 0) return [];
           const full = rows.filter((entry) => entry.definition.delegable).every((entry) => entry.delegated);
-          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <section aria-label={t(`machines.policy.sections.${section}.name`)} className="flex min-w-0 flex-col gap-2">
+          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <div className="flex min-w-0 flex-col gap-2">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <HelpHint term={t(`machines.policy.sections.${section}.name`)} what={t(`machines.policy.sections.${section}.description`)}/>
               <Button size="sm" onClick={() => setHandover(section)}>{t('machines.policy.fullAccessAction')}</Button>
             </div>
             {full && !fullAccess && <p className="text-sm text-text-muted">{t('machines.policy.roleFullAccess')}</p>}
-            <DetailPages items={rows}>{(page) => <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
-              {page.map((entry) => <PolicyRow key={entry.key} machineId={machine.id} entry={entry} program={program} windows={policy.data.machine.platform_os==='windows'} />)}
-            </ul>}</DetailPages>
-          </section> }];
+            <CompleteCollection label={t(`machines.policy.sections.${section}.name`)} items={rows} pinned={rows.filter((entry) => editors.edited.has(entry.key))}
+              textOf={(entry) => searchable.get(entry.key) ?? entry.key} scroll>{(page) => <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
+              {page.map((entry) => <PolicyRow key={entry.key} machineId={machine.id} entry={entry} program={program} windows={policy.data.machine.platform_os==='windows'} editing={editors.edited.has(entry.key)} onEditingChange={editors.toggle} />)}
+            </ul>}</CompleteCollection>
+          </div> }];
         })} />
       )}
       {handover !== null && <Dialog open onOpenChange={(open) => !open && setHandover(null)} title={t('machines.policy.fullAccessFor', { role: t(`machines.policy.sections.${handover}.name`) })}
@@ -382,19 +396,27 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
  * environments or its providers, which is what whoever manages one of those reads and, where the owner
  * handed a key over, changes. Whoever may not read the machine's policy is shown nothing of it.
  */
-export function MachineLimits({ machineId, bounds, id, title, lead, compact = false }: { machineId: string; bounds: 'environment' | 'provider'; id: string; title: string; lead: string; compact?: boolean }) {
+export function MachineLimits(props: { machineId: string; bounds: 'environment' | 'provider'; id: string; title: string; lead: string; compact?: boolean }) {
+  const { scope } = useCollectionSearch(`machine-limits:${props.machineId}:${props.id}`);
+  return <MachineLimitsForReader key={scope} {...props} />;
+}
+function MachineLimitsForReader({ machineId, bounds, id, title, lead, compact: _compact = false }: { machineId: string; bounds: 'environment' | 'provider'; id: string; title: string; lead: string; compact?: boolean }) {
+  const { t } = useTranslation();
+  const editors = usePolicyEditors();
   const policy = useQuery({ ...machinePolicyQuery(machineId), retry: false });
+  const searchable = useMemo(() => new Map((policy.data?.keys ?? []).map((entry) => { const words = keyWords(entry, t); return [entry.key, `${entry.key} ${words.name} ${words.description}`]; })), [policy.data?.keys, t]);
   if (policy.isPending) return <SkeletonRows read={policy} rows={3}/>;
   if (policy.isError) return <ErrorState compact error={policy.error} retrying={policy.isRefetching} onRetry={()=>void policy.refetch()}/>;
   const sections:readonly MachinePolicySection[]=bounds==='environment'?['environment','node']:['environment','node','provider'];
   const keys = policy.data.keys.filter((entry) => entry.definition.sections.some((section)=>sections.includes(section)));
   if (keys.length === 0) return null;
   const rows = (entries: readonly MachinePolicyKey[]) => <ul aria-label={title} className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
-    {entries.map((entry) => <PolicyRow key={entry.key} machineId={machineId} entry={entry} program={policyProgram(policy.data)} windows={policy.data.machine.platform_os==='windows'} />)}
+    {entries.map((entry) => <PolicyRow key={entry.key} machineId={machineId} entry={entry} program={policyProgram(policy.data)} windows={policy.data.machine.platform_os==='windows'} editing={editors.edited.has(entry.key)} onEditingChange={editors.toggle} />)}
   </ul>;
   return (
     <Section id={id} title={title} lead={lead}>
-      {compact ? <DetailPages items={keys}>{rows}</DetailPages> : rows(keys)}
+      <CompleteCollection label={title} items={keys} pinned={keys.filter((entry) => editors.edited.has(entry.key))}
+        textOf={(entry) => searchable.get(entry.key) ?? entry.key} scroll>{rows}</CompleteCollection>
     </Section>
   );
 }

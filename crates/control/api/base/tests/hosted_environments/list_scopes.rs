@@ -919,6 +919,37 @@ mod retained {
     }
 
     #[tokio::test]
+    async fn kept_environment_search_finds_a_later_name_before_the_page_limit() {
+        let s = Scene::new().await;
+        keep(&s).await;
+        let ordinary = page(
+            &s,
+            &s.team.c.admin.token,
+            s.team.topic,
+            &NodeDeletedEnvironmentListQuery::default(),
+        )
+        .await;
+        let wanted = ordinary.items.last().unwrap();
+        let reply = s
+            .world
+            .app
+            .call(NodeDeletedEnvironmentList, &[&s.team.topic])
+            .token(&s.team.c.admin.token)
+            .query(&json!({"q": wanted.environment.name,"limit":1}))
+            .send_bytes()
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.raw)
+        );
+        let selected: Page<DeletedEnvironment> = serde_json::from_slice(&reply.raw).unwrap();
+        assert_eq!(selected.items, vec![wanted.clone()]);
+        assert!(selected.next_cursor.is_none());
+    }
+
+    #[tokio::test]
     async fn kept_list_keeps_under_cursor_and_current_key_scope_on_each_page() {
         let s = Scene::new().await;
         keep(&s).await;
@@ -929,6 +960,7 @@ mod retained {
         )
         .await;
         let query = NodeDeletedEnvironmentListQuery {
+            q: None,
             under: Some(true),
             limit: Some(1),
             cursor: None,
