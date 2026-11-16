@@ -82,6 +82,7 @@ async fn a_file_from_the_agents_workspace_is_downloaded_whole_and_its_history_is
             assert_eq!(body.environment_id, environment);
             assert_eq!(body.path, "web/out/result.bin");
             Ok(CommandResult::FsStat(FileStat {
+                facts: None,
                 entry: DirEntry {
                     name: "result.bin".to_owned(),
                     path: body.path.clone(),

@@ -1,7 +1,7 @@
 /** The composer's Plan switch: the messages sent while it is on are worked in plan mode, where the agent reads,
  * proposes a plan and changes nothing until somebody proceeds. It is the person's switch, beside the approval mode
  * and apart from it: planning never changes the approval mode, and Proceed goes on under the mode the row shows.
- * It is offered only where the thread's agent program declares plan mode.
+ * It is enabled only where the thread's agent program declares plan mode.
  */
 import { ListChecks } from 'lucide-react';
 import { useTranslation } from 'react-i18next';

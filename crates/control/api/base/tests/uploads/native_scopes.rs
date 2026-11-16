@@ -1581,3 +1581,61 @@ async fn thread_attachment_direct_checks_before_body_and_preserves_no_reservatio
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(reservation_count(&site).await, 0);
 }
+
+#[tokio::test]
+async fn scoped_concurrent_pieces_bind_one_session_while_its_progress_changes() {
+    let world = World::new().await;
+    let owner = places::person(&world, "concurrent_piece_owner").await;
+    let upload = unfinished(&world, &owner).await;
+    let secret = key(
+        &world,
+        owner.id(),
+        vec![rule("UploadSessionPut", "upload", upload, "write")],
+    )
+    .await;
+    let bytes = b"01234567890123456789";
+    let send = |offset: i64, part: &'static [u8]| {
+        let app = &world.app;
+        let secret = &secret;
+        async move {
+            app.call(UploadSessionPut, &[&upload])
+                .token(secret)
+                .query(&UploadSessionPutQuery { offset })
+                .bytes(part)
+                .send_bytes()
+                .await
+        }
+    };
+    let (suffix, prefix, middle) = tokio::join!(
+        send(14, &bytes[14..]),
+        send(0, &bytes[..7]),
+        send(7, &bytes[7..14])
+    );
+    for reply in [suffix, prefix, middle] {
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.raw)
+        );
+    }
+    assert_eq!(received(&world, upload).await, 20);
+    assert_eq!(stored_prefix(&world, upload).await, bytes);
+    let reader = key(
+        &world,
+        owner.id(),
+        vec![rule("UploadSessionGet", "upload", upload, "read")],
+    )
+    .await;
+    let status = world
+        .app
+        .call(orch_api_contract::threads::UploadSessionGet, &[&upload])
+        .token(&reader)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        status.ranges,
+        vec![orch_api_contract::threads::UploadRange { start: 0, len: 20 }]
+    );
+}
