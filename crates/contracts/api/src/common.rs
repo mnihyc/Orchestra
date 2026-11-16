@@ -45,8 +45,8 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const fn is_false(value: &bool) -> bool {
     !*value
 }
-/// The size of one piece of an upload.
-pub const UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// Shipped default maximum piece; actual accepted limits are in the session reply.
+pub const UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(test)]
 mod listed_tests {
@@ -516,7 +516,7 @@ error_codes! {
     PreflightExpired = 409, "preflight.expired", "The plan is out of date";
     ResourceInUse = 409, "resource.in_use", "It is still in use";
     AdminLastAdmin = 409, "admin.last_admin", "The last admin stays";
-    UploadOffset = 409, "upload.offset", "The piece does not continue the upload";
+    UploadOffset = 409, "upload.offset", "The upload is incomplete or conflicts with received bytes";
     RouteNotReady = 409, "route.not_ready", "The route cannot reach its person yet";
     ExportTooLarge = 409, "export.too_large", "The archive would be larger than the place allows";
     ExportTooMany = 409, "export.too_many", "The archive would hold more things than the place allows";
@@ -526,6 +526,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";

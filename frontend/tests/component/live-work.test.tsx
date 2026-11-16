@@ -14,7 +14,7 @@ import { formatSpan } from '@/lib/time';
 import { show } from './support';
 
 const state = vi.hoisted(() => ({ jobs: new Map<string, Job>(), stop: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(),
   jobQuery: (id: string) => ({ queryKey: ['live-work-job', id], queryFn: () => Promise.resolve(state.jobs.get(id)) }),
   cancelJob: state.stop,
@@ -30,6 +30,18 @@ function job(): Job {
 const size = { reference: { job_id: 'count', measured_at: null }, measured: false, file_count: 0, total_bytes: 0 };
 const files = { home: { ...size, measurement: size.reference }, file_states: null, private_views: [] } as unknown as FilesPlan;
 const plan = { files, mounts: [], blockers: [] };
+
+for (const locale of ['en', 'zh-CN'] as const) it(`dates a reused count in its existing size slot without inventing freshness (${locale})`, async () => {
+  await setLocale(locale);
+  const measuredAt = '2026-10-24T10:00:05.000Z';
+  const measured = { ...size, measured: true, file_count: 12, total_bytes: 4096, reference: { ...size.reference, measured_at: measuredAt } };
+  const view = show(<MeasurementSize size={measured} />);
+  const row = view.container.querySelector('[data-measured-size]');
+  expect(row).toHaveTextContent(locale === 'en' ? 'Counted' : '统计于');
+  expect(row?.querySelector('time')).toHaveAttribute('datetime', measuredAt);
+  view.rerender(<MeasurementSize size={{ ...measured, reference: { ...measured.reference, measured_at: null } }} />);
+  expect(view.container.querySelector('[data-measured-size] time')).toBeNull();
+});
 const observation: MigrationObservation = { step: 'schema', migration: 16, description: 'Background counts', migrations_done: 2, migrations_total: 5,
   rows_done: 1204000, rows_total: null, detail: 'building index', elapsed_seconds: 130, retry_after_seconds: 1, updated_at: '2026-10-24T10:00:05.000Z' };
 
