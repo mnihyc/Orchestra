@@ -7,7 +7,7 @@
 //! holds the query with where in the line it does.
 //!
 //! It is held to bounds on every side and says when it stopped short: at most the number of
-//! matches asked for (never more than a thousand), within twenty seconds, with a pattern whose
+//! matches asked for, within its configured time slice, with a pattern whose
 //! compiled form is bounded (the pattern language has no backtracking, so no pattern can take
 //! longer than the text it is run on), and only the first 400 characters around a match of a long
 //! line are returned.
@@ -21,7 +21,7 @@ use std::time::Instant;
 use ::ignore::Match;
 use ::ignore::gitignore::{Gitignore, GitignoreBuilder};
 use globset::{GlobBuilder, GlobMatcher};
-use orch_api_contract::workspace::{FILE_MATCH_TEXT_CHARS, FILE_SEARCH_LIMIT_MAX, FileMatch};
+use orch_api_contract::workspace::{FILE_MATCH_TEXT_CHARS, FileMatch};
 use regex::{Regex, RegexBuilder};
 
 use crate::error::{HostError, Result};
@@ -75,7 +75,7 @@ pub struct SearchResult {
     pub searched: i64,
 }
 
-fn compile(request: &SearchRequest) -> Result<Regex> {
+pub(crate) fn compile(request: &SearchRequest) -> Result<Regex> {
     if request.query.is_empty() {
         return Err(HostError::Unsupported(
             "a search needs something to look for".to_owned(),
@@ -100,12 +100,12 @@ fn compile(request: &SearchRequest) -> Result<Regex> {
         .map_err(|error| HostError::Unsupported(format!("that pattern is not accepted: {error}")))
 }
 
-struct Glob {
+pub(crate) struct Glob {
     matcher: GlobMatcher,
     on_path: bool,
 }
 
-fn compile_glob(text: &str) -> Result<Glob> {
+pub(crate) fn compile_glob(text: &str) -> Result<Glob> {
     if text.chars().count() > QUERY_MAX_CHARS {
         return Err(HostError::Unsupported(format!(
             "a glob has at most {QUERY_MAX_CHARS} characters"
@@ -122,13 +122,13 @@ fn compile_glob(text: &str) -> Result<Glob> {
 }
 
 /// The `.gitignore` files that apply at each directory of the search, from the workspace root down.
-struct GitIgnores<'a> {
+pub(crate) struct GitIgnores<'a> {
     workspace: &'a Workspace,
     chains: HashMap<RelPath, Rc<Vec<(RelPath, Gitignore)>>>,
 }
 
 impl<'a> GitIgnores<'a> {
-    fn new(workspace: &'a Workspace) -> Self {
+    pub(crate) fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
             chains: HashMap::new(),
@@ -180,7 +180,7 @@ impl<'a> GitIgnores<'a> {
     }
 
     /// Whether a `.gitignore` leaves out `path`, which lies directly in `dir`.
-    fn leaves_out(&mut self, path: &RelPath, is_dir: bool, dir: &Dir) -> bool {
+    pub(crate) fn leaves_out(&mut self, path: &RelPath, is_dir: bool, dir: &Dir) -> bool {
         let Some(parent) = path.parent() else {
             return false;
         };
@@ -199,33 +199,151 @@ impl<'a> GitIgnores<'a> {
     }
 }
 
-/// The part of a long line that is returned, and where the matches lie in it, counted in characters.
-fn excerpt(line: &str, found: &[(usize, usize)]) -> (String, Vec<(u32, u32)>) {
-    let total = line.chars().count();
-    let to_char = |byte: usize| line[..byte].chars().count();
-    let spans: Vec<(usize, usize)> = found
-        .iter()
-        .map(|&(start, end)| (to_char(start), to_char(end)))
-        .collect();
-    let limit = FILE_MATCH_TEXT_CHARS as usize;
-    if total <= limit {
-        return (
-            line.to_owned(),
-            spans.iter().map(|&(s, e)| (s as u32, e as u32)).collect(),
+#[cfg(test)]
+thread_local! {
+    static TEXT_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, usize::MAX)) };
+}
+
+#[cfg(test)]
+fn note_text_work(amount: usize) {
+    TEXT_WORK.with(|work| {
+        let (used, limit) = work.get();
+        let used = used.saturating_add(amount);
+        work.set((used, limit));
+        assert!(
+            used <= limit,
+            "one excerpt exceeded its text work allowance: {used} > {limit}"
         );
+    });
+}
+
+/// The part of a long line that is returned, and where the matches lie in it, counted in characters.
+type Excerpt = (String, Vec<(u32, u32)>);
+
+fn excerpt(
+    line: &str,
+    pattern: &Regex,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<Excerpt>> {
+    let check = || -> Result<()> {
+        crate::error::check_cancelled()?;
+        if cancel.is_cancelled() {
+            return Err(HostError::Cancelled);
+        }
+        Ok(())
+    };
+    check()?;
+    let Some(first) = pattern.find(line) else {
+        return Ok(None);
+    };
+    let mut start = 0;
+    let mut end = 0;
+    for (byte, _) in line[..first.end()].char_indices() {
+        check()?;
+        #[cfg(test)]
+        note_text_work(1);
+        if byte < first.start() {
+            start += 1;
+        }
+        end += 1;
     }
-    // A window of the limit's size, placed so that the first match lies in the middle of it.
-    let (first_start, first_end) = spans.first().copied().unwrap_or((0, 0));
-    let middle = usize::midpoint(first_start, first_end);
-    let begin = middle.saturating_sub(limit / 2).min(total - limit);
-    let end = begin + limit;
-    let text: String = line.chars().skip(begin).take(limit).collect();
-    let ranges = spans
-        .iter()
-        .filter(|&&(s, e)| s >= begin && e <= end)
-        .map(|&(s, e)| ((s - begin) as u32, (e - begin) as u32))
-        .collect();
-    (text, ranges)
+    let limit = FILE_MATCH_TEXT_CHARS as usize;
+    let target_end = usize::midpoint(start, end)
+        .saturating_sub(limit / 2)
+        .saturating_add(limit);
+    // Retain only the final excerpt's character boundaries. Near EOF the same deque shifts
+    // the window left; neither the rest of a dense line nor all of its match offsets is collected.
+    let mut boundaries = std::collections::VecDeque::new();
+    let mut end_byte = 0;
+    for (position, (byte, ch)) in line.char_indices().enumerate() {
+        if position >= target_end {
+            break;
+        }
+        check()?;
+        #[cfg(test)]
+        note_text_work(1);
+        boundaries.push_back(byte);
+        if boundaries.len() > limit {
+            boundaries.pop_front();
+        }
+        end_byte = byte + ch.len_utf8();
+    }
+    let begin_byte = boundaries.front().copied().unwrap_or(0);
+    let mut ranges = Vec::new();
+    let mut byte = begin_byte;
+    let mut character = 0;
+    for hit in pattern.find_iter(line) {
+        check()?;
+        #[cfg(test)]
+        note_text_work(1);
+        if hit.start() > end_byte {
+            break;
+        }
+        if hit.start() < begin_byte || hit.end() > end_byte {
+            continue;
+        }
+        character += line[byte..hit.start()].chars().count();
+        let start = character;
+        character += line[hit.start()..hit.end()].chars().count();
+        ranges.push((start as u32, character as u32));
+        byte = hit.end();
+    }
+    Ok(Some((line[begin_byte..end_byte].to_owned(), ranges)))
+}
+
+/// Streams matches of one selected text file; the caller owns continuation and cancellation.
+pub(crate) fn stream_file(
+    files: &Files,
+    path: &RelPath,
+    start: &RelPath,
+    pattern: &Regex,
+    glob: Option<&Glob>,
+    cancel: &tokio_util::sync::CancellationToken,
+    emit: &mut dyn FnMut(FileMatch) -> Result<()>,
+) -> Result<bool> {
+    if let Some(glob) = glob {
+        let matched = if glob.on_path {
+            path.strip_prefix(start)
+                .is_some_and(|below| glob.matcher.is_match(below.as_str()))
+        } else {
+            path.file_name()
+                .is_some_and(|name| glob.matcher.is_match(name))
+        };
+        if !matched {
+            return Ok(false);
+        }
+    }
+    let opened = files.open_regular(path)?;
+    let maximum = files.limits().preview_bytes;
+    if opened.meta.size > maximum {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut &*opened.file)
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| HostError::io(format!("searching {path}"), error))?;
+    if bytes.len() as u64 > maximum || !is_text(&bytes[..bytes.len().min(SNIFF_BYTES)]) {
+        return Ok(false);
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(false);
+    };
+    for (number, line) in text.lines().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(HostError::Cancelled);
+        }
+        let Some((text, ranges)) = excerpt(line, pattern, cancel)? else {
+            continue;
+        };
+        emit(FileMatch {
+            path: path.to_string(),
+            line: i64::try_from(number + 1).unwrap_or(i64::MAX),
+            text,
+            ranges,
+        })?;
+    }
+    Ok(true)
 }
 
 struct Run<'a> {
@@ -289,20 +407,19 @@ impl Run<'_> {
         };
         self.searched += 1;
         for (number, line) in text.lines().enumerate() {
-            let found: Vec<(usize, usize)> = self
-                .pattern
-                .find_iter(line)
-                .map(|m| (m.start(), m.end()))
-                .collect();
-            if found.is_empty() {
-                continue;
-            }
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let (text, ranges) = match excerpt(line, self.pattern, &cancel) {
+                Ok(Some(found)) => found,
+                Ok(None) => continue,
+                Err(_) => {
+                    self.truncated = true;
+                    return true;
+                }
+            };
             if self.matches.len() >= self.limit {
-                // One more than was asked for exists: the result is cut and says so.
                 self.truncated = true;
                 return true;
             }
-            let (text, ranges) = excerpt(line, &found);
             self.matches.push(FileMatch {
                 path: entry.path.to_string(),
                 line: i64::try_from(number + 1).unwrap_or(i64::MAX),
@@ -320,7 +437,7 @@ impl Files {
     pub fn search(&self, path: &RelPath, request: &SearchRequest) -> Result<SearchResult> {
         let pattern = compile(request)?;
         let glob = request.glob.as_deref().map(compile_glob).transpose()?;
-        let limit = request.limit.clamp(1, FILE_SEARCH_LIMIT_MAX as usize);
+        let limit = request.limit.max(1);
         let workspace = self.root();
         let located = workspace.locate(path, Locate::THROUGH)?;
         let meta = located
@@ -385,6 +502,7 @@ impl Files {
                 "{path} is neither a file nor a directory"
             )));
         }
+        crate::error::check_cancelled()?;
         Ok(SearchResult {
             matches: run.matches,
             truncated: run.truncated,
@@ -643,6 +761,53 @@ mod tests {
         let found = files.search(&RelPath::root(), &request("needle")).unwrap();
         let paths: Vec<&str> = found.matches.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(paths, ["small.txt"]);
+    }
+
+    #[test]
+    fn a_dense_two_megabyte_line_builds_only_its_excerpt_and_can_be_cancelled() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEXT_WORK.with(|work| work.set((0, usize::MAX)));
+            }
+        }
+        let _reset = Reset;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("dense.txt"), "aa".repeat(1_000_000)).unwrap();
+        let files = files_with(root.path(), &[], Limits::default());
+        let pattern = compile(&request("aa")).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        TEXT_WORK.with(|work| work.set((0, 10_000)));
+        let mut matches = Vec::new();
+        stream_file(
+            &files,
+            &path("dense.txt"),
+            &RelPath::root(),
+            &pattern,
+            None,
+            &cancel,
+            &mut |hit| {
+                matches.push(hit);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].text.len(), FILE_MATCH_TEXT_CHARS as usize);
+        assert_eq!(matches[0].ranges.len(), FILE_MATCH_TEXT_CHARS as usize / 2);
+        cancel.cancel();
+        assert!(matches!(
+            stream_file(
+                &files,
+                &path("dense.txt"),
+                &RelPath::root(),
+                &pattern,
+                None,
+                &cancel,
+                &mut |_| panic!("a cancelled line cannot publish")
+            ),
+            Err(HostError::Cancelled)
+        ));
     }
 
     #[test]

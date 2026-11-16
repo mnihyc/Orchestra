@@ -13,7 +13,7 @@ import { MachineLink } from '@/features/resources/machines/MachineLink';
 export { MachineLink } from '@/features/resources/machines/MachineLink';
 import { architectureName, OS_NAMES } from '@/features/resources/machines/facts';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
-import type { Machine } from '@/generated/api-types';
+import type { MachineListRow as Machine } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';

@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test bootstrap --test admin_places
+test -p orch-engine --lib -- history_pages::tests::copy_pages_skip_markers_but_keep_order_identity_and_the_reserved_sequence

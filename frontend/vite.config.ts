@@ -12,6 +12,8 @@ import tailwindcss from '@tailwindcss/vite';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+import { firstWavePlugin } from './build/first-wave';
+import { vocabularyPlugin } from './build/vocabulary';
 import { helpContentPlugin } from './build/help-content';
 import { releaseNoticesPlugin } from './build/release-notices';
 import { servingProxyConfig } from './build/serving-proxy';
@@ -20,8 +22,11 @@ const upstreams = servingProxyConfig(process.env);
 
 export default defineConfig({
   plugins: [
+    vocabularyPlugin(),
     helpContentPlugin(),
     releaseNoticesPlugin(),
+    // The frame is known before the verified reader selects the first vocabulary.
+    firstWavePlugin(),
     // The route tree is generated from the files under `src/routes`; every route is its own chunk.
     tanstackRouter({
       target: 'react',
@@ -81,8 +86,14 @@ export default defineConfig({
     assetsDir: 'assets',
     sourcemap: false,
     rolldownOptions: {
+      preserveEntrySignatures: false,
       output: {
+        format: 'es',
+        strictExecutionOrder: true,
         codeSplitting: {
+          // Shared factories register once, preserving stores and export identities while each screen
+          // carries the code it actually reaches. Styles remain files so Vite emits each sheet once.
+          experimentalInlineCommonChunks: { maxSize: Infinity, exclude: /\.(css|scss|sass|less|styl|stylus|pcss|postcss|sss)(\?|$)/ },
           groups: [
             // What the first screen needs is fetched as one file, not in hundreds: every module the entry reaches by static
             // imports joins one group (left alone, the many lazily loaded screens cut it into hundreds of shared pieces,
@@ -90,9 +101,6 @@ export default defineConfig({
             // a part that ran before the one it imports from broke the page. (The page's own entry is then an empty file,
             // which Vite leaves out: the page loads the group directly.)
             { name: 'initial', tags: ['$initial'] },
-            // The workbench's frame, which every signed-in screen stands in, likewise comes as one file with what it needs beyond
-            // the first (its parts would otherwise come in a hundred small files). The screens before sign-in share none of it.
-            { name: 'shell', test: /[\\/]src[\\/]shell[\\/]Shell\.tsx$/ },
           ],
         },
       },
