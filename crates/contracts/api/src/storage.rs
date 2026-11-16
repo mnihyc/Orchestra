@@ -7,7 +7,6 @@ use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::PageQuery;
 use crate::nodes::NodeRef;
 use crate::resources::{HostRef, MachineRef};
 use crate::routes::Access::{Rule, User};
@@ -334,6 +333,9 @@ pub struct StorageBreakdown {
 /// Scope and filters of the single storage report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StorageQuery {
+    /// Literal words in already-disclosed record, place, host, owner and dependency labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// `me`, `node:<id>`, `host:<id>` or `system`; defaults to the caller's own storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
@@ -361,9 +363,12 @@ pub struct StorageQuery {
     /// `under_7_days`, `7_to_30_days`, `30_days_plus` or `unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
-    /// The existing list convention.
-    #[serde(flatten)]
-    pub page: PageQuery,
+    /// Entries in a page; fifty by default, any positive u32 when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Continue the same native record selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// The same screen's figures, breakdowns and page of retained records.

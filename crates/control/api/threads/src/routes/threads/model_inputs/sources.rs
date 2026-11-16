@@ -224,7 +224,7 @@ impl native::Selected for Reader {
             let limit = match query.limit {
                 None => PAGE_DEFAULT,
                 Some(n) if n < 1 => return Err(ApiError::invalid("limit", "must be at least 1")),
-                Some(n) => n.min(PAGE_MAX),
+                Some(n) => n,
             };
             let plan = Prepared::new(ctx.route, LIST.operation).map_err(source_error)?;
             let principal = Principal::load(
@@ -251,7 +251,7 @@ impl native::Selected for Reader {
                     Err(error) => return Err(error),
                 }
             }
-            let mut found = rows::list_for_sources(
+            let mut found = rows::list_for_sources_search(
                 conn,
                 node.object.id.ok_or_else(ApiError::not_found)?,
                 &ModelInputFilter {
@@ -259,9 +259,13 @@ impl native::Selected for Reader {
                     turn: query.turn_id,
                     before: query.before,
                     after: query.after,
-                    limit: limit + 1,
+                    limit: limit.checked_add(1).ok_or_else(|| {
+                        ApiError::invalid("limit", "leave room for a continuation record")
+                    })?,
                 },
                 &readable,
+                &orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""))
+                    .like_patterns(),
             )
             .await?;
             let page = usize::try_from(limit).unwrap_or(usize::MAX);

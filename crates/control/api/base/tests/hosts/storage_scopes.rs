@@ -1443,3 +1443,59 @@ async fn cleanup_creation_keys_replay_one_current_job_without_another_plan_or_ef
         original
     );
 }
+
+#[tokio::test]
+async fn storage_words_select_before_the_record_page_without_matching_an_undisclosed_host_name() {
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Private search host").await;
+    let inventory = ResourceInventory {
+        observed_at: Time::new(world.now()),
+        unavailable: Vec::new(),
+        resources: (0..13)
+            .map(|n| Resource {
+                resource: ResourceRef {
+                    kind: ResourceKind::Image,
+                    id: format!("retained-{n}"),
+                },
+                name: format!("retained-{n}"),
+                size_bytes: Some(17),
+                labels: Default::default(),
+                depends_on: Vec::new(),
+                aliases: Vec::new(),
+                last_used_at: None,
+                busy: false,
+            })
+            .collect(),
+    };
+    sqlx::query("UPDATE hosts SET resource_inventory=$2 WHERE id=$1")
+        .bind(host)
+        .bind(json!(inventory))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let k = key(
+        &world,
+        &c.boss,
+        vec![rule("StorageGet", "manage", "host", host)],
+    )
+    .await;
+    for (q, wanted) in [("retained-12", 1), ("Private search host", 0)] {
+        let found = world
+            .app
+            .call(StorageGet, &[])
+            .token(&k.secret)
+            .query(&StorageQuery {
+                q: Some(q.into()),
+                scope: Some(format!("host:{host}")),
+                limit: Some(1),
+                cursor: None,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(found.items.len(), wanted);
+        assert_eq!(found.totals.items, i64::try_from(wanted).unwrap());
+    }
+}

@@ -180,7 +180,7 @@ pub fn mount(registry: &mut Registry) {
         .on(api::MachineEnrollmentTokenCreate, token_create)
         .on_snapshot_read_with_optional_operation(
             api::MachineGet,
-            crate::key_operations::native::selected::<individual::MachineRead>,
+            individual::prepare_children,
             individual::get,
         )
         .on(api::MachineEnrollmentInfoGet, enrollment_info)
@@ -539,7 +539,7 @@ async fn prepare_inventory_for(
     readable_only: bool,
 ) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::hosts_naming(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
     let mut effective =
@@ -688,6 +688,7 @@ pub(crate) async fn show_inventory_prepared(
                 })
                 .flatten();
             Ok(Machine {
+                next_cursor: None,
                 data_directory,
                 grouping: grouping
                     .get(&("machine".to_owned(), row.id))
@@ -724,6 +725,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),

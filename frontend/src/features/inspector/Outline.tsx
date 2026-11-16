@@ -17,6 +17,8 @@ import { AlignLeft, Flag, ListOrdered, MessageSquare, ShieldQuestionMark, Triang
 import { type ComponentType } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { matchesCollectionWords, useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { outlineQuery } from '@/api/threads';
 import type { OutlineEntry, OutlineKind } from '@/generated/api-types';
 import type { ViewProps } from '@/features/workbench/views';
@@ -44,17 +46,20 @@ export function OutlinePanel({ access }: { access: Pick<WorkspaceAccess, 'thread
   const { t } = useTranslation();
   const threadId = access.thread.id;
   const read = useThreadReadRef(threadId);
-  const query = useInfiniteQuery({ ...outlineQuery(read), staleTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false });
   const view = useThreadView(threadId);
   const [hidden, setHidden] = useListChoice<readonly OutlineKind[]>(`outline.${threadId}`, 'hidden', []);
+  const search = useCollectionSearch(`outline:${threadId}`);
+  const included = KINDS.filter((group) => !hidden.includes(group.kind)).flatMap((group) => group.includes).join(',');
+  const kinds = hidden.length === 0 ? undefined : included;
+  const source = outlineQuery(read, search.q, kinds);
+  const query = useInfiniteQuery({ ...source, enabled: source.enabled !== false && included !== '',  staleTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false });
   const entries = outlineRows(query.data?.pages.flatMap((page) => page.entries) ?? [], view);
-  if (query.error !== null && entries.length === 0) return <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} />;
-  if (query.data === undefined && entries.length === 0) return <SkeletonRows read={query} rows={5} />;
   const groupOf = (entry: OutlineEntry) => KINDS.find((group) => group.includes.some((kind) => entry.kind === kind));
-  const present = KINDS.filter((group) => entries.some((entry) => group.includes.some((kind) => entry.kind === kind)));
-  const shown = entries.filter((entry) => !hidden.includes(groupOf(entry)?.kind ?? entry.kind));
+  const present = KINDS;
+  const shown = entries.filter((entry) => !hidden.includes(groupOf(entry)?.kind ?? entry.kind) && matchesCollectionWords(search.q, `${entry.title} ${entry.goal_condition ?? ''} ${String(entry.turn_ordinal ?? '')}`));
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="outline-panel">
+      <div className="border-b border-border p-2"><CollectionSearch name={t('views.outline.title')} {...search} /></div>
       {present.length > 1 && (
         <div role="group" aria-label={t('inspector.outline.filter')} className="flex flex-wrap gap-x-3 gap-y-2 border-b border-border px-2 py-2">
           {present.map(({ kind, icon: Icon }) => {
@@ -67,8 +72,8 @@ export function OutlinePanel({ access }: { access: Pick<WorkspaceAccess, 'thread
           })}
         </div>
       )}
-      {entries.length === 0 ? (
-        <EmptyState compact className="flex-1" icon={<AlignLeft aria-hidden />} title={t('inspector.outline.none')} />
+      {included === '' ? <EmptyState compact title={t('inspector.outline.allHidden')} /> : query.error !== null && entries.length === 0 ? <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined && entries.length === 0 ? <SkeletonRows read={query} rows={5} /> : entries.length === 0 ? (
+        <EmptyState compact className="flex-1" icon={<AlignLeft aria-hidden />} title={t(search.q === '' ? 'inspector.outline.none' : 'ui.collection.none')} />
       ) : shown.length === 0 ? (
         <EmptyState compact className="flex-1" icon={<AlignLeft aria-hidden />} title={t('inspector.outline.allHidden')} />
       ) : (

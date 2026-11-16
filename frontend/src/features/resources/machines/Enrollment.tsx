@@ -71,8 +71,8 @@ export function commandFor(token: EnrollmentToken, os: MachineOs,options?:Instal
 }
 
 type Selection =
-  | { kind: 'connector'; home: string; roles: ConnectorRole[]; delegate: ConnectorRole[]; dedicated: boolean }
-  | { kind: 'node'; home: string; access:NewResourceAccess; delegate_policy: boolean };
+  | { kind: 'connector'; name: string; home: string; roles: ConnectorRole[]; delegate: ConnectorRole[]; dedicated: boolean }
+  | { kind: 'node'; name: string; home: string; access:NewResourceAccess; delegate_policy: boolean };
 
 interface Made {
   kind: Selection['kind'];
@@ -87,6 +87,7 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const queryClient = useQueryClient();
   const opened = useRef(false);
   const now = useNow();
+  const [name, setName] = useState('');
   const [roles, setRoles] = useState<ConnectorRole[]>(['environment', 'agent']);
   const [delegated, setDelegated] = useState<ConnectorRole[]>([]);
   const [node, setNode] = useState(initialKind==='node');
@@ -102,10 +103,10 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const info=useQuery(machineEnrollmentInfoQuery);
   const instanceValid=node || instance==='' || /^[a-zA-Z0-9_-]+$/u.test(instance);
   const selection = useMemo<Selection>(() => node
-    ? { kind: 'node', home, access,delegate_policy: nodeDelegated }
-    : { kind: 'connector', home, roles: CONNECTOR_ROLES.filter((role) => roles.includes(role)),
+    ? { kind: 'node', name: name.trim(), home, access,delegate_policy: nodeDelegated }
+    : { kind: 'connector', name: name.trim(), home, roles: CONNECTOR_ROLES.filter((role) => roles.includes(role)),
         delegate: CONNECTOR_ROLES.filter((role) => roles.includes(role) && delegated.includes(role)), dedicated },
-  [node, home,access, nodeDelegated, roles, delegated, dedicated]);
+  [node, name, home,access, nodeDelegated, roles, delegated, dedicated]);
   const stamp = JSON.stringify(selection);
   const valid = selection.kind === 'node' ? selection.home !== '' : selection.roles.length > 0;
 
@@ -113,8 +114,8 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
     gcTime:0,
     mutationFn: async (selected: Selection): Promise<Made> => {
       const token = selected.kind === 'node'
-        ? await createHostToken({ home_id: selected.home, access:selected.access, delegate_policy: selected.delegate_policy }, newActKey())
-        : await createMachineToken(newActKey(), { roles: selected.roles, delegate: selected.delegate, dedicated: selected.dedicated,
+        ? await createHostToken({ ...(selected.name === '' ? {} : { name_hint: selected.name }), home_id: selected.home, access:selected.access, delegate_policy: selected.delegate_policy }, newActKey())
+        : await createMachineToken(newActKey(), { ...(selected.name === '' ? {} : { name_hint: selected.name }), roles: selected.roles, delegate: selected.delegate, dedicated: selected.dedicated,
             ...(selected.home === '' ? {} : { home_id: selected.home }) });
       return { kind: selected.kind, stamp: JSON.stringify(selected), token };
     },
@@ -165,6 +166,8 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
       {t('common.close')}
     </Button>{arrived===undefined && (made===undefined || expired) && <Button action="show" variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
     <div className="flex flex-col gap-4 py-2" data-tutorial-target="machine-enrollment">
+      {arrived === undefined && <Input label={t('resources.edit.name')} optional placeholder={t('machines.add.nameDefault')} value={name} disabled={make.isPending}
+        onChange={(event) => setName(event.target.value)} autoComplete="off" />}
       {info.isPending && <SkeletonRows read={info} rows={1}/>}
       {info.isError && <ErrorState compact error={info.error} retrying={info.isRefetching} onRetry={()=>void info.refetch()}/>}
       {progress.isError && <ErrorState compact error={progress.error} retrying={progress.isRefetching} onRetry={()=>void progress.refetch()}/>}

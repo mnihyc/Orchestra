@@ -472,12 +472,12 @@ fn list_selection(query: &EverythingListQuery) -> ApiResult<ListSelection> {
     if query.resource_kind.is_some()
         && !matches!(
             kinds.first().map(String::as_str),
-            Some("template" | "environment")
+            Some("template" | "environment" | "agent")
         )
     {
         return Err(ApiError::invalid(
             "resource_kind",
-            "Choose a template or environment list for this filter.",
+            "Choose a template, environment or agent list for this filter.",
         ));
     }
     if matches!(

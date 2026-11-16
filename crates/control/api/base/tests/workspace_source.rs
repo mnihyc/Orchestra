@@ -589,12 +589,15 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),
             kinds: Some("thread".to_owned()),
             org_id: Some(site.org),
             limit: None,
+            picker: None,
+            cursor: None,
         })
         .send()
         .await
@@ -622,12 +625,15 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),
             kinds: Some("thread".to_owned()),
             org_id: Some(site.org),
             limit: None,
+            picker: None,
+            cursor: None,
         })
         .send()
         .await

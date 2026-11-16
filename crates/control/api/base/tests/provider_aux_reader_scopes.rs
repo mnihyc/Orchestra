@@ -685,3 +685,47 @@ async fn auxiliary_readers_recheck_current_scope_on_their_actual_read_connection
         checkpoint(operation, true).await;
     }
 }
+
+#[tokio::test]
+async fn provider_thread_search_finds_later_visible_names_and_does_not_match_redacted_places() {
+    let s = Scene::new().await;
+    let rows: ProviderThreadListReply = ok(threads(
+        &s.world,
+        &s.company.boss.token,
+        s.provider,
+        Default::default(),
+    )
+    .await);
+    let wanted = rows.items.last().unwrap();
+    let selected: ProviderThreadListReply = ok(s
+        .world
+        .app
+        .call(ProviderThreadList, &[&s.provider])
+        .token(&s.company.boss.token)
+        .query(&json!({"q":wanted.thread.name,"limit":1}))
+        .send_bytes()
+        .await);
+    assert_eq!(selected.items, vec![wanted.clone()]);
+    assert!(selected.next_cursor.is_none());
+    let token = key(
+        &s.world,
+        s.company.boss.id(),
+        vec![
+            rule("ProviderThreadList", "provider", s.provider),
+            rule("ProviderThreadList", "thread", wanted.thread.id),
+        ],
+    )
+    .await;
+    let hidden: ProviderThreadListReply = ok(s
+        .world
+        .app
+        .call(ProviderThreadList, &[&s.provider])
+        .token(&token.secret)
+        .query(&json!({"q":"Protected topic","limit":1}))
+        .send_bytes()
+        .await);
+    assert!(
+        hidden.items.is_empty(),
+        "a hidden place name is not searchable"
+    );
+}

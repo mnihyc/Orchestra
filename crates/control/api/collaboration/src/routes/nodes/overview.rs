@@ -248,7 +248,7 @@ async fn prepare_inner(
         &principal,
         orch_api_contract::search::NameSearchListQuery {
             kinds: Some("thread".into()),
-            limit: Some(orch_api_contract::search::NAME_SEARCH_LIMIT_MAX),
+            limit: Some(orch_api_contract::search::NAME_SEARCH_OVERVIEW_COUNT),
             org_id: Some(org.base.org_id),
             ..Default::default()
         },

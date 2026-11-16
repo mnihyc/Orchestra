@@ -442,7 +442,12 @@ export class AdminWorld implements Part {
     if (route === 'GET /admin/pki') return { status: 200, body: this.pki() };
     if (route === 'GET /admin/plugins') return { status: 200, body: this.plugins() };
 
-    if (route === 'GET /admin/capabilities') return { status: 200, body: this.capabilities };
+    if (route === 'GET /admin/capabilities') {
+      const words=(query.get('q')??'').toLowerCase().split(/\s+/u).filter(Boolean),aliases=new Set((query.get('aliases')??'').split(','));
+      const rows=this.capabilities.filter((def)=>aliases.has(def.key)||words.every((word)=>`${def.key} ${def.label} ${def.description}`.toLowerCase().includes(word))).sort((one,other)=>one.key.localeCompare(other.key));
+      const from=Number(query.get('cursor')??0),limit=Number(query.get('limit')??50);
+      return {status:200,body:{items:rows.slice(from,from+limit),next_cursor:from+limit<rows.length?String(from+limit):null}};
+    }
     if ((found = /^PUT \/admin\/capabilities\/([^/]+)$/.exec(route))) return { status: 200, body: this.saveCapability(person, found[1] ?? '', body) };
     if ((found = /^DELETE \/admin\/capabilities\/([^/]+)$/.exec(route))) return { status: 200, body: this.deleteCapability(person, found[1] ?? '') };
 

@@ -1,52 +1,49 @@
-/** A closed destination picker owns no tree read; opening it retains live choices and native filtering. */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, screen } from '@testing-library/react';
+/** A closed place picker reads nothing; native names supply one scoped page without walking org trees. */
+import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type * as Search from '@/api/search';
 import type * as Nodes from '@/api/nodes';
-import { orgsKey, type TreeReply } from '@/api/nodes';
 import { PlacePicker } from '@/features/settings/PlacePicker';
+import type { NameHit, NameSearchPage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { treeWriter } from '@/realtime/stores/tree';
-import { ACME, acmeTree, me, org, userRef } from '../doubles/fixtures';
+import { ACME, acmeTree } from '../doubles/fixtures';
 import { show } from './support';
 
-const reads = vi.hoisted(() => ({ tree: vi.fn() }));
-vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(), fetchTree: reads.tree }));
-afterEach(async () => { cleanup(); treeWriter.clear(); vi.clearAllMocks(); await setLocale('en'); });
+const reads=vi.hoisted(()=>({tree:vi.fn(),names:vi.fn<(search:Search.NameSearch,cursor:string|null)=>Promise<NameSearchPage>>()}));
+vi.mock('@/api/nodes',async(load)=>({...await load<typeof Nodes>(),fetchTree:reads.tree}));
+vi.mock('@/api/search',async(load)=>{const actual=await load<typeof Search>();return {...actual,
+ pickerNamesQuery:(search:Search.NameSearch)=>({...actual.pickerNamesQuery(search),queryFn:({pageParam}:{pageParam:string|null})=>reads.names(search,pageParam)}),
+};});
+const root={id:ACME.org,kind:'org' as const,name:'Acme',redacted:false};
+const hit=(index:number):NameHit=>({home_path:[],id:`place-${index}`,kind:'topic',name:`Destination ${index}`,address:null,archived:false,avatar:null,color:null,custom_color:null,owner:null,recent:false,path:[root,{id:`place-${index}`,kind:'topic',name:`Destination ${index}`,redacted:false}],tag:null,thread_attention:null,username:null});
+beforeEach(()=>{reads.names.mockReset().mockImplementation((search,cursor)=>{
+ const found=Array.from({length:51},(_,index)=>hit(index)).filter((row)=>search.q===''||row.name.toLowerCase().includes(search.q.toLowerCase()));
+ const from=Number(cursor??0);return Promise.resolve({items:found.slice(from,from+20),partial:from+20<found.length,next_cursor:from+20<found.length?String(from+20):null});
+});});
+afterEach(async()=>{cleanup();treeWriter.clear();reads.tree.mockClear();await setLocale('en');});
 
-for (const locale of ['en', 'zh-CN'] as const) {
-  it(`reads destinations only on opening and keeps the same choices on reopening in ${locale}`, async () => {
-    await setLocale(locale);
-    const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-    cache.setQueryData(orgsKey, [org(ACME.org, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')))]);
-    const reply: TreeReply = { nodes: acmeTree(), hidden: [], seq: 1, since: null, complete: true };
-    reads.tree.mockResolvedValue(reply);
-    const changed = vi.fn(), user = userEvent.setup();
-    show(<QueryClientProvider client={cache}><PlacePicker label={i18n.t('mcpSwitch.place')} value={null} onChange={changed} includeThreads /></QueryClientProvider>);
-    expect(reads.tree).not.toHaveBeenCalled();
-    const picker = screen.getByRole('combobox', { name: i18n.t('mcpSwitch.place') });
-    await user.click(picker);
-    await screen.findByRole('option', { name: 'Acme / Research / Web / Fix login' });
-    expect(reads.tree).toHaveBeenCalledTimes(1);
-    await user.keyboard('{Escape}');
-    await user.click(picker);
-    await user.click(await screen.findByRole('option', { name: 'Acme / Research / Web / Fix login' }));
-    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ id: ACME.fixLogin, kind: 'topic' }));
-    expect(reads.tree).toHaveBeenCalledTimes(1);
-  });
-
-  it(`uses the loaded live tree and preserves the root and kind restrictions in ${locale}`, async () => {
-    await setLocale(locale);
-    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    cache.setQueryData(orgsKey, [org(ACME.org, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')))]);
-    treeWriter.reset(ACME.org, acmeTree(), 1);
-    const changed = vi.fn(), user = userEvent.setup();
-    show(<QueryClientProvider client={cache}><PlacePicker label={i18n.t('mcpSwitch.place')} value={null} onChange={changed} rootOrgId={ACME.org} only="topic" /></QueryClientProvider>);
-    expect(reads.tree).not.toHaveBeenCalled();
-    await user.click(screen.getByRole('combobox', { name: i18n.t('mcpSwitch.place') }));
-    expect(await screen.findByRole('option', { name: 'Acme / Research / Web / Fix login' })).toBeVisible();
-    expect(screen.queryByRole('option', { name: /^Acme \/ Web$/ })).not.toBeInTheDocument();
-    expect(reads.tree).not.toHaveBeenCalled();
-  });
+for(const locale of ['en','zh-CN'] as const) {
+ it(`reads one native page only on opening and refreshes recent order on reopening in ${locale}`,async()=>{
+  await setLocale(locale);const user=userEvent.setup();const changed=vi.fn();show(<PlacePicker label="Place" value={null} onChange={changed} includeThreads/>);
+  expect(reads.names).not.toHaveBeenCalled();expect(reads.tree).not.toHaveBeenCalled();
+  const picker=screen.getByRole('combobox',{name:'Place'});await user.click(picker);
+  expect(await screen.findByRole('option',{name:'Acme / Destination 0'})).toBeVisible();expect(reads.names).toHaveBeenCalledTimes(1);
+  await user.keyboard('{Escape}');await user.click(picker);await waitFor(()=>expect(reads.names).toHaveBeenCalledTimes(2));
+  await user.click(await screen.findByRole('option',{name:'Acme / Destination 0'}));expect(changed).toHaveBeenCalledWith(expect.objectContaining({id:'place-0',kind:'topic',rootOrgId:ACME.org}));
+  expect(reads.tree).not.toHaveBeenCalled();expect(reads.names).toHaveBeenCalledTimes(2);
+ });
+ it(`keeps root and kind restrictions on native search and pages while a richer tree is loaded in ${locale}`,async()=>{
+  await setLocale(locale);treeWriter.reset(ACME.org,acmeTree(),1);const user=userEvent.setup();const changed=vi.fn();
+  show(<PlacePicker label="Place" value={null} onChange={changed} rootOrgId={ACME.org} only="topic"/>);
+  const input=screen.getByRole('combobox',{name:'Place'});await user.click(input);await screen.findByRole('option',{name:'Acme / Destination 0'});
+  expect(screen.getAllByRole('option')).toHaveLength(20);expect(screen.queryByRole('option',{name:'Acme / Destination 50'})).toBeNull();
+  await user.click(screen.getByRole('button',{name:i18n.t('resourceDetails.layout.next')}));
+  expect(await screen.findByRole('option',{name:'Acme / Destination 20'})).toBeVisible();expect(screen.queryByRole('option',{name:'Acme / Destination 0'})).toBeNull();
+  await user.click(input);await user.type(input,'50');expect(await screen.findByRole('option',{name:'Acme / Destination 50'})).toBeVisible();
+  expect(reads.names.mock.calls.every(([search])=>search.orgId===ACME.org&&search.kinds.join(',')==='topic')).toBe(true);
+  expect(changed).not.toHaveBeenCalled();expect(reads.tree).not.toHaveBeenCalled();
+  expect(screen.queryByRole('option',{name:'Acme / Research / Web / Fix login'})).toBeNull();
+ });
 }

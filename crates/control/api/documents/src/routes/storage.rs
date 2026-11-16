@@ -802,7 +802,18 @@ async fn prepare_records(
         admitted_skills.push(version);
     }
     let server = if matches!(scope, Scope::System) {
-        Some(prepare_server(ctx, conn, at, query.page.limit(), book.as_deref_mut()).await?)
+        Some(
+            prepare_server(
+                ctx,
+                conn,
+                at,
+                query
+                    .limit
+                    .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT),
+                book.as_deref_mut(),
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -1472,7 +1483,14 @@ async fn prepare_server(
             records.push(row);
         }
         for (hash, bytes, pins, last) in kept_blobs.clone() {
-            let mut row = model::record(format!("blob:{hash}"), StorageKind::Content, hash, at);
+            // Kept content has no name of its own: a person reads its kind, its size and its time, and its hash stays
+            // in the record's identifier.
+            let mut row = model::record(
+                format!("blob:{hash}"),
+                StorageKind::Content,
+                String::new(),
+                at,
+            );
             row.bytes = Some(bytes);
             row.why = if pins > 0 {
                 KeptWhy::InUse
@@ -1532,17 +1550,26 @@ fn render_report(
     at: Time,
     name: String,
 ) -> ApiResult<api::StorageReport> {
+    let size = usize::try_from(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT),
+    )
+    .map_err(ApiError::internal)?;
+    if size == 0 {
+        return Err(ApiError::invalid("limit", "must be greater than zero"));
+    }
     records.retain(|row| model::matches(row, query, at));
     records.sort_by(|a, b| a.id.cmp(&b.id));
     let totals = model::totals(&records);
     let breakdowns = model::breakdowns(&records, at);
-    let after = query.page.cursor.as_deref().unwrap_or("");
+    let after = query.cursor.as_deref().unwrap_or("");
     let mut items: Vec<_> = records
         .into_iter()
         .filter(|row| row.id.as_str() > after)
-        .take(query.page.limit() as usize + 1)
+        .take(size.saturating_add(1))
         .collect();
-    let next_cursor = if items.len() > query.page.limit() as usize {
+    let next_cursor = if items.len() > size {
         items.pop();
         items.last().map(|row| row.id.clone())
     } else {

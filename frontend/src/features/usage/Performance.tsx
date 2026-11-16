@@ -126,7 +126,7 @@ export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: re
     <Button size="sm" variant="ghost" icon={<ArrowDownUp aria-hidden />} onClick={()=>setSort((before)=>({...before,descending:!before.descending}))}>{t('usagePerf.reverseSort')}</Button>
   </>}>
     <p aria-live="polite" className="sr-only">{t('usagePerf.sorted',{column:labels[sort.key],direction:t(sort.descending ? 'usagePerf.descending' : 'usagePerf.ascending')})}</p>
-    <Table label={t('usagePerf.comparison')} rows={ordered} columns={columns} rowKey={(row)=>JSON.stringify([row.model,row.tier,row.tier_unknown === true,row.effort,row.program])} />
+    <Table virtual label={t('usagePerf.comparison')} rows={ordered} columns={columns} rowKey={(row)=>JSON.stringify([row.model,row.tier,row.tier_unknown === true,row.effort,row.program])} />
   </Section>;
 }
 
