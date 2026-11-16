@@ -2800,6 +2800,7 @@ pub type Trial<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 /// and asking, without leaving it made.
 pub async fn begin_trial(conn: &mut Conn) -> Result<Trial<'_>, DbError> {
     use sqlx::Connection;
+    crate::pool::discard_read_facts();
     Ok(conn.begin().await?)
 }
 

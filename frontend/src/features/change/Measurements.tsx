@@ -14,6 +14,7 @@ import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { StateLine } from '@/ui/StateLine';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { RelativeTime } from '@/ui/RelativeTime';
 
 export interface PlanCounts { files?: FilesPlan | null; mounts?: readonly { copy?: PlanMount['copy']; fingerprint_measurement?: PlanMount['fingerprint_measurement'] }[]; measurements?: readonly Measurement[]; plans?: readonly PlanCounts[]; homeFallback?: boolean }
 interface Counted { measurement: Measurement; home: boolean; fallback: boolean; fingerprint?: boolean }
@@ -134,7 +135,8 @@ export function MeasurementSize({ size }: { size: MeasurementSizeData }) {
   ].filter((part) => part !== null).join(' · ');
   const directories = activity?.directories_done;
   const title = directories === null || directories === undefined ? undefined : t('liveWork.directories', { count: directories, value: formatNumber(directories, format.locale) });
-  if (bytes !== undefined) return <span className="text-sm text-text-muted tabular-nums" data-measured-size>{total(files, bytes)}</span>;
+  const measuredAt = size.reference.measured_at ?? (job?.state === 'succeeded' ? job.finished_at : null);
+  if (bytes !== undefined) return <span className="text-sm text-text-muted tabular-nums" data-measured-size>{total(files, bytes)}{measuredAt !== null && <> · {t('liveWork.countedAt')} <RelativeTime at={measuredAt} /></>}</span>;
   if (job?.state === 'succeeded' || size.reference.measured_at !== null) return <span className="text-sm text-text-muted">{t('liveWork.notCounted')}</span>;
   const retry = counts === null ? undefined : <Button size="sm" variant="ghost" onClick={counts.retry}>{t('liveWork.retry')}</Button>;
   if (job?.state === 'cancelled') return <StateLine compact role="status" className="inline-flex max-w-full text-text-muted [&_[data-state-copy]]:basis-auto [&_[data-state-copy]]:flex-none" message={t('liveWork.countStopped')} action={retry} />;

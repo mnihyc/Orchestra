@@ -212,7 +212,7 @@ impl Read {
             .execute(&mut *conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.proof.site.machine)
             .execute(conn)
             .await

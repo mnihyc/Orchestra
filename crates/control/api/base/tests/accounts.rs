@@ -1145,6 +1145,38 @@ async fn refresh_status(world: &World, cookies: &str) -> u16 {
 }
 
 #[tokio::test]
+async fn a_browser_renews_its_session_while_its_persons_own_write_is_open() {
+    let world = World::new().await;
+    let person = world.person("reader").await;
+    let signed = world.sign_in(&person).await;
+    let mut account = world.db.pool.begin().await.unwrap();
+    orch_db::queries::transaction_guard::lock_person(&mut account, person.id)
+        .await
+        .unwrap()
+        .unwrap();
+    // The lock is deliberately kept until renewal completes. This catches a lock dependency;
+    // five seconds leaves room for normal PostgreSQL work without releasing the blocker.
+    let renewed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        refresh(&world, &signed.browser()),
+    )
+    .await
+    .expect("renewal locks its own session, independently of the person's account write");
+    let token = renewed.ok().access_token;
+    account.rollback().await.unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(orch_api_contract::auth::MeGet, &[])
+            .token(&token)
+            .send()
+            .await
+            .status,
+        200
+    );
+}
+
+#[tokio::test]
 async fn a_reset_link_ends_after_half_an_hour_and_an_unknown_one_is_gone_like_a_used_one() {
     let world = World::new().await;
     world.mail_server().await;
