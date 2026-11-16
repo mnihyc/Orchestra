@@ -1,9 +1,10 @@
 /** ACK-gated raw observations. Native source identity and local read ownership stay separate. */
 import { CancelledError, infiniteQueryOptions, type InfiniteData, type Query, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { matchesCollectionWords } from '@/lib/collectionSearch';
 import { api, client, ok } from '@/api/client';
 import { assertThreadRead, isCurrentThreadRead, readInThread, receiveThreadRead, threadQueryRead,
   threadReadSelector, type ThreadReadCapture } from '@/api/threadRead';
-import type { RawEvent, ThreadContinuationProjection, ThreadRawListReply } from '@/generated/api-types';
+import type { RawDirection, RawEvent, ThreadContinuationProjection, ThreadRawListReply } from '@/generated/api-types';
 import type { FeedFrame, RealtimeSocket, Subscription } from '@/realtime/socket';
 import { holdThreadRead, threadViewOf, threadWriter, useThreadStore } from '@/realtime/stores/thread';
 import { sameThreadProjection, stampThreadReceipt, threadReadCacheKey, threadReadChanged, threadReadTarget,
@@ -13,12 +14,17 @@ import { sameThreadProjection, stampThreadReceipt, threadReadCacheKey, threadRea
 const RAW_PAGE = 100;
 type Pages = InfiniteData<ThreadRawListReply, number | null>;
 
+export interface RawFilter { q?: string; direction?: RawDirection }
+function matchesFilter(source: RawDescriptor, event: RawEvent): boolean {
+  return (source.filter.direction === undefined || source.filter.direction === event.direction)
+    && matchesCollectionWords(source.filter.q ?? '', JSON.stringify(event.payload));
+}
 class RawDescriptor {
   readonly ref: ThreadReadRef;
   readonly segment: string;
   readonly captured: ThreadReadCapture | null;
   owner: { readonly join: RawJoin; readonly query: Query } | null = null;
-  constructor(target: ThreadReadTarget, segment: string) {
+  constructor(target: ThreadReadTarget, segment: string, readonly filter: RawFilter = {}) {
     this.ref = threadReadTarget(target);
     this.segment = segment;
     const scope = threadViewOf(this.ref).read;
@@ -79,7 +85,7 @@ function validPage(value: unknown): value is ThreadRawListReply {
     if (!validEvent(event) || event.n >= previous) return false;
     previous = event.n;
   }
-  return !value.has_older || events.length > 0;
+  return !value.has_older || events.length > 0 || 'next_before' in value && typeof value.next_before === 'number' && value.next_before > 0;
 }
 function pagesOf(value: unknown): Pages | null {
   if (typeof value !== 'object' || value === null || !('pages' in value) || !Array.isArray(value.pages)
@@ -95,15 +101,21 @@ function mergeKnownHead(consumer: Consumer, page: ThreadRawListReply | null = nu
   const base = page ?? consumer.head;
   if (base === null) throw retiredPublication();
   if (page !== null && !page.has_older) {
-    const last = page.events.at(-1)?.n;
+    const last = page.next_before ?? page.events.at(-1)?.n;
     if (last !== undefined) consumer.exhaustedBelow = consumer.exhaustedBelow === null ? last : Math.min(consumer.exhaustedBelow, last);
   }
   const known = new Map<number, RawEvent>();
   for (const event of consumer.head?.events ?? []) known.set(event.n, event);
   for (const event of page?.events ?? []) known.set(event.n, event);
   for (const [n, event] of consumer.staged) known.set(n, event);
-  const ordered = [...known.values()].sort((one, other) => other.n - one.n);
+  const ordered = [...known.values()].filter((event) => matchesFilter(consumer.source, event)).sort((one, other) => other.n - one.n);
   const events = ordered.slice(0, RAW_PAGE), tail = events.at(-1)?.n;
+  if (consumer.source.filter.q !== undefined || consumer.source.filter.direction !== undefined) {
+    const more = ordered.length > RAW_PAGE || base.has_older;
+    return stampThreadReceipt({ ...base, events, has_older: more,
+      next_before: ordered.length > RAW_PAGE ? tail : base.next_before ?? (base.has_older ? tail : undefined),
+    }, consumer.captured);
+  }
   return stampThreadReceipt({ ...base, events,
     has_older: ordered.length > RAW_PAGE || tail !== undefined && tail > 1 && (consumer.exhaustedBelow === null || tail > consumer.exhaustedBelow),
   }, consumer.captured);
@@ -113,14 +125,14 @@ function mergeKnownHead(consumer: Consumer, page: ThreadRawListReply | null = nu
  * not append order, so that retained older pages never hide that gap or require a bulk refetch. */
 function nextBefore(pages: ThreadRawListReply[], params: (number | null)[]): number | undefined {
   const head = pages[0];
-  let cursor = head?.has_older === true ? head.events.at(-1)?.n : undefined;
+  let cursor = head?.has_older === true ? head.next_before ?? head.events.at(-1)?.n : undefined;
   for (let step = 0; cursor !== undefined && step < pages.length; step += 1) {
     let progressed = false;
     for (let index = 1; index < pages.length; index += 1) {
       const page = pages[index], before = params[index];
       if (page === undefined || before === undefined || before === null || cursor > before) continue;
       if (!page.has_older) return undefined;
-      const last = page.events.at(-1)?.n;
+      const last = page.next_before ?? page.events.at(-1)?.n;
       if (last !== undefined && cursor > last) { cursor = last; progressed = true; break; }
     }
     if (!progressed) return cursor;
@@ -128,9 +140,9 @@ function nextBefore(pages: ThreadRawListReply[], params: (number | null)[]): num
   return cursor;
 }
 
-export function scopedRawFramesQuery(target: ThreadReadTarget, segment: string) {
-  const source = new RawDescriptor(target, segment);
-  const reading = threadQueryRead(source.ref, ['thread-raw', source.ref.threadId, segment]);
+export function scopedRawFramesQuery(target: ThreadReadTarget, segment: string, filter: RawFilter = {}) {
+  const source = new RawDescriptor(target, segment, filter);
+  const reading = threadQueryRead(source.ref, ['thread-raw', source.ref.threadId, segment, ...(filter.q === undefined && filter.direction === undefined ? [] : [filter])]);
   return infiniteQueryOptions({
     queryKey: reading.key, enabled: reading.enabled && source.captured !== null,
     meta: { scopedRaw: source } satisfies RawQueryMeta,
@@ -409,7 +421,7 @@ class RawJoin {
     for (const consumer of group.consumers) {
       if (!current(consumer) || consumer.error !== null) continue;
       if (!consumer.staged.has(value.event.n) && consumer.staged.size === RAW_PAGE) { this.restart(group); return; }
-      consumer.staged.set(value.event.n, value.event);
+      if (matchesFilter(consumer.source, value.event)) consumer.staged.set(value.event.n, value.event);
       this.flush(consumer);
     }
   }
@@ -511,17 +523,23 @@ class RawJoin {
     }
   }
   private async page(consumer: Consumer, before: number | null, signal: AbortSignal): Promise<ThreadRawListReply> {
+    let position = before;
     for (;;) {
       const admission = await this.admitted(consumer, signal);
       const requestSignal = AbortSignal.any([signal, consumer.controller.signal, admission.attempt.signal]);
       try {
         const page = await interrupt(readInThread(consumer.captured, (readSignal) => ok(api.GET('/threads/{id}/raw', {
           params: { path: { id: consumer.captured.threadId }, query: { segment_id: consumer.source.segment, limit: RAW_PAGE,
-            ...threadReadSelector(consumer.captured), ...(before === null ? {} : { before }) } }, signal: readSignal,
+            ...threadReadSelector(consumer.captured), ...consumer.source.filter, ...(position === null ? {} : { before: position }) } }, signal: readSignal,
         })), requestSignal), requestSignal);
         if (!validPage(page)) throw protocolError();
         receiveThreadRead(consumer.captured, page.projection, requestSignal);
         if (consumer.group?.admission !== admission || admission.attempt.signal.aborted) continue;
+        if (page.events.length === 0 && page.has_older && page.next_before !== undefined && page.next_before !== null) {
+          if (page.next_before === position) throw protocolError();
+          position = page.next_before;
+          continue;
+        }
         if (before !== null) return this.returnedPage(consumer, page, admission, requestSignal);
         consumer.needsHead = false;
         consumer.head = mergeKnownHead(consumer, page);

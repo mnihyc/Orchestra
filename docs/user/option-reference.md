@@ -1,8 +1,8 @@
 ---
 group: providers
-screens: [/help, /thread/$threadId, /resources/providers/$id]
+screens: [/help, /thread/$threadId, /resources/providers/$id, /settings/interface, /topic/$topicId]
 keywords: [reference, settings, options, states, errors, 参考, 设置, 选项, 状态, 错误]
-summary: Every request option a provider endpoint accepts, and what it changes.
+summary: Shipped request and interface options, and what they change.
 ---
 
 # Option field reference
@@ -13,6 +13,122 @@ An option is offered only where its interface or program declares it. Provider l
 
 | Reference | Meaning |
 | --- | --- |
+| `option:ThreadOutlineGetQuery.q` | Words in the same projected outline title, goal condition or turn number, matched before the output page. Native history membership and frozen text stay unchanged. |
+| `option:ThreadOutlineGetQuery.kinds` | Comma-separated outline kinds, applied before the output page; omitted means all native kinds. |
+| `option:ThreadHistoryListQuery.q` | Words in the projected segment agent/provider names and ordinal, or a turn’s model, state and ordinal, before the page fills. |
+| `option:ThreadRawListQuery.q` | Words in protocol frame payloads after current masking; hidden original secrets never supply a match. |
+| `option:ThreadRawListQuery.direction` | Select the direction before the matching frame page fills. |
+| `option:ThreadRawListReply.next_before` | Continue below this original event number, including an empty search-progress page; absent when no older page remains. |
+| `option:ModelInputListQuery.q` | Words in block keys, source labels and stored previews before paging, under the original source permissions. This finder does not search unread full blobs; Read the full text and Copy retain every byte. |
+| `option:HistoryListQuery.q` | Literal words in the same currently permitted History text, action, actor and disclosed thread/path fields. Filtering follows native projection before the output page fills; hidden raw details never match. |
+| `option:HistoryListQuery.kinds` | Environment history uses its existing HistoryKind values. Nodes and other resource histories use the exact AuditKind catalogue, including kinds absent from the loaded page. Selection precedes the result limit and Summary grouping. |
+| `option:DocumentRelatedListQuery.q` | Current readable item-name words, matched before the ranked page fills. Native related scores, reasons and eligibility remain unchanged. |
+| `option:DocumentRelatedListQuery.limit` | Entries per page; any positive u32, the place's existing related-count default when omitted. |
+| `option:DocumentRelatedListQuery.cursor` | Continue the same source, actor, words and ranked visible observation. A changed source or search starts fresh. |
+| `option:DocumentReferencesListQuery.q` | Literal words in a readable source/target name or context, or the label/path already written in the document. With of, search rendered mention lines throughout that source. Hidden target names never match. |
+| `option:DocumentReferencesListQuery.limit` | Sources/targets, or matching mentions with of, per page; any positive u32. Defaults come from the place's existing Links page/occurrence settings. Native access-work budgets yield continuation rather than capping the list. |
+| `option:NodeTagListQuery.q` | Visible tag-name words, matched before paging; exact names precede partial matches. |
+| `option:NodeTagListQuery.picker` | On an empty opening, put this person's recent currently available tag definitions first. Other reads keep their ordinary defining-place order. |
+| `option:NodeTagListQuery.limit` | Tag definitions per page; fifty by default, any positive u32. |
+| `option:NodeTagListQuery.cursor` | Continue the same actor, place, words and personal order. A changed order starts a fresh read. |
+| `option:HolderSearchQuery.picker` | Open a holder chooser with this person's recent people and groups; search starts on the first character while retaining the native placed-locator grammar. |
+| `option:HolderSearchQuery.kinds` | Comma-separated holder kinds; native selection applies them before the page fills. Omitted means all kinds. |
+| `option:HolderSearchQuery.limit` | Holder candidates per page; fifty by default, any positive u32. This does not cap discoverable people or groups. |
+| `option:HolderSearchQuery.cursor` | Continue the same actor, source place, tree, requested kinds and exact locator search. A changed visible source starts fresh. |
+| `option:HolderSearchReply.next_cursor` | Native continuation of the same visible source; absent at its end. |
+| `option:SemanticSearchOverview.orgs_next_cursor` | Continue the same administrator and root-org name query. Eligibility and name matching precede the page; detailed live index state is read only for its rows. |
+| `option:CapabilityListQuery.q` | Literal visible definition-name, key or description words, matched before paging. |
+| `option:CapabilityListQuery.limit` | Entries in one capability page; fifty by default, any positive u32. |
+| `option:CapabilityListQuery.cursor` | Continue the same administrator, words and public alias-key selection. |
+| `option:CapabilityListQuery.aliases` | Comma-separated public capability keys whose shipped localized name or description also matches. This supplements ordinary stored text search before paging and never bypasses system administrator authority. |
+| `option:MePickerRecentReceipt.count` | Current system group length, returned with the write acknowledgement. No stored private history is returned by a write-only operation. |
+| `option:MePickerRecentReceipt.remembered` | True when this selection was recorded; false when remembering is off. Off neither records this choice nor erases earlier preferences. |
+| `option:UserSearchQuery.include_external` | With an explicit org, also offer the existing shared-org and exact public people search outside it. False by default; the same native org view and account scopes apply before paging. |
+| `option:UserSearchReply.org_member_ids` | When include_external is true, IDs among this page's people who actually belong to the selected org. Otherwise absent; a picker does not infer guest status from loaded pages. |
+| `option:UserSearchQuery.picker` | A choice picker accepts one character; empty input offers this person's recent active people and shared-org people. An org selection still restricts membership; current account scopes are checked before paging. |
+| `option:UserSearchQuery.limit` | People in one page; twenty by default, any positive u32. This never caps the people that can be found. |
+| `option:UserSearchQuery.cursor` | Continue the same actor, org, picker mode and literal words. A changed opening order starts a fresh page. |
+| `option:MePickerRecentChoice.kind` | Native resource kind or model. All screens share one private history per kind. |
+| `option:MePickerRecentChoice.key` | Stable opaque choice key; model choices include their provider. Records a deliberate selection, never a permission or a name. |
+| `option:MePickerRecents.count` | Current system default for entries remembered and shown per kind; zero disables remembering. |
+| `option:MePickerRecents.choices` | This person's newest-first distinct keys by kind, read in one batch. The current native picker still decides which entries are available. |
+| `option:PersonalStateKey.picker_recents` | Private server preference used by all pickers. POST /me/picker-recents atomically promotes one kind/key; PUT /me/state/picker_recents with an empty object clears all of it. |
+| `option:NameSearchListQuery.picker` | Picker mode: empty words include all currently available names, with this person's recent selections first. A single typed character filters natively. |
+| `option:NameSearchListQuery.cursor` | Continue the same actor, scope, kinds, participation, starred selection and words. A changed recent order starts a fresh read. |
+| `option:NameSearchPage.next_cursor` | Continue beyond this currently authorized name page; absent at the end. |
+| `option:ProviderModelSuggestionListQuery.refresh` | When true, explicitly reread the source. Otherwise pages and searches use its last successful catalogue; an unread source is loaded once. Refreshing remains available through the provider’s Refresh act. |
+| `option:ProviderModelSuggestionListQuery.q` | Words in a visible source proposal’s model name; matched before paging. |
+| `option:ProviderModelSuggestionListQuery.limit` | Entries in this proposal page: 50 by default; every continuation remains available. |
+| `option:ProviderModelSuggestionListQuery.cursor` | The previous next_cursor from the same provider, search and unlisted choice. |
+| `option:ProviderModelSuggestionListQuery.unlisted` | When true, omit model names already saved on this provider before paging. The complete discovered catalogue remains available with false or omission. |
+| `option:AdminRuntimeListQuery.q` | Words in the visible unit, resource or template name, matched before paging. |
+| `option:AdminRuntimeListQuery.limit` | Entries in one page; 50 by default, any positive u32. |
+| `option:AdminRuntimeListQuery.cursor` | Continue the same host, kind and name search. |
+| `option:EverythingListQuery.resource_kind` | Select a template unit kind, a machine/template environment origin, or system for agent profiles without a home; applied before name search and paging. |
+| `option:NativeSessionListQuery.q` | Words in a native session title or folder, matched within the captured source before paging. |
+| `option:NativeSessionListQuery.limit` | Entries in this page; 50 by default, any positive u32. |
+| `option:NativeSessionListQuery.cursor` | Continue the same source and search; it cannot select another catalogue. |
+| `option:NativeSessionListQuery.source` | The opaque source returned by the first page. Omit it to discover afresh. It is bound to the caller, provider, profile and credential/configuration generation; expiry or a changed source returns a field fault and the UI restarts that read. |
+| `option:InvitationListQuery.active` | When true, exclude expired, revoked and used-up links before paging; false or omission retains the full governed history. |
+| `option:InvitationListQuery.q` | Words of the visible destination, email address, note or inviter. |
+| `option:InvitationListQuery.limit` | Entries in one page; 50 by default, any positive u32. |
+| `option:InvitationListQuery.cursor` | Continue the same org, active choice and search. |
+| `option:NotificationChannelListQuery.q` | Words in the visible channel name or notifier kind, before paging. |
+| `option:NotificationChannelListQuery.limit` | Entries in one page; 50 by default, any positive u32. |
+| `option:NotificationChannelListQuery.cursor` | Continue the same owner selection and search. |
+| `option:EnvironmentMcpListQuery.collection` | The native catalogue: servers by default, or found definitions. |
+| `option:EnvironmentMcpListQuery.q` | Words in the selected catalogue’s visible names, program or directory. |
+| `option:EnvironmentMcpListQuery.limit` | Entries in a page; 50 by default, any positive u32. |
+| `option:EnvironmentMcpListQuery.cursor` | Continue the same environment, catalogue and search. |
+| `option:HostRuntimeListQuery.q` | Words in the readable environment/provider name, driver or state. |
+| `option:HostRuntimeListQuery.limit` | Entries in a page; 50 by default, any positive u32. |
+| `option:HostRuntimeListQuery.cursor` | Continue the same host, kind and search. |
+| `option:MachineMountListQuery.collection` | Locations by default, available additions, or environments attached to mount_id. |
+| `option:MachineMountListQuery.mount_id` | The located mount whose readable attachments are selected with collection=environments. |
+| `option:MachineMountListQuery.q` | Words in visible mount names/paths or attached environment names. |
+| `option:MachineMountListQuery.limit` | Entries in a page; 50 by default, any positive u32. |
+| `option:MachineMountListQuery.cursor` | Continue the same machine, collection, mount and search. |
+| `option:NotificationRouteListQuery.retained` | Keep only removed-channel routes when true, current routes when false, or all stored routes when omitted. |
+| `option:NotificationRouteListQuery.q` | Words in the safe channel name, kind or connected label, before paging. |
+| `option:NotificationRouteListQuery.limit` | Entries in a page; 50 by default, any positive u32. |
+| `option:NotificationRouteListQuery.cursor` | Continue the same person, retained choice and search. |
+| `option:NodeChildListQuery.q` | Visible child-name words, matched with the indexed native name predicate before paging. |
+| `option:NodeDocumentListQuery.q` | Visible title words in both readable and administrative-name phases, before paging. |
+| `option:InputScheduleListQuery.q` | Visible schedule-name words before paging. |
+| `option:InputScheduleListQuery.thread_id` | Keep only schedules whose readable destination and agent origin address this thread. |
+| `option:SharedListQuery.q` | Visible name, description and disclosed path words, matched after native projection and before paging. |
+| `option:SharedListQuery.kind` | Only org, project, topic, thread, document or document_container; omission includes all. |
+| `option:SharedListQuery.limit` | Entries requested in this page; 50 by default, any positive u32. |
+| `option:SharedListQuery.cursor` | Continue the same actor, kind and search with the returned cursor. |
+| `option:PermissionPeopleListQuery.q` | Visible person-name or username words before paging; actual directories include everyone eligible beyond bounded refusal previews. |
+| `option:OrgChatListQuery.include_empty` | With the nodes scope, include current readable place chats before their first message, so they remain forwarding destinations. False by default; ordinary activity lists keep their existing meaning. |
+| `option:OrgChatListQuery.ids` | Optional comma-separated chat identities, resolved in one batch through the same native org, scope, participation and current account admission. Unavailable chats are omitted; supplied IDs grant no access. |
+| `option:OrgChatListQuery.limit` | Chats per page; fifty by default, any positive u32. |
+| `option:OrgChatListQuery.cursor` | Continue the same actor, root, scope, participation, identity filter and words. A changed read starts a fresh page. |
+| `option:OrgChatListQuery.q` | Visible conversation title, participant names or disclosed node name; matched through the native name projection before the result page fills. |
+| `option:ChatGetQuery.members_q` | Visible group-member names and usernames, projected by ChatGet before paging. Omission preserves the complete ordinary metadata view. |
+| `option:ChatGetQuery.members_limit` | Entries in a requested member page; any positive u32, with 50 supplied by the roster screen. |
+| `option:ChatGetQuery.members_cursor` | The members_next_cursor from the same chat and search. |
+| `option:CollectionQuery.q` | Words or quoted phrases in disclosed collection text, matched on the server without a minimum length. Spaces inside a quoted phrase remain literal. A changed search starts a fresh continuation. |
+| `option:CollectionQuery.limit` | Entries requested in this page: 50 by default, any positive u32 when supplied. This changes a page, never the collection’s total. |
+| `option:CollectionQuery.cursor` | The opaque next_cursor returned by the same collection and search. Follow it until null; it cannot be reused for another parent or search. |
+| `option:ChildCollectionQuery.collection` | The child directory: MachineGet agents/providers/environments; HostGet kept_layers/kept_data; MountGet locations/kept/lost_locations. Only that child directory is returned; unselected child arrays are empty. Omit all child-query fields for the complete native resource read. |
+| `option:ChildCollectionQuery.q` | Words in the chosen child directory’s disclosed names and location text. Hidden names and paths never participate. |
+| `option:ChildCollectionQuery.limit` | Positive entries in one child page; fifty by default, without a total-result cutoff. |
+| `option:ChildCollectionQuery.cursor` | The same reader/resource/child/search continuation. A changed child or search starts at its first page. |
+| `option:HostKeptLayers.latest` | Whether this is the newest visible kept generation for its workspace. The native complete observation decides it before paging. |
+| `option:EnvironmentGetQuery.inspect_deleted` | Use the workspace’s current restoration authority when inspecting kept data. The normal live read is unchanged. |
+| `option:EnvironmentGetQuery.threads_q` | Words in disclosed bound-thread, topic, owner or directory text. The server searches the complete native visible projection before selecting its page. |
+| `option:EnvironmentGetQuery.threads_limit` | Positive size of one explicit bound-thread page (50 by default). Omitting all threads_* fields preserves the complete environment read used for functional inputs. |
+| `option:EnvironmentGetQuery.threads_cursor` | The next bound-thread continuation from the same reader, workspace and search. Clear it when the search changes. |
+| `option:AdminTokenListQuery.q` | Words in the administrative token inventory’s visible name. Search runs before paging; continuations belong to the same administrator, owner and search. |
+| `option:NodeDeletedEnvironmentListQuery.q` | Words in a kept workspace’s current name, matched on the server before its page is selected. Clear the cursor when the search changes. |
+| `option:OrgGroupListQuery.q` | Words of the group name, searched before paging. |
+| `option:OrgGroupListQuery.limit` | Entries in one page; 50 by default, any positive value. |
+| `option:OrgGroupListQuery.cursor` | Continue the same org, descendant choice and search. |
+| `option:PersonalState.sidebar.open_links` | The person’s Open links in choice, kept with sidebar state: automatic by default, this or new. Automatic keeps each destination in one view; this replaces the current view and new opens a view. An already open target is focused. Choose it in Interface or a tab menu; explicit clones and browser modifier clicks keep their usual behavior. |
+| `option:TopicSearch.q` | The thread-name search on a topic’s Overview and Threads tab. It filters the visible live collection, travels in the topic address and is not retained as a device default. |
+| `option:codex.cyber_access_program` | The Codex access program offered by the model and enabled for the provider. The selected name reaches the native turn unchanged, including names outside the Daybreak family. Normal model/account eligibility and provider access still apply. |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
 | `option:AccessOptions.models` | The models. |
@@ -25,6 +141,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |

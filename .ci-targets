@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test activity_depth --test history_native_scopes --test access_everything
+test -p orch-api-core --test thread_history_pages --test thread_history_scale --test threads_raw --test realtime_raw_sources --test thread_instructions --test resource_summaries
+web typecheck
+web lint
+web test -- tests/component/thread-outline.test.tsx tests/unit/raw-query-join.test.ts tests/component/given-record.test.tsx tests/component/given-target.test.tsx tests/component/machine-policy.test.tsx tests/component/complete-declaration-locators.test.tsx tests/component/cleanup-plan.test.tsx tests/component/history-person-locator.test.tsx tests/component/access-history.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

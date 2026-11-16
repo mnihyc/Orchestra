@@ -1389,3 +1389,80 @@ content_scope_controls!(
     scoped_content_blob_inspect,
     ContentReadCase::Blob
 );
+
+#[tokio::test]
+async fn outline_search_finds_older_projected_words_before_a_one_point_page() -> Proof {
+    let h = seed_history(13, 1).await?;
+    let page = h
+        .scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&h.thread])
+        .token(&h.scene.ada.token)
+        .query(&ThreadOutlineGetQuery {
+            q: Some("answer 1-0".into()),
+            kinds: Some("agent_message".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].title, "Historical answer 1-0");
+    assert_eq!(page.entries[0].kind, OutlineKind::AgentMessage);
+    assert_eq!(page.next_before, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recorded_error_is_found_in_outline_even_when_no_live_error_is_held() -> Proof {
+    let h = seed_history(1, 1).await?;
+    let mut tx = h.scene.rig.db.begin().await?;
+    let seq = orch_db::sequences::next(&mut tx, h.thread)
+        .await?
+        .ok_or("thread absent")?;
+    let payload = json!({"code":"test_failed","message":"An older recorded failure"});
+    threads::insert_item(
+        &mut tx,
+        &NewItem {
+            id: new_id(),
+            thread_id: h.thread,
+            segment_id: h.anchors[0].segment,
+            turn_id: None,
+            stream: "main",
+            parent_item_id: None,
+            kind: "error",
+            status: "completed",
+            author_id: None,
+            payload: &payload,
+            native_ref: None,
+            search_text: None,
+            at: h.scene.rig.world.now(),
+        },
+        seq,
+    )
+    .await?;
+    tx.commit().await?;
+    let page = h
+        .scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&h.thread])
+        .token(&h.scene.ada.token)
+        .query(&ThreadOutlineGetQuery {
+            q: Some("older recorded".into()),
+            kinds: Some("error".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].kind, OutlineKind::Error);
+    assert_eq!(page.entries[0].title, "An older recorded failure");
+    Ok(())
+}

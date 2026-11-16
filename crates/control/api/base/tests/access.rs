@@ -1096,6 +1096,7 @@ async fn the_people_behind_a_chip_are_listed_a_page_at_a_time_and_only_for_a_chi
         .call(PermissionPeopleList, &[&"nodes", &s.web])
         .token(&s.dan.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: chip.clone(),
             limit: Some(2),
             cursor: None,
@@ -1109,6 +1110,7 @@ async fn the_people_behind_a_chip_are_listed_a_page_at_a_time_and_only_for_a_chi
         .call(PermissionPeopleList, &[&"nodes", &s.web])
         .token(&s.dan.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: chip,
             limit: Some(2),
             cursor: first.next_cursor.clone(),
@@ -1137,6 +1139,7 @@ async fn the_people_behind_a_chip_are_listed_a_page_at_a_time_and_only_for_a_chi
         .call(PermissionPeopleList, &[&"nodes", &s.web])
         .token(&s.dan.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: "admins".to_owned(),
             limit: None,
             cursor: None,
@@ -1156,6 +1159,7 @@ async fn the_people_behind_a_chip_are_listed_a_page_at_a_time_and_only_for_a_chi
             .call(PermissionPeopleList, &[&"nodes", &s.web])
             .token(&s.dan.token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: chip.clone(),
                 limit: None,
                 cursor: None,

@@ -227,6 +227,16 @@ export function Combobox<Value extends string>({
     return () => { live = false; observer?.disconnect(); };
   }, [open, covered, contentVersion, hasFooter, hasControls, current, query, groups, revealCurrent]);
 
+  // Finishing or restarting a page can remove its focused footer action.
+  useLayoutEffect(()=>{
+    const popup=content.current;
+    if(!open||covered||!footerFocus.current||popup===null)return;
+    const foot=popup.querySelector('[data-combobox-footer]');
+    if(foot?.contains(popup.ownerDocument.activeElement))return;
+    restoringInput.current=true;input.current?.focus();restoringInput.current=false;
+    footerFocus.current=false;
+  },[open,covered,footer,contentVersion]);
+
   // The side and the height follow the room for the content the popup has now, not the content it opened with.
   const { place, attach: attachRoom } = useLayerRoom({ shown: open && !covered, anchor, watch: groups, gap: POPUP_GAP, rows: minRows });
   const attachPopup = useCallback((node: HTMLDivElement | null) => { attachContent(node); attachRoom(node); }, [attachContent, attachRoom]);

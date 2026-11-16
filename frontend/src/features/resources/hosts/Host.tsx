@@ -52,6 +52,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { StateLine } from '@/ui/StateLine';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { HelpHint } from '@/ui/HelpHint';
 import { Meter } from '@/ui/Meter';
 import { Select } from '@/ui/Select';
@@ -160,7 +161,7 @@ export function Storages({ host }: { host: Host }) {
   ];
   return (
     <Section id="host-storages" title={t('hosts.storages.title')} lead={t('hosts.storages.lead')}>
-      <Table label={t('hosts.storages.title')} columns={columns} rows={host.storages} rowKey={(storage) => storage.name} />
+      <CompleteCollection label={t('hosts.storages.title')} items={host.storages} textOf={(storage) => storage.name}>{(rows) => <Table virtual label={t('hosts.storages.title')} columns={columns} rows={rows} rowKey={(storage) => storage.name} />}</CompleteCollection>
     </Section>
   );
 }
@@ -191,7 +192,7 @@ export function Drivers({ host }: { host: Host }) {
     <Section id="host-drivers" title={t('hosts.drivers.title')} lead={t('hosts.drivers.lead')}
       action={<HelpHint term={t('hosts.driverFeatures.title')} what={t('hosts.driverFeatures.about')}
         guide={{ article: 'host-driver-features', heading: null }} more={{ label: t('help.hint.more'), onOpen: () => openHelp('host-driver-features') }} />}>
-      <Table label={t('hosts.drivers.title')} columns={columns} rows={host.drivers} rowKey={(driver) => driver.name} />
+      <CompleteCollection label={t('hosts.drivers.title')} items={host.drivers} textOf={(driver) => `${driver.title} ${driver.name} ${driver.runtime_classes.join(' ')}`}>{(rows) => <Table virtual label={t('hosts.drivers.title')} columns={columns} rows={rows} rowKey={(driver) => driver.name} />}</CompleteCollection>
     </Section>
   );
 }
@@ -346,7 +347,7 @@ function HostSettings({ host, manage }: { host: Host; manage: boolean }) {
       {revert.error !== null && <ErrorAlert error={revert.error} />}
       {stale && (
         <InlineAlert tone="warning" title={t('hosts.settings.changed')}>
-          {t('hosts.settings.changedLead', { revision: host.revision })}
+          {t('hosts.settings.changedLead')}
           <SettingChanges rows={[{ name: t('hosts.settings.name'), current: host.name, draft: name }, { name: t('hosts.settings.labels'), current: host.labels, draft: wanted }]}
             disabled={busy || host.revision <= base.revision} onKeep={() => { setBase(host); save.reset(); }} />
         </InlineAlert>

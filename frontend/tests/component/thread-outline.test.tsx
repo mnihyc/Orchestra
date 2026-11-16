@@ -13,8 +13,8 @@ import { agentMessage, errorItem, turn, userMessage } from '../doubles/thread-ro
 import { me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
-const server = vi.hoisted(() => ({ read: vi.fn<() => Promise<ThreadOutlinePage>>() }));
-vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), outlineQuery: (id: string) => ({ queryKey: ['outline', id], queryFn: server.read, initialPageParam: null, getNextPageParam: (page: ThreadOutlinePage) => page.next_before ?? undefined }) }));
+const server = vi.hoisted(() => ({ read: vi.fn<() => Promise<ThreadOutlinePage>>(), filters: vi.fn() }));
+vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), outlineQuery: (id: string, q = '', kinds?: string) => { server.filters(q, kinds); return { queryKey: ['outline', id, q, kinds], queryFn: server.read, initialPageParam: null, getNextPageParam: (page: ThreadOutlinePage) => page.next_before ?? undefined }; } }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), Link: ({ params, search, children, className }: { params: { threadId: string }; search: { item: string }; children: ReactNode; className?: string }) => <a className={className} href={`/thread/${params.threadId}?item=${search.item}`}>{children}</a> }));
 const THREAD = 'outline-thread';
 const AT = '2026-10-15T00:00:00Z';
@@ -114,4 +114,16 @@ it('keeps a reported error reachable and filterable as live errors arrive withou
   expect(screen.queryByRole('link', { name: /The model refused the request/ })).not.toBeInTheDocument();
   expect(screen.getByText('Redirect fixed')).toBeVisible();
   expect(server.read).toHaveBeenCalledTimes(1);
+});
+
+it('finds older outline words through the native query and keeps the kind controls available', async () => {
+  show(<OutlinePanel access={{ thread }} />);
+  await screen.findByText('Redirect fixed');
+  server.read.mockResolvedValue({ entries: [{ item_id:'older-native',seq:1,at:AT,title:'Older special result',kind:'agent_message' }],next_before:null,seq:12 });
+  const search = screen.getByRole('searchbox');
+  await userEvent.type(search, 'special');
+  await screen.findByText('Older special result');
+  expect(server.filters).toHaveBeenLastCalledWith('special', undefined);
+  expect(screen.queryByText('Redirect fixed')).not.toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name:i18n.t('inspector.outline.kind.error') })).toBeVisible();
 });

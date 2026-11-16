@@ -67,6 +67,10 @@ pub mod cache;
 #[path = "certificates.rs"]
 pub mod certificates;
 
+#[path = "collection.rs"]
+pub mod collection;
+pub mod picker_recents;
+
 #[path = "component_updates.rs"]
 pub mod component_updates;
 
