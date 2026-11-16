@@ -436,6 +436,43 @@ pub(crate) fn access_program(parameters: &[ParameterDef], params: &Json) -> Opti
 // ---------------------------------------------------------------- starting a provider
 
 impl Engine {
+    /// Queue the unchanged shared keeper start so its lease can wait for it on the keeper itself.
+    pub(crate) async fn queue_provider_start(
+        &self,
+        thread: Id,
+        provider: Id,
+    ) -> Result<Result<Option<Id>, Keeping>, EngineError> {
+        let plan = match self.start_plan(provider).await? {
+            Ok(plan) => plan,
+            Err(error) => return Ok(Err(Keeping::Cannot(error))),
+        };
+        let mut attempt = 0;
+        loop {
+            let id = ids::provider_start(plan.provider, plan.machine, &plan.digest, attempt);
+            match self.inner.commands.status(id).await? {
+                Some(info) => match info.outcome {
+                    Some(Outcome::Succeeded(_)) => return Ok(Ok(None)),
+                    Some(failed) if attempt + 1 >= START_ATTEMPTS => {
+                        return Ok(Err(Keeping::Failed(failed)));
+                    }
+                    Some(_) => attempt += 1,
+                    None => return Ok(Ok(Some(id))),
+                },
+                None => {
+                    self.set_step(thread, "provider").await?;
+                    let command = Outgoing::new(
+                        id,
+                        plan.machine,
+                        SerialKey::Provider(plan.provider),
+                        &plan.body,
+                    )?;
+                    self.inner.commands.issue(command).await?;
+                    return Ok(Ok(Some(id)));
+                }
+            }
+        }
+    }
+
     /// The `provider.start` of a provider as the database holds it now.
     async fn start_plan(&self, provider: Id) -> Result<Result<StartPlan, PlanError>, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
@@ -593,20 +630,17 @@ pub(crate) fn refreshed_transition(
     }
 }
 
-/// A refused provider's waiting threads name the provider and its recorded reason.
+/// What a refused provider's waiting threads say of it: the reason its manager recorded. The thread already names
+/// the provider, and an identifier is no part of what a person reads.
 pub(crate) fn unavailable_detail(provider: &ProviderRow) -> String {
-    if provider.status == "error" {
-        format!(
-            "Provider {} ({}): {}",
-            provider.name,
-            provider.id,
-            provider
-                .status_detail
-                .as_deref()
-                .unwrap_or("its credential was refused")
-        )
+    unavailable_words(&provider.status, provider.status_detail.as_deref())
+}
+
+fn unavailable_words(status: &str, recorded: Option<&str>) -> String {
+    if status == "error" {
+        recorded.unwrap_or("its credential was refused").to_owned()
     } else {
-        provider.status.clone()
+        status.to_owned()
     }
 }
 
@@ -2482,6 +2516,17 @@ mod tests {
     use chrono::Utc;
     use orch_types::new_id;
     use serde_json::json;
+
+    #[test]
+    fn a_refused_provider_keeps_its_recorded_reason_or_uses_a_plain_fallback() {
+        let said = unavailable_words("error", Some("the key was revoked"));
+        assert_eq!(said, "the key was revoked");
+        assert_eq!(
+            unavailable_words("error", None),
+            "its credential was refused"
+        );
+        assert_eq!(unavailable_words("offline", Some("ignored")), "offline");
+    }
 
     fn row(key_machine: Option<Id>, machine: Option<Id>) -> StartRow {
         StartRow {

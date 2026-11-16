@@ -430,6 +430,8 @@ struct Issued {
     machine: Id,
     handle: CommandHandle,
     at: DateTime<Utc>,
+    work_started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// The API's end of a machine's commands: each is kept from the moment it is issued, a command asked for
@@ -669,7 +671,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -697,6 +699,7 @@ impl Commands for Process {
     ) -> Result<Option<orch_engine::commands::RetainedCommand>, CommandsError> {
         Ok(lock(&self.commands.issued).get(&id).map(|issued| {
             orch_engine::commands::RetainedCommand {
+                after: issued.cmd.after,
                 machine: issued.machine,
                 kind: issued.cmd.kind.clone(),
                 key: issued.cmd.key.clone(),
@@ -707,13 +710,11 @@ impl Commands for Process {
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         self.alive()?;
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline: Time::new(
-                self.commands.clock.now()
-                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-            ),
+            work: std::time::Duration::from_secs(u64::from(command.kind.deadline_secs())),
             body: command.body,
         };
         let handle = self.commands.link_of(command.machine).commands().issue(cmd);
@@ -738,10 +739,11 @@ impl Commands for Process {
             Time::new(now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
         });
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline,
+            work: Cmd::work_budget(Time::new(now), deadline),
             body: command.body,
         };
         if let Some(check) = before {
@@ -759,6 +761,8 @@ impl Commands for Process {
                 machine: command.machine,
                 handle,
                 at: now,
+                work_started_at: None,
+                completed_at: None,
             },
         );
         Ok(())
@@ -766,11 +770,34 @@ impl Commands for Process {
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
         self.alive()?;
-        Ok(lock(&self.commands.issued).get(&id).map(|entry| {
+        Ok(lock(&self.commands.issued).get_mut(&id).map(|entry| {
             let progress = entry.handle.progress();
+            if entry.work_started_at.is_none()
+                && matches!(
+                    progress,
+                    Progress::Running
+                        | Progress::Released
+                        | Progress::Succeeded(_)
+                        | Progress::Failed(_)
+                )
+            {
+                entry.work_started_at = Some(self.commands.clock.now());
+            }
+            if progress.is_final() && entry.completed_at.is_none() {
+                entry.completed_at = Some(self.commands.clock.now());
+            }
             Info {
-                stage: stage_of(&progress),
+                stage: if (entry.cmd.after.is_some()
+                    || matches!(entry.cmd.kind.as_str(), "turn.start" | "turn.start.fenced"))
+                    && progress == Progress::Accepted
+                {
+                    Stage::Sent
+                } else {
+                    stage_of(&progress)
+                },
                 issued_at: entry.at,
+                work_started_at: entry.work_started_at.or(entry.completed_at),
+                completed_at: entry.completed_at,
                 outcome: outcome_of(&progress),
             }
         }))
@@ -782,6 +809,11 @@ impl Commands for Process {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let outcome = self.wait_handle(handle).await?;
+        if let Some(entry) = lock(&self.commands.issued).get_mut(&id)
+            && entry.completed_at.is_none()
+        {
+            entry.completed_at = Some(self.commands.clock.now());
+        }
         self.commands.complete_admitted(id, outcome).await
     }
 
@@ -1193,6 +1225,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -2803,4 +2836,98 @@ fn build_engine(
         orch_provider_contract::builtins::BuiltinSources::default(),
     ));
     engine
+}
+
+/// Atomically make a conversation-copy fixture beside its uncommitted target.
+pub async fn copy_conversation(
+    unit: &mut orch_engine::unit::Unit<'_>,
+    source: Id,
+    target: Id,
+    segment: Id,
+    range: Option<(i32, i32)>,
+    source_segment: Option<Id>,
+) -> Result<(), orch_engine::EngineError> {
+    let started = std::time::Instant::now();
+    if source == target {
+        return Err(orch_engine::EngineError::unreadable(
+            "A full fork cannot copy into its source execution.",
+        ));
+    }
+    // Atomic fixture setup deliberately shares its target birth transaction.
+    // Real requests capture and publish in separate owned transactions.
+    let source_row = orch_db::queries::threads::lock(unit.conn, source)
+        .await?
+        .ok_or_else(|| {
+            orch_engine::EngineError::unreadable("The source conversation is unavailable.")
+        })?;
+    if source_segment.is_some_and(|segment| Some(segment) != source_row.current_segment_id) {
+        return Err(orch_engine::EngineError::unreadable(
+            "The requested source segment is no longer selected.",
+        ));
+    }
+    // An omitted fixture range takes all finished selected turns.
+    let range = match range {
+        Some(range) => Some(range),
+        None => Some((
+            1,
+            orch_db::queries::thread_history_cuts::last_finished(
+                unit.conn,
+                source,
+                source_row.active_continuation_id,
+            )
+            .await?
+            .unwrap_or(0),
+        )),
+    };
+    let at = unit.now();
+    let captured = orch_db::queries::thread_history_cuts::capture(
+        unit.conn,
+        &orch_db::queries::thread_history_cuts::Capture {
+            id: target,
+            thread: source,
+            view: source_row.active_continuation_id,
+            job: None,
+            owner_thread: Some(target),
+            segment: source_row.current_segment_id,
+            execution_revision: source_row.execution_revision,
+            range,
+            at,
+        },
+    )
+    .await?;
+    tracing::debug!(phase = "capture", elapsed = ?started.elapsed(), "Copied conversation phase");
+    orch_engine::fork_history::copy_captured_conversation(unit, &captured, target, segment).await?;
+    tracing::debug!(phase = "publication", elapsed = ?started.elapsed(), "Copied conversation phase");
+    // This temporary cut has no native lineage witness. Release its captured
+    // rows in primary-key order instead of making the header's FK cascade erase
+    // an entire long history under one request statement deadline.
+    let mut after: Option<(String, Id)> = None;
+    loop {
+        let next: Option<(String, Id)> = sqlx::query_as(
+            "WITH page AS MATERIALIZED (
+          SELECT kind,row_id FROM thread_history_cut_rows WHERE cut_id=$1
+            AND (kind,row_id)>=(COALESCE($2::text,''),COALESCE($3::uuid,'00000000-0000-0000-0000-000000000000'::uuid))
+            AND ($2::text IS NULL OR (kind,row_id)>($2,$3::uuid))
+          ORDER BY kind,row_id LIMIT $4
+        ),removed AS (DELETE FROM thread_history_cut_rows r USING page p
+          WHERE r.cut_id=$1 AND r.kind=p.kind AND r.row_id=p.row_id)
+        SELECT kind,row_id FROM page ORDER BY kind DESC,row_id DESC LIMIT 1",
+        )
+        .bind(target)
+        .bind(after.as_ref().map(|(kind, _)| kind.as_str()))
+        .bind(after.as_ref().map(|(_, row)| *row))
+        .bind(orch_db::queries::thread_history_cuts::PAGE)
+        .fetch_optional(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
+    sqlx::query("DELETE FROM thread_history_cuts WHERE id=$1 AND owner_thread_id=$1")
+        .bind(target)
+        .execute(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    tracing::debug!(phase = "release", elapsed = ?started.elapsed(), "Copied conversation phase");
+    Ok(())
 }

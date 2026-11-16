@@ -758,6 +758,7 @@ pub(crate) fn build_command(
         )
     };
     Ok(Outgoing {
+        after: None,
         authority: None,
         id,
         machine,
@@ -908,6 +909,7 @@ impl CommandEvidence {
         access: &dyn ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let actual = Outgoing {
+            after: None,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,
@@ -942,6 +944,7 @@ impl CommandEvidence {
         access: &dyn ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let actual = Outgoing {
+            after: None,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,

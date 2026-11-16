@@ -281,7 +281,7 @@ impl ScriptedController {
 
     /// Issues a command under a given identifier.
     pub fn issue_with_id<B: CommandBody>(&self, id: Id, key: &SerialKey, deadline: Time, body: &B) {
-        let cmd = Cmd::new(id, key, deadline, body)
+        let cmd = Cmd::new(id, key, Cmd::work_budget(self.clock.time(), deadline), body)
             .unwrap_or_else(|error| panic!("a command could not be made: {error}"));
         let handle = self.link().commands().issue(cmd.clone());
         let mut inner = lock(&self.store.inner);
@@ -423,7 +423,7 @@ async fn apply(
                     if let Ok(cmd) = Cmd::new(
                         new_id(),
                         &SerialKey::Thread(thread_id),
-                        deadline,
+                        Cmd::work_budget(clock.time(), deadline),
                         &SessionResync { thread_id },
                     ) {
                         let id = cmd.id;
