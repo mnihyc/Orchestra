@@ -522,6 +522,9 @@ impl AgentRole {
                 mcp: body.mcp.iter().map(|server| server.name.clone()).collect(),
                 skills,
             };
+            let recorded_directory = spec.settings.directory.clone();
+            let recorded_cwd = spec.settings.cwd.clone();
+            let recorded_capture = spec.settings.output_capture_bytes;
             let opened = process
                 .call(move |adapter| {
                     Box::pin(async move {
@@ -556,7 +559,13 @@ impl AgentRole {
                 .await;
             match opened {
                 Ok(opened) => {
-                    process.session_opened(&binding, &opened.session.native_session_ref);
+                    process.session_opened(
+                        &binding,
+                        &opened.session.native_session_ref,
+                        &recorded_directory,
+                        &recorded_cwd,
+                        recorded_capture,
+                    );
                     if fenced {
                         process.fence_continuation(body.thread_id);
                     }
@@ -1135,6 +1144,7 @@ impl RoleHandler for AgentRole {
                     body.segment_id,
                     body.cursor.as_deref(),
                     initial,
+                    body.limits,
                 )?)
             }
             Command::SessionNativeActions(body) => {
@@ -1177,6 +1187,8 @@ impl RoleHandler for AgentRole {
                         .await?,
                 )
             }
+            // Export and resync keep reading native history if Stop arrives; they never restart a turn.
+            // Steer and approval keep their exact native target and report its ordinary accepted/ended result.
             Command::SessionResync(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
                 let items = process
@@ -1227,9 +1239,7 @@ impl RoleHandler for AgentRole {
             }
             Command::TurnInterrupt(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
-                process
-                    .call(|adapter| adapter.interrupt(body.thread_id, body.turn_id))
-                    .await?;
+                process.interrupt(body.thread_id, body.turn_id).await?;
                 CommandResult::TurnInterrupt(Empty {})
             }
             Command::ApprovalResolve(body) => {
