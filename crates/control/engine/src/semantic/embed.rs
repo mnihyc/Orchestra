@@ -233,6 +233,7 @@ impl Engine {
             .background_provider_use(
                 &mut tx,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Embeddings,
                     person: writer,
                     node: org,
                     provider: provider.id,
@@ -371,10 +372,26 @@ impl Engine {
             }
             None => None,
         };
-        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,provider_id,person_id,model_name,created_at,purpose)
+        let recorded = sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,provider_id,person_id,model_name,created_at,purpose)
             VALUES ($1,$2,$2,$3,$4,$5,$6,'embeddings') ON CONFLICT(id) DO NOTHING")
             .bind(call).bind(org).bind(provider.id).bind(writer).bind(&named.model_name).bind(admitted)
             .execute(&mut *tx).await.map_err(DbError::from)?;
+        if recorded.rows_affected() > 0 {
+            orch_db::queries::identity::note_model_choice(
+                &mut tx,
+                writer,
+                provider.id,
+                &named.model_name,
+                admitted,
+            )
+            .await?;
+            orch_db::sequences::notify_user_event(
+                &mut tx,
+                &[writer],
+                &serde_json::json!({"what":"model_recents"}),
+            )
+            .await?;
+        }
         // Present authority is decided when this commits; the command goes out with no transaction open.
         tx.commit().await.map_err(DbError::from)?;
         let mut cancellation = CancelOnDrop {

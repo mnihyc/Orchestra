@@ -903,6 +903,7 @@ impl<M: Mode> native::Selected for MovePreview<M> {
     type Query = DuplicateBody;
     type Value = PreviewValue;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = if M::DRAFT {
         &sources::SKILL_DRAFT_MOVE_PREVIEW
     } else {

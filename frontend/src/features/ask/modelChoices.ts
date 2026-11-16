@@ -2,9 +2,10 @@
 import type { TFunction } from 'i18next';
 import type { AskModelsReply } from '@/generated/api-types';
 import type { ModelEffortEntry } from '@/features/composer/ModelEffort';
+import { modelPurpose } from '@/features/models/purpose';
 
 export function configuredAskEntries(reply: AskModelsReply | undefined): ModelEffortEntry[] {
-  return (reply?.models ?? []).flatMap((entry, index) => entry.allowed && entry.provider !== null && entry.model !== null ? [{
+  return (reply?.models ?? []).flatMap((entry, index) => entry.allowed && entry.provider !== null && entry.model !== null && modelPurpose(entry.model, 'generation') !== 'unsupported' ? [{
     id: String(index), value: entry.selection, option: entry.model, providerName: entry.provider.name,
   }] : []);
 }
