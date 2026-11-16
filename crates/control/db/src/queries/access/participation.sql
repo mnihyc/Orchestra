@@ -36,6 +36,17 @@ WITH wanted AS MATERIALIZED (
      AND (cardinality(s.path)=0 OR s.path[1]=ANY($11::uuid[]))
 ), subjects AS MATERIALIZED (
  SELECT 'user'::text kind,$1::uuid id UNION SELECT 'group',id FROM unnest($2::uuid[]) g(id)
+), direct_subjects AS MATERIALIZED (
+ -- Test a subject's indexed prefix once before expanding absent object/expiry keys.
+ SELECT subject.* FROM subjects subject CROSS JOIN LATERAL (
+  SELECT 1 FROM participation_direct_counts c
+   WHERE c.subject_kind=subject.kind AND c.subject_id=subject.id AND c.total>0 LIMIT 1 OFFSET 0
+ ) present
+), summary_subjects AS MATERIALIZED (
+ SELECT subject.* FROM subjects subject CROSS JOIN LATERAL (
+  SELECT 1 FROM participation_node_counts c
+   WHERE c.subject_kind=subject.kind AND c.subject_id=subject.id AND c.total>0 LIMIT 1 OFFSET 0
+ ) present
 ), expiry_keys AS MATERIALIZED (
  SELECT * FROM orch_participation_after_keys($4)
 ), direct AS (
@@ -48,7 +59,7 @@ WITH wanted AS MATERIALIZED (
   AND ($10::uuid IS NULL OR $10=ANY(p.path))
   AND (cardinality(COALESCE(p.path,'{}'::uuid[]))=0 OR p.path[1]=ANY($11::uuid[]))
   AND EXISTS (
-   SELECT 1 FROM subjects subject CROSS JOIN expiry_keys t CROSS JOIN LATERAL (
+   SELECT 1 FROM direct_subjects subject CROSS JOIN expiry_keys t CROSS JOIN LATERAL (
     SELECT 1 FROM participation_direct_counts c
     WHERE c.subject_kind=subject.kind AND c.subject_id=subject.id
      AND c.object_kind=w.kind AND c.object_id=w.id AND c.time_shift=t.time_shift AND c.time_bucket=t.time_bucket
@@ -80,7 +91,7 @@ WITH wanted AS MATERIALIZED (
  SELECT count(*)<=(SELECT rows FROM summary_cache_capacity) cached FROM summary_sample
 ), totals AS MATERIALIZED (
  SELECT r.id,coalesce(sum(held.total),0)::bigint total FROM count_requests r
- CROSS JOIN subjects subject CROSS JOIN unnest($11::uuid[]) root(id) CROSS JOIN expiry_keys t
+ CROSS JOIN summary_subjects subject CROSS JOIN unnest($11::uuid[]) root(id) CROSS JOIN expiry_keys t
  LEFT JOIN LATERAL (
   SELECT c.total FROM summary_sample c
   WHERE (SELECT cached FROM summary_cache_mode)

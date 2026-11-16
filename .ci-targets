@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-db --lib --test commit_epochs --test usage_commit_order --test released_migrations --test migration_progress
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test machines --test machine_data_inventory --test machine_update_scopes --test machine_policy_scopes --test machine_role_scopes --test machine_revoke_scopes --test machine_program_scopes --test machine_registration
+test -p orch-api-core --test host_update_scopes --test component_updates --test ports_core --test mcp_delete_scopes
+test -p orch-api-core --test environments --test hosted_environments --test realtime_machine_views --test gateways
