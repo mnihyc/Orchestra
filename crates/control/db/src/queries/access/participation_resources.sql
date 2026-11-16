@@ -3,6 +3,11 @@ WITH wanted AS MATERIALIZED (
  SELECT * FROM unnest($4::text[],$5::uuid[]) w(kind,id)
 ), subjects AS MATERIALIZED (
  SELECT 'user'::text kind,$1::uuid id UNION SELECT 'group',id FROM unnest($2::uuid[]) g(id)
+), direct_subjects AS MATERIALIZED (
+ SELECT subject.* FROM subjects subject CROSS JOIN LATERAL (
+  SELECT 1 FROM participation_direct_counts c
+   WHERE c.subject_kind=subject.kind AND c.subject_id=subject.id AND c.total>0 LIMIT 1 OFFSET 0
+ ) present
 ), expiry_keys AS MATERIALIZED (
  SELECT * FROM orch_participation_after_keys($3)
 ), direct AS (
@@ -15,7 +20,7 @@ WITH wanted AS MATERIALIZED (
   AND ($8::uuid IS NULL OR $8=ANY(p.path))
   AND (cardinality(COALESCE(p.path,'{}'::uuid[]))=0 OR p.path[1]=ANY($9::uuid[]))
   AND EXISTS (
-   SELECT 1 FROM subjects subject CROSS JOIN expiry_keys t CROSS JOIN LATERAL (
+   SELECT 1 FROM direct_subjects subject CROSS JOIN expiry_keys t CROSS JOIN LATERAL (
     SELECT 1 FROM participation_direct_counts c
     WHERE c.subject_kind=subject.kind AND c.subject_id=subject.id
      AND c.object_kind=w.kind AND c.object_id=w.id AND c.time_shift=t.time_shift AND c.time_bucket=t.time_bucket

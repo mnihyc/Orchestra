@@ -78,6 +78,8 @@ CREATE INDEX nodes_org_tree_idx ON nodes USING btree (org_id, tree_seq);
 
 CREATE INDEX nodes_parent_idx ON nodes USING btree (parent_id) WHERE (deleted_at IS NULL);
 
+CREATE INDEX nodes_place_parent_idx ON nodes USING btree (parent_id, id) WHERE (kind <> 'thread' AND deleted_at IS NULL);
+
 CREATE INDEX nodes_summary_thread_activity_idx ON nodes (updated_at DESC, id DESC)
     WHERE kind = 'thread' AND deleted_at IS NULL AND archived_at IS NULL;
 

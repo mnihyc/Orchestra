@@ -124,7 +124,7 @@ async fn lock_write(
         .execute(&mut *conn)
         .await
         .map_err(DbError::from)?;
-    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
         .bind(machine)
         .execute(conn)
         .await
@@ -339,7 +339,7 @@ impl<M: SnapshotMode> Source for SnapshotSource<M> {
                 .execute(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.machine)
                 .execute(conn)
                 .await

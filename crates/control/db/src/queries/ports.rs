@@ -89,13 +89,17 @@ pub async fn lock_opening(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
     )
 }
 
-/// The physical publisher serialization already used by a Host opening's current validation.
-/// It is factual locking only; missing rows retain the native validator's eventual outcome.
+/// Serializes allocations on one physical publisher, independently of hardware observations.
+/// Its key pin still orders protected machine changes; a missing row keeps the validator's outcome.
 pub async fn lock_publisher_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR NO KEY UPDATE")
-        .bind(machine)
-        .execute(conn)
-        .await?;
+    sqlx::query(
+        "WITH publisher AS MATERIALIZED (
+             SELECT pg_advisory_xact_lock(hashtextextended('port-publisher:' || $1::uuid::text,0))
+         ) SELECT id FROM machines CROSS JOIN publisher WHERE id=$1 FOR KEY SHARE OF machines",
+    )
+    .bind(machine)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
