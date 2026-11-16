@@ -1,6 +1,6 @@
 // @vitest-environment node
 /** The rules of the views beside a thread that need no page: which viewer takes a file, which language a file is in, where a path of a tool call is in the workspace, how the tree and the table of processes are laid out, which lines changed, what a reference to the message says, the shell's connection through a line that comes and goes, the live feed's names, the part of a repository's difference that is one file's, and the words for a name the API gives. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { partOfDiff } from '@/api/workspace';
 import { changedLines } from '@/features/files/AgentEdits';
@@ -14,7 +14,7 @@ import { layOut } from '@/features/inspector/Processes';
 import { applyWord, environmentStatusWord, outlineKindWord, refusalWord } from '@/features/inspector/words';
 import type { DirEntry, ProcessInfo } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { type ShellSocketLike, connectShell } from '@/realtime/terminal';
+import { type ShellSocketLike, connectShell, PING_EVERY_MS } from '@/realtime/terminal';
 import { directoryKey, feedPath, sortEntries, type DirectoryState, type DirectoryWindow } from '@/realtime/stores/environment';
 
 const file = (name: string, more: Partial<Parameters<typeof factsOf>[0]> = {}) => factsOf({ name, media_type: 'text/plain', is_text: true, size: 100, ...more });
@@ -199,6 +199,26 @@ function fakeSocket() {
 const where = (_id: string, ticket: string) => `ws://x/${ticket}`;
 
 describe('the connection of a shell', () => {
+  it('keeps a stable long-distance shell quiet and identifies only a worsening of its usual line', async () => {
+    vi.useFakeTimers();
+    const made = fakeSocket();
+    const connection = connectShell({ terminalId: 't1', firstTicket: 'synthetic-ticket', connect: () => made.socket, address: where,
+      listener: { onReady: () => undefined, onData: () => undefined } });
+    try {
+      await Promise.resolve(); made.socket.onopen?.();
+      made.text({ op: 'ready', cols: 80, rows: 24, replay_bytes: 0 });
+      const reply = (time: number) => {
+        const ping = [...made.sent].reverse().map((value): { op?: string; n?: number } => typeof value === 'string' ? JSON.parse(value) as { op?: string; n?: number } : {})
+          .find((frame) => frame.op === 'ping');
+        vi.advanceTimersByTime(time); made.text({ op: 'pong', n: ping?.n });
+        vi.advanceTimersByTime(PING_EVERY_MS - time);
+      };
+      for (let index = 0; index < 12; index += 1) reply(700);
+      expect(connection.state.getState()).toMatchObject({ roundTripMs: 700, usualRoundTripMs: 700, slow: false });
+      reply(1_600); reply(1_600);
+      expect(connection.state.getState()).toMatchObject({ roundTripMs: 1_600, usualRoundTripMs: 700, slow: true });
+    } finally { connection.detach(); vi.useRealTimers(); }
+  });
   it('is attached when the shell says it is ready, draws what it prints, and says why it ended', () => {
     const made = fakeSocket();
     const drawn: string[] = [];

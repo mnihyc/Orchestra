@@ -571,9 +571,24 @@ fn default_name(
     orch_provider_contract::choice::default_source(element, keeper(row), &endpoints, table)
 }
 
+#[derive(serde::Deserialize)]
+struct SourceAdapter {
+    #[serde(default)]
+    native_provider: Option<SourceNativeProvider>,
+    #[serde(default)]
+    capabilities: orch_agent_contract::descriptor::Capabilities,
+}
+
+#[derive(serde::Deserialize)]
+struct SourceNativeProvider {
+    title: String,
+    #[serde(default)]
+    plans: std::collections::BTreeMap<String, String>,
+}
+
 fn builtin_descriptor(
     name: &str,
-    adapter: Option<&orch_agent_contract::descriptor::AgentDescriptor>,
+    adapter: Option<&SourceAdapter>,
     table: &BuiltinSources,
 ) -> Option<orch_provider_contract::SourceDescriptor> {
     use orch_provider_contract::choice::builtin;
@@ -629,40 +644,39 @@ fn builtin_descriptor(
 
 /// Source declarations needed by a page of providers, read in two statements for any page size.
 pub(crate) struct SourceViews {
-    adapters: HashMap<Id, orch_agent_contract::descriptor::AgentDescriptor>,
+    adapters: HashMap<Id, SourceAdapter>,
     programs: HashMap<(Id, String), orch_provider_contract::SourceDescriptor>,
     profiles: Vec<(Id, Json)>,
 }
 
 impl SourceViews {
     pub(crate) async fn read(conn: &mut Conn, providers: &[rows::ProviderRow]) -> ApiResult<Self> {
-        let agents = rows::agents(
-            conn,
-            &providers
-                .iter()
-                .filter_map(|row| row.agent_id)
-                .collect::<Vec<_>>(),
-        )
-        .await?;
+        let ids: Vec<_> = providers.iter().filter_map(|row| row.agent_id).collect();
+        // Project declarations in SQL, before profiles' parameter help or native login forms cross the connection.
+        let agents: Vec<(Id, bool, Json, Json)> = sqlx::query_as(
+            "SELECT id,disabled,
+                jsonb_build_object('attach',jsonb_build_object('home',profile#>'{attach,home}')),
+                jsonb_strip_nulls(jsonb_build_object(
+                    'native_provider',CASE WHEN jsonb_typeof(d.value->'native_provider')='object' THEN
+                        jsonb_build_object('title',d.value#>'{native_provider,title}',
+                            'plans',COALESCE(d.value#>'{native_provider,plans}','{}'::jsonb)) ELSE NULL END,
+                    'capabilities',d.value->'capabilities'))
+             FROM agents CROSS JOIN LATERAL (SELECT descriptor || descriptor_overrides AS value) d
+             WHERE id=ANY($1) AND deleted_at IS NULL",
+        ).bind(&ids).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         // Declarations include disabled profiles; only enabled profiles select a home.
         let mut profiles: Vec<_> = agents
             .iter()
-            .filter(|row| !row.disabled)
-            .map(|row| (row.id, row.profile.clone()))
+            .filter(|(_, disabled, _, _)| !disabled)
+            .map(|(id, _, profile, _)| (*id, profile.clone()))
             .collect();
         profiles.sort_unstable_by_key(|(id, _)| *id);
         let adapters = agents
             .into_iter()
-            .filter_map(|row| {
-                let mut value = row.descriptor;
-                if let (Some(fields), Some(overrides)) =
-                    (value.as_object_mut(), row.descriptor_overrides.as_object())
-                {
-                    fields.extend(overrides.clone());
-                }
-                serde_json::from_value::<orch_agent_contract::descriptor::AgentDescriptor>(value)
+            .filter_map(|(id, _, _, value)| {
+                serde_json::from_value::<SourceAdapter>(value)
                     .ok()
-                    .map(|descriptor| (row.id, descriptor))
+                    .map(|descriptor| (id, descriptor))
             })
             .collect();
         let machine_ids: Vec<Id> = providers
@@ -845,11 +859,8 @@ pub(crate) fn view(
         .and_then(|choice| choice.descriptor.as_ref())
         .is_some_and(|descriptor| descriptor.lists_models());
     states["models"] = json!(orch_provider_contract::MemberState::of(
-        facts
-            .models
-            .as_ref()
-            .is_some_and(|models| !models.is_empty()),
-        facts.models.is_some() || lists_models && facts.field_times.contains_key("models"),
+        facts.models_count.is_some_and(|count| count > 0),
+        facts.models_count.is_some() || lists_models && facts.field_times.contains_key("models"),
         lists_models
     ));
     let project = |choice: &SourceChoice| -> ApiResult<api::SourceChoice> {
