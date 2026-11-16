@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-connector-core --lib --test file_transfers --test recording_keys
