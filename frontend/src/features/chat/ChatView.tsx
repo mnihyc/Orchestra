@@ -44,7 +44,7 @@ import { SelectionBar, useSelection } from '@/features/forward/Selection';
 import { linkTo } from '@/lib/links';
 import type { Chat } from '@/api/chat-contract';
 import type { ChatMessage, SearchHit } from '@/generated/api-types';
-import { chatWriter, refreshChatStates, reloadChat, useChatEntry, useChatFeed, useChatState, useChatStates, useChatStore } from '@/realtime/stores/chat';
+import { chatWriter, refreshChatStates, reloadChat, useChatEntry, useChatFeed, useChatState, useChatStates, useChatStore, useLatestSeq } from '@/realtime/stores/chat';
 import { IconButton } from '@/ui/IconButton';
 import { Avatar } from '@/ui/Avatar';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -155,6 +155,7 @@ function OpenChat({
   const me = useStore(client.session, (state) => state.userId);
   const entry = useChatEntry(chat.id);
   const state = useChatState(chat.id, chat.my);
+  const latestMessage = useLatestSeq(chat.id);
   const people = usePeople(entry);
   const visible = usePageVisible();
   const [readTo] = useState(opened);
@@ -358,7 +359,7 @@ function OpenChat({
 
         <AdminReachNotice of={chat.can.admin_access?.place} private={privateAdminAccess(chat.can.admin_access)} object={{ kind: 'chat', id: chat.id }} />
 
-        <ChatSummaries id={chat.id} range={summaryRange} named={chat.name !== null} shown={shown} />
+        <ChatSummaries id={chat.id} range={summaryRange} named={chat.name !== null} shown={shown} hasMessages={Math.max(chat.last_message_seq, latestMessage) > 0} />
         {find.bar}
 
         <ChatPeople chat={chat} me={me} />

@@ -317,6 +317,66 @@ pub async fn settle_approval(
     settle_request(conn, RequestSource::Approval(approval), at).await
 }
 
+/// Queue recipient effects without sharing a key or lock with a worker's receipt.
+pub async fn defer_approval_settlement(
+    conn: &mut Conn,
+    approval: Id,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO approval_notification_settlements (id,approval_id,settled_at) VALUES ($1,$2,$3)")
+        .bind(orch_types::new_id()).bind(approval).bind(at).execute(conn).await?;
+    Ok(())
+}
+
+/// An immutable recipient-work identity, separate from both interactive rows.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ApprovalSettlement {
+    /// Private receipt.
+    pub id: Id,
+    /// Its approval.
+    pub approval_id: Id,
+    /// The accepted decision or withdrawal time.
+    pub settled_at: DateTime<Utc>,
+}
+
+/// The sweep reads only the pending private receipts, in accepted order.
+pub async fn pending_approval_settlements(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar("SELECT id FROM approval_notification_settlements WHERE done_at IS NULL ORDER BY settled_at,id LIMIT $1")
+        .bind(limit).fetch_all(conn).await?)
+}
+
+/// Only recipient workers acquire these locks; no producer locks or updates an existing receipt.
+pub async fn lock_approval_settlement(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Option<ApprovalSettlement>, DbError> {
+    let row: Option<ApprovalSettlement> = sqlx::query_as("SELECT id,approval_id,settled_at FROM approval_notification_settlements WHERE id=$1 AND done_at IS NULL FOR UPDATE")
+        .bind(id).fetch_optional(&mut *conn).await?;
+    if let Some(row) = &row {
+        // Repeated terminal observations may enqueue the same approval. Serialize only their recipient
+        // effects so the existing idempotent Inbox writer advances each person's sequence once.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('approval_recipients:' || $1::uuid::text,0))")
+            .bind(row.approval_id).execute(conn).await?;
+    }
+    Ok(row)
+}
+
+/// The receipt and every recipient sequence commit together, so retrying cannot repeat their effects.
+pub async fn finish_approval_settlement(
+    conn: &mut Conn,
+    id: Id,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE approval_notification_settlements SET done_at=$2 WHERE id=$1 AND done_at IS NULL",
+    )
+    .bind(id)
+    .bind(at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// The source identity of any request with several possible deciders.
 #[derive(Debug, Clone, Copy)]
 pub enum RequestSource {
@@ -579,6 +639,16 @@ pub async fn approvals_always_of(
         .iter()
         .map(|user| (*user, chosen.get(user).copied().unwrap_or(true)))
         .collect())
+}
+
+/// The actual oldest stored row for the caller, independent of the list's cursor and filters.
+pub async fn oldest_retained(conn: &mut Conn, user: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT min(created_at) FROM notifications WHERE user_id=$1")
+            .bind(user)
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 #[cfg(test)]

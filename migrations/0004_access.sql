@@ -140,6 +140,13 @@ CREATE TABLE authz_state (
 
 INSERT INTO authz_state (id) VALUES (true);
 
+CREATE TABLE public_meta_state (
+    id boolean DEFAULT true PRIMARY KEY CHECK (id),
+    seq bigint DEFAULT 0 NOT NULL
+);
+
+INSERT INTO public_meta_state (id) VALUES (true);
+
 CREATE UNLOGGED TABLE commit_work (
     xact xid8 NOT NULL,
     CONSTRAINT commit_work_pkey PRIMARY KEY (xact)
@@ -271,6 +278,7 @@ CREATE TABLE permission_entries (
 CREATE UNIQUE INDEX permission_entries_active_key ON permission_entries USING btree (object_kind, object_id, page, profile, permission, holder_kind, holder_id, holder_role, share_inside, (CASE WHEN holder_kind = 'agents' THEN created_by END)) NULLS NOT DISTINCT WHERE (removed_at IS NULL);
 
 CREATE INDEX permission_entries_ending_idx ON permission_entries USING btree (expires_at) WHERE ((removed_at IS NULL) AND (expires_at IS NOT NULL) AND (object_kind = ANY (ARRAY['system'::text, 'node'::text])));
+CREATE INDEX permission_entries_any_ending_idx ON permission_entries(expires_at) WHERE removed_at IS NULL AND expires_at IS NOT NULL;
 
 CREATE INDEX permission_entries_hierarchy_idx ON permission_entries USING btree (object_id) WHERE ((object_kind = 'node'::text) AND (page = 'live'::text) AND (permission <> 'access.own'::text) AND (removed_at IS NULL));
 

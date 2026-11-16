@@ -248,6 +248,18 @@ impl Rig {
                 let (environment, selection) = match command {
                     Command::FsManifest(body) => (body.environment_id, &body.selection),
                     Command::FsSnapshot(body) => (body.environment_id, &body.selection),
+                    Command::FsMaterialize(body)
+                        if body.purpose
+                            == orch_link_contract::commands::MaterializePurpose::Delivery =>
+                    {
+                        return Ok(CommandResult::FsMaterialize(
+                            orch_link_contract::commands::FsMaterializeResult {
+                                files: 1,
+                                bytes: 0,
+                                skipped: 0,
+                            },
+                        ));
+                    }
                     _ => {
                         return Ok(CommandResult::FsMaterialize(
                             orch_link_contract::commands::FsMaterializeResult {
@@ -742,6 +754,240 @@ async fn a_switch_to_another_kind_of_harness_hands_the_history_over_as_items() {
         0,
         "nothing of the harness's own is asked for where only the items are read"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scripted_snapshot_keeps_selected_files_and_real_notes_under_their_common_physical_root()
+{
+    let physical = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(physical.path().join("web/.orch/memory")).unwrap();
+    std::fs::write(
+        physical.path().join("web/.orch/memory/MEMORY.md"),
+        b"source notes",
+    )
+    .unwrap();
+    let rig = Rig::new(Can::default(), "fake", Can::default()).await;
+    let taken = snapshot::uploaded(
+        rig.world.environment,
+        &orch_link_contract::commands::Selection {
+            include: vec!["web/src/**".into(), "web/.orch/memory".into()],
+            exclude: Vec::new(),
+        },
+        physical.path().to_str(),
+        rig.store.as_ref(),
+        &rig.world.pool,
+        rig.world.clock.as_ref(),
+    )
+    .await
+    .unwrap();
+    let stored = rig.store.get(&taken.manifest_blob, None).await.unwrap();
+    let bytes = orch_blob_contract::store::read_all(stored.body)
+        .await
+        .unwrap();
+    let manifest = orch_engine::manifest::Manifest::parse(&bytes).unwrap();
+    assert_eq!(
+        manifest.header().root,
+        physical.path().join("web").to_string_lossy()
+    );
+    assert_eq!(
+        manifest
+            .entries()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            ".orch/memory/MEMORY.md",
+            "src/a.txt",
+            "src/b.txt",
+            "src/c.txt"
+        ]
+    );
+    assert_eq!(manifest.entries()[0].hash, Some(Hash::of(b"source notes")));
+    assert_eq!(taken.file_count, 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notes_are_carried_independently_of_workspace_files_and_a_target_that_appears_after_preview_is_kept()
+ {
+    use orch_api_contract::forks::{FileSelection, ForkEnvironment};
+    use orch_link_contract::commands::{DirectoryCopyOutcome, FsDirectoryCopyResult};
+    let physical = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(physical.path().join("web/.orch/memory")).unwrap();
+    std::fs::write(
+        physical.path().join("web/.orch/memory/MEMORY.md"),
+        "source notes",
+    )
+    .unwrap();
+    // The scripted peer owns the callback until its world shuts down; the directory itself stays scoped to this case.
+    let root: &'static str = Box::leak(
+        physical
+            .path()
+            .to_string_lossy()
+            .into_owned()
+            .into_boxed_str(),
+    );
+    let rig = Rig::with_source_root(Can::default(), "fake", Can::default(), Some(root)).await;
+    sqlx::query("UPDATE environments SET facts=facts || jsonb_build_object('workspace_root',$2::text,'generation',generation) WHERE id=$1")
+        .bind(rig.world.environment).bind(root).execute(rig.world.pool.pool()).await.unwrap();
+    let thread = rig.thread_with_history("Reviewed notes").await;
+    let target = rig.second_environment().await;
+    let request = ForkRequest {
+        environment: Some(ForkEnvironment::Existing {
+            environment_id: target,
+            files: Some(FileSelection::Nothing),
+        }),
+        memory: Some(true),
+        ..rig.to_other()
+    };
+    let plan = rig.plan(thread, &request).await;
+    assert_eq!(
+        serde_json::to_value(&plan.memory).unwrap()["proposal"]["proposed_fate"],
+        "copy_if_absent"
+    );
+    let seen = Arc::clone(&rig.files);
+    rig.world
+        .machine
+        .handler
+        .on(CommandKind::FsMaterializeIfAbsent, move |command| {
+            seen.lock().unwrap().push(command.clone());
+            Ok(CommandResult::FsMaterializeIfAbsent(
+                FsDirectoryCopyResult {
+                    outcome: DirectoryCopyOutcome::TargetKept,
+                    counts: orch_link_contract::commands::FsMaterializeResult {
+                        files: 0,
+                        bytes: 0,
+                        skipped: 0,
+                    },
+                    at: orch_types::Time::new(chrono::Utc::now()),
+                    cleanup_pending: false,
+                },
+            ))
+        });
+    let job = rig.confirm(thread, &plan).await;
+    rig.wait_job(job.id, "succeeded").await;
+    let retained = rig.job(job.id).await;
+    assert_eq!(retained.plan["memory_outcome"]["fate"], "target_kept");
+    let commands = rig.files.lock().unwrap().clone();
+    let body = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::FsMaterializeIfAbsent(body) => Some(body),
+            _ => None,
+        })
+        .expect("the notes copy is a real independent invocation");
+    let stored = rig.store.get(&body.manifest_blob, None).await.unwrap();
+    let bytes = orch_blob_contract::store::read_all(stored.body)
+        .await
+        .unwrap();
+    let manifest = orch_engine::manifest::Manifest::parse(&bytes).unwrap();
+    assert_eq!(
+        manifest
+            .entries()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["MEMORY.md"]
+    );
+    assert_eq!(manifest.entries()[0].hash, Some(Hash::of(b"source notes")));
+    assert!(commands.iter().any(
+        |command| matches!(command, Command::FsMaterializeIfAbsent(body)
+        if body.job_id == job.id && body.target_root.ends_with("/.orch/memory"))
+    ));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::FsMaterialize(body)
+        if body.purpose == orch_link_contract::commands::MaterializePurpose::Move)),
+        "Files: None does not drop the independent notes act or add a workspace copy"
+    );
+    std::fs::write(
+        physical.path().join("web/.orch/memory/MEMORY.md"),
+        "later source notes",
+    )
+    .unwrap();
+    assert_eq!(
+        rig.job(job.id).await.plan["memory_outcome"],
+        retained.plan["memory_outcome"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_omitted_transcript_cannot_be_reported_as_complete_or_open_the_replacement_session() {
+    let rig = Rig::new(Can::default(), "fake2", Can::default()).await;
+    let thread = rig
+        .thread_with_history("A complete separate transcript")
+        .await;
+    let original = rig.world.segment_of(thread).await;
+    let captured = Arc::clone(&rig.files);
+    rig.world
+        .machine
+        .handler
+        .on(CommandKind::FsMaterialize, move |command| {
+            captured.lock().unwrap().push(command.clone());
+            Ok(CommandResult::FsMaterialize(
+                orch_link_contract::commands::FsMaterializeResult {
+                    files: 0,
+                    bytes: 0,
+                    skipped: 0,
+                },
+            ))
+        });
+    let plan = rig.plan(thread, &rig.to_other()).await;
+    assert_eq!(plan.history.method, HistoryMethod::FileHandoff);
+    let job = rig.confirm(thread, &plan).await;
+    rig.wait_job(job.id, "failed").await;
+    let stopped = rig.job(job.id).await;
+    assert_eq!(
+        stopped.error.as_ref().unwrap()["code"],
+        "history_not_carried"
+    );
+    assert!(
+        stopped
+            .plan
+            .get("history_coverage")
+            .is_none_or(Json::is_null)
+    );
+    assert_eq!(rig.world.segment_of(thread).await, original);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_handoff_records_the_actual_carried_suffix_and_full_transcript_after_settings_change()
+ {
+    let rig = Rig::new(Can::default(), "fake2", Can::default()).await;
+    let thread = rig.thread_with_history("A retained history boundary").await;
+    rig.world.grow_history(thread, 10).await;
+    sqlx::query(
+        "UPDATE provider_models SET parameters=jsonb_set(parameters,$2,$3) WHERE provider_id=$1",
+    )
+    .bind(rig.other_provider)
+    .bind(vec![
+        orch_agent_contract::parameters::MODEL_WINDOW_KEY.to_owned(),
+    ])
+    .bind(json!(64))
+    .execute(rig.world.pool.pool())
+    .await
+    .unwrap();
+    let plan = rig.plan(thread, &rig.to_other()).await;
+    let proposal = serde_json::to_value(&plan.history).unwrap();
+    assert_eq!(proposal["selected_range"], json!({"from":1,"through":10}));
+    assert_eq!(proposal["context_allowance"]["share"], 80);
+    let job = rig.confirm(thread, &plan).await;
+    rig.wait_job(job.id, "succeeded").await;
+    let complete = rig.job(job.id).await;
+    let coverage = complete.plan["history_coverage"].clone();
+    assert_eq!(coverage["method"], "file_handoff");
+    assert_eq!(coverage["selected_range"], json!({"from":1,"through":10}));
+    assert_eq!(coverage["transcript_coverage"], "complete");
+    let ranges = coverage["actual_ranges"]
+        .as_array()
+        .expect("execution retains the ranges it actually carried");
+    assert!(!ranges.is_empty());
+    assert!(ranges[0]["from"].as_i64().unwrap() > 1);
+    assert_eq!(ranges.last().unwrap()["through"], 10);
+    assert!(coverage["omitted_prefix"].as_i64().unwrap() > 1);
+    sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,'thread.switch_carry_share','40') ON CONFLICT(node_id,key) DO UPDATE SET value='40',revision=settings.revision+1")
+        .bind(rig.world.topic).execute(rig.world.pool.pool()).await.unwrap();
+    assert_eq!(rig.job(job.id).await.plan["history_coverage"], coverage);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1250,6 +1496,46 @@ async fn a_running_turn_is_waited_for_and_the_switch_goes_on_when_it_ends() {
     assert_eq!(provider, rig.other_provider);
 }
 
+#[tokio::test]
+async fn a_switch_keeps_the_requested_wait_and_health_check_times_above_the_old_limits() {
+    let can = Can {
+        export_native: true,
+        import_native: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Long check").await;
+    let request = ForkRequest {
+        options: Some(ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(3_601),
+            ..ChangeOptions::default()
+        }),
+        ..rig.to_other()
+    };
+    let plan = rig.plan(thread, &request).await;
+    assert_eq!(plan.options.wait_minutes, 1_441);
+    assert_eq!(plan.options.verify_timeout_secs, 3_601);
+    let mut shortest = request.clone();
+    shortest.options.as_mut().unwrap().verify_timeout_secs = Some(1);
+    assert_eq!(
+        rig.plan(thread, &shortest)
+            .await
+            .options
+            .verify_timeout_secs,
+        1
+    );
+    let mut outside_clock = request;
+    outside_clock.options.as_mut().unwrap().wait_minutes = Some(i64::MAX);
+    assert!(matches!(
+        rig.world
+            .engine()
+            .draft_fork(&rig.caller(), thread, &outside_clock)
+            .await,
+        Err(PlanError::Invalid { .. })
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_turn_is_interrupted_at_once_when_the_options_say_so_and_a_wait_that_runs_out_changes_nothing()
  {
@@ -1455,12 +1741,12 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
                 title: format!("Sub-agent {name}"),
                 started_at: orch_types::Time::new(rig.world.clock.now()),
                 duration_ms: Some(10),
-                raw: RawCall {
+                raw: Some(RawCall {
                     name: "Task".to_owned(),
                     input: OutputRef::of("Check the redirect"),
                     output: Some(OutputRef::of("Checked")),
                     is_error: false,
-                },
+                }),
             })
             .unwrap();
             let parent_ref = format!("native-{source_segment}-task-{name}");
@@ -2010,10 +2296,16 @@ async fn fork_into_a_new_environment(
         unit.added.machine.handler.on(kind, move |command| {
             kept.lock().unwrap().push(command.clone());
             match command {
-                Command::FsMaterialize(_) => answer.clone().map(|()| {
+                Command::FsMaterialize(body) => answer.clone().map(|()| {
                     CommandResult::FsMaterialize(
                         orch_link_contract::commands::FsMaterializeResult {
-                            files: 3,
+                            files: if body.purpose
+                                == orch_link_contract::commands::MaterializePurpose::Delivery
+                            {
+                                1
+                            } else {
+                                3
+                            },
                             bytes: 30,
                             skipped: 0,
                         },
@@ -2136,10 +2428,17 @@ async fn selected_files_into_a_new_environment(alias: bool, live: bool) {
             _ => None,
         })
         .collect();
+    assert!(
+        plan.memory.as_ref().is_some_and(|memory| memory.carried),
+        "the default notes choice is independent of workspace selection"
+    );
     assert_eq!(
-        snapshots[0],
-        ["web/src/**"],
-        "only what was chosen was listed"
+        snapshots,
+        [
+            vec!["web/src/**".to_owned(), "web/.orch/memory".to_owned()],
+            vec!["web/src/**".to_owned()]
+        ],
+        "selected workspace paths and independent notes are captured once, with only workspace files in the delta pass"
     );
     let written: Vec<_> = unit_saw
         .lock()
@@ -3212,10 +3511,19 @@ async fn shared_batch_unit(rig: &Rig, host: &hosting::ScriptedHost) -> hosting::
     unit.added
         .machine
         .handler
-        .on(CommandKind::FsMaterialize, |_| {
+        .on(CommandKind::FsMaterialize, |command| {
+            let Command::FsMaterialize(body) = command else {
+                unreachable!()
+            };
             Ok(CommandResult::FsMaterialize(
                 orch_link_contract::commands::FsMaterializeResult {
-                    files: 3,
+                    files: if body.purpose
+                        == orch_link_contract::commands::MaterializePurpose::Delivery
+                    {
+                        1
+                    } else {
+                        3
+                    },
                     bytes: 30,
                     skipped: 0,
                 },
@@ -3516,6 +3824,7 @@ async fn one_failed_member_cannot_remove_the_shared_environment_of_the_successfu
             ));
         }
         Ok(SessionOpenResult {
+            mcp: None,
             native_session_ref: if open.mode == SessionMode::Resume {
                 open.native_session_ref.clone().unwrap()
             } else {
@@ -4042,6 +4351,7 @@ impl Remembering {
                 lock(&harness.sessions).insert(name.clone(), said);
                 lock(&harness.in_thread).insert(open.thread_id, (open.segment_id, name.clone()));
                 Ok(SessionOpenResult {
+                    mcp: None,
                     native_session_ref: name,
                     resumed,
                     import_report: None,

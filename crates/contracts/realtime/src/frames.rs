@@ -327,6 +327,9 @@ pub struct RawSubscription {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct SubscribedFrame {
+    /// The committed shell change cut at personal-feed admission; absent on other feeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_revision: Option<orch_api_contract::auth::PersonalRevision>,
     /// Admitted raw segment and live-only floor; present only on a raw subscription.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<RawSubscription>,
@@ -1116,7 +1119,22 @@ mod tests {
             feed: thread_feed,
             data: DataObject::new(),
         };
-        assert!(matches!(silent.data(), Err(DataError::NotCarried(_))));
+        // Thread events now carry accepted Stop observations, and reject an incomplete observation.
+        assert!(matches!(silent.data(), Err(DataError::Shape(_))));
+        let stopping = EventFrame {
+            data: serde_json::from_value(
+                json!({"version":1,"requested_at":AT,"pending":true,"thread_seq":9,"state_seq":7}),
+            )
+            .unwrap(),
+            ..silent
+        };
+        let EventData::ThreadStopping(read) = stopping.data().unwrap() else {
+            panic!("not accepted stopping");
+        };
+        assert_eq!(
+            (read.version, read.thread_seq, read.state_seq, read.pending),
+            (1, 9, 7, true)
+        );
     }
 
     #[test]
