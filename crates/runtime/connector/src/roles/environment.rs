@@ -67,19 +67,19 @@ use crate::tunnels::TunnelServer;
 
 /// The kinds of command the environment role takes: every kind the catalogue addresses to it.
 fn directory_mount_id(name: &str, labels: &BTreeMap<String, String>) -> Result<Id, CommandError> {
-    let id: Id = name
-        .strip_prefix("orch-mount-")
+    let id: Id = labels
+        .get("orch.mount_id")
         .and_then(|id| id.parse().ok())
         .ok_or_else(|| {
             CommandError::new(
                 ErrorCode::Conflict,
-                "owned mount data must name its mount identifier",
+                "the owned-data labels do not identify this mount",
             )
         })?;
-    if labels.get("orch.mount_id") != Some(&id.to_string()) {
+    if !orch_link_contract::commands::is_mount_volume(id, name) {
         return Err(CommandError::new(
             ErrorCode::Conflict,
-            "the owned-data labels do not identify this mount",
+            "owned mount data must name its mount identifier",
         ));
     }
     Ok(id)
@@ -709,17 +709,22 @@ impl EnvironmentRole {
         }
         if let Some(policy) = self.services.policy.policy() {
             for mount in private.mounts.iter_mut().flatten() {
-                mount.source = if let Some(volume) = &mount.volume {
+                mount.source = if let Some(volume) = &mut mount.volume {
                     if volume.directory.is_some()
-                        || volume.name != format!("orch-mount-{}", mount.mount_id)
+                        || !orch_link_contract::commands::is_mount_volume(
+                            mount.mount_id,
+                            &volume.name,
+                        )
                     {
                         return Err(CommandError::new(
                             ErrorCode::Conflict,
                             "a mount's owned data reference does not match its identifier",
                         ));
                     }
-                    crate::storages::recorded_directory(&self.services.data_dir,&policy,mount.mount_id,"mount")?
-                        .ok_or_else(||CommandError::new(ErrorCode::NotFound,"the mount's owned data is absent; its location must be made before attaching it"))?.to_string_lossy().into_owned()
+                    let binding = crate::storages::recorded_mount_binding(&self.services.data_dir,&policy,mount.mount_id,&volume.name)?
+                        .ok_or_else(||CommandError::new(ErrorCode::NotFound,"the mount's owned data is absent; its location must be made before attaching it"))?;
+                    volume.directory = Some(binding.clone());
+                    binding.path
                 } else {
                     crate::policy::inspect_environment_path(
                         &policy,
@@ -971,41 +976,53 @@ impl EnvironmentRole {
                         "this machine has no environment.roots policy",
                     )
                 })?;
-                crate::storages::directory(
+                crate::storages::mount_directory(
                     &self.services.data_dir,
                     &self.services.config,
                     &policy,
                     mount,
-                    "mount",
+                    &body.name,
                     body.storage.as_deref(),
+                    &body.labels,
                 )?;
                 CommandResult::NodeVolumeEnsure(Empty {})
             }
             Command::NodeVolumeRemove(body) => {
                 let mount = directory_mount_id(&body.name, &body.labels)?;
-                if self.host.environments().iter().any(|environment| {
-                    environment
-                        .facts()
-                        .mounts
-                        .iter()
-                        .any(|attached| attached.mount_id == mount)
-                }) {
-                    return Err(CommandError::new(
-                        ErrorCode::Conflict,
-                        "this owned directory is still attached to an environment",
-                    ));
-                }
                 let policy = self.services.policy.policy().ok_or_else(|| {
                     CommandError::new(
                         ErrorCode::PolicyRootNotAllowed,
                         "this machine has no environment.roots policy",
                     )
                 })?;
-                crate::storages::remove_directory(
+                let directory = crate::storages::recorded_mount_directory(
                     &self.services.data_dir,
                     &policy,
                     mount,
-                    "mount",
+                    &body.name,
+                )?;
+                if directory.as_ref().is_some_and(|directory| {
+                    self.host.environments().iter().any(|environment| {
+                        environment.facts().mounts.iter().any(|attached| {
+                            attached.mount_id == mount
+                                && attached
+                                    .path
+                                    .as_deref()
+                                    .is_some_and(|path| std::path::Path::new(path) == directory)
+                        })
+                    })
+                }) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "this owned directory is still attached to an environment",
+                    ));
+                }
+                crate::storages::remove_mount_directory(
+                    &self.services.data_dir,
+                    &policy,
+                    mount,
+                    &body.name,
+                    &body.labels,
                 )?;
                 CommandResult::NodeVolumeRemove(Empty {})
             }
@@ -1424,12 +1441,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;

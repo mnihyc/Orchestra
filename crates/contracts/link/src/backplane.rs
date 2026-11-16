@@ -205,6 +205,24 @@ pub struct Down {
     pub frame: DownFrame,
 }
 
+/// A gateway's word that it could not put a frame the system sent into a machine's session, because the
+/// frame is larger than a message the session carries, or cannot be written. The system fails the command
+/// the frame was at once, with the reason, instead of waiting for a machine that never had it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DownRefused {
+    /// The machine.
+    pub machine_id: Id,
+    /// The command the frame was, where it was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Id>,
+    /// What the frame was, by its type as it is written.
+    pub frame: String,
+    /// How many bytes it would take; 0 where it could not be written at all.
+    pub bytes: u64,
+    /// The most bytes of a message the session carries.
+    pub limit: u64,
+}
+
 /// The system's order to end a machine's session now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Kick {
@@ -324,6 +342,12 @@ tagged! {
         AuthQuery(AuthQuery) = "auth_query",
         /// The system's answer to it.
         AuthReply(AuthReply) = "auth_reply",
+        /// Current authorization of one verified session tool Open or Resume.
+        ToolSessionQuery(crate::tool_sessions::ToolSessionQuery) = "tool_session_query",
+        ToolSessionReply(crate::tool_sessions::ToolSessionReply) = "tool_session_reply",
+        /// Monotone current session membership and liveness facts.
+        ToolSessionUpdate(crate::tool_sessions::ToolSessionUpdate) = "tool_session_update",
+        ToolSessionControl(crate::tool_sessions::ToolSessionControl) = "tool_session_control",
         /// A gateway's word that a machine has a session.
         MachineUp(MachineUp) = "machine_up",
         /// A gateway's word that a session ended.
@@ -332,6 +356,8 @@ tagged! {
         Up(Up) = "up",
         /// A text frame that the system sends a machine.
         Down(Down) = "down",
+        /// A gateway's word that it could not put a frame of the system into a machine's session.
+        DownRefused(DownRefused) = "down_refused",
         /// The system's order to end a machine's session.
         Kick(Kick) = "kick",
         /// A gateway's figures.
@@ -373,15 +399,20 @@ impl BackplaneFrame {
         match self {
             Self::GwHello(_)
             | Self::AuthQuery(_)
+            | Self::ToolSessionQuery(_)
             | Self::MachineUp(_)
             | Self::MachineDown(_)
             | Self::Up(_)
+            | Self::DownRefused(_)
             | Self::Stats(_)
             | Self::TunOpenOk(_)
             | Self::TunOpenErr(_)
             | Self::PortConnectionsReply(_) => matches!(side, BackplaneSide::Gateway),
             Self::ApiHello(_)
             | Self::AuthReply(_)
+            | Self::ToolSessionReply(_)
+            | Self::ToolSessionUpdate(_)
+            | Self::ToolSessionControl(_)
             | Self::Down(_)
             | Self::Kick(_)
             | Self::TunOpen(_)
@@ -434,6 +465,10 @@ tagged! {
     /// A text frame of the system that is for a machine, and that a
     /// gateway therefore passes down.
     DownFrame {
+        /// The original source machine's committed physical scope withdrawal.
+        ToolSessionUpdate(crate::tool_sessions::ToolSessionUpdate) = "tool_session_update",
+        /// Current API control availability for local session tools.
+        ToolSessionControl(crate::tool_sessions::ToolSessionControl) = "tool_session_control",
         /// Authenticated installation metadata refresh for a primary.
         Gateways(crate::gateways::GatewayAdvertisement) = "gateways",
         /// Frozen carrier metadata.
@@ -503,6 +538,8 @@ impl From<DownFrame> for Frame {
     fn from(frame: DownFrame) -> Self {
         match frame {
             DownFrame::Gateways(body) => Self::Gateways(body),
+            DownFrame::ToolSessionUpdate(body) => Self::ToolSessionUpdate(body),
+            DownFrame::ToolSessionControl(body) => Self::ToolSessionControl(body),
             DownFrame::TunnelRouteAnswer(body) => Self::TunnelRouteAnswer(body),
             DownFrame::TunnelAttach(body) => Self::TunnelAttach(body),
             DownFrame::TunnelPrepareAnswer(body) => Self::TunnelPrepareAnswer(body),
@@ -621,7 +658,7 @@ mod tests {
         assert!(hello.sent_by(BackplaneSide::Gateway) && !hello.sent_by(BackplaneSide::Api));
         let answer = round_trip(json!({
             "t": "api_hello", "ticket_public_key": "cHVibGljIGtleQ",
-            "limits": { "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 },
+            "limits": { "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 },
             "versions": { "min": "0.1.0", "recommended": "0.1.3" }
         }));
         assert!(answer.sent_by(BackplaneSide::Api) && !answer.sent_by(BackplaneSide::Gateway));
@@ -652,6 +689,18 @@ mod tests {
     }
 
     #[test]
+    fn a_gateway_says_which_frame_of_the_system_it_could_not_put_into_a_session() {
+        let refused = round_trip(json!({
+            "t": "down_refused", "machine_id": MACHINE, "command": OTHER, "frame": "cmd",
+            "bytes": 17000000u64, "limit": 16777216u64
+        }));
+        assert!(refused.sent_by(BackplaneSide::Gateway) && !refused.sent_by(BackplaneSide::Api));
+        round_trip(json!({
+            "t": "down_refused", "machine_id": MACHINE, "frame": "nak", "bytes": 0u64, "limit": 16777216u64
+        }));
+    }
+
+    #[test]
     fn frames_between_a_machine_and_the_system_cross_wrapped_and_whole() {
         let up = round_trip(json!({
             "t": "up", "machine_id": MACHINE, "session_id": SESSION,
@@ -672,6 +721,7 @@ mod tests {
     #[test]
     fn only_frames_for_the_system_are_passed_up() {
         let event: Frame = Ev {
+            native_opening_id: None,
             stream: "machine".into(),
             seq: 5,
             at: "2026-10-08T17:04:05.000Z".parse().unwrap(),

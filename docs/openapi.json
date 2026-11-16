@@ -30685,6 +30685,92 @@
             }
           }
         ]
+      },
+      "put": {
+        "operationId": "MachineGatewaySet",
+        "summary": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+        "x-orch-access": "rule",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MachineGatewaySet",
+          "method": "PUT",
+          "path": "/machines/{machine_id}/gateway",
+          "title": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MachineGatewaySet",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "manage",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "typed_path",
+                    "value": {
+                      "parameter": "machine_id",
+                      "kind": "machine"
+                    }
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineGatewaySetReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-rule": "machine.manage, or host.manage on its node facade",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineGatewaySetBody"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "machine_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
       }
     },
     "/threads/{thread_id}/gateway": {
@@ -30763,6 +30849,142 @@
             }
           }
         ]
+      }
+    },
+    "/admin/public-address": {
+      "get": {
+        "operationId": "PublicAddressGet",
+        "summary": "Reads the revision and effective addresses in Management.",
+        "x-orch-access": "rule",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "PublicAddressGet",
+          "method": "GET",
+          "path": "/admin/public-address",
+          "title": "Reads the revision and effective addresses in Management.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "PublicAddressGet",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "read",
+                  "resources": [
+                    "system"
+                  ],
+                  "target": {
+                    "kind": "system"
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAddressSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-rule": "system administration",
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "PublicAddressUpdate",
+        "summary": "Prepares the edge and publishes one current-revision address draft.",
+        "x-orch-access": "rule",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "PublicAddressUpdate",
+          "method": "PUT",
+          "path": "/admin/public-address",
+          "title": "Prepares the edge and publishes one current-revision address draft.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "PublicAddressUpdate",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "manage",
+                  "resources": [
+                    "system"
+                  ],
+                  "target": {
+                    "kind": "system"
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicAddressUpdated"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-rule": "system administration",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicAddressUpdateBody"
+              }
+            }
+          }
+        }
       }
     },
     "/threads/{id}/move/preview": {
@@ -51509,6 +51731,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Tell affected people once; omitted is silent."
+            }
           }
         ]
       }
@@ -52004,11 +52238,11 @@
                 "string",
                 "null"
               ],
-              "description": "A short one-line note shown to people whose threads wait on the resource."
+              "description": "A short note shown beside the resource stop."
             }
           },
           {
-            "name": "run_waiting",
+            "name": "notify",
             "in": "query",
             "required": false,
             "schema": {
@@ -52016,7 +52250,7 @@
                 "boolean",
                 "null"
               ],
-              "description": "On Enable, run eligible waiting messages; absent or false keeps them held for Resume."
+              "description": "Tell affected people once; omitted is silent."
             }
           }
         ]
@@ -54595,7 +54829,7 @@
                 "string",
                 "null"
               ],
-              "description": "A short one-line note shown to people whose threads wait on the resource."
+              "description": "A short note beside the stopped model."
             }
           },
           {
@@ -54607,7 +54841,19 @@
                 "boolean",
                 "null"
               ],
-              "description": "On Enable, run eligible waiting messages; absent or false keeps them held for Resume."
+              "description": "Enable runs waiting messages only when explicitly selected."
+            }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Disable tells this model's affected people once; omitted is silent."
             }
           }
         ]
@@ -54681,6 +54927,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Tell affected people once; omitted is silent."
             }
           }
         ]
@@ -57602,6 +57860,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Tell affected people once; omitted is silent."
             }
           }
         ]
@@ -62210,11 +62480,23 @@
                   "resources": [
                     "provider",
                     "agent",
-                    "environment"
+                    "environment",
+                    "mcp_server"
                   ],
                   "target": {
                     "kind": "resolved",
                     "value": "requested_resources"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "environment"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "library_owned_environments"
                   },
                   "usage": "required"
                 },
@@ -64844,7 +65126,7 @@
       },
       "delete": {
         "operationId": "MountDelete",
-        "summary": "Deletes a mount that no scope enables.",
+        "summary": "Deletes the definition through the common cleanup job, keeping data unless its displayed fate is confirmed.",
         "x-orch-access": "permission",
         "x-orch-tokens": true,
         "x-orch-legacy-access-tokens": true,
@@ -64852,7 +65134,7 @@
           "operation_id": "MountDelete",
           "method": "DELETE",
           "path": "/mounts/{id}",
-          "title": "Deletes a mount that no scope enables.",
+          "title": "Deletes the definition through the common cleanup job, keeping data unless its displayed fate is confirmed.",
           "delegation": "business",
           "variants": [
             {
@@ -64864,20 +65146,773 @@
                 {
                   "action": "manage",
                   "resources": [
-                    "mount"
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
                   ],
                   "target": {
-                    "kind": "permission_object"
+                    "kind": "resolved",
+                    "value": "storage_namespace"
                   },
                   "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "storage_records"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "cleanup_destinations"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "cleanup_content"
+                  },
+                  "usage": "response_content"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "storage_names"
+                  },
+                  "usage": "response_content"
                 }
               ]
             }
           ]
         },
         "responses": {
-          "204": {
-            "description": "Done; nothing to return."
+          "202": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupJobResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-permission": "mount.manage",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CleanupStart"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/mounts/{id}/copy-plan": {
+      "post": {
+        "operationId": "MountCopyPreflight",
+        "summary": "Reviews a standalone copy of one location's data to another allowed machine.",
+        "x-orch-access": "rule",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MountCopyPreflight",
+          "method": "POST",
+          "path": "/mounts/{id}/copy-plan",
+          "title": "Reviews a standalone copy of one location's data to another allowed machine.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MountCopyPreflight",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "write",
+                  "resources": [
+                    "mount"
+                  ],
+                  "target": {
+                    "kind": "path",
+                    "value": "id"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_reader"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_writer"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "mount"
+                  ],
+                  "target": {
+                    "kind": "path",
+                    "value": "id"
+                  },
+                  "usage": "response_content"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_reader"
+                  },
+                  "usage": "response_content"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_writer"
+                  },
+                  "usage": "response_content"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountCopyPlanResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-rule": "mount.use and management of both machines; native paths and data makers remain current",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MountCopyPreflightBody"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/mounts/{id}/copy": {
+      "post": {
+        "operationId": "MountCopyCreate",
+        "summary": "Accepts the reviewed standalone copy, keeping displaced data and joining a repeated acceptance.",
+        "x-orch-access": "rule",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MountCopyCreate",
+          "method": "POST",
+          "path": "/mounts/{id}/copy",
+          "title": "Accepts the reviewed standalone copy, keeping displaced data and joining a repeated acceptance.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MountCopyCreate",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "write",
+                  "resources": [
+                    "mount"
+                  ],
+                  "target": {
+                    "kind": "path",
+                    "value": "id"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_reader"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_writer"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "mount"
+                  ],
+                  "target": {
+                    "kind": "path",
+                    "value": "id"
+                  },
+                  "usage": "response_content"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_reader"
+                  },
+                  "usage": "response_content"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "mount_copy_writer"
+                  },
+                  "usage": "response_content"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "202": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobCreationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-rule": "the original review's mount and both machines remain manageable",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MountCopyCreateBody"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "get": {
+        "operationId": "MountCopyLatest",
+        "summary": "Reads this person's latest durable copy job without exposing its native recipe.",
+        "x-orch-access": "permission",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MountCopyLatest",
+          "method": "GET",
+          "path": "/mounts/{id}/copy",
+          "title": "Reads this person's latest durable copy job without exposing its native recipe.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MountCopyLatest",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "read",
+                  "resources": [
+                    "mount"
+                  ],
+                  "target": {
+                    "kind": "path",
+                    "value": "id"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "job"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "mount_copy_jobs"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "mount_copy_machine_names"
+                  },
+                  "usage": "response_content"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Job"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-permission": "mount.view",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/mounts/{id}/delete-plan": {
+      "post": {
+        "operationId": "MountDeletePreflight",
+        "summary": "Previews removal of the definition, its next-start consequences and the fates of owned data.",
+        "x-orch-access": "permission",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MountDeletePreflight",
+          "method": "POST",
+          "path": "/mounts/{id}/delete-plan",
+          "title": "Previews removal of the definition, its next-start consequences and the fates of owned data.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MountDeletePreflight",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "manage",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved",
+                    "value": "storage_namespace"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "storage_records"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "manage",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "cleanup_destinations"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "cleanup_content"
+                  },
+                  "usage": "response_content"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "org",
+                    "project",
+                    "topic",
+                    "thread",
+                    "document",
+                    "document_container",
+                    "environment",
+                    "provider",
+                    "host",
+                    "machine",
+                    "mount",
+                    "skill",
+                    "template",
+                    "agent",
+                    "mcp_server",
+                    "account",
+                    "system",
+                    "export",
+                    "import",
+                    "upload"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "storage_names"
+                  },
+                  "usage": "response_content"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupPlanResponse"
+                }
+              }
+            }
           },
           "default": {
             "description": "A problem, with a code a client can act on.",
@@ -75473,6 +76508,150 @@
         ]
       }
     },
+    "/admin/server-update": {
+      "get": {
+        "operationId": "AdminServerUpdateGet",
+        "summary": "Reads the current server release, native update condition and retained job.",
+        "x-orch-access": "session",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": false,
+        "x-orch-operation": {
+          "operation_id": "AdminServerUpdateGet",
+          "method": "GET",
+          "path": "/admin/server-update",
+          "title": "Reads the current server release, native update condition and retained job.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": false,
+              "operation": "AdminServerUpdateGet",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "read",
+                  "resources": [
+                    "system"
+                  ],
+                  "target": {
+                    "kind": "system"
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerUpdateView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "AdminServerUpdateStart",
+        "summary": "Runs the selected release through the bundled node's existing host updater, or joins its open job.",
+        "x-orch-access": "session",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": false,
+        "x-orch-operation": {
+          "operation_id": "AdminServerUpdateStart",
+          "method": "POST",
+          "path": "/admin/server-update",
+          "title": "Runs the selected release through the bundled node's existing host updater, or joins its open job.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": false,
+              "operation": "AdminServerUpdateStart",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "manage",
+                  "resources": [
+                    "system"
+                  ],
+                  "target": {
+                    "kind": "system"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "system"
+                  ],
+                  "target": {
+                    "kind": "system"
+                  },
+                  "usage": "response_content"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "202": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServerUpdateStart"
+              }
+            }
+          }
+        }
+      }
+    },
     "/admin/installation-records": {
       "get": {
         "operationId": "AdminInstallationRecordsGet",
@@ -78171,6 +79350,19 @@
           }
         ],
         "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "One exact identity, independent of recent visits; the same current visibility checks still apply."
+            }
+          },
           {
             "name": "starred",
             "in": "query",
@@ -103553,6 +104745,26 @@
           },
           {
             "type": "string",
+            "const": "public_address.busy",
+            "description": "Another public address change is being prepared"
+          },
+          {
+            "type": "string",
+            "const": "public_address.unverified",
+            "description": "The browser origin could not be verified"
+          },
+          {
+            "type": "string",
+            "const": "public_address.mismatch",
+            "description": "The browser origin does not prove this installation"
+          },
+          {
+            "type": "string",
+            "const": "public_address.frontend_not_ready",
+            "description": "The frontend certificate is not ready"
+          },
+          {
+            "type": "string",
             "const": "conflict.idempotency_mismatch",
             "description": "The key was used for another request"
           },
@@ -105030,6 +106242,11 @@
             "description": "Other browser origins that name this same installation.",
             "default": []
           },
+          "public_address_revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The committed revision that primary and alternate browser origins were read from together."
+          },
           "needs_setup": {
             "type": "boolean",
             "description": "Whether the first administrator is still to be made."
@@ -105108,6 +106325,7 @@
           "build",
           "public_url",
           "alternate_urls",
+          "public_address_revision",
           "needs_setup",
           "registration_mode",
           "org_creation",
@@ -112617,6 +113835,25 @@
             ],
             "description": "What a starting thread is waiting for."
           },
+          "starting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the step it is waiting for began."
+          },
+          "starting_work": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartingWork"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The command that step waits for, and what holds it up; none while it waits for nothing in particular."
+          },
           "blocked": {
             "anyOf": [
               {
@@ -113256,6 +114493,11 @@
           },
           {
             "type": "string",
+            "const": "recording",
+            "description": "The files of the directory, recorded before the turn so that they can be put back."
+          },
+          {
+            "type": "string",
             "const": "files",
             "description": "Its files."
           },
@@ -113266,6 +114508,27 @@
           }
         ],
         "description": "What a starting thread is waiting for."
+      },
+      "StartingWork": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`."
+          },
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of command of other work, on the same machine and in the same line, that it waits behind."
+          }
+        },
+        "required": [
+          "command",
+          "behind"
+        ],
+        "description": "The command a starting thread's step waits for, and the other work that holds it up."
       },
       "ThreadBlocked": {
         "type": "object",
@@ -113403,6 +114666,14 @@
           "placement": {
             "$ref": "#/components/schemas/Placement",
             "description": "Whether it is a person's own machine or one the system manages."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The host of a managed machine, independent of the host's displayed name."
           }
         },
         "required": [
@@ -116922,6 +118193,16 @@
       "PagePreview": {
         "type": "object",
         "properties": {
+          "server_host_use": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServerHostUseDisclosure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "owner_reads": {
             "anyOf": [
               {
@@ -116973,6 +118254,25 @@
           "more"
         ],
         "description": "The effect a change would have, worked out before it is made."
+      },
+      "ServerHostUseDisclosure": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Protected server hosts gaining or changing a native grant; no identities or names are included."
+          },
+          "confirmation": {
+            "type": "string",
+            "description": "Acknowledgement of this exact intent and current native grant set; not an access grant."
+          }
+        },
+        "required": [
+          "hosts",
+          "confirmation"
+        ],
+        "description": "Informed Host Use on the host originally installed with the server."
       },
       "OwnerReadDisclosure": {
         "type": "object",
@@ -131997,6 +133297,14 @@
             "$ref": "#/components/schemas/Placement",
             "description": "Whether it is a person's own machine or one the system manages."
           },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The host of a managed machine, independent of the host's displayed name."
+          },
           "owner": {
             "anyOf": [
               {
@@ -132409,6 +133717,10 @@
       "Host": {
         "type": "object",
         "properties": {
+          "bundled_with_server": {
+            "type": "boolean",
+            "description": "Enrolled through the protected token installed with the server; immutable across rename or home changes."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -132626,6 +133938,7 @@
           }
         },
         "required": [
+          "bundled_with_server",
           "origin_machine",
           "availability",
           "id",
@@ -135235,6 +136548,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +136988,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -154440,6 +155906,14 @@
             "format": "uuid",
             "description": "The complete or explicitly unavailable recorded files before this turn."
           },
+          "files_changed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many included files the turn changed, whoever changed them: the difference of the files recorded\nbefore it and the files observed at its end. `null` while either is missing (the files were not\nrecorded, or the end has not been observed yet)."
+          },
           "model": {
             "type": "string",
             "description": "The model's routing name."
@@ -158435,6 +159909,151 @@
         ],
         "description": "The median of three verified entrance round trips, measured on the connector."
       },
+      "MachineGatewaySetBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "selection": {
+            "$ref": "#/components/schemas/ConnectorGatewaySelection"
+          },
+          "gateway_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "selection"
+        ],
+        "description": "Save one primary selection on the enrolled machine without replacing its identity."
+      },
+      "MachineGatewaySetReceipt": {
+        "type": "object",
+        "properties": {
+          "projection": {
+            "$ref": "#/components/schemas/ReceiptProjection"
+          },
+          "machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/ConnectorGatewaySelection"
+          },
+          "gateway_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projection",
+          "machine_id",
+          "selection",
+          "gateway_id",
+          "changed"
+        ],
+        "description": "The accepted native choice, without reading the machine's existing configuration."
+      },
+      "PublicAddressSnapshot": {
+        "type": "object",
+        "properties": {
+          "public_url": {
+            "type": "string",
+            "description": "The address used in newly produced links, commands and deliveries."
+          },
+          "alternate_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Other declared browser origins of the same installation."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The monotone system-store revision used for compare-and-set publication."
+          },
+          "from_file_seed": {
+            "type": "boolean",
+            "description": "Whether the effective addresses are the persisted file seed rather than an override."
+          },
+          "using_example": {
+            "type": "boolean",
+            "description": "Whether the shipped example is still the effective primary origin."
+          }
+        },
+        "required": [
+          "public_url",
+          "alternate_urls",
+          "revision",
+          "from_file_seed",
+          "using_example"
+        ],
+        "description": "The committed address revision. File configuration seeds it only when no row exists."
+      },
+      "PublicAddressUpdateBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "alternate_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "expected_revision",
+          "public_url",
+          "alternate_urls"
+        ],
+        "description": "One complete address draft, published only after preparation succeeds at this revision."
+      },
+      "PublicAddressUpdated": {
+        "type": "object",
+        "properties": {
+          "projection": {
+            "$ref": "#/components/schemas/ReceiptProjection"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "public_url": {
+            "type": "string"
+          },
+          "alternate_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "using_example": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projection",
+          "revision",
+          "public_url",
+          "alternate_urls",
+          "using_example"
+        ],
+        "description": "Intrinsic write result; it returns no previous file seed or system configuration."
+      },
       "ThreadMovePreviewBody": {
         "type": "object",
         "additionalProperties": false,
@@ -159427,6 +161046,17 @@
             "$ref": "#/components/schemas/EnvironmentDefault",
             "description": "What a new thread does about its environment unless told."
           },
+          "default_environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BindingDefaultEnvironment"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use\nit when they cannot; absent when no setting names one and when rebinding an existing thread."
+          },
           "source": {
             "$ref": "#/components/schemas/BindingSource",
             "description": "Safe resolved repository settings and the place supplying the repository address."
@@ -160019,7 +161649,7 @@
           },
           "is_default": {
             "type": "boolean",
-            "description": "Whether it is the topic's default."
+            "description": "Whether it is the default of the threads started here: the environment the nearest setting of\n`env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it."
           },
           "used": {
             "$ref": "#/components/schemas/EnvironmentUse",
@@ -160101,6 +161731,40 @@
           }
         ],
         "description": "What `env.thread_default` resolves to."
+      },
+      "BindingDefaultEnvironment": {
+        "type": "object",
+        "properties": {
+          "environment": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The environment the setting names."
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NodeRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place whose setting it is, when that is not the place asked about itself: a project or org above it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,\nor `environment_not_seen` when it is not among those the caller may see."
+          }
+        },
+        "required": [
+          "environment",
+          "from",
+          "reason"
+        ],
+        "description": "The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it."
       },
       "BindingSource": {
         "type": "object",
@@ -177374,6 +179038,41 @@
         },
         "description": "Brings a handed-over credential home."
       },
+      "ResourceDeleteQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "notify": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tell affected people once; omitted is silent."
+          }
+        },
+        "description": "Deletion keeps notices an explicit choice."
+      },
+      "ProviderPauseQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short note shown beside the resource stop."
+          },
+          "notify": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tell affected people once; omitted is silent."
+          }
+        },
+        "description": "An explicit optional notice while switching a provider off."
+      },
       "ProviderStartStopBody": {
         "type": "object",
         "additionalProperties": false,
@@ -178503,6 +180202,34 @@
         ],
         "description": "A model write acknowledgement without the provider's existing model configuration."
       },
+      "ProviderModelPauseQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short note beside the stopped model."
+          },
+          "run_waiting": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Enable runs waiting messages only when explicitly selected."
+          },
+          "notify": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Disable tells this model's affected people once; omitted is silent."
+          }
+        },
+        "description": "A model switch keeps its own explicit notice choice and waiting-message behavior."
+      },
       "ProviderModelUpdateBody": {
         "type": "object",
         "additionalProperties": false,
@@ -178560,7 +180287,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [
@@ -181588,6 +183315,10 @@
       "HostListedContent": {
         "type": "object",
         "properties": {
+          "bundled_with_server": {
+            "type": "boolean",
+            "description": "Enrolled through the protected token installed with the server; immutable across rename or home changes."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -181810,6 +183541,7 @@
           }
         },
         "required": [
+          "bundled_with_server",
           "origin_machine",
           "availability",
           "id",
@@ -182733,6 +184465,17 @@
           "notify": {
             "type": "boolean",
             "description": "The resolved operation-notice default."
+          },
+          "effects": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourceFacts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The same shared dependency facts, restricted to the consequences of this act."
           }
         },
         "required": [
@@ -182995,6 +184738,17 @@
             "type": "boolean",
             "description": "A previously accepted stop still has native work to finish."
           },
+          "notification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourceOperationNotification"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A provider-wide pause, provider deletion or MCP deletion can notify this current audience."
+          },
           "thread_displays": {
             "type": "object",
             "additionalProperties": {
@@ -183077,6 +184831,24 @@
           "since"
         ],
         "description": "Current work counted once by the dependents service, before names are projected."
+      },
+      "ResourceOperationNotification": {
+        "type": "object",
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/UpdateAudience",
+            "description": "Visible people and the count whose association remains private."
+          },
+          "default_on": {
+            "type": "boolean",
+            "description": "The inherited Operation notices default; the confirmer may change it."
+          }
+        },
+        "required": [
+          "audience",
+          "default_on"
+        ],
+        "description": "The current affected people and the configured initial notification choice."
       },
       "LibraryReadBody": {
         "type": "object",
@@ -184958,6 +186730,148 @@
           "mount_id"
         ],
         "description": "A truthful completed mount identity without existing metadata or locations."
+      },
+      "MountCopyPreflightBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source_machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "into": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CopyInto"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "source_machine_id",
+          "target_machine_id",
+          "into"
+        ],
+        "description": "A standalone data copy names only existing native machine identities."
+      },
+      "MountCopyPlanResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MountCopyPlan"
+          },
+          {
+            "$ref": "#/components/schemas/MountCopyPlanReceipt"
+          }
+        ]
+      },
+      "MountCopyPlan": {
+        "type": "object",
+        "properties": {
+          "preflight_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mount": {
+            "$ref": "#/components/schemas/MountRef"
+          },
+          "source": {
+            "$ref": "#/components/schemas/MachineRef"
+          },
+          "target": {
+            "$ref": "#/components/schemas/MachineRef"
+          },
+          "copy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanMountCopy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanBlocker"
+            }
+          },
+          "notification": {
+            "$ref": "#/components/schemas/OperationNotificationPlan"
+          }
+        },
+        "required": [
+          "preflight_id",
+          "expires_at",
+          "mount",
+          "source",
+          "target",
+          "copy",
+          "blockers",
+          "notification"
+        ],
+        "description": "The measured data and destination choice, before any copy is accepted."
+      },
+      "MountCopyPlanReceipt": {
+        "type": "object",
+        "properties": {
+          "projection": {
+            "$ref": "#/components/schemas/ReceiptProjection"
+          },
+          "mount_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preflight_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "projection",
+          "mount_id",
+          "preflight_id",
+          "expires_at"
+        ],
+        "description": "Acknowledges the saved review without disclosing existing mount or machine content."
+      },
+      "MountCopyCreateBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "preflight_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "notify": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "preflight_id",
+          "notify"
+        ],
+        "description": "Accepts exactly one current reviewed copy as a durable job."
       },
       "MountUpdateBody": {
         "type": "object",
@@ -190111,6 +192025,243 @@
         ],
         "description": "A read-only lookup at the operator's configured release source."
       },
+      "ServerUpdateView": {
+        "type": "object",
+        "properties": {
+          "installed_version": {
+            "type": "string",
+            "description": "The release of the API that is answering now."
+          },
+          "offered_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The current validated release offer, if one has been checked."
+          },
+          "update_available": {
+            "type": "boolean",
+            "description": "The offered release is newer than the API answering now."
+          },
+          "availability": {
+            "$ref": "#/components/schemas/ServerUpdateAvailability",
+            "description": "The real local condition for the page's update act."
+          },
+          "command": {
+            "type": "string",
+            "description": "The existing operator path, available even when no bundled node can run the act."
+          },
+          "job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Job"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The most recent server update, including its outcome after reload."
+          },
+          "observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServerUpdateObservation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The latest recorded native updater phase and outcome."
+          }
+        },
+        "required": [
+          "installed_version",
+          "offered_version",
+          "update_available",
+          "availability",
+          "command",
+          "job",
+          "observation"
+        ],
+        "description": "Management's server update row and the same durable job presentation as other updates."
+      },
+      "ServerUpdateAvailability": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "ready",
+            "description": "The current bundled node offers the host Docker path."
+          },
+          {
+            "type": "string",
+            "const": "no_bundled_node",
+            "description": "No active node is marked as bundled with this installation."
+          },
+          {
+            "type": "string",
+            "const": "ambiguous_bundled_nodes",
+            "description": "More than one active node claims the installation bundle."
+          },
+          {
+            "type": "string",
+            "const": "node_offline",
+            "description": "The bundled node has no current connection."
+          },
+          {
+            "type": "string",
+            "const": "docker_unavailable",
+            "description": "The node cannot use the installation's local Docker daemon."
+          }
+        ],
+        "description": "Whether the bundled node can run this installation's existing updater."
+      },
+      "ServerUpdateObservation": {
+        "type": "object",
+        "properties": {
+          "stage": {
+            "$ref": "#/components/schemas/ServerUpdateStage",
+            "description": "The phase actually recorded by update.sh."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServerUpdateFailure"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its safe fixed failure reason, if any."
+          },
+          "from_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release being left, once the updater has opened its journal."
+          },
+          "to_version": {
+            "type": "string",
+            "description": "The selected release of this exact operation."
+          }
+        },
+        "required": [
+          "stage",
+          "reason",
+          "from_version",
+          "to_version"
+        ],
+        "description": "A factual observation from the operation's local updater record."
+      },
+      "ServerUpdateStage": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "queued",
+            "description": "Accepted, before fetching the selected release."
+          },
+          {
+            "type": "string",
+            "const": "fetching",
+            "description": "Fetching the release's own manifest and assets."
+          },
+          {
+            "type": "string",
+            "const": "verifying",
+            "description": "Verifying the manifest's assets."
+          },
+          {
+            "type": "string",
+            "const": "applying",
+            "description": "Preparing the verified payloads."
+          },
+          {
+            "type": "string",
+            "const": "stopping",
+            "description": "Stopping the application services."
+          },
+          {
+            "type": "string",
+            "const": "dumping",
+            "description": "Taking the rollback database snapshot."
+          },
+          {
+            "type": "string",
+            "const": "activating",
+            "description": "Atomically selecting the new payload generations."
+          },
+          {
+            "type": "string",
+            "const": "starting",
+            "description": "Starting the application services."
+          },
+          {
+            "type": "string",
+            "const": "checking",
+            "description": "Checking the effective public route and running release."
+          },
+          {
+            "type": "string",
+            "const": "rolling_back",
+            "description": "Restoring the old payloads and their database snapshot."
+          },
+          {
+            "type": "string",
+            "const": "recovering",
+            "description": "Resuming the original journal after the helper or host restarted."
+          },
+          {
+            "type": "string",
+            "const": "updated",
+            "description": "The selected release passed readiness."
+          },
+          {
+            "type": "string",
+            "const": "rolled_back",
+            "description": "The earlier release is running again."
+          },
+          {
+            "type": "string",
+            "const": "failed",
+            "description": "The updater could not finish; its existing recovery command remains available."
+          }
+        ],
+        "description": "The existing updater's durable phase, including what happened after a restart."
+      },
+      "ServerUpdateFailure": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "health_check_failed",
+            "description": "The selected release failed browser or service readiness."
+          },
+          {
+            "type": "string",
+            "const": "update_failed",
+            "description": "The update ended before a successful new release or rollback was confirmed."
+          },
+          {
+            "type": "string",
+            "const": "recovery_required",
+            "description": "The original journal remains and needs the existing recovery path."
+          }
+        ],
+        "description": "Safe updater reasons; native output and credentials never become a page's failure text."
+      },
+      "ServerUpdateStart": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "release": {
+            "type": "string",
+            "description": "The exact version from the current validated release offer."
+          }
+        },
+        "required": [
+          "release"
+        ],
+        "description": "One explicit offer selected by a system administrator, never a download URL or a shell command."
+      },
       "InstallationRecords": {
         "type": "object",
         "properties": {
@@ -192825,6 +194976,14 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "One exact identity, independent of recent visits; the same current visibility checks still apply."
+          },
           "starred": {
             "type": [
               "boolean",

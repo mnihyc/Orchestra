@@ -40,8 +40,6 @@ use orch_access_contract::key_scope::KeyTargetKind;
 
 use orch_api_contract::operation_sources::Declaration;
 
-use orch_api_contract::storage_sources as sources;
-
 use orch_api_contract::storage_sources::Source;
 
 use orch_api_contract::workspace::Job;
@@ -75,7 +73,7 @@ use orch_types::Id;
 use orch_types::new_id;
 
 use serde_json::json;
-pub(super) struct Create;
+pub(super) struct Create<M: Mode>(PhantomData<M>);
 
 pub(super) struct Intent {
     scope: Scope,
@@ -93,6 +91,7 @@ pub(super) struct Prepared {
     sources: Sources,
     preview: Option<Origin>,
     preview_deadline: Option<operation::Deadline>,
+    deletion: Option<mount_deletion::Prepared>,
 }
 
 pub(super) struct Saved {
@@ -116,11 +115,11 @@ impl From<Saved> for Accepted {
     }
 }
 
-pub(super) fn replay_binding()
+pub(super) fn replay_binding<M: Mode>()
 -> crate::middleware::idempotency::Creation<(), api::CleanupStart, api::CleanupJobResponse> {
     crate::middleware::idempotency::Creation {
         kind: "cleanup_job",
-        replay,
+        replay: replay::<M>,
         identity: |value| {
             Ok(orch_db::idempotency::creation::Created {
                 kind: "cleanup_job".into(),
@@ -134,7 +133,7 @@ pub(super) fn replay_binding()
     }
 }
 
-fn replay(
+fn replay<M: Mode>(
     ctx: Ctx,
     (): (),
     _: api::CleanupStart,
@@ -161,7 +160,7 @@ fn replay(
         };
         let sources = serde_json::from_value(sources).map_err(ApiError::internal)?;
         drop(conn);
-        match reply::render_completed_replay::<Shown>(
+        match reply::render_completed_replay::<Shown<M>>(
             &ctx,
             ctx.user()?.id(),
             Accepted {
@@ -182,7 +181,7 @@ fn replay(
     })
 }
 
-async fn locate(
+async fn locate<M: Mode>(
     conn: &mut Conn,
     user: Id,
     id: Id,
@@ -194,6 +193,7 @@ async fn locate(
 )> {
     if let Some(id)=sqlx::query_scalar::<_,Id>("SELECT id FROM jobs WHERE kind='storage_cleanup' AND plan->'recipe'->'plan'->>'id'=$1 AND created_by=$2").bind(id.to_string()).bind(user).fetch_optional(&mut *conn).await.map_err(DbError::from)? {
         let row=jobs::job(conn,id).await?.ok_or_else(ApiError::not_found)?;
+        if M::DELETE_MOUNT == row.plan["mount_delete"].is_null() { return Err(ApiError::not_found()); }
         let recipe:Recipe=serde_json::from_value(row.plan["recipe"].clone()).map_err(ApiError::internal)?;
         let request=recipe.request.ok_or_else(||ApiError::internal("the native cleanup request is missing"))?;
         return Ok((None,Some(row),request));
@@ -204,6 +204,9 @@ async fn locate(
         .ok_or_else(|| ApiError::new(ErrorCode::PreflightExpired, "read the cleanup plan again"))?;
     let request =
         serde_json::from_value(row.plan["request"].clone()).map_err(ApiError::internal)?;
+    if M::DELETE_MOUNT == row.plan["mount_delete"].is_null() {
+        return Err(ApiError::not_found());
+    }
     Ok((Some(row), None, request))
 }
 
@@ -234,14 +237,14 @@ fn preview_origin(row: &PreflightRow) -> ApiResult<Origin> {
     })
 }
 
-impl Effect for Create {
+impl<M: Mode> Effect for Create<M> {
     type Source = Source;
     type Query = ();
     type Body = api::CleanupStart;
     type Value = Prepared;
     type Output = Saved;
     fn declaration(_: &Prepared) -> &'static Declaration<Source> {
-        &sources::CREATE
+        M::CREATE
     }
     fn prepare<'a>(
         ctx: &'a Ctx,
@@ -257,9 +260,10 @@ impl Effect for Create {
                 .await
                 .map_err(DbError::from)?;
             let (stored, replay, request) =
-                locate(conn, caller.user(), body.plan_id, ctx.now).await?;
+                locate::<M>(conn, caller.user(), body.plan_id, ctx.now).await?;
+            M::check(ctx, &request)?;
             let scope = Scope::parse(&query(&request))?;
-            let initial = effects::initial_value::<Create>(ctx)?;
+            let initial = effects::initial_value::<Create<M>>(ctx)?;
             let (plan, targets, saved_sources) = if let Some(row) = &replay {
                 let recipe: Recipe = serde_json::from_value(row.plan["recipe"].clone())
                     .map_err(ApiError::internal)?;
@@ -282,19 +286,26 @@ impl Effect for Create {
                     row.plan.get("sources").cloned(),
                 )
             };
-            let (mut sources, principal, records) = if let Some(saved) = saved_sources {
+            let (mut sources, principal, records, deletion) = if let Some(saved) = saved_sources {
                 let sources: Sources = serde_json::from_value(saved).map_err(ApiError::internal)?;
                 let facts = sources
                     .required(conn)
                     .await
                     .map_err(ApiError::engine)?
                     .ok_or_else(ApiError::not_found)?;
-                let plan = native::bind_required(ctx, &sources::CREATE, &facts)?;
+                let plan = native::bind_required(ctx, M::CREATE, &facts)?;
                 let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
                 if replay.is_none() {
                     report_sources::require_namespace(conn, &principal, scope).await?;
                 }
-                let records = if replay.is_none() {
+                let deletion = if M::DELETE_MOUNT && replay.is_none() {
+                    Some(mount_deletion::prepare(ctx, conn, &principal, &request, None).await?)
+                } else {
+                    None
+                };
+                let records = if let Some(deletion) = &deletion {
+                    Some(deletion.records())
+                } else if replay.is_none() {
                     Some(
                         super::super::prepare_records(
                             ctx,
@@ -309,7 +320,7 @@ impl Effect for Create {
                 } else {
                     None
                 };
-                (sources, principal, records)
+                (sources, principal, records, deletion)
             } else {
                 let selected = Some(
                     plan.items
@@ -318,23 +329,35 @@ impl Effect for Create {
                         .collect(),
                 );
                 let mut book =
-                    Book::for_operation(ctx, conn, caller, scope, selected, &sources::CREATE, true)
+                    Book::for_operation(ctx, conn, caller, scope, selected, M::CREATE, true)
                         .await?;
                 let principal =
                     native::preparation_principal(ctx, conn, caller, &book.plan).await?;
                 if replay.is_none() {
                     report_sources::require_namespace(conn, &principal, scope).await?;
                 }
-                let records = super::super::prepare_records(
-                    ctx,
-                    conn,
-                    &principal,
-                    &query(&request),
-                    Some(initial.as_ref()),
-                    Some(&mut book),
-                )
-                .await?;
-                (book.snapshot()?, principal, Some(records))
+                let deletion = if M::DELETE_MOUNT {
+                    Some(
+                        mount_deletion::prepare(ctx, conn, &principal, &request, Some(&mut book))
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let records = if let Some(deletion) = &deletion {
+                    deletion.records()
+                } else {
+                    super::super::prepare_records(
+                        ctx,
+                        conn,
+                        &principal,
+                        &query(&request),
+                        Some(initial.as_ref()),
+                        Some(&mut book),
+                    )
+                    .await?
+                };
+                (book.snapshot()?, principal, Some(records), deletion)
             };
             let account = targets::account(conn, caller.user()).await?;
             sources.names = vec![Reference {
@@ -371,6 +394,7 @@ impl Effect for Create {
                     sources,
                     preview,
                     preview_deadline,
+                    deletion,
                 },
                 facts,
             ))
@@ -400,11 +424,11 @@ impl Effect for Create {
     }
 }
 
-impl Initial for Create {
+impl<M: Mode> Initial for Create<M> {
     type Input = Intent;
     type Fetched = OperatorSnapshot;
     fn declaration(_: &Intent) -> &'static Declaration<Source> {
-        &sources::CREATE
+        M::CREATE
     }
     fn authorize<'a>(
         ctx: &'a Ctx,
@@ -414,7 +438,9 @@ impl Initial for Create {
         body: api::CleanupStart,
     ) -> BoxFuture<'a, ApiResult<(Intent, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
-            let (_, replay, request) = locate(conn, caller.user(), body.plan_id, ctx.now).await?;
+            let (_, replay, request) =
+                locate::<M>(conn, caller.user(), body.plan_id, ctx.now).await?;
+            M::check(ctx, &request)?;
             let scope = Scope::parse(&query(&request))?;
             let target = report_sources::namespace(conn, caller, scope).await?;
             Ok((
@@ -453,7 +479,7 @@ impl Initial for Create {
     }
 }
 
-impl ApplyOwned for Create {
+impl<M: Mode> ApplyOwned for Create<M> {
     fn apply_owned<'a>(
         ctx: &'a Ctx,
         mut tx: Tx,
@@ -485,6 +511,11 @@ impl ApplyOwned for Create {
                 }));
             }
             let deadline = before.deadline();
+            if let Some(deletion) = &value.deletion {
+                let saved =
+                    &value.stored.as_ref().ok_or_else(ApiError::not_found)?.plan["mount_delete"];
+                deletion.check(saved)?;
+            }
             let (_, rows, _) = value
                 .records
                 .as_ref()
@@ -497,14 +528,30 @@ impl ApplyOwned for Create {
                     (row.id.clone(), row)
                 })
                 .collect();
-            let (plan, work) =
+            let (mut plan, mut work) =
                 select_work(value.plan.clone(), current, &value.targets, &value.body)?;
+            let id = new_id();
+            if let Some(preview) = &value.preview_deadline {
+                preview
+                    .check(ctx.app.clock.as_ref())
+                    .map_err(ApiError::engine)?;
+            }
+            before.check()?;
+            if let Some(deletion) = &value.deletion {
+                for item in &mut plan.items {
+                    if item.selected == CleanupChoice::Keep {
+                        item.record.blocker = None;
+                    }
+                }
+                deletion
+                    .retain(&mut tx, principal, id, &mut work, ctx.now)
+                    .await?;
+            }
             let recipe = Recipe {
                 request: Some(value.request.clone()),
                 plan,
                 work,
             };
-            let id = new_id();
             let retained = operation::Request::capture(
                 id,
                 principal.caller(),
@@ -524,8 +571,12 @@ impl ApplyOwned for Create {
                     .check(ctx.app.clock.as_ref())
                     .map_err(ApiError::engine)?;
             }
-            before.check()?;
-            let row=jobs::insert(&mut tx,&jobs::NewJob{id,kind:cleanup::KIND,node_id:None,environment_id:None,provider_id:None,created_by:Some(principal.user()),plan:&json!({"recipe":recipe,"identity":identity,"origin":orch_db::audit::current_origin(),"cleanup_operation":retained,"sources":value.sources,"cleanup_results":[]}),progress:&serde_json::to_value(initial_progress(&cleanup::PHASES)).map_err(ApiError::internal)?},ctx.now).await?;
+            let row=jobs::insert(&mut tx,&jobs::NewJob{id,kind:cleanup::KIND,node_id:None,environment_id:None,provider_id:None,created_by:Some(principal.user()),plan:&json!({"recipe":recipe,"identity":identity,"origin":orch_db::audit::current_origin(),"cleanup_operation":retained,"sources":value.sources,"cleanup_results":[],"mount_delete":value.deletion.as_ref().map(|deletion| &deletion.snapshot)}),progress:&serde_json::to_value(initial_progress(&cleanup::PHASES)).map_err(ApiError::internal)?},ctx.now).await?;
+            if let Some(deletion) = &value.deletion {
+                deletion
+                    .remove(ctx, &mut tx, principal, id, value.body.notify)
+                    .await?;
+            }
             sqlx::query("DELETE FROM preflights WHERE id=$1")
                 .bind(value.stored.as_ref().ok_or_else(ApiError::not_found)?.id)
                 .execute(&mut *tx)
@@ -553,19 +604,20 @@ impl ApplyOwned for Create {
     }
 }
 
-pub(super) async fn run(
+pub(super) async fn run<M: Mode>(
     ctx: Ctx,
     (): (),
     _: api::CleanupStart,
 ) -> ApiResult<api::CleanupJobResponse> {
     let (tx, _) = transaction_guard::begin(&ctx).await?;
-    let done = effects::apply_owned::<Create>(&ctx, tx).await?;
+    let done = effects::apply_owned::<Create<M>>(&ctx, tx).await?;
     let receipt = api::CleanupJobReceipt {
         projection: orch_api_contract::common::ReceiptProjection::Receipt,
         id: done.output.row.id,
     };
     publication::receipt(&done.ctx, &receipt)?;
-    let full = match reply::render::<Shown>(&done.ctx, &done.accepted, done.output.into()).await {
+    let full = match reply::render::<Shown<M>>(&done.ctx, &done.accepted, done.output.into()).await
+    {
         Ok(full) => full,
         Err(error) if matches!(error.code(), ErrorCode::AuthzDenied | ErrorCode::NotFound) => None,
         Err(error) => return Err(error),
@@ -576,9 +628,9 @@ pub(super) async fn run(
     ))
 }
 
-struct Shown;
+struct Shown<M: Mode>(PhantomData<M>);
 
-impl reply::Projection for Shown {
+impl<M: Mode> reply::Projection for Shown<M> {
     type Source = Source;
     type Input = Accepted;
     type Subject = jobs::JobRow;
@@ -586,7 +638,7 @@ impl reply::Projection for Shown {
     type Reply = Job;
     const READ_SOURCE: Source = Source::Content;
     fn declaration(_: &Accepted) -> &'static Declaration<Source> {
-        &sources::CREATE
+        M::CREATE
     }
     fn subject<'a>(
         _: &'a Ctx,

@@ -6,6 +6,7 @@
  * or, in its place, the bar of a selection being made, or the sentence that says why the reader may not
  * write here. The chat is followed only while it is on screen.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { ChatSummaries } from '@/features/summaries/ChatSummaries';
 import { messageReferenceText } from '@/features/chat/messageReference';
 import { Lock, MessageSquareOff, Search } from 'lucide-react';
@@ -363,7 +364,7 @@ function OpenChat({
 
         <ChatPeople chat={chat} me={me} />
         {markedUnread && <p role="status" className="border-b border-border bg-accent-subtle px-3 py-1 text-xs text-text-muted">{t('people.markedUnread')}</p>}
-        {askedThread !== null && <p role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1 text-xs text-text-muted"><span>{t('people.asked', { agent: askedThread.agent, thread: askedThread.name })}</span><a href={`/thread/${askedThread.id}`} className="text-accent-text underline">{t('people.openThread')}</a></p>}
+        {askedThread !== null && <p role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1 text-xs text-text-muted"><span>{t('people.asked', { agent: askedThread.agent, thread: askedThread.name })}</span><PathLink href={`/thread/${askedThread.id}`} className="text-accent-text underline">{t('people.openThread')}</PathLink></p>}
         <MessageList
           entry={entry}
           onRestore={partsOfDraft(draft).length > 0 ? undefined : (sent) => { draft.restore?.(sent.parts,sent.replyTo,sent.mentionNames ?? []); discard(chat.id,sent.clientId); requestAnimationFrame(() => input.current?.focus()); }}

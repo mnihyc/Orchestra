@@ -250,15 +250,12 @@ impl Rig {
     ) {
         let script = Arc::new(script);
         for kind in [CommandKind::SessionOpen, CommandKind::SessionOpenFenced] {
-            let (script, peer, ordered, refusals, machine) = (
+            let (script, peer, refusals) = (
                 script.clone(),
                 self.native.clone(),
-                self.world.ordered.clone(),
                 self.open_refusals.clone(),
-                self.world.machine_id,
             );
             self.world.machine.handler.on(kind, move |command| {
-                ordered.lock().unwrap().push((machine, command.clone()));
                 let open = match command {
                     Command::SessionOpen(open) => open,
                     Command::SessionOpenFenced(open) => &open.session,
