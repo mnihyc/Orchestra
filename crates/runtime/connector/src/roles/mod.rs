@@ -162,6 +162,8 @@ pub struct Services {
     pub keys: Arc<Keys>,
     /// The configuration as the connector started with it.
     pub config: ConnectorConfig,
+    /// The physical composition's verified build cache, when it can fetch named programs.
+    pub build_cache: Option<Arc<dyn crate::builds::BuildCache>>,
     /// The read-only directory of tools a managed runtime is given, if it was.
     pub tools_dir: Option<PathBuf>,
     /// The harnesses that directory held when the connector started: the builds the system put in this

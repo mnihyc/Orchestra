@@ -125,6 +125,7 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
       }
     >
       <form ref={formElement} id="make-environment" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => templateAvailable && hostAvailable && make.mutate(values.name))}>
+        <Input label={t('environments.make.name')} {...form.field('name')} autoComplete="off" />
         {make.error !== null && (!placed || unplaced) && <div ref={errorElement} tabIndex={-1}><ErrorAlert error={make.error} /></div>}
         {loading ? (
           <SkeletonRows reads={[templates, hosts]} rows={3} />
@@ -138,7 +139,6 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
           <>
             <HomePicker value={form.values.home_node_id} onChange={(value) => form.set('home_node_id', value)} error={form.field('home_node_id').error}
               places={home === undefined ? [] : [home]} disabled={make.isPending} />
-            <Input label={t('environments.make.name')} {...form.field('name')} autoComplete="off" />
             <ResourcePicker pickerKey="resources.environments.MakeEnvironment.environments.make.template"
               label={t('environments.make.template')}
               help={<Hint id="env-template" />}

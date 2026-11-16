@@ -1117,7 +1117,7 @@ async fn identity_link_key(sso: &Sso, user: Id) -> (Id, String) {
         KeyAction, KeyIdentityKind, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget,
         KeyTargetKind,
     };
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 
     let kind = KeyTargetKind::Identity(KeyIdentityKind::Account);
@@ -1140,9 +1140,9 @@ async fn identity_link_key(sso: &Sso, user: Id) -> (Id, String) {
         constraints: Vec::new(),
         excluded_places: Vec::new(),
     };
-    let key = new_token(API_TOKEN_PREFIX);
-    let hash = token_hash(&key);
     let id = new_id();
+    let key = new_api_token(id);
+    let hash = token_hash(&key);
     let policy = serde_json::to_value(scope).unwrap();
     create_api_token_scoped(
         &mut sso.world.db.pool.acquire().await.unwrap(),
@@ -1315,8 +1315,9 @@ async fn an_oidc_link_rechecks_its_originating_key_at_callback_and_does_not_borr
             .await
             .unwrap();
         assert_eq!(remains, 0, "refused callbacks still consume the state once");
-        let credential = identity::api_token_by_hash(
+        let credential = identity::api_token_by_identity(
             &mut sso.world.db.pool.acquire().await.unwrap(),
+            orch_api_contract::api_keys::key_id(&key).unwrap(),
             &token_hash(&key),
             sso.world.app.clock.now(),
         )

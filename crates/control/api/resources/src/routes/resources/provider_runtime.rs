@@ -360,7 +360,7 @@ pub(crate) async fn runtime_views(
                         .and_then(|r| r.machine_id)
                         .and_then(|id| versions.get(&id))
                         .map(String::as_str),
-                    orch_engine::updates::CONNECTOR_MINIMUM,
+                    ctx.app.link.connector_minimum(),
                 ),
                 updates,
                 last_active_at: runtime
@@ -369,6 +369,9 @@ pub(crate) async fn runtime_views(
                 idle_stop_at: idle_stop_at.map(Time::new),
                 renew_at: renew_at.map(Time::new),
                 job: job.map(job_ref),
+                // The page says system reasons in the reader's language, including whether the host has
+                // confirmed a forced stop, and keeps the host's own words for its failures.
+                detail: runtime.and_then(|runtime| runtime.state_detail.clone()),
             },
         );
     }
@@ -385,16 +388,36 @@ pub(super) fn refused(error: RuntimeError) -> ApiError {
         ),
         RuntimeError::Unavailable(why) => ApiError::new(
             ErrorCode::ProviderUnavailable,
-            format!("its runtime cannot be started or stopped now: {why}"),
+            format!("Its runtime cannot be started or stopped now: {why}."),
         ),
         RuntimeError::Busy(running) => ApiError::new(
             ErrorCode::ThreadNotIdle,
             "turns run on this provider; stop them first, or say to interrupt them",
         )
         .with("running", running),
+        RuntimeError::Held(hold) => {
+            // The screen says the sentence of the reason in the reader's language, with the work and the step; the
+            // English one in `detail` is for the log and for a client that has no catalogue.
+            let mut error = ApiError::new(
+                ErrorCode::ProviderUnavailable,
+                format!(
+                    "Its runtime cannot be started or stopped now: {}.",
+                    hold.sentence()
+                ),
+            )
+            .with("reason", hold.why.word())
+            .with("can_force", hold.why.can_force());
+            if let Some(work) = hold.work {
+                error = error.with("work", work);
+            }
+            if let Some(step) = &hold.step {
+                error = error.with("step", step);
+            }
+            error
+        }
         RuntimeError::Host(why) => ApiError::new(
             ErrorCode::ProviderUnavailable,
-            format!("the host could not stop its runtime: {why}"),
+            format!("The runtime's host could not do it: {why}"),
         ),
         RuntimeError::Internal(error) => ApiError::engine(error),
     }
@@ -422,12 +445,13 @@ async fn stop(ctx: Ctx, (): (), body: api::ProviderStartStopBody) -> ApiResult<P
     let (ctx, tx, principal) = super::begin_mutation(&ctx).await?;
     ctx.app
         .engine
-        .stop_provider_runtime_in(
+        .stop_provider_runtime_forced_in(
             tx,
             &principal,
             &crate::sign_in::origin(&ctx),
             id,
             body.interrupt.unwrap_or(false),
+            body.force.unwrap_or(false),
         )
         .await
         .map_err(refused)?;
@@ -450,5 +474,42 @@ pub(super) fn not_home(error: ReturnError) -> ApiError {
         .with("running", running),
         ReturnError::Failed(why) => ApiError::new(ErrorCode::CredentialReturnFailed, why),
         ReturnError::Internal(error) => ApiError::engine(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch_engine::provider_runtime::{Hold, HoldWhy};
+
+    fn word<'a>(error: &'a ApiError, member: &str) -> Option<&'a str> {
+        error
+            .problem
+            .extra
+            .get(member)
+            .and_then(serde_json::Value::as_str)
+    }
+
+    #[test]
+    fn a_hold_is_answered_with_its_word_the_work_and_the_step_and_whether_forcing_changes_it() {
+        let own = refused(RuntimeError::Held(Hold::own_work(
+            "update",
+            "replace".to_owned(),
+        )));
+        assert_eq!(own.problem.code, ErrorCode::ProviderUnavailable);
+        assert_eq!(word(&own, "reason"), Some("own_work"));
+        assert_eq!(word(&own, "work"), Some("update"));
+        assert_eq!(word(&own, "step"), Some("replace"));
+        assert_eq!(
+            own.problem.extra.get("can_force"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let other = refused(RuntimeError::Held(Hold::of(HoldWhy::OtherWork)));
+        assert_eq!(word(&other, "reason"), Some("other_work"));
+        assert_eq!(
+            other.problem.extra.get("can_force"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert!(other.problem.extra.get("work").is_none());
     }
 }

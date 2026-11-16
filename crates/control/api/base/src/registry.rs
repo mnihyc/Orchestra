@@ -2300,8 +2300,9 @@ impl Registry {
         Fut: Future<Output = ApiResult<Response>> + Send + 'static,
     {
         assert!(
-            E::ROUTE.method != Method::GET && matches!(E::ROUTE.body, Shape::Bytes | Shape::Raw),
-            "a raw changing query operation retains its actual raw body declaration"
+            E::ROUTE.method != Method::GET
+                && matches!(E::ROUTE.body, Shape::Bytes | Shape::Raw | Shape::Json(_)),
+            "a raw changing query operation retains its actual body declaration"
         );
         self.on_raw_configured(
             endpoint,
