@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -2450,6 +2449,7 @@ mod tests {
         )
         .unwrap();
         let retained = RetainedCommand {
+            after: None,
             machine,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
