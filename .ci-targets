@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract -p orch-api-contract -p orch-adapter-acp -p orch-adapter-claude-code -p orch-adapter-codex -p orch-adapter-fake --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test harness_checks --test threads_settings
+test -p orch-engine --test approval_review --test delivery --test orch_tools
+test -p orch-api-core --test binding_options --test thread_session_configuration --test thread_opening_scopes --test model_entries --test provider_models
+test -p orch-engine --test forks

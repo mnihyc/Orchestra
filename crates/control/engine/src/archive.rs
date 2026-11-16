@@ -664,7 +664,7 @@ impl Engine {
                         Outgoing::new(
                             ids::turn_interrupt(turn.id),
                             machine,
-                            SerialKey::Thread(*id),
+                            SerialKey::None,
                             &TurnInterrupt {
                                 thread_id: *id,
                                 turn_id: turn.id,
@@ -864,6 +864,8 @@ impl Engine {
                 .commands
                 .issue(Outgoing {
                     authority: None,
+                    input_facts: None,
+                    session_offer: None,
                     id: row.id,
                     machine: row.machine_id,
                     key,

@@ -581,6 +581,16 @@ pub async fn approvals_always_of(
         .collect())
 }
 
+/// The actual oldest stored row for the caller, independent of the list's cursor and filters.
+pub async fn oldest_retained(conn: &mut Conn, user: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT min(created_at) FROM notifications WHERE user_id=$1")
+            .bind(user)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
