@@ -71,6 +71,26 @@ fn meta_of(stat: &rustix::fs::Stat) -> Meta {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct NamesCursor {
+    directory: rustix::fs::Dir,
+}
+
+#[cfg(target_os = "linux")]
+impl NamesCursor {
+    pub(crate) fn next_name(&mut self) -> io::Result<Option<OsString>> {
+        while let Some(entry) = self.directory.read() {
+            crate::error::check_cancelled().map_err(io::Error::other)?;
+            let entry = entry.map_err(io_error)?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                return Ok(Some(OsString::from_vec(name.to_vec())));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl Dir {
     /// Opens the directory at `path`, following links in the path: the root of a workspace, which
     /// is given by whoever set the environment up and is not a request's to name.
@@ -239,6 +259,14 @@ impl Dir {
     }
 
     /// The names in this directory, without `.` and `..`, in no particular order.
+    /// One owned directory cursor permits whole-tree work without collecting its names.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn names_cursor(&self) -> io::Result<NamesCursor> {
+        Ok(NamesCursor {
+            directory: rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?,
+        })
+    }
+
     pub fn names(&self) -> io::Result<Vec<OsString>> {
         let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
         let mut names = Vec::new();

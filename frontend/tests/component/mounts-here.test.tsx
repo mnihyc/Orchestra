@@ -14,11 +14,13 @@ import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { show } from './support';
 
-const { read, add, remove } = vi.hoisted(() => ({
+const { read, add, remove, copy } = vi.hoisted(() => ({
   read: vi.fn<(machine: string) => Promise<MachineMounts>>(),
   add: vi.fn<(mount: string, machine: string, body: MountLocationSetBody) => Promise<Mount>>(),
   remove: vi.fn<(mount: string, machine: string, confirm?: string) => Promise<void>>(),
+  copy: vi.fn(),
 }));
+vi.mock('@/features/resources/mounts/Copy', () => ({ CopyMountDataLoader: (props: {mountId: string; sourceMachine?: string}) => { copy(props); return null; } }));
 vi.mock('@/api/resource-tools', () => ({
   machineMountsQuery: (machine: string) => ({ queryKey: ['mounts', 'machine', machine], queryFn: () => read(machine) }),
   setMountLocation: add, removeMountLocation: remove,
@@ -92,7 +94,9 @@ describe('Mounts here', () => {
   it('requires the exact mount name before removing a volume from this machine', async () => {
     const user = userEvent.setup();
     show(<MountsHere machine="node" name="Build host" />);
-    await user.click(await screen.findByRole('button', { name: i18n.t('resourceDetails.mount.here.remove', { name: 'empty-volume' }) }));
+    const row = await screen.findByRole('row', { name: /empty-volume/ });
+    await user.click(within(row).getByRole('button', { name: i18n.t('operation.actions') }));
+    await user.click(await screen.findByRole('menuitem', { name: i18n.t('resourceDetails.mount.here.remove', { name: 'empty-volume' }) }));
     const dialog = screen.getByRole('dialog', { name: i18n.t('resourceDetails.mount.removeLocation') });
     expect(within(dialog).getByText(/Build host/)).toBeVisible();
     const erase = within(dialog).getByRole('button', { name: i18n.t('resourceDetails.remove') });
@@ -100,6 +104,17 @@ describe('Mounts here', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Mount name to confirm' }), 'empty-volume');
     await user.click(erase);
     await waitFor(() => expect(remove).toHaveBeenCalledWith('volume', 'node', 'empty-volume'));
+  });
+
+  it('opens the shared data copy with this machines source instead of duplicating its definition', async () => {
+    const user = userEvent.setup();
+    show(<MountsHere machine="node" name="Build host" />);
+    const row = await screen.findByRole('row', { name: /empty-volume/ });
+    await user.click(within(row).getByRole('button', { name: i18n.t('operation.actions') }));
+    await user.click(await screen.findByRole('menuitem', { name: i18n.t('mountCopy.copy') }));
+    await waitFor(() => expect(copy).toHaveBeenCalledWith(expect.objectContaining({ mountId: 'volume', sourceMachine: 'node' })));
+    expect(add).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it('keeps a failed location draft and discards it when the machine changes', async () => {

@@ -225,6 +225,15 @@ impl Mounts {
                 None => {
                     let files = Self::open(&source, limits, gates);
                     match files {
+                        Some(files) if !Self::recorded_identity_matches(request, &files) => (
+                            Self::unavailable(
+                                request.mount_id,
+                                &request.name,
+                                asked,
+                                MountFault::Refused,
+                            ),
+                            None,
+                        ),
                         Some(_) => (
                             EnvironmentFactsMount {
                                 mount_id: request.mount_id,
@@ -258,6 +267,24 @@ impl Mounts {
             });
         }
         Self { entries }
+    }
+
+    fn recorded_identity_matches(request: &EnvAttachMount, files: &Files) -> bool {
+        let Some(recorded) = request
+            .volume
+            .as_ref()
+            .and_then(|volume| volume.directory.as_ref())
+        else {
+            return true;
+        };
+        let (Some(device), Some(inode)) = (recorded.device, recorded.inode) else {
+            return false;
+        };
+        Path::new(&request.source) == Path::new(&recorded.path)
+            && files
+                .root()
+                .root_meta()
+                .is_ok_and(|actual| actual.dev == device && actual.ino == inode)
     }
 
     fn unavailable(
@@ -424,6 +451,47 @@ mod tests {
         let roots = mounts.roots();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].mode, DriverMode::ReadOnly);
+    }
+
+    #[test]
+    fn an_owned_mount_does_not_attach_a_replacement_directory_at_its_recorded_path() {
+        use std::os::unix::fs::MetadataExt;
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("owned");
+        std::fs::create_dir(&path).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mut request = request("owned", &path, AttachMode::ReadOnly);
+        request.volume = Some(orch_driver_contract::runtime::VolumeRef {
+            name: format!("orch-mount-{}", request.mount_id),
+            storage: None,
+            directory: Some(orch_driver_contract::runtime::DirectoryBinding {
+                path: path.to_string_lossy().into_owned(),
+                device: Some(metadata.dev()),
+                inode: Some(metadata.ino()),
+            }),
+        });
+        let initial = Mounts::attach_in_place(
+            &[request.clone()],
+            &MountPolicy::default(),
+            &["/workspace"],
+            &Limits::default(),
+            &gates(),
+        );
+        assert_eq!(initial.facts()[0].state, MountState::Attached);
+        drop(initial);
+        std::fs::rename(&path, base.path().join("original")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("foreign.txt"), b"another directory").unwrap();
+        let mounts = Mounts::attach_in_place(
+            &[request],
+            &MountPolicy::default(),
+            &["/workspace"],
+            &Limits::default(),
+            &gates(),
+        );
+        assert_eq!(mounts.facts()[0].state, MountState::Unavailable);
+        assert_eq!(mounts.facts()[0].reason, Some(MountFault::Refused));
+        assert!(mounts.files("owned").is_err());
     }
 
     #[test]

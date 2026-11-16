@@ -789,6 +789,7 @@ impl Command {
             orch_db::queries::link::insert_command_with_authority(
                 conn,
                 &orch_db::queries::link::NewCommand {
+                    native_target: None,
                     id,
                     machine_id: cleanup.machine,
                     kind: cleanup.kind.as_str(),
@@ -907,6 +908,7 @@ impl Command {
         self.current_issue_callers(
             conn,
             &orch_db::queries::link::NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

@@ -65,6 +65,15 @@ fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
             vec![orch_engine::loss::recipient_subject(&record.plan).map_err(ApiError::engine)?]
         }
         "host_delete" => vec![resources::host_delete::recipient_subject(&record.plan)?],
+        "mount_copy" => {
+            let review: orch_engine::mount_copies::location::Review =
+                serde_json::from_value(record.plan["review"].clone())
+                    .map_err(ApiError::internal)?;
+            vec![ObjectRef {
+                kind: ObjectKind::Mount,
+                id: review.source().mount,
+            }]
+        }
         "provider_update" => vec![resources::provider_recovery::recipient_subject(
             &record.plan,
         )?],

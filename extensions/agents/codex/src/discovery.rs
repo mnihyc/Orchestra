@@ -262,6 +262,7 @@ pub fn record_of(
 fn record_config(thread: &Json) -> crate::events::MapperConfig {
     let native = named(thread, "id").unwrap_or_default();
     crate::events::MapperConfig {
+        opening_id: orch_types::Id::nil(),
         // No thread of Orch holds the session yet: the entries name nothing of Orch's.
         thread_id: orch_types::Id::nil(),
         segment_id: orch_types::Id::nil(),
