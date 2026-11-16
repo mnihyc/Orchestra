@@ -19,9 +19,9 @@ import { Select } from '@/ui/Select';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
 vi.mock('@/help', async () => {
   // This suite exercises entrance ownership. The separate content suite checks the real shipped files/assets.
   const { makeGuide } = await import('@/help/guide');

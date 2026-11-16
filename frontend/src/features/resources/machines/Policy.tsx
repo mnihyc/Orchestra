@@ -39,7 +39,7 @@ import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
 
 /** How a key's value is changed: a switch, a choice, a set of known words, or lines of text. */
-type PolicyChoice = 'read_only' | 'workspace' | 'open' | 'separated' | 'key_separated' | 'credential_shared' | 'handed_over';
+type PolicyChoice = 'roots' | 'machine' | 'read_only' | 'workspace' | 'open' | 'separated' | 'key_separated' | 'credential_shared' | 'handed_over';
 type Control =
   | { kind: 'switch' }
   | { kind: 'choice'; options: readonly PolicyChoice[] }
@@ -57,6 +57,7 @@ const KEYS = {
   'resources.max': { id: 'resources_max', control: { kind: 'json' } },
   hooks: { id: 'hooks', control: { kind: 'json' } },
   ports: { id: 'ports', control: { kind: 'json' } },
+  'environment.files_reach': { id: 'environment_files_reach', control: { kind: 'choice', options: ['roots', 'machine'] } },
   'environment.roots': { id: 'environment_roots', control: { kind: 'lines' } },
   'environment.remote_write': { id: 'environment_remote_write', control: { kind: 'switch' } },
   'environment.terminal': { id: 'environment_terminal', control: { kind: 'switch' } },
@@ -134,6 +135,7 @@ function keyWords(entry: MachinePolicyKey, t: TFunction) {
 
 function ValueText({ policyKey, value }: { policyKey: string; value: unknown }) {
   const { t } = useTranslation();
+  if (policyKey === 'environment.files_reach' && (value === 'roots' || value === 'machine')) return <>{t(`fileReach.${value}`)}</>;
   if (policyKey === 'ports') return <PortPolicyValue value={value} />;
   if (typeof value === 'boolean') return <>{value ? t('machines.policy.on') : t('machines.policy.off')}</>;
   if (policyKey === 'agent.max_sandbox' && (value === 'read_only' || value === 'workspace' || value === 'open')) return <>{t(`machines.policy.sandbox.${value}`)}</>;
@@ -246,7 +248,7 @@ function EditKey({ machineId, entry, onClose }: { machineId: string; entry: Mach
             value={choice}
             onValueChange={setChoice}
             disabled={save.isPending}
-            options={control.options.map((option) => ({ value: option, name: t(`machines.policy.choices.${option}.name`, { defaultValue: option }), description: t(`machines.policy.choices.${option}.description`, { defaultValue: words.description }) }))}
+            options={control.options.map((option) => entry.key === 'environment.files_reach' ? { value: option, name: t(`fileReach.${option}`) } : ({ value: option, name: t(`machines.policy.choices.${option}.name`, { defaultValue: option }), description: t(`machines.policy.choices.${option}.description`, { defaultValue: words.description }) }))}
           />
         )}
         {control.kind === 'set' && (
@@ -349,12 +351,12 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
       {keys.length === 0 ? (
         <EmptyState compact title={t('machines.policy.noKeys')} />
       ) : (
-        <DetailSections label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
+        <DetailSections stacked label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
           // Shared keys (for example directory roots) keep one row and one editor on this page.
           const rows = keys.filter((entry) => SECTIONS.find((candidate)=>entry.definition.sections.includes(candidate))===section);
           if (rows.length === 0) return [];
           const full = rows.filter((entry) => entry.definition.delegable).every((entry) => entry.delegated);
-          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <section aria-label={t(`machines.policy.sections.${section}.name`)} className="flex min-w-0 flex-col gap-2">
+          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <div className="flex min-w-0 flex-col gap-2">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <HelpHint term={t(`machines.policy.sections.${section}.name`)} what={t(`machines.policy.sections.${section}.description`)}/>
               <Button size="sm" onClick={() => setHandover(section)}>{t('machines.policy.fullAccessAction')}</Button>
@@ -363,7 +365,7 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
             <DetailPages items={rows}>{(page) => <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
               {page.map((entry) => <PolicyRow key={entry.key} machineId={machine.id} entry={entry} program={program} windows={policy.data.machine.platform_os==='windows'} />)}
             </ul>}</DetailPages>
-          </section> }];
+          </div> }];
         })} />
       )}
       {handover !== null && <Dialog open onOpenChange={(open) => !open && setHandover(null)} title={t('machines.policy.fullAccessFor', { role: t(`machines.policy.sections.${handover}.name`) })}

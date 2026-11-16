@@ -769,6 +769,37 @@ pub struct SessionRow {
 
 const SESSION_COLUMNS: &str = "id, user_id, as_admin, user_agent, host(ip) AS ip, created_at, last_used_at, expires_at, revoked_at";
 
+/// An exact retained credential match, never authority to continue a session.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SessionProof {
+    pub user_id: Id,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Observes only the cookie presented by this request, including its retained ending facts.
+pub async fn session_proof_by_refresh_hash(
+    conn: &mut Conn,
+    hash: &[u8],
+) -> Result<Option<SessionProof>, DbError> {
+    Ok(
+        sqlx::query_as("SELECT user_id,expires_at,revoked_at FROM sessions WHERE refresh_hash=$1")
+            .bind(hash)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// Failed bearer authentication may report a retained session end, not access-token expiry alone.
+/// The ordinary successful authentication path needs no additional fact read.
+pub async fn session_proof_by_access_hash(
+    conn: &mut Conn,
+    hash: &[u8],
+) -> Result<Option<SessionProof>, DbError> {
+    Ok(sqlx::query_as("SELECT s.user_id,s.expires_at,s.revoked_at FROM access_tokens a JOIN sessions s ON s.id=a.session_id WHERE a.token_hash=$1")
+        .bind(hash).fetch_optional(conn).await?)
+}
+
 /// Reads only the selected live browser session's administrator switch.
 pub async fn session_admin_mode(
     conn: &mut Conn,
@@ -2167,6 +2198,20 @@ pub async fn email_code_sign_in_set_somewhere(conn: &mut Conn) -> Result<bool, D
 }
 
 /// What the interface of `user` remembers for them on every device, by key.
+pub async fn interface_value(
+    conn: &mut Conn,
+    user: Id,
+    key: &str,
+) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT value FROM user_state WHERE user_id=$1 AND key=$2")
+            .bind(user)
+            .bind(key)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
 pub async fn interface_state(conn: &mut Conn, user: Id) -> Result<Vec<(String, Json)>, DbError> {
     Ok(
         sqlx::query_as("SELECT key, value FROM user_state WHERE user_id = $1 ORDER BY key")
