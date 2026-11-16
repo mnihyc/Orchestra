@@ -151,12 +151,15 @@ async fn turns(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<Thr
         &segment_ids,
     )
     .await?;
-    let (turns, segments) = ctx
+    let (mut turns, segments) = ctx
         .app
         .engine
         .project_history_in(&mut tx, &rows, &segments)
         .await
         .map_err(super::read_failed)?;
+    orch_engine::notifications::decisions::project(&mut tx, ctx.user()?.id(), &mut turns, &mut [])
+        .await
+        .map_err(ApiError::internal)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     #[cfg(any(test, feature = "test-support"))]
     crate::realtime::history_read_tests::pause(

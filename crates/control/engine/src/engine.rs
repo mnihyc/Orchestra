@@ -124,6 +124,13 @@ pub struct Inner {
     pub(crate) blobs: OnceLock<Arc<dyn BlobStore>>,
     /// The idle environments that this process is stopping now.
     pub(crate) stopping: Mutex<HashSet<Id>>,
+    /// The threads whose Stops, or the work that follows them, a task of this process is carrying out now.
+    pub(crate) stops: Mutex<HashSet<Id>>,
+    pub(crate) decision_settlements: Mutex<HashSet<Id>>,
+    pub(crate) start_waits: Mutex<HashMap<Id, tokio_util::sync::CancellationToken>>,
+    pub(crate) preparation_reads: Mutex<HashMap<Id, tokio_util::sync::CancellationToken>>,
+    /// At most one end publication per thread; seals of later turns remain independent.
+    pub(crate) end_publications: Mutex<HashSet<Id>>,
     /// Current browser profiles, counts and the API's volatile transport.
     pub(crate) browser_memory: Arc<crate::browsers::Memory>,
     /// Display sealing and transient-list hooks supplied by the API.
@@ -139,8 +146,6 @@ pub struct Inner {
     /// What this process remembers of the credentials that left their providers (the part that keeps
     /// providers): the copies issued under each lease, and the returns under way.
     pub(crate) credentials: Mutex<crate::credentials::Issuing>,
-    /// The pieces of growing text that are not written to their items yet ([`crate::streaming`]).
-    pub(crate) growing: crate::streaming::Growing,
 }
 
 /// The thread engine.
@@ -213,9 +218,13 @@ impl Engine {
                 room_made: Mutex::new(None),
                 releasing: AtomicBool::new(false),
                 cap_waits: Mutex::new(HashMap::new()),
-                growing: crate::streaming::Growing::default(),
                 blobs: OnceLock::new(),
                 stopping: Mutex::new(HashSet::new()),
+                stops: Mutex::new(HashSet::new()),
+                decision_settlements: Mutex::new(HashSet::new()),
+                start_waits: Mutex::new(HashMap::new()),
+                preparation_reads: Mutex::new(HashMap::new()),
+                end_publications: Mutex::new(HashSet::new()),
                 browser_memory: Arc::new(crate::browsers::Memory::default()),
                 display_memory: Arc::new(crate::displays::Memory::default()),
                 background: crate::background::Memory::default(),
@@ -281,6 +290,12 @@ impl Engine {
     /// is in the database, for the next process to take up.
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
+        for waiting in lock(&self.inner.start_waits).values() {
+            waiting.cancel();
+        }
+        for reading in lock(&self.inner.preparation_reads).values() {
+            reading.cancel();
+        }
         self.stop_agent_history();
         self.inner.signal.notify_waiters();
         self.inner.woken.notify_waiters();
@@ -427,6 +442,21 @@ impl Engine {
             ripe
         };
         let batch = self.inner.config.sweep_batch;
+        // A person's Stop comes before everything else the sweep looks at, and is handed to a task of its
+        // thread that the sweep does not wait for.
+        if let Err(error) = self.keep_stops().await {
+            tracing::warn!(%error, "the Stops that are open could not be looked at; the next sweep looks again");
+        }
+        if let Err(error) = self.keep_decision_settlements().await {
+            tracing::warn!(%error, "recorded decisions await their thread effects; the next sweep looks again");
+        }
+        // A commit may skip a busy thread; idle threads still get their durable file work paid.
+        if let Err(error) = self.invalidate_work().await {
+            tracing::warn!(%error, "committed file changes await the next invalidation sweep");
+        }
+        if let Err(error) = self.clear_forgotten_sessions().await {
+            tracing::warn!(%error, "the records of closed sessions could not be cleared; the next sweep looks again");
+        }
         if let Err(error) = crate::tools::source::reap(self, None).await {
             tracing::warn!(%error, "admitted own-tool native commands await their durable outcome");
         }
