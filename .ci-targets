@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-db --lib
+test -p orch-db --test provider_keeper --test participation_summaries
+test -p orch-authz --lib
+test -p orch-api-core --lib
+test -p orch-api-core --test accounts --test session_others --test transaction_guards --test notifications_inbox
+test -p orch-api-core --test everything_scale --test realtime_feeds --test threads_read --test providers --test provider_sources --test provider_duplicates -- --nocapture
+test -p orch-api-core --test search_content --test search_names --test search_native_scopes --test holder_search_native_scopes
+test -p orch-engine --test person_notice_preparation

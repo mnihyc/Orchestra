@@ -59,7 +59,6 @@ CREATE TABLE users (
     theme text DEFAULT 'system'::text NOT NULL,
     density text DEFAULT 'comfortable'::text NOT NULL,
     personal_org_id uuid,
-    inbox_seq bigint DEFAULT 0 NOT NULL,
     created_by uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -97,6 +96,22 @@ CREATE TRIGGER access_changed_insert AFTER INSERT ON users FOR EACH ROW EXECUTE 
 CREATE TRIGGER access_changed_update AFTER UPDATE OF status, is_system_admin ON users FOR EACH ROW WHEN (((old.status IS DISTINCT FROM new.status) OR (old.is_system_admin IS DISTINCT FROM new.is_system_admin))) EXECUTE FUNCTION access_changed();
 
 CREATE TRIGGER public_name_user AFTER INSERT OR UPDATE OF username ON users FOR EACH ROW EXECUTE FUNCTION orch_public_name_user();
+
+-- Notification cursors order only one person's Inbox. They share no writer row with credentials.
+CREATE TABLE user_inboxes (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    inbox_seq bigint DEFAULT 0 NOT NULL
+);
+
+CREATE FUNCTION public.orch_user_inbox_created() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO user_inboxes(user_id) VALUES(NEW.id);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER user_inbox_created AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION orch_user_inbox_created();
 
 CREATE TABLE api_tokens (
     id uuid NOT NULL,
@@ -184,7 +199,7 @@ CREATE TABLE invitations (
     CONSTRAINT invitations_check3 CHECK (((email IS NULL) OR (max_uses = 1))),
     CONSTRAINT invitations_issuer_origin_check CHECK ((issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object')),
     CONSTRAINT invitations_kind_check CHECK ((kind = ANY (ARRAY['system'::text, 'org'::text, 'node'::text, 'chat'::text]))),
-    CONSTRAINT invitations_max_uses_check CHECK (((max_uses >= 1) AND (max_uses <= 1000))),
+    CONSTRAINT invitations_max_uses_check CHECK ((max_uses >= 1)),
     CONSTRAINT invitations_role_check CHECK ((role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
     CONSTRAINT invitations_pkey PRIMARY KEY (id),
     CONSTRAINT invitations_token_hash_key UNIQUE (token_hash),
@@ -294,7 +309,7 @@ CREATE TABLE user_state (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
+    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'interface'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
     CONSTRAINT user_state_value_check CHECK ((pg_column_size(value) <= 65536)),
     CONSTRAINT user_state_pkey PRIMARY KEY (user_id, key),
     CONSTRAINT user_state_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

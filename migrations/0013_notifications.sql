@@ -194,7 +194,7 @@ CREATE TABLE notifications (
     CONSTRAINT notifications_user_id_dedupe_key_key UNIQUE (user_id, dedupe_key),
     CONSTRAINT notifications_chat_fk FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
     CONSTRAINT notifications_node_id_fkey FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
-    CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES user_inboxes(user_id) ON DELETE CASCADE
 );
 
 CREATE INDEX notifications_approval_idx ON notifications USING btree (approval_id, user_id) WHERE (approval_id IS NOT NULL);
