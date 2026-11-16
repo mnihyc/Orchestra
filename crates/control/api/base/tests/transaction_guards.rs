@@ -31,6 +31,86 @@ use support::World;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn a_page_write_refused_at_commit_is_decided_again_without_repeating_its_effect() {
+    use orch_api_contract::access::{
+        PageChange, PermissionPageUpdate, PermissionPageWriteReceipt, PermissionPageWriteResponse,
+    };
+    use orch_api_contract::common::ReceiptProjection;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let world = World::new().await;
+    let owner = person(&world, "page-writer").await;
+    let org = make_org(&world, &owner, "Pages", "pages").await.base.id;
+    let project = make_project(&world, &owner, org, "Plans").await.base.id;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&attempts);
+    let mut registry = Registry::new();
+    registry.on(PermissionPageUpdate,move |ctx:Ctx,():(),_body:PageChange| {
+        let calls=Arc::clone(&calls);
+        async move {
+            let (mut tx,guard)=transaction_guard::begin(&ctx).await?;
+            let id=ctx.id("id")?;
+            authorization::require(&mut tx,guard.principal(),id,authorization::MANAGE,orch_authz::Act::Use,orch_authz::Policy::default()).await?;
+            let seq:i64=sqlx::query_scalar("UPDATE user_inboxes SET inbox_seq=inbox_seq+1 WHERE user_id=$1 RETURNING inbox_seq")
+                .bind(guard.user().id()).fetch_one(&mut *tx).await.map_err(orch_db::DbError::from)?;
+            if calls.fetch_add(1,Ordering::SeqCst)==0 {
+                // One committed authority refresh lands after the native decisions, as a first
+                // provider refresh does. The refused transaction owns its whole database effect.
+                let database=ctx.app.db.clone();
+                tokio::spawn(async move {
+                    let mut changed=database.begin().await?;
+                    access::bump_epoch(&mut changed).await?;
+                    changed.commit().await.map_err(orch_db::DbError::from)?;
+                    Ok::<(),orch_db::DbError>(())
+                }).await.map_err(ApiError::internal)??;
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            Ok::<_,ApiError>(PermissionPageWriteResponse::Receipt(PermissionPageWriteReceipt {
+                projection:ReceiptProjection::Receipt,object_id:id,kind:"project".into(),revision:seq,defaults:false,
+            }))
+        }
+    });
+    let app = orch_api_core::testing::TestApp::new(
+        world.app.app.db.clone(),
+        world.app.clock.clone(),
+        registry,
+    );
+    let before: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
+        .bind(owner.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let reply = app
+        .call(PermissionPageUpdate, &[&"nodes", &project])
+        .token(&owner.token)
+        .body(&PageChange::default())
+        .send()
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "authority is decided under the new snapshot"
+    );
+    let after: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
+        .bind(owner.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after,
+        before + 1,
+        "only the successful database effect commits"
+    );
+}
+
+#[tokio::test]
 async fn revoking_manage_while_a_body_arrives_prevents_the_rename() {
     let world = World::new().await;
     let owner = person(&world, "owner").await;
@@ -1016,7 +1096,7 @@ async fn guarded_change(ctx: &Ctx, after_write: impl Future<Output = ()>) {
     let (mut tx, guard) = transaction_guard::begin(ctx).await.unwrap();
     // A real non-authority write used by messages and notifications. Its user
     // counter must coexist with identity protection; it is not a suspension.
-    sqlx::query("UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1")
+    sqlx::query("UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1")
         .bind(guard.user().id())
         .execute(&mut *tx)
         .await
@@ -1200,7 +1280,7 @@ async fn all_sixteen_guards_can_reach_their_write_before_any_commits() {
         let release = release.clone();
         tasks.spawn(async move {
             let (mut tx, guard) = transaction_guard::begin(&ctx).await.unwrap();
-            sqlx::query("UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1")
+            sqlx::query("UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1")
                 .bind(guard.user().id())
                 .execute(&mut *tx)
                 .await
@@ -1700,7 +1780,7 @@ async fn an_unannounced_authority_change_moves_the_systems_epoch_at_its_commit()
         .await
         .unwrap();
     assert_eq!(after, before + 1, "the system's epoch moved once");
-    sqlx::query("UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1")
+    sqlx::query("UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1")
         .bind(scenario.writer.id())
         .execute(&mut *other)
         .await
@@ -1744,7 +1824,7 @@ async fn a_suspension_waits_for_the_users_key_share_even_without_an_epoch_bump()
 }
 
 #[tokio::test]
-async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_action() {
+async fn concurrent_refreshes_and_drafts_finish_while_account_and_action_writes_are_open() {
     use orch_db::queries::transaction_guard::{self as locks, Scope};
     let world = concurrent_world().await;
     let contexts = concurrent_contexts(&world).await;
@@ -1799,18 +1879,11 @@ async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_a
             .await
             .unwrap()
     });
-    // Prove the actual refresh reached its person lock, rather than merely
-    // leaving an unpolled future while the other requests run.
-    tokio::time::timeout(LOCK_WAIT_BOUND, async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
-                   AND query = 'SELECT * FROM users WHERE id = $1 FOR UPDATE' AND wait_event_type = 'Lock')",
-            ).fetch_one(&world.db.pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.expect("the refresh waits for its own person");
+    let own_response = tokio::time::timeout(OVERLAP_PATIENCE, own_refresh)
+        .await
+        .expect("renewal also finishes while this same person's account write remains open")
+        .unwrap();
+    assert_eq!(own_response.status(), StatusCode::OK);
     let mut tasks = tokio::task::JoinSet::new();
     for index in 1..contexts.len() - 1 {
         let ctx = &contexts[index];
@@ -1859,13 +1932,8 @@ async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_a
     tokio::time::timeout(OVERLAP_PATIENCE, async {
         while let Some(done) = tasks.join_next().await { done.unwrap(); }
     }).await.expect("all other people's refreshes and drafts finish while both original transactions remain open");
-    assert!(
-        !own_refresh.is_finished(),
-        "the same person's refresh still waits"
-    );
     action.commit().await.unwrap();
     personal.commit().await.unwrap();
-    assert_eq!(own_refresh.await.unwrap().status(), StatusCode::OK);
 }
 
 #[tokio::test]

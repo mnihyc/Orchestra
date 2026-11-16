@@ -354,6 +354,102 @@ async fn standing(conn: &mut Conn, provider: Id) -> (String, Option<String>, i64
 }
 
 #[tokio::test]
+async fn a_provider_edit_keeps_its_revision_while_the_system_refreshes_its_facts() {
+    use orch_db::queries::resources::{
+        provider_runtime,
+        routes::{ProviderChange, change_provider},
+    };
+    let (_fixture, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let home = home(&mut conn).await;
+    let provider = api(
+        &mut conn,
+        &home,
+        Api {
+            machine: None,
+            key_machine: None,
+            status: "ready",
+        },
+    )
+    .await;
+    let before = standing(&mut conn, provider).await.2;
+    let at = now();
+    set_facts(
+        &mut conn,
+        provider,
+        &json!({"identity":"Observed account"}),
+        at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before,
+        "a fact refresh does not stale a person's form"
+    );
+    move_status(
+        &mut conn,
+        provider,
+        &["ready"],
+        "error",
+        Some("A temporary upstream error"),
+        at,
+    )
+    .await
+    .unwrap();
+    provider_runtime::set_login_state(&mut conn, provider, &json!({"state":"signed_in"}), at)
+        .await
+        .unwrap();
+    orch_db::queries::provider_facts::source_observed(
+        &mut conn,
+        provider,
+        "facts",
+        &json!({}),
+        Some(&json!({"name":"adapter"})),
+        None,
+        at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before,
+        "status, login reports and learned source metadata are observations too"
+    );
+    sqlx::query("UPDATE providers SET sources=$2 WHERE id=$1")
+        .bind(provider).bind(json!({
+            "facts":{"by":"default","name":null,"address":null,"config":{},"secrets":[],"descriptor":null,"described_at":null,"last_error":null},
+            "models":{"by":"default","name":"endpoints","address":null,"config":{},"secrets":[],"descriptor":{"name":"endpoints"},"described_at":null,"last_error":null},
+            "presenter":null
+        })).execute(&mut *conn).await.unwrap();
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before,
+        "learning the implementation of a default source leaves pending edits current"
+    );
+    let change = ProviderChange {
+        name: Some("A chosen name"),
+        ..Default::default()
+    };
+    assert!(
+        change_provider(&mut conn, provider, before, &change, at)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        standing(&mut conn, provider).await.2,
+        before + 1,
+        "a person's edit moves the configuration revision"
+    );
+    assert!(
+        !change_provider(&mut conn, provider, before, &change, at)
+            .await
+            .unwrap(),
+        "an actually stale human edit is still refused"
+    );
+}
+
+#[tokio::test]
 async fn a_provider_is_read_for_its_start_also_when_deleted_and_its_secrets_come_without_values() {
     let (_db, pool) = world().await;
     let mut conn = pool.acquire().await.unwrap();
@@ -486,7 +582,10 @@ async fn a_status_moves_only_from_the_states_named_and_only_when_it_changes() {
         (status.as_str(), detail.as_deref()),
         ("error", Some("the key was refused"))
     );
-    assert_eq!(after, revision + 1);
+    assert_eq!(
+        after, revision,
+        "a status observation leaves pending edits current"
+    );
 
     // Saying the same again changes nothing, not even the revision.
     assert!(
@@ -561,6 +660,11 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
     let now = now();
     let facts = json!({ "models": ["mock-large"], "protocols": ["openai-responses"] });
     let before = standing(&mut conn, provider).await.2;
+    let accepted =
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap()
+            .unwrap();
 
     assert!(set_facts(&mut conn, provider, &facts, now).await.unwrap());
     assert!(!set_facts(&mut conn, provider, &facts, now).await.unwrap());
@@ -572,13 +676,50 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
             .unwrap();
     assert_eq!(stored.0, facts);
     assert_eq!(stored.1, Some(now));
-    assert_eq!(stored.2, before + 1, "the second report was not a change");
+    assert_eq!(
+        stored.2, before,
+        "neither report changes editable configuration"
+    );
+    assert_eq!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, None)
+            .await
+            .unwrap(),
+        Some(accepted.clone()),
+        "a model or facts observation does not revoke another accepted observation"
+    );
+    assert_eq!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap(),
+        Some(accepted.clone()),
+        "the same configuration snapshot remains current after an observation"
+    );
     assert!(
         set_facts(&mut conn, provider, &json!({ "models": [] }), now)
             .await
             .unwrap()
     );
 
+    sqlx::query(
+        "UPDATE providers SET name='A changed configuration',revision=revision+1 WHERE id=$1",
+    )
+    .bind(provider)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    assert_ne!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, None)
+            .await
+            .unwrap(),
+        Some(accepted),
+        "a configuration change still revokes the accepted observation"
+    );
+    assert!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap()
+            .is_none()
+    );
     // A deleted provider takes no more reports.
     delete_provider(&mut conn, provider, now).await.unwrap();
     assert!(!set_facts(&mut conn, provider, &facts, now).await.unwrap());
