@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-db --lib -- queries::link::tests::
+test -p orch-engine --test paste_delivery
+test -p orch-engine --test source -- the_next_turn_starts_while_a_warm_end_manifests_publication_and_comparison_are_parked
+test -p orch-engine --test machine_moves -- the_end_of_a_job_lets_go_of_what_its_commands_held_and_removes_what_nothing_else_holds

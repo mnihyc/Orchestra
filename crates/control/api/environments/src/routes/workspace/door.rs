@@ -31,43 +31,8 @@ use orch_db::Conn;
 
 use orch_db::queries::environments::workspace as rows;
 
-use orch_db::queries::environments::workspace::EnvironmentRow;
-
+pub use orch_api_base::routes::workspace::door::{Door, open_with_principal, writing};
 use orch_types::Id;
-/// A caller who may reach into an environment.
-#[derive(Debug)]
-pub struct Door {
-    /// The physical machine's own ceiling, separate from the environment's narrowing.
-    pub machine_write: bool,
-    /// The environment.
-    pub env: EnvironmentRow,
-    /// The caller, as the access engine knows them.
-    pub principal: Principal,
-    /// The thread the caller works beside, when they named one.
-    pub thread: Option<Id>,
-    /// That thread's directory in the workspace.
-    pub directory: Option<String>,
-}
-
-impl Door {
-    /// Requires the environment's switch for writes from outside to be on.
-    pub fn may_write(&self) -> ApiResult<()> {
-        if !self.machine_write {
-            return Err(ApiError::new(
-                ErrorCode::PolicyRemoteWriteDisabled,
-                "environment.remote_write: this machine keeps file writes through Orch off",
-            ));
-        }
-        if self.env.remote_write {
-            Ok(())
-        } else {
-            Err(ApiError::new(
-                ErrorCode::WorkspaceRemoteWriteDisabled,
-                "files are not written into this environment from here",
-            ))
-        }
-    }
-}
 
 /// The thread `thread` that the caller works beside, in the environment `environment`: where its
 /// agent starts. It is a thread that runs there and that the caller may view, and none else: a thread
@@ -97,47 +62,4 @@ pub async fn open(ctx: &Ctx, conn: &mut Conn, thread: Option<Id>) -> ApiResult<D
     let environment = ctx.id("id")?;
     let principal = authorization::principal(ctx, conn).await?;
     open_with_principal(ctx, conn, environment, thread, principal).await
-}
-
-/// The same native door for a producer that already obtained its current preparation actor.
-pub(super) async fn open_with_principal(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    environment: Id,
-    thread: Option<Id>,
-    principal: Principal,
-) -> ApiResult<Door> {
-    let env = rows::environment(conn, environment)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if matches!(
-        ctx.route.method.as_str(),
-        "POST" | "PUT" | "PATCH" | "DELETE"
-    ) && let Some(job) =
-        orch_db::queries::jobs::changes::environment_change_hold(conn, environment).await?
-        && job.kind == orch_db::queries::jobs::kind::WORKSPACE_RESTORE
-    {
-        return Err(ApiError::new(
-            ErrorCode::ConflictExists,
-            "recorded files are being restored; remote file writes wait",
-        )
-        .with("job", orch_engine::locks::job_ref(&job)));
-    }
-    let directory = match thread {
-        Some(thread) => Some(beside(conn, &principal, env.id, thread).await?),
-        None => None,
-    };
-    Ok(Door {
-        // A machine's own ceiling refuses only where a machine is known to hold the environment.
-        machine_write: !orch_db::queries::environment_facts::refuses(
-            conn,
-            environment,
-            "environment.remote_write",
-        )
-        .await?,
-        env,
-        principal,
-        thread,
-        directory,
-    })
 }

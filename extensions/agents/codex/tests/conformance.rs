@@ -9,6 +9,8 @@
 mod common;
 #[path = "../../../../scripts/harness-canary/model_only.rs"]
 mod model_only;
+#[path = "../../../../scripts/harness-canary/translated_model.rs"]
+mod translated_model;
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -93,26 +95,10 @@ impl Launcher for Isolated {
     }
 }
 
-async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCase {
-    let mut rig = common::Rig::start(case)
-        .await
-        .expect("the native conformance image is required");
-    let server = if matches!(case, "elicitation" | "tools.result_form") {
-        Some(
-            native::elicitation::Server::start(rig.mock.addr(), common::WAIT)
-                .await
-                .unwrap(),
-        )
-    } else {
-        None
-    };
-    rig.loopback_port = server.as_ref().map(|server| server.address.port());
-    let network = model_only::ModelOnly::new(
-        server
-            .as_ref()
-            .map_or(rig.mock.addr(), |server| server.address),
-    )
-    .await;
+fn isolated(
+    rig: &common::Rig,
+    network: Arc<model_only::ModelOnly>,
+) -> (Arc<Isolated>, Option<String>) {
     let binary = std::env::var("ORCH_CONFORMANCE_CODEX_BINARY").ok();
     let mut mounts: Vec<std::path::PathBuf> =
         vec![rig.home_path().into(), rig.workspace_path().into()];
@@ -131,11 +117,53 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
         mounts,
         launches: Mutex::new(Vec::new()),
     });
+    (launcher, binary)
+}
+
+async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCase {
+    observed_with_translation(case, false).await
+}
+async fn observed_with_translation(
+    case: &str,
+    translated: bool,
+) -> orch_api_contract::admin::HarnessConformanceCase {
+    let mut rig = common::Rig::start(case)
+        .await
+        .expect("the native conformance image is required");
+    let server = if matches!(case, "elicitation" | "tools.result_form") {
+        Some(
+            native::elicitation::Server::start(rig.mock.addr(), common::WAIT)
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    let destination = server
+        .as_ref()
+        .map_or(rig.mock.addr(), |server| server.address);
+    let translation = if translated {
+        Some(translated_model::Translation::start(destination, true, &rig.token).await)
+    } else {
+        None
+    };
+    rig.loopback_port = translation
+        .as_ref()
+        .map(|translation| translation.address.port())
+        .or_else(|| server.as_ref().map(|server| server.address.port()));
+    let network = model_only::ModelOnly::new(
+        translation
+            .as_ref()
+            .map_or(destination, |translation| translation.address),
+    )
+    .await;
+    let (launcher, binary) = isolated(&rig, network);
     rig.adapter = CodexAdapter::with_launcher(launcher.clone());
     let mut start = rig.agent_start();
     start.binary = binary;
     let requests = || {
-        rig.mock
+        let actual = rig
+            .mock
             .requests()
             .into_iter()
             .map(|request| ModelRequest {
@@ -144,7 +172,12 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
                 status: request.status,
                 queued: request.script == Some(orch_testkit::doubles::model::ScriptSource::Queue),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(translation) = &translation {
+            translation.requests(&actual)
+        } else {
+            actual
+        }
     };
     let launches = || {
         launcher
@@ -166,6 +199,9 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
     let control_model = |control: ModelControl| -> Result<(), String> {
         match control {
             ModelControl::Reset => {
+                if let Some(translation) = &translation {
+                    translation.clear();
+                }
                 rig.mock.reset();
                 Ok(())
             }
@@ -230,6 +266,21 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
     } else {
         native::run_case(&mut rig.adapter, &fixture, case).await
     };
+    if translated && result.passed {
+        let actual = rig.mock.requests();
+        assert!(
+            actual
+                .iter()
+                .any(|request| request.path.ends_with("/messages")),
+            "the native case reached the opposite interface"
+        );
+        assert!(
+            !actual
+                .iter()
+                .any(|request| request.path.ends_with("/responses")),
+            "the target never served the native Responses interface"
+        );
+    }
     if !result.passed {
         eprintln!(
             "controlled model requests: {}",
@@ -323,6 +374,13 @@ async fn native_tool_answers_have_only_one_model_facing_form() {
 }
 
 #[tokio::test]
+async fn a_command_left_running_is_listed_and_ended_by_the_name_it_was_listed_with() {
+    let result = observed("background_commands").await;
+    assert_eq!(result.feature.as_deref(), Some("background_commands"));
+    assert!(result.passed && result.error.is_none(), "{result:?}");
+}
+
+#[tokio::test]
 async fn a_fork_is_read_back_from_the_harness_as_the_turns_it_was_forked_through() {
     let result = observed("history.native_import").await;
     assert_eq!(result.feature.as_deref(), Some("import_native"));
@@ -375,5 +433,203 @@ async fn a_native_bypass_turn_runs_a_command_without_an_approval_card() {
             .any(|event| matches!(event, SessionEvent::ApprovalRequested(_)))
     );
     assert!(events.iter().any(|event| matches!(event, SessionEvent::TurnCompleted(end) if end.status == TurnOutcome::Completed)));
+    rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_translation_keeps_parallel_tools_images_and_the_exact_history_prefix() {
+    use base64::Engine as _;
+    use orch_types::new_id;
+
+    let mut rig = common::Rig::start("translated-native-tools")
+        .await
+        .expect("native translation requires its pinned image");
+    let translation = translated_model::Translation::start(rig.mock.addr(), true, &rig.token).await;
+    rig.loopback_port = Some(translation.address.port());
+    let network = model_only::ModelOnly::new(translation.address).await;
+    let (launcher, binary) = isolated(&rig, network);
+    rig.adapter = CodexAdapter::with_launcher(launcher);
+    let mut start = rig.agent_start();
+    start.binary = binary;
+    rig.adapter.start(start, rig.sink.clone()).await.unwrap();
+    let thread = new_id();
+    rig.open_new(thread).await;
+    for (name, text) in [
+        ("first.txt", "the first result"),
+        ("second.txt", "the second result"),
+    ] {
+        std::fs::write(rig.workspace_path().join(name), text).unwrap();
+    }
+    let script = format!(
+        "#!mock\ntool exec_command {}\ntool exec_command {}\nthen\nsay read both\n",
+        json!({"cmd":format!("cat '{}'",rig.workspace_path().join("first.txt").display())}),
+        json!({"cmd":format!("cat '{}'",rig.workspace_path().join("second.txt").display())}),
+    );
+    let events = rig.run_turn(thread, &script).await;
+    assert!(
+        matches!(events.last(), Some(SessionEvent::TurnCompleted(end)) if end.status == TurnOutcome::Completed)
+    );
+    let calls = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ItemCompleted(item) if item.payload["tool"]["kind"] == "command" => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls.len(),
+        2,
+        "both native commands retain their own results"
+    );
+    assert_ne!(calls[0].native_ref, calls[1].native_ref);
+    for (name, text) in [
+        ("first.txt", "the first result"),
+        ("second.txt", "the second result"),
+    ] {
+        assert!(
+            calls.iter().any(|call| {
+                let body = call.payload.to_string();
+                body.contains(name) && body.contains(text)
+            }),
+            "{name} keeps its own native result"
+        );
+    }
+    let native = translation.requests(&[]);
+    let prefix = native.last().unwrap().body["input"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let actual = rig.mock.requests();
+    let outgoing_prefix = actual.last().unwrap().body["messages"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for text in ["the first result", "the second result"] {
+        assert!(
+            actual.last().unwrap().body.to_string().contains(text),
+            "{text} reached the opposite interface"
+        );
+    }
+    let pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let path = rig.workspace_path().join("view.png");
+    std::fs::write(
+        &path,
+        base64::engine::general_purpose::STANDARD
+            .decode(pixel)
+            .unwrap(),
+    )
+    .unwrap();
+    let script = format!(
+        "#!mock\ntool view_image {}\nthen\nsay image seen\n",
+        json!({"path":path})
+    );
+    let events = rig.run_turn(thread, &script).await;
+    assert!(
+        matches!(events.last(), Some(SessionEvent::TurnCompleted(end)) if end.status == TurnOutcome::Completed)
+    );
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.payload["tool"]["kind"] == "image")));
+    let after = translation.requests(&[]);
+    assert!(
+        after[native.len()].body["input"]
+            .as_array()
+            .unwrap()
+            .starts_with(&prefix),
+        "the next native request keeps the exact earlier input prefix"
+    );
+    assert!(
+        after.iter().skip(native.len()).any(|request| {
+            let body = request.body.to_string();
+            body.contains("\"type\":\"input_image\"") && body.contains("image/png")
+        }),
+        "the actual native image result reaches the conversion"
+    );
+    let outgoing = rig.mock.requests();
+    assert!(
+        outgoing[actual.len()].body["messages"]
+            .as_array()
+            .unwrap()
+            .starts_with(&outgoing_prefix),
+        "the opposite interface keeps the exact earlier conversation prefix"
+    );
+    assert!(
+        outgoing.iter().skip(actual.len()).any(|request| {
+            let body = request.body.to_string();
+            body.contains("\"type\":\"image\"") && body.contains("image/png")
+        }),
+        "the opposite interface receives the usable native image result"
+    );
+    assert!(
+        outgoing
+            .iter()
+            .all(|request| request.path.ends_with("/messages")),
+        "the controlled target serves only the opposite interface"
+    );
+    rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_translation_keeps_mcp_result_forms_dynamic_tools_and_nested_agents() {
+    for case in ["tools.result_form", "dynamic_tools", "nested_subagent"] {
+        let result = observed_with_translation(case, true).await;
+        assert!(
+            result.passed && result.error.is_none(),
+            "{case}: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_translation_keeps_a_conversation_that_is_imported_into_a_fresh_program_home() {
+    let result = observed_with_translation("history.native_import", true).await;
+    assert!(result.passed && result.error.is_none(), "{result:?}");
+}
+
+#[tokio::test]
+async fn native_translation_keeps_a_completed_compaction_summary_in_the_next_real_turn() {
+    use orch_agent_contract::session::SessionMode;
+    use orch_types::new_id;
+    let mut rig = common::Rig::start("translated-compaction")
+        .await
+        .expect("native translation requires its pinned image");
+    let translation = translated_model::Translation::start(rig.mock.addr(), true, &rig.token).await;
+    rig.loopback_port = Some(translation.address.port());
+    let network = model_only::ModelOnly::new(translation.address).await;
+    let (launcher, binary) = isolated(&rig, network);
+    rig.adapter = CodexAdapter::with_launcher(launcher);
+    let mut start = rig.agent_start();
+    start.binary = binary;
+    rig.adapter.start(start, rig.sink.clone()).await.unwrap();
+    let thread = new_id();
+    // The small compaction threshold and the pinned fallback model's own window are the existing native history fixture.
+    let small = json!({"context":4000,"context_window":272000});
+    let mut spec = rig.spec(thread, SessionMode::New, None);
+    spec.settings.params = small.clone();
+    rig.adapter.open_session(spec).await.unwrap();
+    let mut first = rig.turn(
+        thread,
+        &common::script("PROBE_BEFORE", &["say PROBE_ANSWER", "usage 3900 10"]),
+    );
+    first.params = small.clone();
+    rig.adapter.start_turn(first).await.unwrap();
+    let first = rig.until_turn_ends().await;
+    assert!(first.iter().any(|event|matches!(event,SessionEvent::TurnCompleted(end) if end.status==TurnOutcome::Completed)));
+    rig.mock.queue("say PROBE_SUMMARY_KEPT").unwrap();
+    let mut next = rig.turn(
+        thread,
+        &common::script("PROBE_AFTER", &["say Finished after shortening"]),
+    );
+    next.params = small;
+    rig.adapter.start_turn(next).await.unwrap();
+    let next = rig.until_turn_ends().await;
+    assert!(next.iter().any(|event|matches!(event,SessionEvent::TurnCompleted(end) if end.status==TurnOutcome::Completed)));
+    assert!(
+        rig.mock.requests().iter().any(|request| {
+            let body = request.body.to_string();
+            body.contains("PROBE_AFTER") && body.contains("PROBE_SUMMARY_KEPT")
+        }),
+        "the actual opposite interface receives the retained summary with the next turn"
+    );
     rig.adapter.stop().await.unwrap();
 }

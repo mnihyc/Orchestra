@@ -275,6 +275,7 @@ async fn inventory_prefix_durable_issue_keeps_exact_command_raw_key_and_an_obser
     let id: Id = serde_json::from_value(frame["id"].clone()).unwrap();
     let body = json!({});
     let wire = link::NewCommand {
+        content_transit: false,
         id,
         machine_id: host.machine,
         kind: "node.resources.list",
@@ -302,6 +303,7 @@ async fn inventory_prefix_durable_issue_keeps_exact_command_raw_key_and_an_obser
     clock.advance(chrono::Duration::seconds(2));
     let mut tx = world.pool.begin().await.unwrap();
     let wire = link::NewCommand {
+        content_transit: false,
         id,
         machine_id: host.machine,
         kind: "node.resources.list",

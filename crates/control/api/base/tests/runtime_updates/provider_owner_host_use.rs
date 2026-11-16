@@ -161,6 +161,7 @@ async fn a_provider_manager_cannot_move_its_runtime_where_only_the_manager_has_h
         .call(provider_api::ProviderUpdate, &[&team.provider])
         .token(&team.c.boss.token)
         .body(&provider_api::ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -346,6 +347,7 @@ async fn a_provider_manager_can_preview_a_move_when_only_its_owner_has_destinati
         .call(provider_api::ProviderUpdate, &[&team.provider])
         .token(&team.c.boss.token)
         .body(&provider_api::ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
