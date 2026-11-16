@@ -148,6 +148,7 @@ impl native::Selected for Batch {
     type Query = ();
     type Value = Selected;
     type Reply = ForkBatch;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::BATCH_GET;
 
     fn select<'a>(
@@ -255,9 +256,17 @@ impl native::Selected for Batch {
                     || row.created_by != new.created_by
                     || row.created_at != new.created_at
                     || row.batch_id != new.batch_id
-                    || row
-                        .node_id
-                        .is_some_and(|id| old.paths.get(&id) != fresh.paths.get(&id))
+                {
+                    // A current governor cannot lend its Read to an earlier job/source pairing.
+                    // Progress can refresh, but a different association needs a new read.
+                    return Err(ApiError::new(
+                        orch_api_contract::common::ErrorCode::ConflictStaleRevision,
+                        "The batch job changed its original source while it was being read.",
+                    ));
+                }
+                if row
+                    .node_id
+                    .is_some_and(|id| old.paths.get(&id) != fresh.paths.get(&id))
                     || old.waiting.get(&row.id) != fresh.waiting.get(&row.id)
                 {
                     return Ok(false);

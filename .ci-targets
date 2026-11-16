@@ -1,0 +1,5 @@
+web typecheck
+web lint
+web test -- tests/unit/first-wave.test.ts tests/unit/client.test.ts tests/unit/entry-reach.test.ts tests/component/connection-status.test.tsx tests/unit/socket.test.ts tests/unit/admin-mode-double.test.ts tests/component/shell-bootstrap.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
+web-e2e tests/e2e/frame-review.spec.ts --project=chromium --grep "startup keeps one baseline|thread startup preloads"
+web-e2e tests/e2e/first-wave-edge.spec.ts --project=chromium
