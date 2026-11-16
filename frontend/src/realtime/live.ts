@@ -5,12 +5,12 @@
  * out. A view says which feed it shows by a hook, and the feed is followed for as long as any view
  * does.
  */
+import { supersededRead } from '@/api/reads';
 import { isThreadDisplay } from '@/lib/threadDisplay';
-import { CancelledError } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useStore } from 'zustand';
 
-import { applyChanges, type Change, followWith, people, resourceChanges, threadRowChanges, treeChanges, userEventChanges } from '@/api/acts';
+import { applyChanges, type Change, followWith, people, resourceChanges, threadMcpChanges, threadRowChanges, treeChanges, userEventChanges } from '@/api/acts';
 import { feedSequences, record } from '@/api/cache';
 import { client } from '@/api/client';
 import { capturePeopleHint } from '@/api/peopleChanges';
@@ -29,23 +29,31 @@ import { captureThreadRead } from '@/api/threadRead';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { isDefaultThreadRead, threadReadRegistryKey, threadReadTarget, type ThreadReadTarget } from '@/realtime/threadScope';
 import { applyThreadFeedRows, coordinateThreadReads, createThreadReadFeed, forgetThreadRead as forgetRead, type ThreadFeedData } from '@/realtime/threadFeed';
-import type { DocumentBlock, DocumentDiscussion, DocumentRef, Notification, Thread, ThreadParameters, UserRef } from '@/generated/api-types';
+import type { DocumentBlock, DocumentDiscussion, DocumentRef, Meta, Notification, PersonalRevision, Thread, ThreadParameters, UserRef } from '@/generated/api-types';
 import { createRealtimeSocket, type SocketStatus, type Subscription } from '@/realtime/socket';
-import { type DocumentRows, documentWriter } from '@/realtime/stores/document';
+import { type DocumentRows, documentStateNow, documentWriter } from '@/realtime/stores/document';
+import { useViewReadsReady } from '@/features/workbench/KeptQueries';
+import { useKeptModel } from '@/features/workbench/KeptModels';
+import { useViewShown } from '@/features/workbench/viewOpening';
 import { setGapHandler, threadReadOnly, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import { type Counters, onUserEvent, tellUserEvent, useUserStore, userWriter } from '@/realtime/stores/user';
 import { outsideQuery } from '@/api/away';
 import { type DurableFeed, FeedRegistry, followFeed, loadWithRetries } from '@/realtime/sync';
 import { installQueryFeeds } from '@/realtime/queryFeeds';
+import { readAgainFollows } from '@/api/readAgain';
 import { clearResourceFollowing, setResourceFollowing } from '@/realtime/resourceFollowing';
 
 export const socket = createRealtimeSocket({
+  quality: () => queryClient.getQueryData<Meta>(['meta'])?.interface_defaults.connection_quality,
   token: client.accessToken,
   renew: client.renew,
   // The session is over on the server: asking for a token finds that out, and the page follows.
   onSuspended: () => void client.renew().catch(() => undefined),
 });
+
+// A wait that only the live connection can end reads again by itself, and reads more often while the connection is not up.
+readAgainFollows(() => socket.status.getState().phase === 'ready');
 
 export const feeds = new FeedRegistry();
 let stopQueryFeeds = installQueryFeeds(socket, queryClient);
@@ -55,6 +63,7 @@ client.onSession((event) => {
     // adopt() can replace a person without an intervening signed_out event. A subscription
     // captured for the new reader must never travel on the former person's authenticated socket.
     personalSource?.stop(); personalSource = null; retirePersonalEvents();
+    personalJoined = false; personalRevision = null; firstJoin = false;
     scheduledReads.advance();
     socket.stop();
     stopQueryFeeds();
@@ -67,6 +76,7 @@ client.onSession((event) => {
   else if (event.type === 'renewed') socket.reauth();
   else {
     personalSource?.stop(); personalSource = null; retirePersonalEvents();
+    personalJoined = false; personalRevision = null; firstJoin = false;
     scheduledReads.advance();
     socket.stop();
     stopQueryFeeds();
@@ -148,11 +158,24 @@ function carryChoice(row: Thread, earlier: Thread): void {
   });
 }
 
+/** How long a feed that was started ahead of its view is held for it, unless the view takes it over or lets go sooner. */
+export const WARM_HOLD_MS = 30_000;
+
+/** A release that happens once: at the call, or when `ms` have passed. */
+function holdFor(release: () => void, ms: number): () => void {
+  const timer = setTimeout(release, ms);
+  return () => { clearTimeout(timer); release(); };
+}
+
 const treeKey = (orgId: string) => `org:${orgId}`;
 
 function treeFeed(orgId: string): DurableFeed<TreeRows> {
   return {
     feed: treeKey(orgId),
+    initial: () => {
+      const held = useTreeStore.getState().byOrg.get(orgId);
+      return held?.loaded === true ? { seq: held.lastSeq, complete: true, data: { nodes: [], hidden: [] } } : null;
+    },
     resetting: () => treeWriter.evict(orgId),
     load: async (since, signal) => {
       const reply = await loadWithRetries(() => fetchTree(orgId, since, signal), signal);
@@ -168,6 +191,7 @@ function treeFeed(orgId: string): DurableFeed<TreeRows> {
     // A private place the reader administers and may not view arrives as its minimal row, kept apart.
     read: (data) => splitListed(Array.isArray(data.nodes) ? (data.nodes as unknown[]) : []),
     failed: (error) => treeWriter.failed(orgId, error),
+    subscribed: () => treeWriter.failed(orgId, null),
     // The org is gone, or closed to this reader: nothing of it stays.
     closed: () => treeWriter.evict(orgId),
   };
@@ -175,14 +199,31 @@ function treeFeed(orgId: string): DurableFeed<TreeRows> {
 
 /** Follows the tree of a root org for as long as the calling view is shown. */
 export function useOrgTreeFeed(orgId: string | null): void {
+  useKeptModel(orgId, retainOrgTree);
+  const ready = useViewReadsReady();
   useEffect(() => {
-    if (orgId === null) return;
+    if (orgId === null || !ready) return;
     return feeds.use(
       treeKey(orgId),
       () => followFeed(socket, treeFeed(orgId)),
       () => treeWriter.evict(orgId),
     );
-  }, [orgId]);
+  }, [orgId, ready]);
+}
+
+/** Keeps an open view's tree rows without following or polling them. */
+export function retainOrgTree(orgId: string): () => void {
+  return feeds.hold(treeKey(orgId), () => treeWriter.evict(orgId));
+}
+
+/**
+ * Starts following a root org's tree before any view shows it, and keeps it for `holdMs` for the view that comes: the left
+ * bar finds it under way, or loaded, instead of starting it. What is returned lets go of it earlier; the registry then keeps
+ * the follower a little longer for a view that is about to show it.
+ */
+export function warmOrgTree(orgId: string, holdMs = WARM_HOLD_MS): () => void {
+  const release = feeds.use(treeKey(orgId), () => followFeed(socket, treeFeed(orgId)), () => treeWriter.evict(orgId));
+  return holdFor(release, holdMs);
 }
 
 /** Loads a tree again from nothing, when its reader asks after a failure. */
@@ -233,6 +274,9 @@ function takeThreadRows(threadId: ThreadReadTarget, data: ThreadFeedData, reset:
       item.kind === 'marker' && (item.payload.marker === 'setting_changed' || item.payload.marker === 'model_changed')
       && !before.items.has(item.id) && current.items.has(item.id));
     if (modelChanged || settingRecorded) chosen.push(...threadRowChanges(now.id));
+    const observed = data.items?.filter((item) => current.items.get(item.id) !== before.items.get(item.id)
+      && current.items.get(item.id)?.seq_updated === item.seq_updated) ?? [];
+    chosen.push(...threadMcpChanges(now, earlier, observed));
     carryChoice(now, earlier);
   }
   settle(changes);
@@ -280,17 +324,27 @@ if (typeof document !== 'undefined') {
   });
 }
 
-/** Follows a thread for as long as the calling view is shown, and tells the server that it is on screen. */
+/** Retains a scoped native model even while Activity pauses its readers. */
+export function useRetainedThread(target: ThreadReadTarget | null): void {
+  const ref = useThreadReadRef(target ?? '');
+  const hold = useCallback(() => feeds.hold(threadKey(ref), () => threadWriter.evict(ref), () => reloadThreadRead.rebase(ref)), [ref]);
+  useKeptModel(target === null ? null : threadKey(ref), hold);
+}
+
+/** Transport and watching belong only to a displayed view, independently of its retained model. */
 export function useThreadFeed(threadId: ThreadReadTarget | null, reportVisible = true): void {
   const ref = useThreadReadRef(threadId ?? '');
+  useRetainedThread(threadId === null ? null : ref);
+  const ready = useViewReadsReady(), shownHere = useViewShown();
   useEffect(() => {
-    if (threadId === null) return;
+    if (threadId === null || !ready || !shownHere) return;
     const actual = ref.threadId;
     const release = feeds.use(
       threadKey(ref),
       () => followFeed(socket, threadFeed(ref)),
       () => threadWriter.evict(ref),
       () => reloadThreadRead.rebase(ref),
+      true,
     );
     if (reportVisible) {
       shown.set(actual, (shown.get(actual) ?? 0) + 1);
@@ -305,12 +359,35 @@ export function useThreadFeed(threadId: ThreadReadTarget | null, reportVisible =
       }
       release();
     };
-  }, [threadId, ref, reportVisible]);
+  }, [threadId, ref, reportVisible, ready, shownHere]);
 }
 
-/** Loads a thread again from nothing, when its reader asks after a failure. */
-export function reloadThread(threadId: ThreadReadTarget): void {
-  reloadThreadRead(threadId);
+/**
+ * Starts following a thread, as its screen will, from the moment its tab is opened for it and before the screen is drawn:
+ * the screen's own use of the feed finds it under way. It is kept for `holdMs`; what is returned lets go of it earlier.
+ */
+export function warmThread(threadId: ThreadReadTarget, holdMs = WARM_HOLD_MS): (() => void) & { shown: (shown: boolean) => void } {
+  const ref = threadReadTarget(threadId);
+  const hold = feeds.hold(threadKey(ref), () => threadWriter.evict(ref), () => reloadThreadRead.rebase(ref));
+  const follow = () => feeds.use(
+    threadKey(ref),
+    () => followFeed(socket, threadFeed(ref)),
+    () => threadWriter.evict(ref),
+    () => reloadThreadRead.rebase(ref),
+    true,
+  );
+  let release: (() => void) | null = follow(), stopped = false;
+  const stop = holdFor(() => { stopped = true; release?.(); release = null; hold(); }, holdMs);
+  return Object.assign(stop, { shown: (shown: boolean) => {
+    if (stopped) return;
+    if (!shown) { release?.(); release = null; }
+    else release ??= follow();
+  } });
+}
+
+/** Explicit latest/activation reads replace the window; connection recovery can preserve its cut. */
+export function reloadThread(threadId: ThreadReadTarget, keepWindow = false): void {
+  reloadThreadRead(threadId, !keepWindow);
 }
 
 /** Destroy one local window on true tab close; other views of its native thread stay owned. */
@@ -330,6 +407,10 @@ const documentKey = (id: string) => `doc:${id}`;
 function documentFeed(id: string): DurableFeed<DocumentRows> {
   return {
     feed: documentKey(id),
+    initial: () => {
+      const state = documentStateNow(id);
+      return state.loaded && state.ended === null ? { seq: state.lastSeq, complete: true, data: {} } : null;
+    },
     invalidated: () => documentWriter.evict(id),
     load: async (since, signal) => {
       const reader = summaryReaderKey();
@@ -358,14 +439,26 @@ function documentFeed(id: string): DurableFeed<DocumentRows> {
 
 /** Follows a document's rows, who has it open and who is writing, for as long as the calling view is shown. */
 export function useDocumentFeed(id: string | null): void {
+  useKeptModel(id, retainDocument);
+  const ready = useViewReadsReady();
   useEffect(() => {
-    if (id === null) return;
+    if (id === null || !ready) return;
     return feeds.use(
       documentKey(id),
       () => followFeed(socket, documentFeed(id)),
       () => documentWriter.evict(id),
     );
-  }, [id]);
+  }, [id, ready]);
+}
+
+/** A retained editor owns rows, without a subscription, polling or presence. */
+export function retainDocument(id: string): () => void {
+  return feeds.hold(documentKey(id), () => documentWriter.evict(id));
+}
+
+/** The address starts the document's same native feed before its editor code arrives. */
+export function warmDocument(id: string): () => void {
+  return feeds.use(documentKey(id), () => followFeed(socket, documentFeed(id)), () => documentWriter.evict(id));
 }
 
 /** Loads a document again from nothing, when its reader asks after a failure. */
@@ -388,17 +481,34 @@ export function sendWriting(id: string, block: string): void {
 const USER_FEED = 'user';
 let personalSource: ReturnType<typeof followPersonalSource<UserRows>> | null = null;
 let baselineExpected = false;
+/** Whether the server has accepted the person's own feed on this page for this reader. */
+let personalJoined = false;
+let personalRevision: PersonalRevision | null = null;
+/**
+ * The first join of a page, made beside the first baseline read: the reads of that first wave began before it, and its
+ * own acceptance retires none of them. Native change order identifies any gap before the join.
+ */
+let firstJoin = false;
+
+/** Whether the person's own feed has been accepted by the server since this reader signed in. */
+export function personalSourceJoined(): boolean { return personalJoined; }
+/** The native cut of the currently accepted personal source, never a former session's cut. */
+export function personalSourceRevision(): PersonalRevision | null { return personalRevision; }
+
 export async function ensurePersonalSource(willReadBaseline = false): Promise<void> {
   baselineExpected ||= willReadBaseline;
-  if (personalSource === null) feeds.use(USER_FEED, () => {
-    const source = followPersonalSource(socket, userFeed(), () => scheduledReads.advance());
-    personalSource = source;
-    return { ...source, stop: () => { source.stop(); if (personalSource === source) personalSource = null; baselineExpected = false; } };
-  }, () => userWriter.clear());
+  if (personalSource === null) {
+    firstJoin = willReadBaseline && !personalJoined;
+    feeds.use(USER_FEED, () => {
+      const source = followPersonalSource(socket, userFeed(), () => { personalRevision = null; if (!firstJoin) scheduledReads.advance(); });
+      personalSource = source;
+      return { ...source, stop: () => { source.stop(); if (personalSource === source) personalSource = null; personalRevision = null; baselineExpected = false; firstJoin = false; } };
+    }, () => userWriter.clear());
+  }
   const source = personalSource;
   if (source === null) throw new Error('The personal source has no owner');
   const accepted = await admittedOrOffline(source.ready, socket.status);
-  if (!accepted) baselineExpected = false;
+  if (!accepted) { baselineExpected = false; firstJoin = false; }
 }
 
 const INBOX_FIRST_PAGE = ['inbox', 'first-page'] as const;
@@ -462,7 +572,7 @@ function userFeed(): DurableFeed<UserRows> {
       const read = readInboxPage(0);
       const page = await read.promise;
       signal.throwIfAborted();
-      if (!read.current()) throw new CancelledError({ silent: true });
+      if (!read.current()) throw supersededRead();
       return {
         seq: summary.seq,
         complete: true,
@@ -492,11 +602,14 @@ function userFeed(): DurableFeed<UserRows> {
       // source closes the authority gap before initial admission or reconnect:
       // personal events are not replayed and an Inbox sequence is not that cut.
       if (frame.mode === 'reload') return;
-      // The first shell aggregate starts after this accepted source. Reconnects
-      // retake it once before repairing dependent views; no pre-admission snapshot
-      // is used as evidence for this cut.
+      personalRevision = frame.personal_revision ?? null;
+      // The first shell aggregate is read beside this join. Its native cut says
+      // whether repair is needed. Reconnects retake it before dependent views.
       if (subscribed || !baselineExpected) void retakePersonalBaseline().then((retaken) => { if (!retaken) settle(people(true)); }, (error: unknown) => userWriter.failed(error));
       subscribed = true;
+      // From here a later join is a change of source again, and retires what was read before it.
+      firstJoin = false;
+      personalJoined = true;
     },
     other: (frame) => {
       if (frame.op === 'event') {
@@ -507,7 +620,7 @@ function userFeed(): DurableFeed<UserRows> {
           const counters = countersOf(frame.data.summary);
           if (counters !== null) userWriter.counters(counters);
           // Publish a supplied preference once before all its consumers hear it.
-          if (what === 'state' || what === 'favorites') void applyChanges(userEventChanges(what, frame.data));
+          if (what === 'state' || what === 'favorites' || what === 'model_recents') void applyChanges(userEventChanges(what, frame.data));
           tellUserEvent(what, frame.data);
         });
       }
@@ -567,6 +680,7 @@ followWith({
 
 /** The feeds of the resources whose pages are on screen, by `kind:id`. */
 const resourceFeeds = new Map<string, Subscription>();
+const resourceFailures = new WeakSet<Error>();
 let reconciling = false;
 socket.status.subscribe((status) => { if (status.phase !== 'ready') clearResourceFollowing(); });
 
@@ -574,7 +688,7 @@ socket.status.subscribe((status) => { if (status.phase !== 'ready') clearResourc
  * Follows the feed of every resource a view on screen reads (`resource:<kind>:<id>`), and only those: what its owners
  * or managers change elsewhere arrives as that recipient's native row and updates held views directly.
  * Bare general news defers to this object feed; only a genuinely missing projection needs an exact repair.
- * A feed the person may not follow is refused by the server and says nothing.
+ * A refused stream keeps its row and reports recovery on that exact detail.
  */
 function reconcileResourceFeeds(): void {
   reconciling = false;
@@ -584,26 +698,53 @@ function reconcileResourceFeeds(): void {
     subscription.unsubscribe();
     resourceFeeds.delete(name);
     const [kind = '', id = ''] = name.split(':');
-    setResourceFollowing(kind, id, false);
+    if (kind !== 'provider-row') setResourceFollowing(kind, id, false);
   }
   for (const name of wanted) {
     if (resourceFeeds.has(name)) continue;
     const [kind = '', id = ''] = name.split(':');
+    const rowOnly = kind === 'provider-row';
+    const entity = rowOnly ? 'provider' : kind;
     let seq: number | null = null;
     let baseline = true;
     resourceFeeds.set(
       name,
-      socket.subscribe(`resource:${name}`, {
+      socket.subscribe(rowOnly ? name : `resource:${name}`, {
         since: () => seq,
         onFrame: (frame) => {
-          if (frame.op === 'subscribed') { setResourceFollowing(kind, id, true); return; }
-          if (frame.op === 'closed' || frame.op === 'error') setResourceFollowing(kind, id, false);
+          const detail = kind === 'mcp_server' ? 'mcp-server' : kind;
+          const query = queryClient.getQueryCache().find({ queryKey: [detail, id], exact: true });
+          if (frame.op === 'subscribed') {
+            // A row-only feed follows the list's compact row: it neither marks the resource as followed nor settles the
+            // detail read's failure, which belong to the detail's own feed.
+            if (!rowOnly) {
+              setResourceFollowing(kind, id, true);
+              if (frame.mode !== 'reload' && query?.state.error instanceof Error && resourceFailures.has(query.state.error)) {
+                query.setState({ error: null, status: query.state.data === undefined ? 'pending' : 'success' });
+              }
+            }
+            return;
+          }
+          if (!rowOnly && (frame.op === 'closed' || frame.op === 'error')) setResourceFollowing(kind, id, false);
           if ((frame.op === 'closed' && frame.reason !== 'unsubscribed') || (frame.op === 'error' && (frame.code === 'forbidden' || frame.code === 'not_found'))) {
-            settle([{ row: { kind, id, value: null } }]);
+            settle([{ row: { kind: entity, id, value: null } }]);
+            return;
+          }
+          if (frame.op === 'error' && query !== undefined) {
+            const error = new Error(`resource:${name}: ${frame.code}: ${frame.detail}`);
+            if (frame.code === 'too_many_subscriptions') Object.defineProperty(error, 'code', { value: frame.code });
+            resourceFailures.add(error);
+            query.setState({ error, status: 'error' });
             return;
           }
           if (frame.op === 'sync') { if (seq !== null && frame.seq <= seq) return; seq = frame.seq; }
           if (frame.op !== 'event' && frame.op !== 'sync') return;
+          if (rowOnly) {
+            if (frame.data.what === 'changed' && (frame.data.provider === null || record(frame.data.provider) && frame.data.provider.id === id)) {
+              settle([{ row: { kind: 'provider', id, value: frame.data.provider, partial: true } }]);
+            }
+            return;
+          }
           setResourceFollowing(kind, id, true);
           if (frame.data.what === 'login' && record(frame.data.state)) {
             settle([{ value: { key: ['provider-login', id], data: frame.data.state } }]);

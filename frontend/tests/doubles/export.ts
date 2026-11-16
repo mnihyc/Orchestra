@@ -642,6 +642,11 @@ export class ExportWorld implements Part {
     if ((found = /^GET \/chats\/([^/]+)\/export$/.exec(route))) return this.chat(person, found[1] ?? '', query);
     if ((found = /^GET \/documents\/([^/]+)\/export$/.exec(route))) return this.documentFile(person, found[1] ?? '', query);
     if ((found = /^GET \/topics\/([^/]+)\/sync$/.exec(route))) return this.topicSync(person, found[1] ?? '');
+    if ((found = /^GET \/topics\/([^/]+)\/input-schedules$/.exec(route))) {
+      const topicId = found[1] ?? '';
+      if (this.world.places.node(person, topicId).kind !== 'topic') return refuse(404, 'not_found', 'no such topic');
+      return { status: 200, body: { items: this.world.requestFeeds.topicSchedules(person, topicId).rows, next_cursor: null } };
+    }
     return null;
   }
 

@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract -p orch-agent-contract -p orch-link-contract -p orch-model-contract -p orch-provider-contract -p orch-realtime-contract -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test forks --test delivery --test orch_tools
+test -p orch-engine --test background_wake -- instruction_refresh_waits_for_live_work_without_replacing_its_session_generation
+test -p orch-api-core --test binding_options --test semantic_admin --test thread_session_configuration --test threads_settings --test call_recovery --test provider_recovery --test thread_read_tools --test model_entries --test provider_models --test personal
+test -p orch-xtask --bin orch-xtask -- names::tests::
+web typecheck
+web lint
+web test
