@@ -154,6 +154,7 @@ impl Rig {
         let clock: Arc<dyn Clock> = Arc::new(manual.clone());
         let pki = TestPki::new(Arc::clone(&clock));
         let hub = Hub::new(Arc::clone(&clock), pki.certificate());
+        hub.admit_test_tool_sessions();
         let machine_id = new_id();
         let pki_identity = pki.machine(machine_id);
         let controller =

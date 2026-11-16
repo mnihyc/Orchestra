@@ -356,6 +356,7 @@ impl Packet {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
