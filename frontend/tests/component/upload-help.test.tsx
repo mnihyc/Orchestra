@@ -8,7 +8,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const opened = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => opened }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => opened }));
 afterEach(async () => { opened.mockClear(); await setLocale('en'); });
 
 for (const language of ['en', 'zh-CN'] as const) for (const topic of Object.keys(UPLOAD_HELP) as UploadHelpTopic[]) {

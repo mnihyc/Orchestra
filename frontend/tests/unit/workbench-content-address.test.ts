@@ -1,6 +1,10 @@
 /** Full content resource identities survive URLs, explicit clones and supported old layouts. */
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { contentAddress, contentHref, contentLocation, contentTab, contentTarget, parseContentAddress, type ContentLocation } from '@/features/workbench/contentAddress';
+import { client } from '@/api/client';
+import { queryClient } from '@/api/query';
+import { meStateKey } from '@/api/personal';
+import { useCapturedAction } from '@/features/workbench/lossActions';
 import { openContent } from '@/features/workbench/contentNavigation';
 import { allTabs, applyGrid, findTab, makeGroup, makeTab, move, parse, serialize } from '@/features/workbench/layout';
 import { panelTarget, moveScoped } from '@/features/workbench/panelScope';
@@ -15,7 +19,7 @@ const differences: ContentLocation[] = [
   { view: 'difference', environmentId: 'environment-a', threadId: null, path: 'src/main.rs', kind: 'change', item: 'actual-item', staged: false },
 ];
 beforeEach(() => { state().leave(); localStorage.clear(); state().enter('content-address-reader', 'thread'); });
-afterEach(() => { state().leave(); localStorage.clear(); });
+afterEach(() => { state().leave(); localStorage.clear(); queryClient.removeQueries({ queryKey: meStateKey, exact: true }); useCapturedAction.setState({ action: null }); });
 
 it.each([file, ...differences, { view: 'page', href: '/thread/thread-a?continuation=version-b&item=item-2&prompt=input-2' } satisfies ContentLocation])('round trips the complete $view source without any local owner in its shared URL', (location) => {
   const href = contentHref(location);
@@ -91,15 +95,17 @@ it('normal resource reuse preserves peers while new/beside clones the exact nati
   expect(findTab(state().layout, other!)).not.toBeNull();
 });
 
-it.each([1, 2, 3])('migrates every valid main result in layout version %s without replacing identity, group selection or locator', (version) => {
+it.each([1, 2, 3])('rejects obsolete layout version %s instead of importing its replaced shape', (version) => {
+  expect(parse(JSON.stringify({ ...state().layout, version }))).toBeNull();
+});
+
+it('promotes current main results without replacing identity, group selection or locator', () => {
   const one = makeTab('search-result', { kind: 'thread', id: 'thread-a', continuation: 'history-b', prompt: 'input-b', anchor: 'actual-item-b' });
   const document = makeTab('search-result', { kind: 'document', id: 'document-a', anchor: 'block-a', version: '7' });
   const chat = makeTab('search-result', { kind: 'chat', id: 'chat-a', anchor: 'message-a' });
   const placeChat = makeTab('search-result', { kind: 'place-chat', id: 'place-a', anchor: 'message-b' });
   const group = makeGroup([one, document, chat, placeChat], document.id);
-  const value = { ...state().layout, version, main: group };
-  const legacy = version === 1 ? { ...value, left: { open: false, size: 220, group: makeGroup() }, right: { open: false, size: 320, group: makeGroup() } } : value;
-  const loaded = parse(JSON.stringify(legacy));
+  const loaded = parse(JSON.stringify({ ...state().layout, main: group }));
   expect(loaded).not.toBeNull();
   expect(findTab(loaded!, document.id)?.group.id).toBe(group.id);
   expect(findTab(loaded!, document.id)?.group.active).toBe(document.id);
@@ -139,4 +145,57 @@ it('the neutral file address still offers compatible panels only from actual cur
   expect(offers(definition, 'page', { title: 'Other page', views: { ready: true } })).toBe(false);
   expect(offers(definition, 'page', { title: 'Refused source', target: { kind: 'environment', id: 'workspace-a' }, views: { ready: true, workspace: false } })).toBe(false);
   expect(offers({ ...definition, name: 'git' }, 'page', { title: 'No through-thread', target: { kind: 'environment', id: 'workspace-a' }, views: { ready: true, workspace: true } })).toBe(false);
+});
+
+
+it('keeps a destination in one view while walking its sections and opens a different destination beside it', () => {
+  const management = openContent('/admin/overview');
+  expect(openContent('/admin/storage')).toBe(management);
+  expect(contentAddress(findTab(state().layout, management!)!.tab)).toBe('/admin/storage');
+  const resources = openContent('/resources/providers');
+  expect(resources).not.toBe(management);
+  expect(openContent('/resources/hosts')).toBe(resources);
+  expect(openContent('/resources/hosts/one')).toBe(resources);
+  expect(openContent('/settings/profile')).not.toBe(resources);
+  expect(openContent('/admin/users')).toBe(management);
+  expect(allTabs(state().layout).filter((tab) => tab.view === 'page')).toHaveLength(3);
+});
+
+it('applies the opening choice to new destinations while focusing a target that is already open', () => {
+  const management = openContent('/admin/overview');
+  queryClient.setQueryData(meStateKey, { sidebar: { open_links: 'new' } });
+  const storage = openContent('/admin/storage');
+  expect(storage).not.toBe(management);
+  expect(openContent('/admin/overview')).toBe(management);
+  queryClient.setQueryData(meStateKey, { sidebar: { open_links: 'this' } });
+  expect(openContent('/inbox')).toBe(management);
+  expect(contentAddress(findTab(state().layout, management!)!.tab)).toBe('/inbox');
+  expect(contentAddress(findTab(state().layout, storage!)!.tab)).toBe('/admin/storage');
+});
+
+it('keeps unsaved work and its address until the existing save decision permits navigation', () => {
+  const management = openContent('/admin/overview');
+  state().setUnsaved(management!, true);
+  const before = state().layout;
+  expect(openContent('/admin/storage')).toBeNull();
+  expect(state().layout).toBe(before);
+  expect(contentAddress(findTab(state().layout, management!)!.tab)).toBe('/admin/overview');
+  const decision = useCapturedAction.getState().action;
+  expect(decision?.ids).toEqual([management]);
+  state().setUnsaved(management!, false);
+  if (decision?.current() === true) decision.run();
+  expect(contentAddress(findTab(state().layout, management!)!.tab)).toBe('/admin/storage');
+});
+
+it('does not carry a delayed replacement into a different signed-in person', () => {
+  const session = client.session.getState();
+  try {
+    const management = openContent('/admin/overview'); state().setUnsaved(management!, true);
+    openContent('/admin/storage');
+    const decision = useCapturedAction.getState().action;
+    client.session.setState({ userId: 'another-reader' });
+    expect(decision?.current()).toBe(false);
+    expect(useCapturedAction.getState().action).toBeNull();
+    expect(contentAddress(findTab(state().layout, management!)!.tab)).toBe('/admin/overview');
+  } finally { client.session.setState(session); }
 });

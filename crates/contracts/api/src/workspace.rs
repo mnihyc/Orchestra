@@ -39,21 +39,13 @@ pub const FETCH_WAIT_MAX_SECONDS: u32 = 25;
 pub const EXPECTED_HASH_NONE: &str = "none";
 /// The fewest characters a search for files may be asked.
 pub const FILE_SEARCH_QUERY_MIN_CHARS: u32 = 2;
-/// The most entries a search by name returns.
-pub const FILE_SEARCH_NAMES_MAX: u32 = 200;
 /// How many matches a search in content returns when it does not say.
 pub const FILE_SEARCH_LIMIT_DEFAULT: u32 = 200;
-/// The most matches a search in content may be asked for.
-pub const FILE_SEARCH_LIMIT_MAX: u32 = 1_000;
 /// How many characters of a line a match carries, cut around the match.
 pub const FILE_MATCH_TEXT_CHARS: u32 = 400;
 /// How many entries a listing of an archive holds when it is not told.
 pub const ARCHIVE_LIST_LIMIT_DEFAULT: u32 = 1_000;
-/// The most entries a listing of an archive may be asked for.
-pub const ARCHIVE_LIST_LIMIT_MAX: u32 = 5_000;
-/// The most bytes of a unified diff of a repository; more is cut and says so.
-pub const GIT_DIFF_MAX_BYTES: i64 = 2 * 1024 * 1024;
-/// The header that is `1` on a diff that was cut at [`GIT_DIFF_MAX_BYTES`].
+/// The header that is `1` when the native difference has another page.
 pub const TRUNCATED_HEADER: &str = "x-truncated";
 
 /// How far a phase of a job has come.
@@ -140,6 +132,9 @@ pub enum JobWaiting {
 /// Live activity accompanying a job's counters without changing its durable state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct JobActivity {
+    /// The actual native execution budget, captured where that same timer is enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_deadline: Option<JobWorkDeadline>,
     /// What the controller knows this work is waiting for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<JobWaiting>,
@@ -151,6 +146,61 @@ pub struct JobActivity {
     pub directories_done: Option<i64>,
     /// Cancellation was requested and machine cleanup has not finished.
     pub stopping: bool,
+}
+
+/// The only origins used by system-scoped work allowances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPolicyOrigin {
+    /// The settings registry's value.
+    Default,
+    /// An explicit system row.
+    System,
+}
+
+/// The existing system keys that govern native work and count timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum JobWorkPolicyKey {
+    /// Active observer grace.
+    #[serde(rename = "jobs.measurement_keepalive_secs")]
+    MeasurementKeepalive,
+    /// Reuse validity at assessment.
+    #[serde(rename = "jobs.measurement_valid_secs")]
+    MeasurementValidity,
+    /// Native count execution allowance.
+    #[serde(rename = "jobs.measurement_timeout_secs")]
+    MeasurementTimeout,
+    /// Native file work execution allowance.
+    #[serde(rename = "jobs.io_timeout_secs")]
+    IoTimeout,
+}
+
+/// The public system setting actually used, without private values or ancestor names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JobWorkPolicy {
+    /// Its public registry key.
+    pub key: JobWorkPolicyKey,
+    /// The exact layer which supplied this allowance.
+    pub origin: WorkPolicyOrigin,
+    /// The stored row's revision, or null for the registry default.
+    pub revision: Option<orch_types::Revision>,
+}
+
+/// The connector's actual execution timer, distinct from the command's admission deadline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JobWorkDeadline {
+    /// The native invocation which owns this budget; never a display label.
+    pub command: Id,
+    /// Its actual phase.
+    pub phase: String,
+    /// When execution was accepted by the enforcing dispatcher.
+    pub accepted_at: Time,
+    /// The instant corresponding to the same native monotonic deadline.
+    pub at: Time,
+    /// The accepted allowance, not today's setting.
+    pub seconds: u64,
+    /// Captured settings provenance, or null when it was not reported.
+    pub policy: Option<JobWorkPolicy>,
 }
 
 /// Why a job failed.
@@ -169,6 +219,18 @@ pub struct JobError {
 /// A job: work that takes a while and is carried out apart from the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Job {
+    /// The retained notes decision of this change, without borrowing today's proposal or private directory names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_outcome: Option<crate::forks::MemoryOutcome>,
+    /// The current native count assessment and observer grace, never calculated by the browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_timing: Option<crate::forks::MeasurementTiming>,
+    /// A completed fork or switch's captured history transport and coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_coverage: Option<crate::forks::HistoryCoverage>,
+    /// Captured retry and lease facts under this job's current read authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_wait: Option<JobLifecycleWait>,
     /// A model recovery awaited by this workflow, with its known due time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_recovery: Option<crate::calls::CallRecovery>,
@@ -203,6 +265,43 @@ pub struct Job {
     pub started_at: Option<Time>,
     /// When it ended.
     pub finished_at: Option<Time>,
+}
+
+/// An operational time is unknown, inapplicable or recorded; eligibility never promises execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum JobWaitTime {
+    /// This record did not capture the instant.
+    Unreported,
+    /// This job is not waiting on that kind of boundary.
+    NotApplicable,
+    /// The boundary captured by the actual operational decision.
+    At {
+        /// The recorded boundary, never a guaranteed execution time.
+        at: Time,
+    },
+}
+
+/// What an accepted cleanup or retry currently waits on, separate from progress counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JobLifecycleWait {
+    /// The actual phase, or cleanup after an accepted abort.
+    pub phase: String,
+    /// The retry boundary retained by the deciding operation.
+    pub retry_eligible_at: JobWaitTime,
+    /// The current runner lease's recoverable boundary.
+    pub lease_recoverable_at: JobWaitTime,
+    /// When the latest retained attempt was claimed or ended in a retry.
+    pub last_attempt_at: JobWaitTime,
+    /// The ordinary public failure wording; never a runner's private diagnostic.
+    pub reason: Option<String>,
+    /// The public failure catalogue key, for the reader's language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Whether the current claim recovers an earlier execution, when captured.
+    pub recovering: Option<bool>,
+    /// When these retry or lease facts were last recorded; null if not reported.
+    pub observed_at: Option<Time>,
 }
 
 /// What `result` is on the job that takes a snapshot.
@@ -251,9 +350,166 @@ pub struct DirEntry {
     pub cached: bool,
 }
 
+/// Native source classification, independent of the caller's write permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSourceKind {
+    /// The attached workspace, with Orch's configured and local exclusions.
+    Workspace,
+    /// A read-only attached root, without workspace exclusions.
+    Mount,
+    /// An owned data root copied whole, without workspace exclusions.
+    OwnedData,
+}
+
+/// The source whose rules contributed; rule contents are never disclosed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRuleKind {
+    /// Environment-supplied configured patterns.
+    Configured,
+    /// A local exclusion file in an applicable ancestor directory.
+    Local,
+}
+
+/// An applicable rule source, redacted independently of the allowed directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileRuleSource {
+    /// Configured rules or a local file.
+    pub kind: FileRuleKind,
+    /// A readable workspace-relative rule file; null means not shared.
+    pub path: Option<String>,
+}
+
+/// The inclusion policy captured while reading this exact source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileInclusion {
+    /// Applicable configured and ancestor-local rules, shallow to deep.
+    pub governing_rule_sources: Vec<FileRuleSource>,
+    /// Deeper local rules take precedence over earlier sources.
+    pub deeper_rules_override: bool,
+    /// An excluded ancestor prevents traversal even if a deeper rule would include a file.
+    pub parent_excluded: bool,
+    /// Internal markers and protected control-file rules apply.
+    pub internal_rules_applied: bool,
+}
+
+/// Native source rules, without granting the caller permission to write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileSourcePolicy {
+    /// Which root is being read.
+    pub kind: FileSourceKind,
+    /// Whether workspace exclusions apply; false means the whole source root.
+    pub workspace_exclusions: bool,
+    /// Whether the source itself admits writes, before caller and operation checks.
+    pub writable: bool,
+}
+
+/// The configuration supplier of a native directory watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileWatchSource {
+    /// The machine configuration accepted by the installed watcher.
+    MachineConfiguration,
+}
+
+/// The active native watcher, rather than a browser timer or a later configuration edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileWatchFacts {
+    /// The supplier of the accepted fallback interval.
+    pub source: FileWatchSource,
+    /// Whether native notifications are available; false uses fallback refresh.
+    pub native: bool,
+    /// Native coverage includes only explicitly opened directories when false.
+    pub recursive: bool,
+    /// The fallback interval accepted when this watcher started, in seconds.
+    pub fallback_interval_secs: u64,
+    /// The directory observation to which this watcher fact belongs.
+    pub observation_id: String,
+}
+
+/// Safe native facts captured with one authorized file-source observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileSourceFacts {
+    /// Source identity and rules.
+    pub policy: FileSourcePolicy,
+    /// Applicable exclusion provenance; absent for a source without workspace rules.
+    pub inclusion: Option<FileInclusion>,
+    /// Watch facts; absent for retained sources or unreported watches.
+    pub watch: Option<FileWatchFacts>,
+    /// When these facts were observed, not when the reader opened the disclosure.
+    pub observed_at: Time,
+}
+
+/// The particular allowance that prevented a file preview or original viewer read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewAllowanceKind {
+    /// Original bytes admitted to the static decoder.
+    DecodedSourceBytes,
+    /// Original image pixels, before decode or rendering.
+    Pixels,
+    /// Encoded bytes of the bounded static preview.
+    EncodedPreviewBytes,
+    /// Original bytes admitted to an interactive viewer.
+    ViewerBytes,
+}
+
+/// A captured allowance, not an inference from an unrelated read limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PreviewAllowance {
+    /// The accounting that refused this preview.
+    pub kind: PreviewAllowanceKind,
+    /// The accepted allowance in bytes or pixels, according to kind.
+    pub limit: u64,
+    /// The measured original or encoded amount, only when known.
+    pub actual_if_known: Option<u64>,
+    /// The source of the accepted value.
+    pub source: crate::settings::SettingSource,
+}
+
+/// The last known state of the exact native manifest transfer for this source incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTransferState {
+    /// The native publisher announced a transfer that has not completed.
+    Transferring,
+    /// The native publisher reported an interrupted transfer.
+    Interrupted,
+    /// Cleanup removed its unfinished pieces after the captured expiry.
+    Expired,
+}
+
+/// A machine transfer receipt; browser upload sessions are a separate source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileTransferFacts {
+    /// Exact announced content, never inferred from size or recent machine activity.
+    pub transfer_id: Hash,
+    /// The publisher's observed state, or confirmed cleanup.
+    pub state: FileTransferState,
+    /// Actual last accepted piece; null when no piece was reported.
+    pub last_piece_at: Option<Time>,
+    /// Captured idle expiry; null when not reported, never calculated from a later default.
+    pub expires_at: Option<Time>,
+    /// Accepted idle retention in seconds.
+    pub idle_retention_secs: Option<i64>,
+    /// Captured default or System source; absent when the original transfer did not record it.
+    pub retention_source: Option<crate::settings::SettingSource>,
+}
+
+/// Current source transfer facts read on intent, without a scan or a new native command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileTransferReply {
+    /// None when there is no announced unfinished transfer for this exact source incarnation.
+    pub transfer: Option<FileTransferFacts>,
+}
+
 /// A directory and what is in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DirListing {
+    /// Captured source facts; absent means not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<FileSourceFacts>,
     /// The directory.
     pub path: String,
     /// The mount that was listed, when it was not the workspace.
@@ -270,7 +526,8 @@ pub struct DirListing {
     pub entries: Vec<DirEntry>,
     /// Whether there are more than were listed.
     pub truncated: bool,
-    /// Sorted immutable observed metadata; absent for an older unpaged source.
+    /// Identity of this directory observation. Wide or changing folders retain a live reader;
+    /// their pages cover an interval rather than an instantaneous whole-directory snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
     /// Read the next page with the same environment/source/path; null means the actual end.
@@ -284,6 +541,9 @@ pub struct DirListing {
 /// One file or directory, with what is known of its content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileStat {
+    /// Facts captured by the native read; absent is not inferred from current defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<FileSourceFacts>,
     /// What a directory lists of it.
     #[serde(flatten)]
     pub entry: DirEntry,
@@ -449,11 +709,34 @@ pub struct FileMatch {
 /// What a search in content found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileSearchContent {
+    /// Continue the same live traversal; null means it reached the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The beginning of live observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_from: Option<Time>,
     /// The lines that hold it.
     pub matches: Vec<FileMatch>,
-    /// Whether there were more than were returned.
+    /// Whether traversal can continue; another slice may examine entries without finding a match.
     pub truncated: bool,
     /// How many files were searched.
+    pub searched: i64,
+}
+
+/// A filename-search window with its actual source and continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileSearchNames {
+    /// Matching paths from this observation.
+    pub entries: Vec<DirEntry>,
+    /// The next window of the same selected search.
+    pub next_cursor: Option<String>,
+    /// Live traversal or the last complete cached manifest.
+    pub source: FilesSource,
+    /// The end of this page's observation.
+    pub as_of: Time,
+    /// The beginning of live traversal, or the cached manifest's observation time.
+    pub observed_from: Option<Time>,
+    /// Entries examined so far; this is not a count of the whole directory.
     pub searched: i64,
 }
 
@@ -461,7 +744,7 @@ pub struct FileSearchContent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchIn {
-    /// A substring of the path, without regard to case, in the latest manifest.
+    /// A substring of the path, from live traversal or the last complete cached manifest.
     Names,
     /// The lines of text files, in the environment as it is now.
     Content,
@@ -519,6 +802,9 @@ pub struct ArchiveEntry {
 /// What an archive holds, read where the file lies and without unpacking it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchiveListing {
+    /// Continue the same archive traversal, including a slice with no matching child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Its format.
     pub format: ArchiveFormat,
     /// How it is compressed, if it is.
@@ -617,8 +903,8 @@ pub struct EnvironmentChangeListReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum EnvironmentFileSearchReply {
-    /// For a search by name: at most [`FILE_SEARCH_NAMES_MAX`] entries.
-    Names(Vec<DirEntry>),
+    /// Matching names with source coverage and continuation.
+    Names(FileSearchNames),
     /// For a search in content.
     Content(FileSearchContent),
 }
@@ -654,7 +940,7 @@ pub struct EnvironmentFileListQuery {
     /// Opaque continuation of exactly this environment/source/path membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// One through 5,000 rows, with an independent two-MiB serialized page bound.
+    /// Positive rows per page; omitted uses the workspace default, with independent wire-byte paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -843,6 +1129,9 @@ pub struct EnvironmentChangeListQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentFileSearchQuery {
+    /// Continue exactly this selected search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -863,8 +1152,7 @@ pub struct EnvironmentFileSearchQuery {
     /// With content: whether case matters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<bool>,
-    /// With content: how many matches at most, [`FILE_SEARCH_LIMIT_DEFAULT`] when left out and at
-    /// most [`FILE_SEARCH_LIMIT_MAX`].
+    /// Matches in this page; the workspace's default when omitted. Continuation retains the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -873,6 +1161,12 @@ pub struct EnvironmentFileSearchQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentArchiveListQuery {
+    /// Match child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Continue the same archive selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -881,8 +1175,7 @@ pub struct EnvironmentArchiveListQuery {
     /// A directory within it to list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside: Option<String>,
-    /// How many entries at most, [`ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and at most
-    /// [`ARCHIVE_LIST_LIMIT_MAX`].
+    /// Entries in this page; omitted uses the workspace default. Continuation retains the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -916,6 +1209,12 @@ pub struct EnvironmentGitStatusGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentGitDiffGetQuery {
+    /// Continue the same native Git output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Preferred bytes in this page; omitted uses the workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -1206,6 +1505,8 @@ crate::common::full_or_receipt! {
 crate::endpoints! {
     /// Lists a directory of an environment's workspace, or of one of its mounts, live or from the last manifest.
     EnvironmentFileList: GET "/environments/{id}/files", Permission("files.view"), query EnvironmentFileListQuery, none, json DirListing, 200;
+    /// Reads the exact current manifest transfer under the existing Files authority.
+    EnvironmentFileTransferGet: GET "/environments/{id}/files/transfer", Permission("files.view"), query ThroughThreadQuery, none, json FileTransferReply, 200;
     /// Describes one file or directory of an environment.
     EnvironmentFileStat: GET "/environments/{id}/files/stat", Permission("files.view"), query EnvironmentFileStatQuery, none, json FileStat, 200;
     /// Returns a bounded preview of the current workspace file without downloading its original to the browser.
@@ -1360,7 +1661,7 @@ crate::endpoints! {
             Target::Resolved("snapshot_environment"),
         );
     /// Reads a job.
-    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export's maker, or current access to a measurement's subject"), none, none, json Job, 200,
+    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export or thread move-out's maker, or current access to a measurement's subject"), none, none, json Job, 200,
         operation Op::variants(&[
             Variant {
                 name: "ordinary",
@@ -1536,8 +1837,12 @@ mod tests {
             by_content,
             EnvironmentFileSearchReply::Content(FileSearchContent { searched: 41, .. })
         ));
-        let by_name: EnvironmentFileSearchReply = serde_json::from_value(json!([])).unwrap();
-        assert!(matches!(by_name, EnvironmentFileSearchReply::Names(names) if names.is_empty()));
+        let by_name: EnvironmentFileSearchReply = serde_json::from_value(json!({
+            "entries":[], "next_cursor":null, "source":"cached", "as_of":"2026-10-08T17:04:05.000Z", "observed_from":null, "searched":0
+        })).unwrap();
+        assert!(
+            matches!(by_name, EnvironmentFileSearchReply::Names(names) if names.entries.is_empty())
+        );
         let query: EnvironmentFileSearchQuery = serde_json::from_value(
             json!({ "q": "parse", "in": "content", "glob": "*.rs", "case": true }),
         )

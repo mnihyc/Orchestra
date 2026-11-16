@@ -6,9 +6,10 @@
 //! explained fallbacks. Immutable roots remain readable after a connector restart and project
 //! garbage collection because every retained object belongs to the separate store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use orch_link_contract::source::{FsRecord, FsRecordResult, RecordState};
@@ -19,14 +20,28 @@ use crate::files::Files;
 use crate::ignore::IGNORE_FILE_MAX_BYTES;
 use crate::index::{Index, IndexEntry};
 use crate::manifest::{self, EntryKind, ManifestEntry};
-use crate::paths::{Locate, PathStyle, RelPath};
+use crate::paths::{Locate, RelPath};
 use crate::platform;
-use crate::state_store::{ObjectStore, StateRoot};
+use crate::state_store::{ObjectStore, PreparedState, StateRoot};
 
 /// The shipped maximum from the recording setting: one GiB of included code and fixtures.
 pub const DEFAULT_RECORD_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 /// The shipped keeping period from the recording setting: a working week and its review.
 pub const DEFAULT_RECORD_DAYS: i64 = 7;
+
+/// How many changed paths wait for the baselines one by one. Past it nothing is lost: everything is looked
+/// at again as a whole, which is cheaper than a list of that length.
+const PENDING_LIMIT: usize = 1_000_000;
+/// How long a path that could not be read waits before it is tried again, so that a file that is being
+/// written is not read at every change.
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+/// How long a pass over a whole tree that could not read something waits before it is tried again.
+const SEED_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How often a directory over the byte bound is measured again while it changes: it may have shrunk.
+const TOO_LARGE_RECHECK: Duration = Duration::from_secs(60);
+/// How many objects written without a flush of their own wait before the worker flushes them: the
+/// recording that follows finds little left to flush.
+const FLUSH_EVERY_OBJECTS: u64 = 1_000;
 
 /// Reads only bounded local Git metadata, with every resolved file kept inside the workspace.
 /// No Git process, fetch, filter, helper or directory scan belongs on the recording path.
@@ -120,30 +135,148 @@ struct CachedEntry {
     object: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndPatch {
+    base: Hash,
+    header: manifest::ManifestHeader,
+    entries: BTreeMap<String, Option<ManifestEntry>>,
+}
+
 #[derive(Debug, Clone)]
 struct Baseline {
     max_bytes: i64,
+    prepared: Option<PreparedState>,
+    end_base: Option<Hash>,
+    end_changes: BTreeMap<String, Option<ManifestEntry>>,
     ready: bool,
     reason: &'static str,
     entries: BTreeMap<String, CachedEntry>,
     ignore_fingerprint: Option<Hash>,
+    /// What this scope leaves out, as the pass that made it read it; every later change is judged by
+    /// these rules until an ignore file changes.
+    rules: Option<std::sync::Arc<GitRules>>,
+    /// The included file bytes and link text, kept up to date change by change.
+    total: i64,
+    /// Whether a pass over the whole scope is owed: a new scope, lost notices, changed ignore
+    /// rules, a larger bound.
+    stale: bool,
+    /// Not before this moment is the pass that is owed tried again.
+    retry_at: Option<Instant>,
+    /// Whether a directory over the byte bound changed since it was measured.
+    changed_since: bool,
 }
 
 impl Baseline {
     fn missing(max_bytes: i64) -> Self {
         Self {
             max_bytes,
+            prepared: None,
+            end_base: None,
+            end_changes: BTreeMap::new(),
             ready: false,
             reason: "not_ready",
             entries: BTreeMap::new(),
             ignore_fingerprint: None,
+            rules: None,
+            total: 0,
+            stale: true,
+            retry_at: None,
+            changed_since: false,
+        }
+    }
+
+    /// A directory whose included files are more than the bound: it keeps nothing, and is measured
+    /// again after a minute if it changes.
+    fn exceeded(max_bytes: i64) -> Self {
+        Self {
+            max_bytes,
+            prepared: None,
+            end_base: None,
+            end_changes: BTreeMap::new(),
+            ready: false,
+            reason: "too_large",
+            entries: BTreeMap::new(),
+            ignore_fingerprint: None,
+            rules: None,
+            total: 0,
+            stale: false,
+            retry_at: Some(Instant::now() + TOO_LARGE_RECHECK),
+            changed_since: false,
         }
     }
 }
 
+/// Takes `relative` and everything below it out of `entries` into `taken`.
+fn take_subtree(
+    entries: &mut BTreeMap<String, CachedEntry>,
+    relative: &str,
+    taken: &mut HashMap<String, CachedEntry>,
+) {
+    if let Some(entry) = entries.remove(relative) {
+        taken.insert(relative.to_owned(), entry);
+    }
+    // Everything below "a/b" sorts between "a/b/" and "a/b0" ('0' follows '/').
+    let from = format!("{relative}/");
+    let to = format!("{relative}0");
+    let keys: Vec<String> = entries
+        .range(from..to)
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        if let Some(entry) = entries.remove(&key) {
+            taken.insert(key, entry);
+        }
+    }
+}
+
+/// What an entry adds to the included bytes: a file's size, a link's text.
+fn weight(entry: &CachedEntry) -> i64 {
+    entry.manifest.s.saturating_add(
+        entry
+            .manifest
+            .l
+            .as_ref()
+            .map_or(0, |link| link.len() as i64),
+    )
+}
+
+struct IndexingPass<'a>(&'a std::sync::atomic::AtomicU64);
+impl Drop for IndexingPass<'_> {
+    fn drop(&mut self) {
+        self.0.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What the background worker of baselines does next.
+pub(crate) enum Work {
+    /// Nothing is owed.
+    Nothing,
+    /// Build the immutable turn metadata requested by a recording.
+    RecordMetadata,
+    /// A pass over everything: a new directory, lost notices, changed ignore rules, a larger bound.
+    Everything,
+    /// Only these paths changed.
+    Paths(Vec<RelPath>),
+}
+
+/// Changed paths that have been taken into the index and wait to be taken into the baselines.
+#[derive(Debug, Default)]
+struct Pending {
+    paths: BTreeSet<RelPath>,
+    /// Paths that could not be read just now, tried again at `retry_at`.
+    retry: BTreeSet<RelPath>,
+    retry_at: Option<Instant>,
+    /// More paths arrived than are kept one by one: everything is looked at again.
+    overflow: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct GitRules {
-    scoped: Vec<(RelPath, Gitignore)>,
+    scoped: BTreeMap<RelPath, Gitignore>,
     pub(crate) fingerprint: Hash,
+    #[cfg(test)]
+    visited: std::sync::atomic::AtomicUsize,
 }
 
 impl GitRules {
@@ -152,6 +285,9 @@ impl GitRules {
         indexed: &[(RelPath, IndexEntry)],
         directory: &RelPath,
     ) -> Result<Self> {
+        let max_rule_bytes = files
+            .ignore()
+            .map_or(IGNORE_FILE_MAX_BYTES, |rules| rules.max_file_bytes());
         let mut directories = std::collections::BTreeSet::from([RelPath::root()]);
         let mut ancestor = Some(directory.clone());
         while let Some(path) = ancestor {
@@ -164,7 +300,7 @@ impl GitRules {
             }
         }
         let mut fingerprints = BTreeMap::new();
-        let mut scoped = Vec::new();
+        let mut scoped = BTreeMap::new();
         for base in directories {
             if !base.starts_with(directory) && !directory.starts_with(&base) {
                 continue;
@@ -177,7 +313,7 @@ impl GitRules {
                     Err(error) => return Err(error),
                 };
                 let Some(meta) = located.meta else { continue };
-                if !meta.is_file() || meta.size > IGNORE_FILE_MAX_BYTES {
+                if !meta.is_file() || meta.size > max_rule_bytes {
                     return Err(HostError::Unsupported(
                         "recording ignore rules are unavailable".to_owned(),
                     ));
@@ -190,14 +326,12 @@ impl GitRules {
                     .map_err(|error| HostError::io("checking recording ignore rules", error))?;
                 let mut bytes = Vec::new();
                 (&file)
-                    .take(IGNORE_FILE_MAX_BYTES + 1)
+                    .take(max_rule_bytes.saturating_add(1))
                     .read_to_end(&mut bytes)
                     .map_err(|error| HostError::io("reading recording ignore rules", error))?;
                 let after = platform::file_meta(&file)
                     .map_err(|error| HostError::io("checking recording ignore rules", error))?;
-                if bytes.len() as u64 > IGNORE_FILE_MAX_BYTES
-                    || before.identity() != after.identity()
-                {
+                if bytes.len() as u64 > max_rule_bytes || before.identity() != after.identity() {
                     return Err(HostError::Changed(
                         "recording ignore rules changed while read".to_owned(),
                     ));
@@ -216,16 +350,15 @@ impl GitRules {
                             .add_line(None, line)
                             .map_err(|error| HostError::Unsupported(error.to_string()))?;
                     }
-                    scoped.push((
+                    scoped.insert(
                         base.clone(),
                         builder
                             .build()
                             .map_err(|error| HostError::Unsupported(error.to_string()))?,
-                    ));
+                    );
                 }
             }
         }
-        scoped.sort_by_key(|(path, _)| path.depth());
         let configured = files
             .ignore()
             .map(|rules| rules.configured_patterns())
@@ -238,6 +371,8 @@ impl GitRules {
         Ok(Self {
             scoped,
             fingerprint: Hash::of(&bytes),
+            #[cfg(test)]
+            visited: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -245,21 +380,26 @@ impl GitRules {
         if path.has_component(".git") {
             return true;
         }
-        let names: Vec<&str> = path.components().collect();
-        for end in 1..=names.len() {
-            let candidate = names[..end].join("/");
-            let Ok(candidate) = RelPath::parse(&candidate, PathStyle::Posix) else {
+        let mut active = Vec::new();
+        let mut candidate = RelPath::root();
+        let mut names = path.components().peekable();
+        while let Some(name) = names.next() {
+            if let Some(rules) = self.scoped.get_key_value(&candidate) {
+                active.push(rules);
+            }
+            let Ok(next) = candidate.join(name) else {
                 return true;
             };
+            candidate = next;
             let mut ignored = false;
-            for (base, rules) in &self.scoped {
-                let Some(relative) = candidate
-                    .strip_prefix(base)
-                    .filter(|relative| !relative.is_root())
-                else {
+            for (base, rules) in &active {
+                #[cfg(test)]
+                self.visited
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(relative) = candidate.strip_prefix(base) else {
                     continue;
                 };
-                match rules.matched(relative.as_str(), end < names.len() || is_dir) {
+                match rules.matched(relative.as_str(), names.peek().is_some() || is_dir) {
                     ignore::Match::Ignore(_) => ignored = true,
                     ignore::Match::Whitelist(_) => ignored = false,
                     ignore::Match::None => {}
@@ -279,9 +419,39 @@ pub struct FileStates {
     store: ObjectStore,
     baselines: Mutex<BTreeMap<RelPath, Baseline>>,
     recording: Mutex<()>,
-    refreshing: Mutex<()>,
+    refreshing: Arc<Mutex<()>>,
     actions: tokio::sync::Mutex<()>,
     epoch: std::sync::atomic::AtomicU64,
+    /// How many passes that bring baselines up to date are running or about to run.
+    working: std::sync::atomic::AtomicUsize,
+    /// The changed paths waiting for the baselines.
+    pending: Mutex<Pending>,
+    /// Whether a pass over everything was asked for, whatever the scopes think they owe.
+    full_wanted: std::sync::atomic::AtomicBool,
+    capture_wanted: std::sync::atomic::AtomicBool,
+    /// How many files the pass over a whole tree has done, and how many it has to do.
+    pass_done: std::sync::atomic::AtomicU64,
+    pass_total: std::sync::atomic::AtomicU64,
+    /// Whether the background worker of the baselines is running.
+    worker: std::sync::atomic::AtomicBool,
+    /// Whether a timer is set to start the worker again when work that waits for its time is due.
+    timer: std::sync::atomic::AtomicBool,
+    /// Whether a recording has already waited out the work in flight: the ones that follow answer
+    /// at once instead of each waiting as long, until the work has moved on.
+    impatient: std::sync::atomic::AtomicBool,
+}
+
+/// Background work that brings baselines up to date, for as long as it is held: a recording that finds a
+/// baseline not ready waits only while there is such work.
+#[derive(Debug)]
+pub(crate) struct Working(std::sync::Arc<FileStates>);
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        self.0
+            .working
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// One recorded read, with the exact immutable root pinned while verified bytes are transferred.
@@ -339,6 +509,7 @@ impl FileStates {
     /// Begins without a complete state until the background index work prepares it.
     #[must_use]
     pub fn new(store: ObjectStore) -> Self {
+        let refreshing = store.background_gate();
         Self {
             store,
             baselines: Mutex::new(BTreeMap::from([(
@@ -346,10 +517,95 @@ impl FileStates {
                 Baseline::missing(DEFAULT_RECORD_MAX_BYTES),
             )])),
             recording: Mutex::new(()),
-            refreshing: Mutex::new(()),
+            refreshing,
             actions: tokio::sync::Mutex::new(()),
             epoch: std::sync::atomic::AtomicU64::new(0),
+            working: std::sync::atomic::AtomicUsize::new(0),
+            pending: Mutex::new(Pending::default()),
+            full_wanted: std::sync::atomic::AtomicBool::new(false),
+            capture_wanted: std::sync::atomic::AtomicBool::new(false),
+            pass_done: std::sync::atomic::AtomicU64::new(0),
+            pass_total: std::sync::atomic::AtomicU64::new(0),
+            worker: std::sync::atomic::AtomicBool::new(false),
+            timer: std::sync::atomic::AtomicBool::new(false),
+            impatient: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Notes that a pass that brings baselines up to date is about to run, until the answer is dropped.
+    pub(crate) fn begin_work(self: &std::sync::Arc<Self>) -> Working {
+        self.working
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Working(std::sync::Arc::clone(self))
+    }
+
+    /// Whether a pass that brings baselines up to date is running or about to run.
+    pub(crate) fn work_in_flight(&self) -> bool {
+        self.working.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// Takes the right to run the background worker; false when it is running already.
+    pub(crate) fn claim_worker(&self) -> bool {
+        !self.worker.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Gives the right to run the background worker back.
+    pub(crate) fn release_worker(&self) {
+        self.worker
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Sets the one timer that starts the worker again; false when one is set already.
+    pub(crate) fn arm_timer(&self) -> bool {
+        !self.timer.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The timer went off.
+    pub(crate) fn disarm_timer(&self) {
+        self.timer.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether work is owed now that the worker has not taken yet.
+    pub(crate) fn has_work(&self) -> bool {
+        let now = Instant::now();
+        if self.full_wanted.load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .capture_wanted
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return true;
+        }
+        {
+            let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if pending.overflow
+                || !pending.paths.is_empty()
+                || (!pending.retry.is_empty() && pending.retry_at.is_none_or(|at| at <= now))
+            {
+                return true;
+            }
+        }
+        self.baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|baseline| Self::owes_a_pass(baseline, now))
+    }
+
+    /// Notes that a recording waited out the work in flight without its baseline becoming ready.
+    pub(crate) fn note_impatient(&self) {
+        self.impatient
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether a recording has waited out the work in flight already.
+    pub(crate) fn is_impatient(&self) -> bool {
+        self.impatient.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The worker finished one piece of work: the next recording waits for the next piece afresh.
+    pub(crate) fn calm(&self) {
+        self.impatient
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The environment-owned immutable store, for reads, moves and restore journals.
@@ -534,17 +790,34 @@ impl FileStates {
             .collect()
     }
 
-    /// Releases expired unpinned roots and unreferenced objects under the capture/refresh gates.
+    /// Opportunistic maintenance never waits in front of foreground file work. A busy store is
+    /// collected by the next scheduled sweep; all expired roots are discoverable without the hint.
     pub fn prune(&self, expired: &[orch_types::Id], now: Time) -> Result<i64> {
-        let _recording = self
-            .recording
+        let _refreshing = match self.refreshing.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(0),
+        };
+        let _recording = match self.recording.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(0),
+        };
+        let mut protected = self.cached_objects();
+        let prepared: Vec<_> = self
+            .baselines
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let _refreshing = self
-            .refreshing
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.store.prune(expired, now, self.cached_objects())
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter_map(|baseline| baseline.prepared.clone())
+            .collect();
+        let mut maps = BTreeSet::new();
+        for prepared in prepared {
+            self.store
+                .protect_tree(&prepared.metadata.tree_ref, &mut protected)?;
+            maps.insert(prepared.objects_blob);
+        }
+        self.store.prune_with_maps(expired, now, protected, maps)
     }
 
     /// Verifies carried roots while baseline refresh and collection cannot change their objects.
@@ -569,53 +842,58 @@ impl FileStates {
             .baselines
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        match baselines.get_mut(directory) {
+        let seed = match baselines.get_mut(directory) {
             None => {
-                let inherited = baselines
-                    .iter()
-                    .filter(|(base, state)| directory.starts_with(base) && state.ready)
-                    .max_by_key(|(base, _)| base.depth())
-                    .and_then(|(base, state)| {
-                        let relative = directory.strip_prefix(base)?;
-                        if !state
-                            .entries
-                            .get(relative.as_str())
-                            .is_some_and(|entry| entry.manifest.t == EntryKind::Dir)
-                        {
-                            return None;
-                        }
-                        let mut subset = Baseline::missing(max_bytes);
-                        for (path, entry) in &state.entries {
-                            let path = RelPath::parse(path, PathStyle::Posix).ok()?;
-                            if let Some(child) =
-                                path.strip_prefix(&relative).filter(|path| !path.is_root())
-                            {
-                                let mut entry = entry.clone();
-                                entry.manifest.p = child.to_string();
-                                subset.entries.insert(child.to_string(), entry);
-                            }
-                        }
-                        // Raw objects can be inherited, but ignore fingerprints are scoped to
-                        // their directory. The first off-turn seed verifies the new scope.
-                        subset.ready = false;
-                        subset.ignore_fingerprint = None;
-                        Some(subset)
-                    });
-                let needs_seed = inherited.as_ref().is_none_or(|state| !state.ready);
-                baselines.insert(
-                    directory.clone(),
-                    inherited.unwrap_or_else(|| Baseline::missing(max_bytes)),
-                );
-                needs_seed
+                baselines.insert(directory.clone(), Baseline::missing(max_bytes));
+                true
             }
-            Some(baseline) if max_bytes > baseline.max_bytes => {
+            Some(baseline) if max_bytes < baseline.max_bytes && baseline.ready => {
+                if baseline.total > max_bytes {
+                    *baseline = Baseline::exceeded(max_bytes);
+                } else {
+                    baseline.max_bytes = max_bytes;
+                }
+                false
+            }
+            Some(baseline) if baseline.reason == "off" || max_bytes != baseline.max_bytes => {
                 baseline.max_bytes = max_bytes;
                 baseline.ready = false;
+                baseline.prepared = None;
                 baseline.reason = "not_ready";
+                self.capture_wanted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                baseline.stale = true;
+                baseline.retry_at = None;
                 true
             }
             _ => false,
+        };
+        if seed {
+            self.full_wanted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        self.capture_wanted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        seed
+    }
+
+    /// Current coverage without copying a scope's entries or doing any filesystem work.
+    pub(crate) fn scope_recording(
+        &self,
+        directory: &RelPath,
+    ) -> Option<orch_link_contract::events::RecordingCoverage> {
+        self.baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(directory)
+            .map(|baseline| orch_link_contract::events::RecordingCoverage {
+                state: if baseline.ready && baseline.prepared.is_some() {
+                    RecordState::Complete
+                } else {
+                    RecordState::Unavailable
+                },
+                reason: (!baseline.ready).then(|| baseline.reason.to_owned()),
+            })
     }
 
     /// Whether the index worker still owes this scope its first/current baseline.
@@ -626,11 +904,13 @@ impl FileStates {
             .unwrap_or_else(PoisonError::into_inner)
             .get(directory)
             .is_none_or(|baseline| {
-                !baseline.ready && matches!(baseline.reason, "not_ready" | "off")
+                (!baseline.ready || baseline.prepared.is_none())
+                    && matches!(baseline.reason, "not_ready" | "indexing" | "off")
             })
     }
 
-    /// Makes coverage unknown immediately when watching loses events or ignore rules change.
+    /// Makes coverage unknown immediately when watching loses events or ignore rules change: every
+    /// scope is looked at again, in the background, by [`FileStates::take_work`].
     pub fn invalidate(&self, reason: &'static str) {
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         for baseline in self
@@ -640,11 +920,14 @@ impl FileStates {
             .values_mut()
         {
             baseline.ready = false;
+            baseline.prepared = None;
             baseline.reason = reason;
+            baseline.stale = reason != "live_tree";
         }
     }
 
-    /// Makes affected scopes unknown before background work refreshes their changed files.
+    /// Makes affected scopes unknown the moment a watch batch arrives, before the index has taken it
+    /// in. The paths are handed to the background worker by [`FileStates::queue`] once it has.
     pub fn changed(&self, paths: &[RelPath]) {
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         for (directory, baseline) in self
@@ -653,17 +936,159 @@ impl FileStates {
             .unwrap_or_else(PoisonError::into_inner)
             .iter_mut()
         {
-            if paths
-                .iter()
-                .any(|path| path.starts_with(directory) || directory.starts_with(path))
-            {
+            if !paths.iter().any(|path| {
+                (path.starts_with(directory) || directory.starts_with(path))
+                    && (matches!(
+                        path.file_name(),
+                        Some(".gitignore" | crate::ignore::IGNORE_FILE)
+                    ) || !baseline.rules.as_ref().is_some_and(|rules| {
+                        rules.ignored(
+                            path,
+                            path.strip_prefix(directory)
+                                .and_then(|relative| baseline.entries.get(relative.as_str()))
+                                .is_some_and(|entry| entry.manifest.t == EntryKind::Dir),
+                        )
+                    }))
+            }) {
+                continue;
+            }
+            if baseline.reason == "too_large" {
+                // A directory over the bound stays so, and is measured again at most once a minute.
+                baseline.changed_since = true;
+            } else if !matches!(baseline.reason, "live_tree" | "off") {
                 baseline.ready = false;
+                baseline.prepared = None;
                 baseline.reason = "not_ready";
+                self.capture_wanted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }
 
-    /// Refreshes requested scopes from the complete in-memory index, hashing only changed files.
+    /// Hands paths that the index has taken in to the background worker: they are brought into every
+    /// baseline one by one, by what changed and not by the size of the tree.
+    pub fn queue(&self, paths: &[RelPath]) {
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if pending.overflow || pending.paths.len().saturating_add(paths.len()) > PENDING_LIMIT {
+                // Nothing is lost: more changes than are kept one by one are looked at as a whole.
+                pending.overflow = true;
+                pending.paths.clear();
+            } else {
+                pending.paths.extend(paths.iter().cloned());
+            }
+        }
+        self.changed(paths);
+    }
+
+    /// Paths that could not be read just now are tried again shortly; the baseline is not ready until
+    /// they were.
+    fn queue_retry(&self, paths: Vec<RelPath>) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.retry.extend(paths);
+        pending.retry_at = Some(Instant::now() + RETRY_AFTER);
+    }
+
+    /// Whether a scope owes a pass over everything that is due now.
+    fn owes_a_pass(baseline: &Baseline, now: Instant) -> bool {
+        let owed = match baseline.reason {
+            "live_tree" | "off" => false,
+            "too_large" => baseline.changed_since,
+            _ => baseline.stale,
+        };
+        owed && baseline.retry_at.is_none_or(|at| at <= now)
+    }
+
+    /// What the background worker does next: a pass over everything (a new directory, lost notices,
+    /// changed ignore rules, a larger bound), the changed paths one by one, or nothing.
+    pub(crate) fn take_work(&self) -> Work {
+        let now = Instant::now();
+        let baselines = self
+            .baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let everything = self
+            .full_wanted
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+            || baselines
+                .values()
+                .any(|baseline| Self::owes_a_pass(baseline, now));
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if everything || pending.overflow {
+            pending.overflow = false;
+            pending.paths.clear();
+            // A new baseline replaces its descriptor even if an earlier metadata pass finished.
+            self.capture_wanted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Work::Everything;
+        }
+        let mut paths = std::mem::take(&mut pending.paths);
+        if pending.retry_at.is_some_and(|at| at <= now) {
+            paths.append(&mut pending.retry);
+            pending.retry_at = None;
+        }
+        if paths.is_empty() {
+            if self
+                .capture_wanted
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Work::RecordMetadata
+            } else {
+                Work::Nothing
+            }
+        } else {
+            Work::Paths(paths.into_iter().collect())
+        }
+    }
+
+    /// Asks for a pass over everything, whatever the scopes think they owe.
+    pub(crate) fn want_everything(&self) {
+        self.full_wanted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How long until work that is waiting for its time is due: paths to try again, a directory to
+    /// measure again.
+    pub(crate) fn next_due(&self) -> Option<std::time::Duration> {
+        let now = Instant::now();
+        let mut soonest = {
+            let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            pending.retry_at.filter(|_| !pending.retry.is_empty())
+        };
+        for baseline in self
+            .baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+        {
+            let waiting = match baseline.reason {
+                "live_tree" | "off" => false,
+                "too_large" => baseline.changed_since,
+                _ => baseline.stale,
+            };
+            if waiting && let Some(at) = baseline.retry_at {
+                soonest = Some(soonest.map_or(at, |soonest| soonest.min(at)));
+            }
+        }
+        soonest.map(|at| at.saturating_duration_since(now))
+    }
+
+    /// How far the pass that is looking at a whole tree has come: files done and files in all.
+    #[must_use]
+    pub fn indexing(&self) -> Option<(u64, u64)> {
+        let total = self.pass_total.load(std::sync::atomic::Ordering::SeqCst);
+        (total > 0).then(|| {
+            (
+                self.pass_done
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .min(total),
+                total,
+            )
+        })
+    }
+
+    /// Brings baselines up to date: with `changed` only those paths, which costs what they cost and
+    /// not what the tree costs; with `None` everything, reading every included file again.
     /// This runs with background index work, never in the turn's capture or observation path.
     pub fn refresh(
         &self,
@@ -671,6 +1096,23 @@ impl FileStates {
         index: &Index,
         changed: Option<&[RelPath]>,
         complete: bool,
+    ) -> Result<()> {
+        self.refresh_with(files, index, changed, complete, changed.is_none())
+    }
+
+    /// Looks at everything again but reads only the files whose size, time or mode differ from what
+    /// was kept: the pass after lost notices or a changed ignore rule.
+    pub fn reconcile(&self, files: &Files, index: &Index, complete: bool) -> Result<()> {
+        self.refresh_with(files, index, None, complete, false)
+    }
+
+    fn refresh_with(
+        &self,
+        files: &Files,
+        index: &Index,
+        changed: Option<&[RelPath]>,
+        complete: bool,
+        forced: bool,
     ) -> Result<()> {
         let _refreshing = self
             .refreshing
@@ -684,8 +1126,40 @@ impl FileStates {
             self.invalidate("not_ready");
             return Ok(());
         }
-        let indexed = index.entries();
         let epoch = self.epoch.load(std::sync::atomic::Ordering::SeqCst);
+        match changed {
+            None => self.seed(files, index, forced)?,
+            Some(paths) => self.apply(files, index, paths)?,
+        }
+        self.settle(epoch);
+        Ok(())
+    }
+
+    /// Marks the scopes that are whole and have nothing waiting as ready. Whatever arrived while a
+    /// pass ran leaves them not ready: its paths are in the queue and the next pass takes them.
+    fn settle(&self, epoch: u64) {
+        let mut baselines = self
+            .baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch
+            || !pending.paths.is_empty()
+            || !pending.retry.is_empty()
+            || pending.overflow
+        {
+            return;
+        }
+        for baseline in baselines.values_mut() {
+            if !baseline.stale && baseline.reason == "not_ready" && baseline.rules.is_some() {
+                baseline.ready = true;
+            }
+        }
+    }
+
+    /// A pass over everything, for every scope.
+    fn seed(&self, files: &Files, index: &Index, forced: bool) -> Result<()> {
+        let indexed = index.entries();
         let scopes: Vec<(RelPath, Baseline)> = self
             .baselines
             .lock()
@@ -701,29 +1175,32 @@ impl FileStates {
             {
                 let mut baseline = Baseline::missing(previous.max_bytes);
                 baseline.reason = "off";
+                baseline.stale = false;
                 self.baselines
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(directory, baseline);
                 continue;
             }
-            let result = self.prepare(files, &indexed, &directory, &previous, changed);
+            let result = self.prepare(files, &indexed, &directory, &previous, forced, true);
             let mut baselines = self
                 .baselines
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if epoch != self.epoch.load(std::sync::atomic::Ordering::SeqCst) {
-                continue;
-            }
             match result {
                 Ok(prepared) => {
                     baselines.insert(directory, prepared);
                 }
+                Err(HostError::TooLarge { .. }) => {
+                    baselines.insert(directory, Baseline::exceeded(previous.max_bytes));
+                }
                 Err(error) => {
+                    // What cannot be read is looked at again later, not at every change.
                     let baseline = baselines.entry(directory).or_insert(previous);
                     baseline.ready = false;
+                    baseline.stale = true;
+                    baseline.retry_at = Some(Instant::now() + SEED_RETRY_AFTER);
                     baseline.reason = match error {
-                        HostError::TooLarge { .. } => "too_large",
                         HostError::Changed(_) => "changed_during_recording",
                         _ => "unreadable",
                     };
@@ -733,13 +1210,257 @@ impl FileStates {
         Ok(())
     }
 
+    /// Brings the changed paths, and what lies below them, into every scope that holds them.
+    fn apply(&self, files: &Files, index: &Index, changed: &[RelPath]) -> Result<()> {
+        let scopes: Vec<RelPath> = self
+            .baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect();
+        for directory in scopes {
+            let mut old: HashMap<String, CachedEntry> = HashMap::new();
+            let (rules, max_bytes) = {
+                let mut baselines = self
+                    .baselines
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let Some(baseline) = baselines.get_mut(&directory) else {
+                    continue;
+                };
+                if matches!(baseline.reason, "live_tree" | "off") {
+                    continue;
+                }
+                if !changed
+                    .iter()
+                    .any(|path| path.starts_with(&directory) || directory.starts_with(path))
+                {
+                    continue;
+                }
+                if baseline.reason == "too_large" {
+                    baseline.changed_since = true;
+                    continue;
+                }
+                // A pass over everything is owed, the directory itself moved, or an ignore file that
+                // applies here changed: what is left out may be different for any path.
+                let rules_changed = changed.iter().any(|path| {
+                    directory.starts_with(path)
+                        || matches!(
+                            path.file_name(),
+                            Some(".gitignore" | crate::ignore::IGNORE_FILE)
+                        ) && {
+                            let base = path.parent().unwrap_or_else(RelPath::root);
+                            base.starts_with(&directory) || directory.starts_with(&base)
+                        }
+                });
+                let Some(rules) = baseline.rules.clone().filter(|_| !baseline.stale) else {
+                    baseline.ready = false;
+                    continue;
+                };
+                if rules_changed {
+                    baseline.stale = true;
+                    baseline.ready = false;
+                    continue;
+                }
+                if matches!(baseline.reason, "changed_during_recording" | "unreadable") {
+                    baseline.reason = "not_ready";
+                }
+                for path in changed {
+                    let Some(relative) = path
+                        .strip_prefix(&directory)
+                        .filter(|relative| !relative.is_root())
+                    else {
+                        continue;
+                    };
+                    take_subtree(&mut baseline.entries, relative.as_str(), &mut old);
+                }
+                for path in old.keys() {
+                    baseline.end_changes.insert(path.clone(), None);
+                }
+                let removed: i64 = old.values().map(weight).sum();
+                baseline.total = baseline.total.saturating_sub(removed);
+                baseline.ready = false;
+                (rules, baseline.max_bytes)
+            };
+            // What is there now, by the index: each changed path read again, what lies below it as the
+            // index has it.
+            let mut targets: BTreeMap<String, (RelPath, IndexEntry, bool)> = BTreeMap::new();
+            for path in changed {
+                if path
+                    .strip_prefix(&directory)
+                    .filter(|relative| !relative.is_root())
+                    .is_none()
+                {
+                    continue;
+                }
+                if let Some(entry) = index.get(path) {
+                    targets.insert(path.to_string(), (path.clone(), entry, true));
+                }
+                for (below, entry) in index.below(path) {
+                    targets
+                        .entry(below.to_string())
+                        .or_insert_with(|| (below, entry, false));
+                }
+            }
+            let mut fresh: Vec<(String, CachedEntry)> = Vec::new();
+            let mut failure: Option<&'static str> = None;
+            let mut unsettled: Vec<RelPath> = Vec::new();
+            let mut added = 0i64;
+            for (path, entry, forced) in targets.into_values() {
+                let Some(relative) = path
+                    .strip_prefix(&directory)
+                    .filter(|relative| !relative.is_root())
+                else {
+                    continue;
+                };
+                if rules.ignored(&path, entry.kind == platform::Kind::Dir) {
+                    continue;
+                }
+                let known = if forced {
+                    None
+                } else {
+                    old.remove(relative.as_str()).filter(|known| {
+                        known.index == entry
+                            && (entry.kind != platform::Kind::File || known.object.is_some())
+                    })
+                };
+                let cached = match known {
+                    Some(known) => Ok(known),
+                    None => self.cached_entry(files, &path, &relative, &entry),
+                };
+                match cached {
+                    Ok(cached) => {
+                        added = added.saturating_add(weight(&cached));
+                        fresh.push((relative.to_string(), cached));
+                    }
+                    Err(HostError::Changed(_)) => {
+                        failure = Some("changed_during_recording");
+                        unsettled.push(path);
+                    }
+                    Err(_) => {
+                        failure = Some("unreadable");
+                        unsettled.push(path);
+                    }
+                }
+            }
+            let mut baselines = self
+                .baselines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(baseline) = baselines.get_mut(&directory) else {
+                continue;
+            };
+            if baseline.stale {
+                // A pass over everything was asked for meanwhile and sees all of this.
+                continue;
+            }
+            baseline.total = baseline.total.saturating_add(added);
+            for (path, entry) in &fresh {
+                baseline
+                    .end_changes
+                    .insert(path.clone(), Some(entry.manifest.clone()));
+            }
+            baseline.entries.extend(fresh);
+            if baseline.total > max_bytes {
+                *baseline = Baseline::exceeded(max_bytes);
+            } else if let Some(reason) = failure {
+                baseline.ready = false;
+                baseline.reason = reason;
+                self.queue_retry(unsettled);
+            }
+        }
+        if self.store.unsynced_objects() >= FLUSH_EVERY_OBJECTS {
+            self.store.make_durable()?;
+        }
+        Ok(())
+    }
+
+    /// One included entry as it is now: a file's bytes are read and kept, without a flush of their
+    /// own (see [`ObjectStore::make_durable`]).
+    fn cached_entry(
+        &self,
+        files: &Files,
+        path: &RelPath,
+        relative: &RelPath,
+        entry: &IndexEntry,
+    ) -> Result<CachedEntry> {
+        let located = files.root().locate(path, Locate::ENTRY)?;
+        let meta = located
+            .meta
+            .ok_or_else(|| HostError::Changed("an included recorded path vanished".to_owned()))?;
+        files.check_visible(path, &located, meta.is_dir())?;
+        if meta.kind != entry.kind
+            || meta.mode != entry.mode
+            || meta.is_file() && (meta.size != entry.size || meta.mtime_ns != entry.mtime_ns)
+        {
+            return Err(HostError::Changed(
+                "an included recorded path changed after indexing".to_owned(),
+            ));
+        }
+        let (object, hash, link) = match entry.kind {
+            platform::Kind::File => {
+                let mut file = located
+                    .parent
+                    .open_read(located.name()?)
+                    .map_err(|error| HostError::io("opening included recording bytes", error))?;
+                let (oid, hash) = self.store.write_blob_deferred(&mut file, entry.size)?;
+                (Some(oid), Some(hash), None)
+            }
+            platform::Kind::Symlink => {
+                let link = located
+                    .parent
+                    .read_link(located.name()?)
+                    .map_err(|error| HostError::io("reading recorded link text", error))?
+                    .into_string()
+                    .map_err(|_| {
+                        HostError::Unsupported("recorded link text is not UTF-8".to_owned())
+                    })?;
+                if entry.link_target.as_deref() != Some(link.as_str()) {
+                    return Err(HostError::Changed(
+                        "a recorded link changed after indexing".to_owned(),
+                    ));
+                }
+                (
+                    Some(self.store.write_object_deferred("blob", link.as_bytes())?),
+                    None,
+                    Some(link),
+                )
+            }
+            platform::Kind::Dir => (None, None, None),
+            platform::Kind::Other => {
+                return Err(HostError::Unsupported(
+                    "unsupported recorded file type".to_owned(),
+                ));
+            }
+        };
+        Ok(CachedEntry {
+            index: entry.clone(),
+            object,
+            manifest: ManifestEntry {
+                p: relative.to_string(),
+                t: entry.kind.into(),
+                s: if meta.is_file() { entry.size as i64 } else { 0 },
+                m: entry.mtime_ns,
+                x: entry.mode,
+                h: hash,
+                l: link,
+            },
+        })
+    }
+
+    /// A pass over every included entry of `directory`. With `forced` every file is read again;
+    /// without, an entry whose size, time and mode are what was kept is kept as it is. With
+    /// `tolerant` a file that changes while it is read is tried again shortly instead of ending the
+    /// pass.
     fn prepare(
         &self,
         files: &Files,
         indexed: &[(RelPath, IndexEntry)],
         directory: &RelPath,
         previous: &Baseline,
-        changed: Option<&[RelPath]>,
+        forced: bool,
+        tolerant: bool,
     ) -> Result<Baseline> {
         let located = files.root().locate(directory, Locate::THROUGH)?;
         if !located.meta.is_some_and(|meta| meta.is_dir()) || located.real != *directory {
@@ -785,95 +1506,153 @@ impl FileStates {
             }
             included.push((path, relative, entry));
         }
+        let counted = u64::try_from(included.len()).unwrap_or(u64::MAX);
+        self.pass_done.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.pass_total
+            .store(counted.max(1), std::sync::atomic::Ordering::SeqCst);
+        let ended = || {
+            self.pass_total
+                .store(0, std::sync::atomic::Ordering::SeqCst)
+        };
         let mut entries = BTreeMap::new();
+        let mut unsettled: Vec<RelPath> = Vec::new();
         for (path, relative, entry) in included {
-            let forced = changed.is_none()
-                || changed
-                    .is_some_and(|paths| paths.iter().any(|changed| path.starts_with(changed)));
-            if !forced
-                && let Some(known) = previous
-                    .entries
-                    .get(relative.as_str())
-                    .filter(|known| known.index == *entry)
-            {
-                entries.insert(relative.to_string(), known.clone());
-                continue;
-            }
-            let located = files.root().locate(path, Locate::ENTRY)?;
-            let meta = located.meta.ok_or_else(|| {
-                HostError::Changed("an included recorded path vanished".to_owned())
-            })?;
-            files.check_visible(path, &located, meta.is_dir())?;
-            if meta.kind != entry.kind
-                || meta.mode != entry.mode
-                || meta.is_file() && (meta.size != entry.size || meta.mtime_ns != entry.mtime_ns)
-            {
-                return Err(HostError::Changed(
-                    "an included recorded path changed after indexing".to_owned(),
-                ));
-            }
-            let (object, hash, link) = match entry.kind {
-                platform::Kind::File => {
-                    let mut file = located.parent.open_read(located.name()?).map_err(|error| {
-                        HostError::io("opening included recording bytes", error)
-                    })?;
-                    let (oid, hash) = self.store.write_blob(&mut file, entry.size)?;
-                    (Some(oid), Some(hash), None)
-                }
-                platform::Kind::Symlink => {
-                    let link = located
-                        .parent
-                        .read_link(located.name()?)
-                        .map_err(|error| HostError::io("reading recorded link text", error))?
-                        .into_string()
-                        .map_err(|_| {
-                            HostError::Unsupported("recorded link text is not UTF-8".to_owned())
-                        })?;
-                    if entry.link_target.as_deref() != Some(link.as_str()) {
-                        return Err(HostError::Changed(
-                            "a recorded link changed after indexing".to_owned(),
-                        ));
-                    }
-                    (
-                        Some(self.store.write_object("blob", link.as_bytes())?),
-                        None,
-                        Some(link),
-                    )
-                }
-                platform::Kind::Dir => (None, None, None),
-                platform::Kind::Other => {
-                    return Err(HostError::Unsupported(
-                        "unsupported recorded file type".to_owned(),
-                    ));
-                }
+            let reusable = if forced {
+                None
+            } else {
+                previous.entries.get(relative.as_str()).filter(|known| {
+                    known.index == *entry
+                        && (entry.kind != platform::Kind::File || known.object.is_some())
+                })
             };
-            entries.insert(
-                relative.to_string(),
-                CachedEntry {
-                    index: entry.clone(),
-                    object,
-                    manifest: ManifestEntry {
-                        p: relative.to_string(),
-                        t: entry.kind.into(),
-                        s: if meta.is_file() { entry.size as i64 } else { 0 },
-                        m: entry.mtime_ns,
-                        x: entry.mode,
-                        h: hash,
-                        l: link,
-                    },
-                },
-            );
+            let cached = match reusable {
+                Some(known) => Ok(known.clone()),
+                None => self.cached_entry(files, path, &relative, entry),
+            };
+            match cached {
+                Ok(cached) => {
+                    entries.insert(relative.to_string(), cached);
+                }
+                Err(HostError::Changed(_)) if tolerant => unsettled.push(path.clone()),
+                Err(error) => {
+                    ended();
+                    return Err(error);
+                }
+            }
+            self.pass_done
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        ended();
+        self.store.make_durable()?;
+        let reason = if unsettled.is_empty() {
+            "not_ready"
+        } else {
+            self.queue_retry(unsettled);
+            "changed_during_recording"
+        };
+        let fingerprint = rules.fingerprint;
         Ok(Baseline {
             max_bytes: previous.max_bytes,
-            ready: true,
-            reason: "not_ready",
+            prepared: None,
+            end_base: None,
+            end_changes: BTreeMap::new(),
+            ready: false,
+            reason,
             entries,
-            ignore_fingerprint: Some(rules.fingerprint),
+            ignore_fingerprint: Some(fingerprint),
+            rules: Some(std::sync::Arc::new(rules)),
+            total,
+            stale: false,
+            retry_at: None,
+            changed_since: false,
         })
     }
 
-    /// Records only prepared immutable metadata; every fallback is durable under this identity.
+    /// Prepares immutable manifests, object maps and trees off the turn's serial key.
+    /// Native changes can invalidate coverage while this works; the result is installed only if the
+    /// affected scope remained ready. Unrelated scopes do not throw its work away.
+    pub fn prepare_recordings(&self, files: &Files, generation: i64, now: Time) -> Result<()> {
+        let _refreshing = self
+            .refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let scopes: Vec<_> = self
+            .baselines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, baseline)| baseline.ready && baseline.prepared.is_none())
+            .map(|(directory, baseline)| (directory.clone(), baseline.clone()))
+            .collect();
+        for (directory, baseline) in scopes {
+            self.pass_total.store(
+                baseline.entries.len() as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            self.pass_done.store(0, std::sync::atomic::Ordering::SeqCst);
+            let _indexing = IndexingPass(&self.pass_total);
+            let entries: Vec<_> = baseline
+                .entries
+                .values()
+                .map(|entry| {
+                    self.pass_done
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    entry.manifest.clone()
+                })
+                .collect();
+            let objects = baseline
+                .entries
+                .iter()
+                .filter_map(|(path, entry)| {
+                    entry.object.as_ref().map(|oid| (path.clone(), oid.clone()))
+                })
+                .collect();
+            let manifest = manifest::build(
+                &manifest::header_for(files.root(), &directory, generation, now.get()),
+                entries.clone(),
+            )?;
+            manifest::parse(&manifest.bytes)?;
+            let root = StateRoot {
+                selected_paths: None,
+                snapshot_id: orch_types::Id::nil(),
+                request_hash: None,
+                directory: directory.to_string(),
+                generation,
+                kind: orch_link_contract::source::RecordKind::Turn,
+                tree_ref: self.store.write_tree(&entries, &objects)?,
+                manifest_blob: manifest.hash,
+                objects,
+                files: manifest.file_count,
+                bytes: baseline.total,
+                created_at: now,
+                expires_at: now,
+                repository_head: known_head(files, &directory),
+                ignore_fingerprint: baseline.ignore_fingerprint.ok_or_else(|| {
+                    HostError::Unsupported("recording ignore coverage is not ready".to_owned())
+                })?,
+            };
+            let prepared = self.store.prepare(&root, &manifest.bytes)?;
+            if let Some(current) = self
+                .baselines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_mut(&directory)
+            {
+                // Paths cannot apply while this refresh owner runs. Even if a new notice has
+                // invalidated ready, this completed immutable image is a valid historical base;
+                // the queued paths will supply only the changes after it.
+                current.end_base = Some(prepared.metadata.manifest_blob);
+                current.end_changes.clear();
+                if current.ready {
+                    current.prepared = Some(prepared);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unit fixtures explicitly prepare their background metadata before synchronous recording.
+    #[cfg(test)]
     pub fn record(
         &self,
         files: &Files,
@@ -881,6 +1660,9 @@ impl FileStates {
         generation: i64,
         now: Time,
     ) -> Result<FsRecordResult> {
+        if request.record_days > 0 {
+            self.prepare_recordings(files, generation, now)?;
+        }
         let _recording = self
             .recording
             .lock()
@@ -897,10 +1679,26 @@ impl FileStates {
         now: Time,
         operation: &RecordOperation,
     ) -> Result<CapturedState> {
-        let _recording = self
-            .recording
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        if operation.cancel.is_cancelled() {
+            return Err(HostError::Cancelled);
+        }
+        let _recording = loop {
+            if operation.cancel.is_cancelled() {
+                return Err(HostError::Cancelled);
+            }
+            match self.recording.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) if request.wait_for_indexing => {
+                    std::thread::sleep(RETRY_AFTER)
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(HostError::Busy(
+                        "the saved files are being read or collected".to_owned(),
+                    ));
+                }
+            }
+        };
         if operation.cancel.is_cancelled() {
             return Err(HostError::Cancelled);
         }
@@ -944,22 +1742,17 @@ impl FileStates {
             return Ok(reply);
         }
         if self.store.has_root(request.snapshot_id) {
-            let (root, _) = self.store.load(request.snapshot_id, now)?;
-            let bytes = serde_json::to_vec(request)
-                .map_err(|error| HostError::Internal(error.to_string()))?;
-            if root.request_hash != Some(Hash::of(&bytes)) {
-                return Err(HostError::Changed(
-                    "the published recording belongs to another frozen choice".to_owned(),
-                ));
-            }
-            self.store.keep_root_metadata(&root)?;
-            let result = root.result();
+            let result = self.store.recover_reply(request, now)?;
             self.store.keep_reply(request, &result)?;
             return Ok(result);
         }
-        if request.kind == orch_link_contract::source::RecordKind::Restore {
+        if matches!(
+            request.kind,
+            orch_link_contract::source::RecordKind::Restore
+                | orch_link_contract::source::RecordKind::Source
+        ) {
             return Err(HostError::NotFound(
-                "the original restore undo state is unavailable".to_owned(),
+                "the original explicit file state is unavailable".to_owned(),
             ));
         }
         if request.record_days < 0 || request.max_bytes < 1 {
@@ -985,100 +1778,106 @@ impl FileStates {
         {
             baseline.ready = false;
             baseline.reason = "off";
+            baseline.prepared = None;
             baseline.entries.clear();
+            baseline.total = 0;
         }
         let baseline = self
             .baselines
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&directory)
-            .cloned();
-        let result = if request.record_days == 0 {
+            .map(|baseline| {
+                (
+                    baseline.ready,
+                    baseline.reason,
+                    baseline.total,
+                    baseline.prepared.clone(),
+                )
+            });
+        let mut result = if request.record_days == 0 {
             unavailable("off")
         } else {
             match baseline {
-                None => unavailable("not_ready"),
-                Some(baseline) if !baseline.ready => unavailable(if baseline.reason == "off" {
-                    "not_ready"
-                } else {
-                    baseline.reason
-                }),
-                Some(baseline) => {
-                    let bytes = baseline
-                        .entries
-                        .values()
-                        .try_fold(0i64, |total, entry| {
-                            total.checked_add(entry.manifest.s).and_then(|total| {
-                                total.checked_add(
-                                    entry
-                                        .manifest
-                                        .l
-                                        .as_ref()
-                                        .map_or(0, |link| link.len() as i64),
-                                )
-                            })
-                        })
-                        .ok_or_else(|| {
-                            HostError::Unsupported("recorded bytes overflowed".to_owned())
-                        })?;
-                    if bytes > request.max_bytes {
-                        unavailable("too_large")
-                    } else {
-                        let days =
-                            chrono::Duration::try_days(request.record_days).ok_or_else(|| {
-                                HostError::Unsupported("recording days are too large".to_owned())
-                            })?;
-                        let expiry = now.get().checked_add_signed(days).ok_or_else(|| {
-                            HostError::Unsupported("recording expiry is too large".to_owned())
-                        })?;
-                        let entries: Vec<ManifestEntry> = baseline
-                            .entries
-                            .values()
-                            .map(|entry| entry.manifest.clone())
-                            .collect();
-                        let objects = baseline
-                            .entries
-                            .iter()
-                            .filter_map(|(path, entry)| {
-                                entry.object.as_ref().map(|oid| (path.clone(), oid.clone()))
-                            })
-                            .collect();
-                        let manifest = manifest::build(
-                            &manifest::header_for(files.root(), &directory, generation, now.get()),
-                            entries.clone(),
-                        )?;
-                        let root = StateRoot {
-                            selected_paths: None,
-                            snapshot_id: request.snapshot_id,
-                            request_hash: Some(Hash::of(
-                                &serde_json::to_vec(request)
-                                    .map_err(|error| HostError::Internal(error.to_string()))?,
-                            )),
-                            directory: directory.to_string(),
-                            generation,
-                            kind: request.kind,
-                            tree_ref: self.store.write_tree(&entries, &objects)?,
-                            manifest_blob: manifest.hash,
-                            objects,
-                            files: manifest.file_count,
-                            bytes,
-                            created_at: now,
-                            expires_at: Time::new(expiry),
-                            repository_head: known_head(files, &directory),
-                            ignore_fingerprint: baseline.ignore_fingerprint.ok_or_else(|| {
-                                HostError::Unsupported(
-                                    "recording ignore coverage is not ready".to_owned(),
-                                )
-                            })?,
-                        };
-                        self.store.keep(&root, &manifest.bytes)?;
-                        root.result()
-                    }
-                }
+                Some((true, _, bytes, _)) if bytes > request.max_bytes => unavailable("too_large"),
+                Some((true, _, _, Some(prepared))) => self
+                    .store
+                    .keep_turn(&prepared, request, &directory, generation, now)?,
+                Some((_, "off", _, _)) | None => unavailable("not_ready"),
+                Some((_, reason, _, _)) => unavailable(reason),
             }
         };
+        if matches!(result.reason.as_deref(), Some("not_ready" | "indexing"))
+            && let Some((done, total)) = self.indexing()
+        {
+            result.reason = Some("indexing".to_owned());
+            result.indexing = Some(orch_link_contract::events::IndexingProgress { done, total });
+        }
         self.store.keep_reply(request, &result)?;
         Ok(result)
+    }
+
+    /// Freezes an explicitly chosen Current files source for its own worktree job, independently
+    /// of automatic history policy or index coverage. No interactive baseline or policy is changed.
+    pub(crate) fn capture_source(
+        &self,
+        files: &Files,
+        request: &FsRecord,
+        generation: i64,
+        now: Time,
+        operation: orch_types::Id,
+    ) -> Result<crate::state_store::StatePin> {
+        let snapshot = request.snapshot_id;
+        let directory = files.parse(&request.directory)?;
+        if request.kind != orch_link_contract::source::RecordKind::Source {
+            return Err(HostError::Unsupported(
+                "a current source needs its job-owned capture purpose".into(),
+            ));
+        }
+        let gate = self.store.background_gate();
+        let _writing = gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let until = Time::new(
+            now.get()
+                .checked_add_signed(chrono::Duration::seconds(i64::from(
+                    orch_link_contract::commands::CommandKind::GitWorktree.deadline_secs(),
+                )))
+                .ok_or_else(|| {
+                    HostError::Unsupported("the source operation deadline is invalid".into())
+                })?,
+        );
+        if !self.store.has_root(snapshot) {
+            if self.store.recorded_reply(request)?.is_some() {
+                return Err(HostError::Changed(
+                    "the original current-files capture needs a fresh owned attempt".into(),
+                ));
+            }
+            self.store.begin_record(request)?;
+            let mut indexed = Vec::new();
+            let outcome = crate::walk::walk_streamed(
+                files.root(),
+                files.ignore(),
+                &directory,
+                &mut || true,
+                &mut |entry| {
+                    if entry.path.has_component(".git") {
+                        return crate::walk::Flow::SkipDir;
+                    }
+                    indexed.push((
+                        entry.path.clone(),
+                        IndexEntry::of(&entry.meta, entry.link_target.clone()),
+                    ));
+                    crate::walk::Flow::Continue
+                },
+            )?;
+            if !outcome.unreadable.is_empty() {
+                return Err(HostError::Changed(
+                    "the complete current source includes unreadable entries".into(),
+                ));
+            }
+            let root = self.capture_explicit(files, &indexed, request, generation, now)?;
+            self.store.keep_reply(request, &root.result())?;
+        }
+        self.store.pin(snapshot, operation, until)
     }
 
     /// Captures the explicitly scanned current directory as complete undo before a restore.
@@ -1091,7 +1890,10 @@ impl FileStates {
         generation: i64,
         now: Time,
     ) -> Result<StateRoot> {
-        if request.record_days <= 0 || request.max_bytes < 1 {
+        if (request.record_days <= 0
+            && request.kind != orch_link_contract::source::RecordKind::Source)
+            || request.max_bytes < 1
+        {
             return Err(HostError::Unsupported(
                 "complete undo recording is disabled".to_owned(),
             ));
@@ -1102,7 +1904,8 @@ impl FileStates {
             indexed,
             &directory,
             &Baseline::missing(request.max_bytes),
-            None,
+            true,
+            false,
         )?;
         let entries: Vec<ManifestEntry> = prepared
             .entries
@@ -1122,8 +1925,15 @@ impl FileStates {
         )?;
         // A complete state must be readable under the same manifest bounds before it is rooted.
         manifest::parse(&built.bytes)?;
-        let days = chrono::Duration::try_days(request.record_days)
-            .ok_or_else(|| HostError::Unsupported("undo keeping period is too large".to_owned()))?;
+        let days = if request.kind == orch_link_contract::source::RecordKind::Source {
+            chrono::Duration::seconds(i64::from(
+                orch_link_contract::commands::CommandKind::GitWorktree.deadline_secs(),
+            ))
+        } else {
+            chrono::Duration::try_days(request.record_days).ok_or_else(|| {
+                HostError::Unsupported("undo keeping period is too large".to_owned())
+            })?
+        };
         let expires = now
             .get()
             .checked_add_signed(days)
@@ -1160,34 +1970,113 @@ impl FileStates {
         Ok(root)
     }
 
-    /// Returns an end manifest from the prepared baseline, without reading live files or Git.
-    pub fn observe(
+    /// Freezes only changes over an immutable prepared base when full encoding is still owed.
+    pub(crate) fn seal_end(
         &self,
         files: &Files,
         directory: &RelPath,
         generation: i64,
         now: Time,
-    ) -> Result<Option<manifest::Manifest>> {
-        let baseline = self
+    ) -> Result<(Option<Hash>, Option<Hash>)> {
+        let frozen = {
+            let baselines = self
+                .baselines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(baseline) = baselines.get(directory).filter(|baseline| baseline.ready) else {
+                return Ok((None, None));
+            };
+            if let Some(prepared) = &baseline.prepared {
+                return Ok((
+                    (prepared.metadata.generation == generation)
+                        .then_some(prepared.metadata.manifest_blob),
+                    None,
+                ));
+            }
+            let Some(base) = baseline.end_base else {
+                return Ok((None, None));
+            };
+            EndPatch {
+                base,
+                header: manifest::header_for(files.root(), directory, generation, now.get()),
+                entries: baseline.end_changes.clone(),
+            }
+        };
+        let bytes =
+            serde_json::to_vec(&frozen).map_err(|error| HostError::Internal(error.to_string()))?;
+        Ok((None, Some(self.store.keep_end_patch(&bytes)?)))
+    }
+
+    /// Rebuilds the full namespace only for the background publisher, from its exact frozen patch.
+    pub(crate) fn publish_end_patch(
+        &self,
+        files: &Files,
+        directory: &RelPath,
+        generation: i64,
+        patch: Hash,
+    ) -> Result<manifest::Manifest> {
+        let patch: EndPatch =
+            serde_json::from_slice(&self.store.read_end_patch(patch)?).map_err(|error| {
+                HostError::Unsupported(format!("sealed end metadata is invalid: {error}"))
+            })?;
+        let expected = manifest::header_for(
+            files.root(),
+            directory,
+            generation,
+            patch.header.generated_at.get(),
+        );
+        let base = manifest::parse(&self.store.manifest_bytes(patch.base)?)?;
+        if patch.header != expected
+            || base.header.root != expected.root
+            || base.header.generation != generation
+        {
+            return Err(HostError::Changed(
+                "the sealed end belongs to another directory or generation".into(),
+            ));
+        }
+        let mut entries: BTreeMap<_, _> = base
+            .entries
+            .into_iter()
+            .map(|entry| (entry.p.clone(), entry))
+            .collect();
+        for (path, entry) in patch.entries {
+            let relative = files.parse(&path)?;
+            if relative.is_root() || relative.has_component(".git") {
+                return Err(HostError::Unsupported(
+                    "the sealed end contains a protected path".into(),
+                ));
+            }
+            match entry {
+                Some(entry) if entry.p == path && entry.t != EntryKind::Other => {
+                    entries.insert(path, entry);
+                }
+                None => {
+                    entries.remove(&path);
+                }
+                _ => {
+                    return Err(HostError::Unsupported(
+                        "the sealed end entry is inconsistent".into(),
+                    ));
+                }
+            }
+        }
+        let manifest = manifest::build(&patch.header, entries.into_values().collect())?;
+        manifest::parse(&manifest.bytes)?;
+        Ok(manifest)
+    }
+
+    /// Seals a small immutable reference only. Complete manifest encoding belongs to background preparation.
+    pub fn prepared_manifest(&self, directory: &RelPath, generation: i64) -> Option<Hash> {
+        let baselines = self
             .baselines
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        baselines
             .get(directory)
             .filter(|baseline| baseline.ready)
-            .cloned();
-        let Some(baseline) = baseline else {
-            return Ok(None);
-        };
-        let entries = baseline
-            .entries
-            .values()
-            .map(|entry| entry.manifest.clone())
-            .collect();
-        manifest::build(
-            &manifest::header_for(files.root(), directory, generation, now.get()),
-            entries,
-        )
-        .map(Some)
+            .and_then(|baseline| baseline.prepared.as_ref())
+            .filter(|prepared| prepared.metadata.generation == generation)
+            .map(|prepared| prepared.metadata.manifest_blob)
     }
 }
 
@@ -1205,6 +2094,8 @@ pub(crate) fn join(directory: &RelPath, relative: &RelPath, files: &Files) -> Re
 #[must_use]
 pub fn unavailable(reason: &str) -> FsRecordResult {
     FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -1224,7 +2115,7 @@ mod tests {
     use crate::environment::{GateState, Gates, Limits};
     use crate::ignore::IgnoreRules;
     use crate::index::HashCache;
-    use crate::paths::Workspace;
+    use crate::paths::{PathStyle, Workspace};
     use orch_link_contract::commands::IndexMode;
     use orch_link_contract::source::RecordKind;
     use orch_types::new_id;
@@ -1262,7 +2153,10 @@ mod tests {
             Limits::default(),
             Arc::new(GateState::new(Gates::OPEN)),
         );
-        let index = Index::new(IndexMode::Full, Limits::default().index_max_entries);
+        let index = Index::new(
+            IndexMode::Full,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+        );
         let states =
             FileStates::new(ObjectStore::open(&dir.path().join("kept"), &workspace).unwrap());
         (dir, files, index, states)
@@ -1273,6 +2167,7 @@ mod tests {
             environment_id: new_id(),
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: RecordKind::Turn,
             record_days: DEFAULT_RECORD_DAYS,
             max_bytes: DEFAULT_RECORD_MAX_BYTES,
@@ -1287,6 +2182,7 @@ mod tests {
         std::fs::write(files.root().root_path().join("code.bin"), original)?;
         index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
         states.refresh(&files, &index, None, true)?;
+        states.prepare_recordings(&files, 1, at())?;
         let request = request();
         let until = Time::new(
             at().get()
@@ -1361,6 +2257,7 @@ mod tests {
         std::fs::write(&path, b"original captured bytes")?;
         index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
         states.refresh(&files, &index, None, true)?;
+        states.prepare_recordings(&files, 1, at())?;
         let request = request();
         let operation = RecordOperation {
             id: new_id(),
@@ -1411,6 +2308,7 @@ mod tests {
         std::fs::write(files.root().root_path().join("code.txt"), b"captured")?;
         index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
         states.refresh(&files, &index, None, true)?;
+        states.prepare_recordings(&files, 1, at())?;
         let request = request();
         let operation = RecordOperation {
             id: new_id(),
@@ -1457,6 +2355,7 @@ mod tests {
         std::fs::write(files.root().root_path().join("code.txt"), b"before")?;
         index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
         states.refresh(&files, &index, None, true)?;
+        states.prepare_recordings(&files, 1, at())?;
         let interrupted = request();
         states.store.begin_record(&interrupted)?;
         let operation = RecordOperation {
@@ -1497,6 +2396,28 @@ mod tests {
             "failed preparation releases its pin"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_recording_never_waits_behind_an_explicit_reader_of_its_old_files() {
+        let (_dir, files, index, states) = setup();
+        std::fs::write(files.root().root_path().join("code"), "before").unwrap();
+        index.scan(files.root(), files.ignore().unwrap()).unwrap();
+        states.refresh(&files, &index, None, true).unwrap();
+        let _reader = states.recording.lock().unwrap();
+        let operation = RecordOperation {
+            id: orch_types::new_id(),
+            until: at(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let request = FsRecord {
+            wait_for_indexing: false,
+            ..request()
+        };
+        assert!(matches!(
+            states.capture(&files, &request, 1, at(), &operation),
+            Err(HostError::Busy(_))
+        ));
     }
 
     #[test]
@@ -1628,7 +2549,10 @@ mod tests {
         let (_dir, files, index, states) = setup();
         let first = states.record(&files, &request(), 1, at()).unwrap();
         assert_eq!(first.reason.as_deref(), Some("not_ready"));
-        let live = Index::new(IndexMode::Live, Limits::default().index_max_entries);
+        let live = Index::new(
+            IndexMode::Live,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+        );
         states.refresh(&files, &live, None, true).unwrap();
         assert_eq!(
             states
@@ -1658,6 +2582,24 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_waits_for_a_baseline_only_while_background_work_is_bringing_it_up_to_date() {
+        let (_dir, _files, _index, states) = setup();
+        let states = Arc::new(states);
+        assert!(
+            states.needs_preparing(&RelPath::root()),
+            "a baseline nobody prepared yet is owed one"
+        );
+        assert!(!states.work_in_flight(), "and nothing is making it");
+        let first = states.begin_work();
+        let second = states.begin_work();
+        assert!(states.work_in_flight());
+        drop(first);
+        assert!(states.work_in_flight(), "one pass is still going");
+        drop(second);
+        assert!(!states.work_in_flight(), "nothing is left to wait for");
+    }
+
+    #[test]
     fn disabled_recording_does_not_repopulate_raw_cached_states_and_can_be_enabled_again() {
         let (_dir, files, index, states) = setup();
         std::fs::write(files.root().root_path().join("code"), "before").unwrap();
@@ -1683,12 +2625,7 @@ mod tests {
             states.cached_objects().is_empty(),
             "background changes do not defeat recording off"
         );
-        assert!(
-            states
-                .observe(&files, &RelPath::root(), 1, at())
-                .unwrap()
-                .is_none()
-        );
+        assert!(states.prepared_manifest(&RelPath::root(), 1).is_none());
         let enabled = request();
         assert_eq!(
             states
@@ -1702,5 +2639,269 @@ mod tests {
         let saved = states.record(&files, &request(), 1, at()).unwrap();
         assert_eq!(saved.state, RecordState::Complete);
         assert!(saved.manifest_blob.is_some());
+    }
+
+    fn recorded_paths(
+        states: &FileStates,
+        files: &Files,
+    ) -> std::result::Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let request = request();
+        let recorded = states.record(files, &request, 1, at())?;
+        assert_eq!(recorded.state, RecordState::Complete);
+        let (_, tree) = states.store.load(request.snapshot_id, at())?;
+        Ok(tree.entries.iter().map(|entry| entry.p.clone()).collect())
+    }
+
+    #[test]
+    fn a_changed_path_visits_its_ancestor_rules_without_scanning_unrelated_rule_directories() {
+        let (_dir, files, index, _states) = setup();
+        let root = files.root().root_path();
+        std::fs::create_dir(root.join("focused")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(root.join("focused/.gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(root.join("focused/code"), "kept").unwrap();
+        for number in 0..1000 {
+            let base = root.join(format!("unrelated-{number}"));
+            std::fs::create_dir(&base).unwrap();
+            std::fs::write(base.join(".gitignore"), "*.secret\n").unwrap();
+        }
+        index.scan(files.root(), files.ignore().unwrap()).unwrap();
+        let rules = GitRules::read(&files, &index.entries(), &RelPath::root()).unwrap();
+        let changed = files.parse("focused/code").unwrap();
+        for _ in 0..128 {
+            assert!(!rules.ignored(&changed, false));
+        }
+        assert!(
+            rules.visited.load(std::sync::atomic::Ordering::Relaxed) <= 128 * 3,
+            "only the root rule for focused and both ancestor rules for its file are visited"
+        );
+        assert!(rules.ignored(&files.parse("focused/hidden.tmp").unwrap(), false));
+        assert!(rules.ignored(&files.parse("focused/hidden.log").unwrap(), false));
+    }
+
+    #[test]
+    fn a_warm_end_keeps_complete_coverage_while_only_its_changed_path_metadata_is_sealed() {
+        let (_dir, files, index, states) = setup();
+        for number in 0..200 {
+            std::fs::write(
+                files.root().root_path().join(format!("file-{number:03}")),
+                "before",
+            )
+            .unwrap();
+        }
+        let _ = states.take_work();
+        index.scan(files.root(), files.ignore().unwrap()).unwrap();
+        states.refresh(&files, &index, None, true).unwrap();
+        let _ = states.take_work();
+        states.prepare_recordings(&files, 1, at()).unwrap();
+        let base = states.prepared_manifest(&RelPath::root(), 1).unwrap();
+        std::fs::write(files.root().root_path().join("file-007"), "a changed file").unwrap();
+        let changed = [files.parse("file-007").unwrap()];
+        states.queue(&changed);
+        index
+            .refresh(files.root(), files.ignore().unwrap(), &changed)
+            .unwrap();
+        let Work::Paths(paths) = states.take_work() else {
+            panic!("the change was not queued")
+        };
+        states
+            .refresh(&files, &index, Some(&paths), index.fully_observed())
+            .unwrap();
+        assert!(
+            states
+                .baselines
+                .lock()
+                .unwrap()
+                .get(&RelPath::root())
+                .unwrap()
+                .ready
+        );
+        assert!(states.prepared_manifest(&RelPath::root(), 1).is_none());
+        let (whole, patch) = states.seal_end(&files, &RelPath::root(), 1, at()).unwrap();
+        assert!(whole.is_none());
+        let patch = patch.unwrap();
+        let frozen: EndPatch =
+            serde_json::from_slice(&states.store.read_end_patch(patch).unwrap()).unwrap();
+        assert_eq!(frozen.base, base);
+        assert_eq!(
+            frozen.entries.len(),
+            1,
+            "the other199 files remain referenced by the immutable base"
+        );
+        let end = states
+            .publish_end_patch(&files, &RelPath::root(), 1, patch)
+            .unwrap();
+        let parsed = manifest::parse(&end.bytes).unwrap();
+        assert_eq!(parsed.entries.len(), 200);
+        let changed = parsed
+            .entries
+            .iter()
+            .find(|entry| entry.p == "file-007")
+            .unwrap();
+        assert_eq!(changed.h, Some(Hash::of(b"a changed file")));
+        assert_ne!(end.hash, base);
+    }
+
+    #[test]
+    fn a_change_costs_what_it_changes_and_not_what_the_tree_holds()
+    -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_dir, files, index, states) = setup();
+        let root = files.root().root_path().to_owned();
+        for number in 0..200 {
+            std::fs::write(
+                root.join(format!("file-{number}.txt")),
+                format!("bytes of {number}"),
+            )?;
+        }
+        index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
+        states.refresh(&files, &index, None, true)?;
+        let read_before = states.store().deferred_written();
+        assert_eq!(read_before, 200);
+        std::fs::write(root.join("file-7.txt"), "different bytes entirely")?;
+        let changed = [RelPath::parse("file-7.txt", PathStyle::Posix)?];
+        index.refresh(
+            files.root(),
+            files.ignore().ok_or("missing ignore rules")?,
+            &changed,
+        )?;
+        states.refresh(&files, &index, Some(changed.as_slice()), true)?;
+        assert_eq!(
+            states.store().deferred_written() - read_before,
+            1,
+            "one file was read, not the two hundred of the tree"
+        );
+        let request = request();
+        let recorded = states.record(&files, &request, 1, at())?;
+        assert_eq!(recorded.state, RecordState::Complete);
+        assert_eq!(recorded.files, 200);
+        let (saved, tree) = states.store.load(request.snapshot_id, at())?;
+        let entry = tree
+            .entries
+            .iter()
+            .find(|entry| entry.p == "file-7.txt")
+            .ok_or("the changed file is not in the state")?;
+        assert_eq!(
+            std::fs::read(states.store.read_entry(&saved, entry)?.path())?,
+            b"different bytes entirely"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_directory_comes_in_with_what_is_in_it_and_a_removed_one_goes_with_it()
+    -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_dir, files, index, states) = setup();
+        let root = files.root().root_path().to_owned();
+        std::fs::create_dir_all(root.join("keep"))?;
+        std::fs::create_dir_all(root.join("gone"))?;
+        std::fs::write(root.join("keep/a.txt"), "a")?;
+        std::fs::write(root.join("gone/b.txt"), "b")?;
+        index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
+        states.refresh(&files, &index, None, true)?;
+        std::fs::create_dir_all(root.join("fresh/deep"))?;
+        std::fs::write(root.join("fresh/x.txt"), "x")?;
+        std::fs::write(root.join("fresh/deep/y.txt"), "y")?;
+        std::fs::remove_dir_all(root.join("gone"))?;
+        let changed = [
+            RelPath::parse("fresh", PathStyle::Posix)?,
+            RelPath::parse("gone", PathStyle::Posix)?,
+        ];
+        index.refresh(
+            files.root(),
+            files.ignore().ok_or("missing ignore rules")?,
+            &changed,
+        )?;
+        states.refresh(&files, &index, Some(changed.as_slice()), true)?;
+        let mut paths = recorded_paths(&states, &files)?;
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "fresh",
+                "fresh/deep",
+                "fresh/deep/y.txt",
+                "fresh/x.txt",
+                "keep",
+                "keep/a.txt"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn paths_that_arrived_wait_for_the_worker_and_the_baseline_is_ready_when_they_are_in()
+    -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_dir, files, index, states) = setup();
+        let root = files.root().root_path().to_owned();
+        std::fs::write(root.join("first.txt"), "first")?;
+        index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
+        states.refresh(&files, &index, None, true)?;
+        assert!(matches!(states.take_work(), Work::Nothing));
+        std::fs::write(root.join("second.txt"), "second")?;
+        let changed = [RelPath::parse("second.txt", PathStyle::Posix)?];
+        index.refresh(
+            files.root(),
+            files.ignore().ok_or("missing ignore rules")?,
+            &changed,
+        )?;
+        states.changed(&changed);
+        states.queue(&changed);
+        assert_eq!(
+            states
+                .record(&files, &request(), 1, at())?
+                .reason
+                .as_deref(),
+            Some("not_ready"),
+            "the new file is not in the baseline yet, so nothing partial is offered"
+        );
+        let Work::Paths(paths) = states.take_work() else {
+            return Err("the arrived path was not handed to the worker".into());
+        };
+        assert_eq!(paths, changed);
+        states.refresh(&files, &index, Some(paths.as_slice()), true)?;
+        assert!(
+            matches!(states.take_work(), Work::RecordMetadata),
+            "the changed baseline still owes its immutable recording metadata"
+        );
+        states.prepare_recordings(&files, 1, at())?;
+        assert!(matches!(states.take_work(), Work::Nothing));
+        let mut recorded = recorded_paths(&states, &files)?;
+        recorded.sort();
+        assert_eq!(recorded, ["first.txt", "second.txt"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_change_to_an_ignore_file_makes_the_whole_directory_owed_a_pass_and_the_pass_reads_nothing_it_kept()
+    -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_dir, files, index, states) = setup();
+        let root = files.root().root_path().to_owned();
+        std::fs::write(root.join("code.txt"), "code")?;
+        std::fs::write(root.join("secret.txt"), "secret")?;
+        index.scan(files.root(), files.ignore().ok_or("missing ignore rules")?)?;
+        states.refresh(&files, &index, None, true)?;
+        let read_before = states.store().deferred_written();
+        std::fs::write(root.join(".gitignore"), "secret.txt\n")?;
+        let changed = [RelPath::parse(".gitignore", PathStyle::Posix)?];
+        index.refresh(
+            files.root(),
+            files.ignore().ok_or("missing ignore rules")?,
+            &changed,
+        )?;
+        states.refresh(&files, &index, Some(changed.as_slice()), true)?;
+        assert!(
+            matches!(states.take_work(), Work::Everything),
+            "what is left out may be different for any path"
+        );
+        states.reconcile(&files, &index, true)?;
+        assert_eq!(
+            states.store().deferred_written() - read_before,
+            1,
+            "only the new ignore file was read; code.txt kept its copy"
+        );
+        let mut paths = recorded_paths(&states, &files)?;
+        paths.sort();
+        assert_eq!(paths, [".gitignore", "code.txt"]);
+        Ok(())
     }
 }
