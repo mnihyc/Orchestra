@@ -1,6 +1,6 @@
 import { LiveThreadStateIcon } from '@/ui/ThreadState';
-import { MessageCircleQuestionMark } from 'lucide-react';
-import { openAsk } from '@/features/ask/open';
+import { ACTIONS } from '@/ui/actions';
+import { toggleAsk } from '@/features/ask/open';
 import { ArrangementMenu } from '@/features/workbench/Arrangements';
 import { useWorkbench } from '@/features/workbench/store';
 import { tabEntries } from '@/features/workbench/Tabs';
@@ -81,9 +81,9 @@ export function MobileNavigation({ onShortcuts, pending = false, focusMode = fal
       <Banners />
       <ScreenTitleBar>
         <IconButton size="sm" label={t('finder.open')} icon={<Search aria-hidden />} onClick={() => openFinder()} />
-        <IconButton size="sm" label={t('ask.open')} icon={<MessageCircleQuestionMark aria-hidden />} onClick={openAsk} />
+        <IconButton size="sm" label={t('ask.open')} icon={<ACTIONS.ask.Icon aria-hidden />} onClick={toggleAsk} data-ask-opener />
       </ScreenTitleBar>
-      <NarrowChoices choices={workbench.choices} presentation="icons" />
+      <NarrowChoices choices={workbench.choices} presentation="icons" facts={workbench.deviceFacts} />
       </div>}
       <div inert={!pending && workbench.main === null} aria-hidden={!pending && workbench.main === null ? true : undefined}
         className={`flex shrink-0 items-stretch border-b border-border bg-bg-subtle${!pending && workbench.main === null ? ' invisible' : ''}`} data-mobile-main-tabs>
