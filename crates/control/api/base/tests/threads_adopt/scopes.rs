@@ -1087,6 +1087,7 @@ async fn native_preview_commands_keep_exact_private_preparation_evidence_and_cur
     }
     .wire();
     let actual = orch_db::queries::link::NewCommand {
+        native_target: None,
         id: execution.id,
         machine_id: s.rig.machine_id,
         kind: "agent.discover_sessions",

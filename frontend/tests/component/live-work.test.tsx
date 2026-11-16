@@ -289,3 +289,15 @@ for (const locale of ['en','zh-CN'] as const) it(`names the host deletion's reco
   expect(screen.getByText(t('liveWork.waitingFor',{machine:'host-2'}))).toBeVisible();
   rendered.unmount();
 });
+
+
+for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['mount_copy', 'environment_move'] as const) it(`keeps unfinished copy custody visible in the progress line and title for ${kind} in ${locale}`, async () => {
+  await setLocale(locale);
+  const message = 'mount_copy_custody_pending';
+  const value: Job = { ...job(), kind, progress: { ...job().progress, phase: 'copy', message } };
+  const shown = show(<JobActivityLine job={value} />);
+  const expected = i18n.t('liveWork.keepingCopies');
+  expect(shown.container.querySelector('[data-job-line]')).toHaveTextContent(expected);
+  expect(shown.container.querySelector('[data-job-activity]')).toHaveAttribute('title', expect.stringContaining(expected));
+  if (locale === 'zh-CN') expect(shown.container.querySelector('[data-job-activity]')?.getAttribute('title')).not.toContain('cleanup is waiting');
+});

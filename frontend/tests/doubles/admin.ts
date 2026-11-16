@@ -33,6 +33,7 @@ import type {
   Runtime,
   StorageStats,
   SystemInfo,
+  ServerUpdateView,
   UserRef,
 } from '../../src/generated/api-types.ts';
 import { compareVersions } from '../../src/lib/versions.ts';
@@ -416,6 +417,14 @@ export class AdminWorld implements Part {
 
     if (route === 'GET /admin/system') return { status: 200, body: this.system() };
     if (route === 'GET /admin/semantic-search') return { status: 200, body: { available: true, unavailable_reason: null, interval_secs: 10, orgs: [] } };
+    if (route === 'GET /admin/server-update') {
+      const offered = this.installation.release?.offered_version ?? null;
+      const result: ServerUpdateView = { installed_version: this.system().version, offered_version: offered,
+        update_available: offered !== null && compareVersions(offered, this.system().version) > 0,
+        availability: 'no_bundled_node', command: `./update.sh ${offered === null ? 'latest' : `v${offered}`}`, job: null, observation: null };
+      return { status: 200, body: result };
+    }
+    if (route === 'POST /admin/server-update') throw new Refusal(409, 'capability.unsupported', 'This fixture has no bundled node with host Docker access.');
     if (route === 'GET /admin/installation-records') return { status: 200, body: this.installation };
     if (route === 'GET /admin/backup-restore-list') return { status: 200, body: null };
     if (route === 'POST /admin/releases/check') {
@@ -926,7 +935,7 @@ export class AdminWorld implements Part {
     const systemWhenFull = this.settingValue('hosts.when_full') === 'block' ? 'block' : 'warn';
     const ada = this.world.people.get('ada');
     const vera = this.world.people.get('vera');
-    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({ ...unjudgedProvenance(),
+    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({ bundled_with_server: false, ...unjudgedProvenance(),
       access: { admin_only: [], participating: false, administers: true, permissions: [], through: [] },
       address: name,
       capacity: { cpu_millis: 16_000, disk_gb: 500, memory_mb: memory },
