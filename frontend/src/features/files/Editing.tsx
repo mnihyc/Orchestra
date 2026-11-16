@@ -103,9 +103,6 @@ export function ReadOnlyNote({ reason }: { reason: ReadOnlyReason }) {
   const format = useFormatContext();
   let text: string;
   switch (reason.kind) {
-    case 'small_screen':
-      text = t('craftFiles.readOnly');
-      break;
     case 'permission':
       text = t('files.edit.why.permission', { permission: workspacePermissionLabel(t, 'files.manage') });
       break;
