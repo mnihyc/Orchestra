@@ -7,7 +7,7 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 const help = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => help }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => help }));
 // The provider card owns its own current read. This suite keeps the ordinary chip as supplied text.
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject }: { subject: { provider: { name: string } } }) => <span>{subject.provider.name}</span> }));
 
