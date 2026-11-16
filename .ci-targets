@@ -1,0 +1,7 @@
+# b43y-1: place the fourth trial's new reds on its merge commit fb248a35f
+test -p orch-envhost --lib -- environment::directory_watch_tests::
+test -p orch-link --test large_messages
+test -p orch-engine --test forks -- history_size::
+test -p orch-api-core --test summaries
+test -p orch-api-core --test threads_read
+test -p orch-engine --test history_scale
