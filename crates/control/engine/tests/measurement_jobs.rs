@@ -52,6 +52,7 @@ async fn host_reported_copy_provision_and_count_phases_accept_live_counters_with
         link::insert_command(
             &mut tx,
             &link::NewCommand {
+                native_target: None,
                 id: command,
                 machine_id: host.machine,
                 kind: "node.mount.measure",
@@ -311,6 +312,7 @@ async fn a_directory_count_uses_its_environment_feed_only_for_its_declared_comma
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            native_target: None,
             id: command,
             machine_id: world.machine_id,
             kind: "fs.data.measure",

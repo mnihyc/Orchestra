@@ -34,6 +34,9 @@ use crate::jobs::runner::{Failure, Job, Stop};
 use crate::mounts::Fated;
 use crate::{Engine, EngineError};
 
+pub(crate) mod claims;
+pub mod location;
+
 /// How many trailing hexadecimal digits of an identifier name a machine or a copy in a volume's name: the last
 /// ones, since the first twelve of an identifier are the millisecond it was made in.
 const NAME_DIGITS: usize = 12;
@@ -105,12 +108,16 @@ pub struct CopyDecision {
     pub mount_id: Id,
     /// The machine its data is read on.
     pub source_machine: Id,
+    /// The actual location membership reviewed for this source.
+    pub source_membership_id: Id,
     /// The driver that reads it there.
     pub source_driver: String,
     /// Where it is read.
     pub from: DataRef,
     /// The machine it lands on.
     pub target_machine: Id,
+    /// The reviewed destination membership, or its known absence.
+    pub target_membership_id: Option<Id>,
     /// The driver that writes it there.
     pub target_driver: String,
     /// The volume it is unpacked into.
@@ -337,11 +344,24 @@ async fn measure(
             Some(source) => Some(source.accept_on(engine, &mut conn).await?),
             None => None,
         };
+        let copy = location::preparation::active();
+        let copy_check = match &copy {
+            Some(source) => Some(
+                source
+                    .accept_on(&mut conn, engine.inner.clock.as_ref())
+                    .await?,
+            ),
+            None => None,
+        };
+        let copy_deadline = copy_check.as_ref().map(|check| check.deadline());
         sqlx::query("SELECT mount_id FROM mount_locations WHERE mount_id=$1 AND machine_id=$2 AND kind=$3 AND source=$4 FOR UPDATE")
             .bind(mount).bind(machine).bind(&data.kind).bind(&data.source)
             .fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         if let Some(accepted) = &accepted {
             accepted.check(engine.inner.clock.as_ref())?;
+        }
+        if let Some(check) = copy_check {
+            check.check(engine.inner.clock.as_ref())?;
         }
         sqlx::query("UPDATE mount_locations SET last_bytes=$3,size_at=$4 WHERE mount_id=$1 AND machine_id=$2 AND kind=$5 AND source=$6")
             .bind(mount).bind(machine).bind(measured.total_bytes).bind(at.get()).bind(&data.kind).bind(&data.source)
@@ -349,7 +369,13 @@ async fn measure(
         if let Some(accepted) = &accepted {
             accepted.check(engine.inner.clock.as_ref())?;
         }
+        if let Some(deadline) = &copy_deadline {
+            deadline.check(engine.inner.clock.as_ref())?;
+        }
         conn.commit().await.map_err(orch_db::DbError::from)?;
+        if let Some(deadline) = &copy_deadline {
+            deadline.check(engine.inner.clock.as_ref())?;
+        }
     }
     Ok((measured, count.reference))
 }
@@ -420,13 +446,14 @@ pub async fn decide(
     decide_from(engine, conn, ask, None).await
 }
 
-/// Plans an authorized host location's move with the same new-location copy used by environment moves.
+/// Plans an authorized location copy with the same reviewed destination choices used by environment moves.
 pub async fn decide_location_copy(
     engine: &Engine,
     conn: &mut Conn,
     principal: &Principal,
     source: &rows::LocationRow,
     target: Id,
+    into: Option<CopyInto>,
     at: DateTime<Utc>,
 ) -> Result<Decided, EngineError> {
     use orch_api_contract::mounts::{EnvMountState, MountRef};
@@ -451,7 +478,7 @@ pub async fn decide_location_copy(
     let choices = [MountChoice {
         mount_id: source.mount_id,
         fate: MountFate::Copy,
-        into: Some(CopyInto::NewLocation),
+        into,
     }];
     decide_from(
         engine,
@@ -473,6 +500,21 @@ pub async fn decide_location_copy(
     .await
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct ReviewedLocation {
+    pub(crate) membership_id: Id,
+    #[sqlx(flatten)]
+    pub(crate) row: rows::LocationRow,
+}
+
+pub(crate) async fn reviewed_locations(
+    conn: &mut Conn,
+    ids: &[Id],
+) -> Result<Vec<ReviewedLocation>, EngineError> {
+    Ok(sqlx::query_as("SELECT l.membership_id,l.mount_id,l.machine_id,h.id AS host_id,h.name AS host_name,l.kind,l.source,l.storage,l.data_kind,l.created_by,l.created_at FROM mount_locations l JOIN machines m ON m.id=l.machine_id AND m.deleted_at IS NULL LEFT JOIN hosts h ON h.machine_id=l.machine_id WHERE l.mount_id=ANY($1) ORDER BY l.mount_id,l.machine_id")
+        .bind(ids).fetch_all(conn).await.map_err(orch_db::DbError::from)?)
+}
+
 async fn decide_from(
     engine: &Engine,
     conn: &mut Conn,
@@ -488,7 +530,19 @@ async fn decide_from(
     ids.sort_unstable();
     ids.dedup();
     let mounts = rows::mounts(conn, &ids).await?;
-    let mut locations = rows::locations(conn, &ids).await?;
+    // Read each token and its native operands on one statement snapshot. Separate
+    // reads could attach an old path to a replacement membership with equal labels.
+    let reviewed = reviewed_locations(conn, &ids).await?;
+    let memberships: BTreeMap<_, _> = reviewed
+        .iter()
+        .map(|location| {
+            (
+                (location.row.mount_id, location.row.machine_id),
+                location.membership_id,
+            )
+        })
+        .collect();
+    let mut locations: Vec<_> = reviewed.into_iter().map(|location| location.row).collect();
     if let Some(source) = source {
         locations
             .retain(|row| row.mount_id != source.mount_id || row.machine_id != source.machine_id);
@@ -833,9 +887,13 @@ async fn decide_from(
             decisions.copies.push(CopyDecision {
                 mount_id: id,
                 source_machine: source,
+                source_membership_id: *memberships.get(&(id, source)).ok_or_else(|| {
+                    EngineError::unreadable("The reviewed source location was removed.")
+                })?,
                 source_driver: read.clone(),
                 from,
                 target_machine: target,
+                target_membership_id: memberships.get(&(id, target)).copied(),
                 target_driver: write.clone(),
                 data_kind: if landed_made {
                     None
@@ -1141,6 +1199,63 @@ pub(crate) async fn apply(job: &Job, machine: Id) -> Result<(), Stop> {
         .iter()
         .filter(|copy| copy.target_machine == machine)
         .collect();
+    if copies.is_empty() {
+        return Ok(());
+    }
+    // Reserve the whole accepted plan, including destinations applied by a later
+    // phase. Each metadata transaction ends before waiting or touching native data.
+    loop {
+        job.check()?;
+        let parent = job.row().await?;
+        if parent.cancel_requested() {
+            return Err(Stop::Cancelled);
+        }
+        let mut tx = job.engine().db().begin().await?;
+        let all: Vec<_> = decisions.copies.iter().collect();
+        let acquired = claims::acquire(&mut tx, &parent, &all).await?;
+        let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
+        if let Some(reason) = crate::jobs::runner::abort_reason(&owned)? {
+            return Err(reason);
+        }
+        if owned.cancel_requested() {
+            return Err(Stop::Cancelled);
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        if acquired {
+            break;
+        }
+        job.amend(|progress, _| {
+            let waiting = orch_api_contract::workspace::JobWaiting::Operations { count: 1 };
+            if progress
+                .activity
+                .as_ref()
+                .and_then(|activity| activity.waiting_for.as_ref())
+                != Some(&waiting)
+            {
+                progress.activity = Some(orch_api_contract::workspace::JobActivity {
+                    waiting_for: Some(waiting),
+                    updated_at: orch_types::Time::new(job.now()),
+                    stall_after_seconds: 0,
+                    directories_done: None,
+                    stopping: false,
+                });
+            }
+        })
+        .await?;
+        job.pause(job.engine().inner.config.recheck_every).await?;
+    }
+    job.amend(|progress, _| {
+        if let Some(activity) = &mut progress.activity
+            && matches!(
+                activity.waiting_for,
+                Some(orch_api_contract::workspace::JobWaiting::Operations { .. })
+            )
+        {
+            activity.waiting_for = None;
+            activity.updated_at = orch_types::Time::new(job.now());
+        }
+    })
+    .await?;
     let held_bytes = |copy: &CopyDecision| {
         copy.kept
             .as_ref()
@@ -1287,6 +1402,25 @@ pub(crate) async fn undo(job: &Job) -> Vec<String> {
         return vec!["the copies could not be read back".to_owned()];
     };
     for copy in &decisions.copies {
+        let owned = match job.engine().db().acquire().await {
+            Ok(mut conn) => claims::held(&mut conn, job.id(), copy)
+                .await
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !owned {
+            let attempted = match job.engine().db().acquire().await {
+                Ok(mut conn) => sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM commands WHERE machine_id=ANY($1) AND (body->>'mount_id'=$2 OR body#>>'{labels,orch.mount_id}'=$2) AND (body->>'job_id'=$3 OR body#>>'{labels,orch.copy_job}'=$3))")
+                    .bind([copy.source_machine, copy.target_machine].as_slice())
+                    .bind(copy.mount_id.to_string()).bind(job.id().to_string())
+                    .fetch_one(&mut *conn).await.unwrap_or(true),
+                Err(_) => true,
+            };
+            if attempted {
+                left.push("The original copy destination is no longer owned by this job".into());
+            }
+            continue;
+        }
         if !copy.made
             && unpacking.contains(&copy.mount_id)
             && let Some(held) = kept.get(&copy.mount_id)
@@ -1362,6 +1496,12 @@ pub(crate) async fn commit_locations(
     at: DateTime<Utc>,
 ) -> Result<(), EngineError> {
     for copy in &decisions.copies {
+        if !claims::held(conn, job, copy).await? || !claims::memberships_current(conn, copy).await?
+        {
+            return Err(EngineError::unreadable(
+                "The original copy destination claim changed.",
+            ));
+        }
         let current = rows::locations(conn, &[copy.mount_id])
             .await?
             .into_iter()
@@ -1421,6 +1561,10 @@ pub(crate) async fn commit_locations(
             copy.data_kind.as_deref(),
         )
         .await?;
+        // A replace publishes new data even when the visible operands and clock
+        // match. Earlier reviews must never inherit that new data membership.
+        sqlx::query("UPDATE mount_locations SET membership_id=gen_random_uuid() WHERE mount_id=$1 AND machine_id=$2")
+            .bind(copy.mount_id).bind(copy.target_machine).execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
         if let Some(kept) = &copy.kept {
             let aside = kept.copied_into.as_ref().unwrap_or(&kept.previous);
             rows::keep(
@@ -1458,13 +1602,14 @@ pub(crate) async fn commit_locations(
         });
         orch_db::audit::append(conn, &audit, &orch_db::audit::Origin::default(), at).await?;
     }
+    claims::release(conn, job).await?;
     Ok(())
 }
 
 impl Engine {
     /// Lets go of the copies' archive parts once a job has ended, whatever its end.
     pub(crate) async fn after_mount_copies(&self, row: &jobs::JobRow) {
-        if row.plan.get(done::PINS).is_none() {
+        if row.plan.get(done::PINS).is_none() && row.plan.get("mount_decisions").is_none() {
             return;
         }
         let released = async {
@@ -1472,6 +1617,12 @@ impl Engine {
             let Some(current) = jobs::lock(&mut tx, row.id).await? else {
                 return Ok::<_, EngineError>(());
             };
+            // A retry may have started before this earlier completion hook obtained
+            // the row. Its live claims and archive parts still belong to that work.
+            if current.is_open() {
+                return Ok(());
+            }
+            claims::release(&mut tx, current.id).await?;
             let pins: Vec<Hash> = current
                 .plan
                 .get(done::PINS)
@@ -1556,6 +1707,8 @@ mod tests {
             copies: vec![CopyDecision {
                 mount_id: mount,
                 source_machine: new_id(),
+                source_membership_id: new_id(),
+                target_membership_id: None,
                 source_driver: "docker".into(),
                 from: DataRef::volume(format!("orch-mount-{mount}")),
                 target_machine: machine,

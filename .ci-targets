@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test mount_plans --test loss --test forks
+test -p orch-api-core --test kmounts_files --test hosts
+test -p orch-api-core --lib

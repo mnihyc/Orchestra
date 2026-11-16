@@ -12,6 +12,12 @@ mod support;
 #[path = "kmounts_files/machine_scopes.rs"]
 mod machine_scopes;
 
+#[path = "kmounts_files/copy.rs"]
+mod copy;
+
+#[path = "kmounts_files/deletion.rs"]
+mod deletion;
+
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::mounts::*;
@@ -887,6 +893,9 @@ async fn a_mount_is_created_listed_changed_and_removed_with_its_current_revision
         .app
         .call(MountDelete, &[&made.base.id])
         .token(&c.viewer.token)
+        .body(&deletion::keep(
+            &deletion::plan(&world, &c.viewer, made.base.id).await,
+        ))
         .send()
         .await
         .ok();
@@ -1027,7 +1036,7 @@ async fn a_person_adds_only_their_own_machine_location_and_other_readers_do_not_
 }
 
 #[tokio::test]
-async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
+async fn deleting_an_enabled_mount_switches_off_its_scope_without_asking_to_edit_that_scope() {
     let world = World::new().await;
     let c = company(&world).await;
     let made = world
@@ -1060,18 +1069,35 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
         used.scopes[0].value,
         MountScopeValue::Mode(MountScopeMode::Private)
     );
-    let refused = world
+    let plan = deletion::plan(&world, &c.viewer, made.base.id).await;
+    let accepted = world
         .app
         .call(MountDelete, &[&made.base.id])
         .token(&c.viewer.token)
+        .body(&deletion::keep(&plan))
         .send()
         .await
-        .problem();
-    assert_eq!(refused.code, ErrorCode::ResourceInUse);
+        .ok();
+    let job = match accepted {
+        orch_api_contract::storage::CleanupJobResponse::Full(job) => job.id,
+        orch_api_contract::storage::CleanupJobResponse::Receipt(receipt) => receipt.id,
+    };
+    let row = orch_db::queries::jobs::job(&mut *world.conn().await, job)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        refused.extra["uses"]["scopes"][0]["node"]["id"],
-        json!(c.acme)
+        row.kind, "storage_cleanup",
+        "Delete uses the existing cleanup job"
     );
+    let enabled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key='env.mounts' AND value ? $1)",
+    )
+    .bind(made.base.id.to_string())
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!(!enabled, "a deleted mount cannot remain enabled in a place");
     assert_eq!(
         world
             .app
@@ -1079,9 +1105,9 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
             .token(&c.viewer.token)
             .send()
             .await
-            .ok()
-            .revision,
-        made.revision
+            .problem()
+            .code,
+        ErrorCode::NotFound
     );
     assert_eq!(
         world

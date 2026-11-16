@@ -268,6 +268,9 @@ impl JsonSchema for Stream {
 /// One event of a stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Ev {
+    /// The physical producer captured before queuing; absent on non-session observations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_opening_id: Option<orch_types::Id>,
     /// The stream.
     #[serde(rename = "s")]
     pub stream: String,
@@ -287,6 +290,9 @@ pub struct Ev {
 /// One event of a batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EvbEntry {
+    /// The original physical producer, independently retained for each event in a batch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_opening_id: Option<orch_types::Id>,
     /// The event's number in its stream.
     #[serde(rename = "q")]
     pub seq: Seq,
@@ -341,6 +347,20 @@ pub enum ResetReason {
     SpoolLost,
     /// Its spool was full, and the oldest events made room.
     SpoolOverflow,
+    /// An event was larger than a message of the session may be, and could not be sent.
+    TooLarge,
+}
+
+impl ResetReason {
+    /// The reason as a word, for a log and a count.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpoolLost => "spool_lost",
+            Self::SpoolOverflow => "spool_overflow",
+            Self::TooLarge => "too_large",
+        }
+    }
 }
 
 /// A machine's word that a stream goes on from a number, and that
@@ -376,6 +396,7 @@ pub struct Eph {
 impl From<Ev> for EvbEntry {
     fn from(event: Ev) -> Self {
         Self {
+            native_opening_id: event.native_opening_id,
             seq: event.seq,
             at: event.at,
             kind: event.kind,
@@ -796,10 +817,46 @@ mod tests {
         round_trip::<Ack>(json!({ "s": stream, "q": 43 }));
         round_trip::<Nak>(json!({ "s": stream, "expected": 44 }));
         round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "spool_overflow" }));
+        round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "too_large" }));
         round_trip::<Eph>(json!({
             "s": format!("env:{A}"), "k": "fs.changed", "at": "2026-10-08T17:04:05.000Z",
             "b": { "watch_id": B, "changed": [], "removed": ["tmp/a.txt"] }
         }));
+    }
+
+    #[test]
+    fn individual_and_batched_reports_keep_their_original_opening_on_the_same_stream() {
+        let stream = format!("session:{A}:{B}");
+        round_trip::<Ev>(json!({
+            "s":stream,"q":1,"at":"2026-10-08T17:04:05.000Z","native_opening_id":A,
+            "k":"session.title","b":{"title":"Original conversation"}
+        }));
+        let batch: Evb = round_trip(json!({"s":stream,"e":[
+            {"q":2,"at":"2026-10-08T17:04:05.100Z","native_opening_id":A,
+                "k":"turn.completed","b":{"turn_id":A,"status":"completed","error":null}},
+            {"q":3,"at":"2026-10-08T17:04:05.200Z","native_opening_id":B,
+                "k":"session.title","b":{"title":"Replacement conversation"}}
+        ]}));
+        assert_eq!(batch.stream, stream);
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn a_reason_for_a_reset_is_the_word_a_log_and_a_count_use() {
+        for reason in [
+            ResetReason::SpoolLost,
+            ResetReason::SpoolOverflow,
+            ResetReason::TooLarge,
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
     }
 
     #[test]

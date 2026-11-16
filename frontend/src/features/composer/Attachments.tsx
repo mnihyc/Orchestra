@@ -15,7 +15,7 @@ import { FileAttachment } from '@/features/files/FileChip';
 import { FileGuideHint } from '@/features/files/FileGuideHint';
 import { blobSource } from '@/features/files/source';
 import { FilePathAttachment } from '@/features/files/FileLink';
-import { Menu } from '@/ui/Menu';
+import { Menu, type MenuEntry } from '@/ui/Menu';
 import type { ChatPart, ContentPart } from '@/generated/api-types';
 import type { QueuedUpload } from '@/lib/useUploads';
 import { ByteSize } from '@/ui/ByteSize';
@@ -34,13 +34,15 @@ import { UploadHelp } from '@/features/composer/UploadHelp';
 import { JobActivityLine } from '@/features/change/Progress';
 export { carriesFiles } from '@/lib/drop';
 
-export function AttachButton({ onPress, label, disabled = false, onFile, onDocument, fileReason = false, help = 'message-files' }: { onPress: () => void; label?: string; disabled?: boolean; onFile?: () => void; onDocument?: () => void; fileReason?: string | false; help?: 'message-files' | 'documents' }) {
+/** The plus of the box: what is added to a message, and the other acts of the box that a slash command also opens (a goal, a side question), each entered here and by its command and by no third way. */
+export function AttachButton({ onPress, label, disabled = false, onFile, onDocument, fileReason = false, help = 'message-files', extras = [] }: { onPress: () => void; label?: string; disabled?: boolean; onFile?: () => void; onDocument?: () => void; fileReason?: string | false; help?: 'message-files' | 'documents'; extras?: readonly MenuEntry[] }) {
   const { t } = useTranslation();
   const name = label ?? t(onFile !== undefined && onDocument !== undefined ? 'composer.plus.label' : 'composer.attach');
   const button = onFile !== undefined && onDocument !== undefined ? <Menu label={name} side="top" trigger={<IconButton size="sm" label={name} icon={<Plus aria-hidden />} disabled={disabled} />} entries={[
     { id: 'upload', label: t('composer.plus.upload'), onSelect: onPress },
     { id: 'file', label: t('composer.plus.file'), disabled: fileReason, onSelect: onFile },
     { id: 'document', label: t('composer.plus.document'), onSelect: onDocument },
+    ...(extras.length === 0 ? [] : [{ type: 'separator', id: 'acts-separator' } as MenuEntry, ...extras]),
   ]} /> : <IconButton size="sm" label={name} icon={<Paperclip aria-hidden />} disabled={disabled} onClick={onPress} />;
   return <span className="inline-flex items-center gap-0.5">{button}<UploadHelp topic={help} /></span>;
 }

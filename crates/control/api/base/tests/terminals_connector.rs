@@ -404,7 +404,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: 2,
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -559,6 +559,10 @@ impl Commands for LinkCommands {
             check().map_err(CommandsError::BeforeEffect)?;
         }
         let handle = link.commands().issue(Cmd {
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
