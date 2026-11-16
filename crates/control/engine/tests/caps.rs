@@ -837,6 +837,74 @@ async fn a_running_turn_is_stopped_when_a_report_of_its_usage_shows_the_cap_reac
     world.wait_blocked(thread, "quota_exceeded").await;
 }
 
+/// The engine notes that it looked at a thread's caps when it looks, inside the transaction of the report, and
+/// acts on a cap that is reached after the grace, by a look of its own at what has been committed. A transaction
+/// that is rolled back and a report that is applied again (a conflict does that) leaves the note without the
+/// report: the look of the first try found the usage of before, the second try finds the thread looked at, and a
+/// turn whose reports end there runs past its cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_report_applied_again_after_a_rolled_back_try_still_stops_the_turn_its_cap_covers() {
+    let clock = Arc::new(clock::manual());
+    let world = World::with_clock(clock.clone()).await;
+    let check_every = orch_engine::config::EngineConfig::default().cap_check;
+    world.set_config(|config| config.cap_check = check_every);
+    world.restart_api().await;
+    let thread = world.thread("Retried").await;
+    Cap::tokens(1_000).on(world.topic).make(&world).await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    world.say(thread, reported(start.turn_id, 400)).await;
+    common::eventually("the below-cap usage report to be committed", || async {
+        let reported: Option<i64> = world
+            .scalar(
+                "SELECT (usage->>'total_tokens')::bigint FROM turns WHERE id = $1",
+                start.turn_id,
+            )
+            .await;
+        reported == Some(400)
+    })
+    .await;
+    clock.advance(Duration::from_std(check_every).unwrap());
+    let event = reported(start.turn_id, 1_500);
+    let delivered = orch_link::streams::DeliveredEvent {
+        seq: 1_000,
+        at: orch_types::Time::new(world.clock.now()),
+        kind: event.kind().as_str().to_owned(),
+        body: event.body().unwrap(),
+    };
+    let stream = orch_link_contract::streams::Stream::Session {
+        thread_id: thread,
+        segment_id: world.segment_of(thread).await,
+    };
+    for attempt in 0..2 {
+        let mut tx = world.pool.begin().await.unwrap();
+        world
+            .engine()
+            .apply_stream_events(
+                &mut tx,
+                world.machine_id,
+                &stream,
+                std::slice::from_ref(&delivered),
+            )
+            .await
+            .unwrap();
+        if attempt == 0 {
+            tx.rollback().await.unwrap();
+            // The look at what is committed that the first try asked for has been made by now: it found 400.
+            meanwhile(Wait::from_millis(100)).await;
+        } else {
+            tx.commit().await.unwrap();
+        }
+    }
+    world.wait_turn(start.turn_id, "interrupted").await;
+    let code: String = world
+        .scalar(
+            "SELECT error->>'code' FROM turns WHERE id = $1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(code, "cap_reached");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cap_made_below_what_a_running_turn_has_used_stops_it_as_soon_as_the_engine_is_told() {
     let world = World::new().await;

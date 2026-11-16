@@ -2,7 +2,12 @@
 import { Trans,useTranslation } from 'react-i18next';
 import type { UsageCap,UserRef } from '@/generated/api-types';
 import { UserChip } from '@/ui/UserChip';
-import { capTitle,offeringsWords,narrowingWords,whereWords, type ProgramTitle } from './words';
+import { capTitle,offeringsWords,narrowingWords,whereWords,whoWords, type ProgramTitle } from './words';
+
+export function CapSubjectName({cap}:{cap:UsageCap}) {
+  const {t}=useTranslation();
+  return cap.subject.kind==='user'?<UserChip user={cap.subject.user}/>:<>{whoWords(cap,t)}</>;
+}
 
 export function CapTitle({cap,programTitle}:{cap:UsageCap;programTitle?:ProgramTitle}) {
   const {t}=useTranslation();

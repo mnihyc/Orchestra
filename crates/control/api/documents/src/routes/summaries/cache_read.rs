@@ -25,53 +25,32 @@ pub(super) async fn guard(
         let refs: Vec<SummaryTarget> =
             serde_json::from_value(kept.source_refs.clone()).map_err(ApiError::internal)?;
         let mut readable = !refs.is_empty() || kept.text.is_none();
-        for source in refs {
-            let current = match sources::identify(conn, source).await {
-                Ok(current) => current,
-                Err(_) => {
-                    readable = false;
-                    break;
-                }
-            };
-            if !plan
-                .permits_binding(
-                    principal.caller(),
-                    inputs_slot,
-                    current.fact().object.kind,
-                    std::slice::from_ref(current.fact()),
-                )
-                .map_err(source_error)?
-                || !sources::viewable(conn, principal, source)
-                    .await
-                    .map_err(source_error)?
-            {
-                readable = false;
-                break;
-            }
-            if source != target {
-                inputs.push(current.fact().clone());
-            }
-            inspecting |= !sources::readable(conn, principal, source)
-                .await
-                .map_err(source_error)?;
+        if let Some(checked) = guard_refs(
+            conn,
+            principal,
+            target,
+            plan,
+            &refs,
+            inputs_slot,
+            target_inspecting,
+        )
+        .await?
+        {
+            inputs = checked.inputs;
+            inspecting = checked.inspecting;
+        } else {
+            readable = false;
         }
-        if matches!(target, SummaryTarget::Chat { .. }) {
-            let selected = match wanted {
-                Some(range) => Some(range),
-                None => Some(
-                    sources::disclosure_range(conn, principal, target.id())
-                        .await
-                        .map_err(source_error)?,
-                ),
-            };
-            if kept
-                .source_snapshot
-                .as_ref()
-                .and_then(|source| source.get("range"))
-                != Some(&serde_json::to_value(selected).map_err(ApiError::internal)?)
-            {
-                readable = false;
-            }
+        if !same_range(
+            conn,
+            principal,
+            target,
+            wanted,
+            kept.source_snapshot.as_ref(),
+        )
+        .await?
+        {
+            readable = false;
         }
         if !readable {
             cache = None;
@@ -85,6 +64,74 @@ pub(super) async fn guard(
         inputs,
         inspecting,
     })
+}
+
+pub(super) struct CheckedRefs {
+    pub inputs: Vec<KeyResolvedTarget>,
+    pub inspecting: bool,
+}
+
+/// Both a published paragraph and a later attempt keep their own complete source governors.
+pub(super) async fn guard_refs(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: SummaryTarget,
+    plan: &Prepared,
+    refs: &[SummaryTarget],
+    inputs_slot: usize,
+    mut inspecting: bool,
+) -> ApiResult<Option<CheckedRefs>> {
+    let mut inputs = Vec::new();
+    for &source in refs {
+        let current = match sources::identify(conn, source).await {
+            Ok(current) => current,
+            Err(_) => return Ok(None),
+        };
+        if !plan
+            .permits_binding(
+                principal.caller(),
+                inputs_slot,
+                current.fact().object.kind,
+                std::slice::from_ref(current.fact()),
+            )
+            .map_err(source_error)?
+            || !sources::viewable(conn, principal, source)
+                .await
+                .map_err(source_error)?
+        {
+            return Ok(None);
+        }
+        if source != target {
+            inputs.push(current.fact().clone());
+        }
+        inspecting |= !sources::readable(conn, principal, source)
+            .await
+            .map_err(source_error)?;
+    }
+    Ok(Some(CheckedRefs { inputs, inspecting }))
+}
+
+/// A private chat receipt describes only its originally selected range.
+pub(super) async fn same_range(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: SummaryTarget,
+    wanted: Option<SummaryChatRange>,
+    snapshot: Option<&Json>,
+) -> ApiResult<bool> {
+    if !matches!(target, SummaryTarget::Chat { .. }) {
+        return Ok(true);
+    }
+    let selected = match wanted {
+        Some(range) => Some(range),
+        None => Some(
+            sources::disclosure_range(conn, principal, target.id())
+                .await
+                .map_err(source_error)?,
+        ),
+    };
+    Ok(snapshot.and_then(|source| source.get("range"))
+        == Some(&serde_json::to_value(selected).map_err(ApiError::internal)?))
 }
 
 /// The same optional producer metadata projection for singleton and batch paragraph reads.
@@ -103,6 +150,22 @@ pub(super) async fn producer(
             provider: None,
             offering: None,
         };
+        // An admitted model name is a result fact; its account/configuration still needs Read.
+        view.offering = cache
+            .producer
+            .as_ref()
+            .and_then(|producer| producer.get("model_name"))
+            .and_then(Json::as_str)
+            .map(str::to_owned);
+        if let Some(name) = cache
+            .producer
+            .as_ref()
+            .and_then(|producer| producer.get("model_display"))
+            .and_then(Json::as_str)
+            .or(view.offering.as_deref())
+        {
+            view.title = name.to_owned();
+        }
         let id = cache
             .producer
             .as_ref()
