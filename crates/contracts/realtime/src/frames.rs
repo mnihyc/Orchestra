@@ -327,6 +327,9 @@ pub struct RawSubscription {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct SubscribedFrame {
+    /// The committed shell change cut at personal-feed admission; absent on other feeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_revision: Option<orch_api_contract::auth::PersonalRevision>,
     /// Admitted raw segment and live-only floor; present only on a raw subscription.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<RawSubscription>,
