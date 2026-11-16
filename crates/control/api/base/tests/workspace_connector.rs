@@ -612,7 +612,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -862,6 +862,64 @@ async fn job_of(site: &Site, id: Id) -> Job {
 // ---------------------------------------------------------------- the tests
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_api_page_can_return_more_than_five_thousand_short_names_from_the_real_connector() {
+    use orch_api_contract::workspace::{
+        EnvironmentFileList, EnvironmentFileListQuery, FileListSource,
+    };
+    let names: Vec<_> = (0..6001)
+        .map(|number| format!("wide/{number:04}"))
+        .collect();
+    let files: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|name| (name.as_str(), b"x".as_slice()))
+        .collect();
+    let cluster = Cluster::with_store(true, false, &files, false).await;
+    let site = &cluster.site;
+    let first = site
+        .app()
+        .call(EnvironmentFileList, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&EnvironmentFileListQuery {
+            thread: None,
+            path: "wide".into(),
+            source: Some(FileListSource::Live),
+            mount: None,
+            cursor: None,
+            limit: Some(6000),
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.entries.len(), 6000);
+    assert!(first.truncated);
+    let last = site
+        .app()
+        .call(EnvironmentFileList, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&EnvironmentFileListQuery {
+            thread: None,
+            path: "wide".into(),
+            source: Some(FileListSource::Live),
+            mount: None,
+            cursor: first.next_cursor.clone(),
+            limit: Some(6000),
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.revision, first.revision);
+    assert!(!last.truncated);
+    let got: std::collections::BTreeSet<_> = first
+        .entries
+        .iter()
+        .chain(&last.entries)
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(got, names.iter().map(String::as_str).collect());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_recording_uses_the_deployments_disk_store_and_the_restore_routes_put_back_its_files()
  {
     recording_and_restore(false).await;
@@ -920,9 +978,11 @@ async fn recording_and_restore(root_alias: bool) {
             &SerialKey::Environment(site.environment),
             orch_types::Time::new(app.clock.now() + chrono::Duration::seconds(90)),
             &FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: site.environment,
                 snapshot_id: snapshot,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: days,
                 max_bytes,
@@ -1001,6 +1061,8 @@ async fn recording_and_restore(root_alias: bool) {
     // The original native result is good, but old server validation could freeze only a
     // generic unavailable fallback. Reading it must revalidate that original, never recapture.
     let fallback = FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -1172,7 +1234,7 @@ async fn an_empty_full_index_reaches_the_server_and_file_name_search_answers_an_
         .await
         .ok();
     assert!(
-        matches!(answer, EnvironmentFileSearchReply::Names(entries) if entries.is_empty()),
+        matches!(answer, EnvironmentFileSearchReply::Names(page) if page.entries.is_empty()),
         "an indexed empty tree answers no matches, not a missing-list failure"
     );
 }

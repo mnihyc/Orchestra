@@ -87,6 +87,7 @@ async fn a_restart_reconstructs_attachment_and_executor_without_new_start_comman
     assert_eq!(role.host().running_executors().await.len(), 1);
     let fetched = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "kept.txt".to_owned(),
@@ -158,6 +159,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     // A directory is listed with what is in it.
     let listing = rig
         .succeed(&FsList {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: String::new(),
@@ -183,6 +185,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     let blob = rig.stored(content);
     let written = rig
         .succeed(&FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             path: "src/new.txt".to_owned(),
@@ -200,6 +203,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     // And a file is read back: its content goes up to the system, which holds it afterwards.
     let fetched = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "hello.txt".to_owned(),
@@ -211,6 +215,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     assert_eq!(rig.blobs.content(&hash).unwrap().as_ref(), b"hello");
     let again = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "src/new.txt".to_owned(),
@@ -301,6 +306,8 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
 
 fn attach_body(environment_id: orch_types::Id, root: &std::path::Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -339,6 +346,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
         let named = path.to_owned();
         assert_eq!(
             rig.fail(&FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 mount: None,
                 path: named.clone()
@@ -349,6 +357,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
         );
         assert_eq!(
             rig.fail(&FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 mount: None,
                 path: named.clone(),
@@ -361,6 +370,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
         );
         assert_eq!(
             rig.fail(&FsWrite {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id,
                 path: named.clone(),
@@ -374,6 +384,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
         );
         assert_eq!(
             rig.fail(&FsMkdir {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 path: named.clone()
             })
@@ -383,6 +394,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
         );
         assert_eq!(
             rig.fail(&FsList {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 mount: None,
                 path: named,
@@ -398,6 +410,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
     // A link inside the workspace that points out of it leads nowhere either.
     assert_eq!(
         rig.fail(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             mount: None,
             path: "leak".to_owned(),
@@ -429,6 +442,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     let blob = rig.stored(b"what somebody sent");
 
     let write = FsWrite {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id,
         path: "keep.txt".to_owned(),
@@ -439,6 +453,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     assert_eq!(rig.fail(&write).await, "policy.remote_write_disabled");
     assert_eq!(
         rig.fail(&FsMkdir {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             path: "made".to_owned()
         })
@@ -447,6 +462,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     assert_eq!(
         rig.fail(&FsRename {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             from: "keep.txt".to_owned(),
             to: "kept.txt".to_owned()
@@ -456,6 +472,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     assert_eq!(
         rig.fail(&FsCopy {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             from: "keep.txt".to_owned(),
             to: "copy.txt".to_owned()
@@ -465,6 +482,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     assert_eq!(
         rig.fail(&FsRemove {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             path: "keep.txt".to_owned(),
             recursive: false
@@ -474,6 +492,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     // Files that arrive with a message have a switch of their own, and a move is a write.
     let delivery = FsMaterialize {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id,
         job_id: None,
@@ -582,6 +601,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     let job = new_id();
     let snapshot = rig
         .succeed(&FsSnapshot {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             job_id: job,
@@ -612,6 +632,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     // And is written in the other environment, which then has the same files.
     let moved = rig
         .succeed(&FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: second,
             job_id: Some(new_id()),
@@ -636,6 +657,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     // Written again, nothing is written twice.
     let again = rig
         .succeed(&FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: second,
             job_id: None,
@@ -668,6 +690,7 @@ async fn what_the_environment_says_on_its_own_account_goes_on_its_stream() {
     // The whole tree's list is uploaded and announced when it is asked for.
     let manifest = rig
         .succeed(&orch_link_contract::commands::FsManifest {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             selection: Selection {
                 include: vec![String::new()],

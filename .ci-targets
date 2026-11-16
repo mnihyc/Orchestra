@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-access-contract --lib
+test -p orch-link-contract --lib
+test -p orch-authz --test environments --test resource_pages
+test -p orch-envhost --test environment
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-engine --lib -- --skip history_pages::

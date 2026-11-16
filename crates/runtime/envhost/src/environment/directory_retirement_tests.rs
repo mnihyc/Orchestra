@@ -37,6 +37,8 @@ impl Rig {
             Vec::new(),
         );
         let attach = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,
@@ -65,6 +67,7 @@ impl Rig {
 
     fn request(&self, cursor: Option<String>) -> FsList {
         FsList {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.attach.environment_id,
             path: String::new(),
             mount: None,

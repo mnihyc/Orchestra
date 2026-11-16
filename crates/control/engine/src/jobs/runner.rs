@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -2433,6 +2432,7 @@ mod tests {
             machine,
             SerialKey::Environment(environment),
             &FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 job_id: job,
                 selection: Selection {

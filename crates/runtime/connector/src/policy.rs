@@ -236,6 +236,7 @@ pub fn policy_of(config: &ConnectorConfig) -> Result<LocalPolicy, PolicyError> {
         local_values: BTreeMap::new(),
         hooks: config.hooks.clone(),
         environment_roots: config.environment.roots.clone(),
+        environment_files_reach: config.environment.files_reach,
         environment_remote_write: config.environment.remote_write,
         environment_terminal: config.environment.terminal,
         environment_after_up: config.environment.after_up,
@@ -283,6 +284,7 @@ pub fn put_policy(config: &mut ConnectorConfig, policy: &LocalPolicy) {
         .environment
         .roots
         .clone_from(&policy.environment_roots);
+    config.environment.files_reach = policy.environment_files_reach;
     config.environment.remote_write = policy.environment_remote_write;
     config.environment.terminal = policy.environment_terminal;
     config.environment.after_up = policy.environment_after_up;
@@ -333,10 +335,7 @@ pub fn explicit_local_keys(text: &str) -> Result<Vec<String>, toml::de::Error> {
         .filter(|key| **key != PolicyKey::PolicyDelegated)
         .filter(|key| match key.as_str().split_once('.') {
             Some((section, member)) => written.get(section).and_then(|v| v.get(member)).is_some(),
-            None => {
-                written.get(key.as_str()).is_some()
-                    || (**key == PolicyKey::Storages && written.get("storage").is_some())
-            }
+            None => written.get(key.as_str()).is_some(),
         })
         .map(|key| key.as_str().into())
         .collect())
@@ -775,6 +774,12 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             )?,
         },
         Command::PtyOpen(_) => {
+            if policy.environment_files_reach != orch_link_contract::policy::FileReach::Machine {
+                return Err(CommandError::new(
+                    ErrorCode::FileReachDenied,
+                    "this machine limits file reach to roots; an unrestricted shell cannot stay within it",
+                ));
+            }
             if !policy.environment_terminal {
                 return Err(CommandError::new(
                     ErrorCode::Unsupported,
@@ -1533,6 +1538,7 @@ mod tests {
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
+            output_capture_bytes: 67_108_864,
             native_model: None,
             transport_only: false,
             turn_changes_require_restart: false,
@@ -1559,6 +1565,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,
@@ -1926,6 +1933,7 @@ mod tests {
     fn nothing_is_written_from_outside_until_the_owner_allows_it() {
         let mut policy = here();
         let write = Command::FsWrite(FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: new_id(),
             path: "a.txt".into(),
@@ -1940,6 +1948,7 @@ mod tests {
         policy.environment_remote_write = true;
         assert!(gate(&policy, write).is_ok());
         let delivery = Command::FsMaterialize(FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: new_id(),
             job_id: None,
@@ -1957,6 +1966,7 @@ mod tests {
             "policy.deliver_files_disabled"
         );
         let moved = Command::FsMaterialize(FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: new_id(),
             job_id: None,
@@ -1977,6 +1987,8 @@ mod tests {
         let policy = here();
         let attach = |root: &str| {
             Command::EnvAttach(EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,

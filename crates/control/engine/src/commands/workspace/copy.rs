@@ -58,6 +58,7 @@ impl FileCopyInput {
     /// The same native copy body, without authority fields.
     pub fn command(&self) -> FsCopy {
         FsCopy {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.environment,
             from: self.from.clone(),
             to: self.to.clone(),

@@ -210,6 +210,30 @@ pub struct ToolContext<'a> {
     pub directory: &'a str,
     /// Where the agent starts, inside it.
     pub cwd: &'a str,
+    /// Native cache uploaded before publication; absent for metadata-only callers.
+    pub outputs: Option<&'a std::path::Path>,
+    /// The accepted session capture allowance.
+    pub output_capture_bytes: u64,
+}
+impl ToolContext<'_> {
+    /// Captures the original text before creating its compact timeline excerpt.
+    pub fn output(&self, text: &str) -> OutputRef {
+        let total = i64::try_from(text.len()).unwrap_or(i64::MAX);
+        if let Some(directory) = self.outputs {
+            match orch_agent_contract::output::OutputStore::new(directory.to_owned()).retain(
+                text,
+                total,
+                self.output_capture_bytes,
+            ) {
+                Ok((output, _)) => return output,
+                Err(error) => tracing::warn!(%error,"native output capture is unavailable"),
+            }
+        }
+        orch_agent_contract::output::inline(
+            orch_agent_contract::output::tail(text, self.output_capture_bytes),
+            total,
+        )
+    }
 }
 
 /// A path as it is shown: relative to the thread's directory where it lies in it, else as it is.
@@ -594,7 +618,7 @@ pub fn tool_payload(
             command: text_of(input, "command").unwrap_or_default().to_owned(),
             cwd: ctx.cwd.to_owned(),
             exit_code: outcome.map(exit_code_of),
-            output: OutputRef::of(
+            output: ctx.output(
                 text.map(|text| {
                     if outcome.is_some_and(|outcome| outcome.is_error) {
                         text.strip_prefix("Exit code ")
@@ -649,7 +673,7 @@ pub fn tool_payload(
                 total_lines: file
                     .and_then(|file| file.get("totalLines"))
                     .and_then(Json::as_i64),
-                content: OutputRef::of(
+                content: ctx.output(
                     file.and_then(|file| file.get("content"))
                         .and_then(Json::as_str)
                         .or(if image { Some("") } else { text })
@@ -726,7 +750,7 @@ pub fn tool_payload(
                     .and_then(|result| result.get("code"))
                     .and_then(Json::as_u64)
                     .and_then(|code| u16::try_from(code).ok()),
-                content: OutputRef::of(
+                content: ctx.output(
                     structured
                         .and_then(|result| result.get("result"))
                         .and_then(Json::as_str)
@@ -876,8 +900,42 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn a_completed_native_command_keeps_the_chosen_output_interval_before_inline_cropping() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ToolContext {
+            directory: "/work",
+            cwd: "/work",
+            outputs: Some(directory.path()),
+            output_capture_bytes: 32_769,
+        };
+        let original = "native output 字🙂\n".repeat(4_000);
+        let outcome = ToolOutcome::from_block(&json!({"content":original}), None);
+        let payload = tool_payload(
+            &Family::Command,
+            "Bash",
+            "call",
+            &json!({"command":"build"}),
+            Some(&outcome),
+            &context,
+        );
+        let ToolPayload::Command { output, .. } = payload else {
+            panic!("command")
+        };
+        assert_eq!(output.total_len, i64::try_from(original.len()).unwrap());
+        let range = output.retained.unwrap();
+        assert_eq!(range.offset + range.len, output.total_len);
+        assert!(range.len <= 32_769);
+        assert_eq!(
+            std::fs::read(directory.path().join(output.blob.unwrap().to_string())).unwrap(),
+            orch_agent_contract::output::tail(&original, 32_769).as_bytes()
+        );
+    }
+
     fn ctx() -> ToolContext<'static> {
         ToolContext {
+            outputs: None,
+            output_capture_bytes: orch_agent_contract::output::DEFAULT_CAPTURE_BYTES,
             directory: "/workspace/web",
             cwd: "/workspace/web/api",
         }

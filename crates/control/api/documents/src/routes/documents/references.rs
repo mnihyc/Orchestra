@@ -1057,6 +1057,7 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                 ctx,
                 machine,
                 &FsStat {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env.id,
                     mount: None,
                     path: path.to_owned(),
@@ -1114,6 +1115,7 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                     ctx,
                     machine,
                     &FsFetch {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         environment_id: env.id,
                         mount: None,
                         path: path.to_owned(),

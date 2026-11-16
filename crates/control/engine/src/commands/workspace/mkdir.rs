@@ -50,6 +50,7 @@ impl FileMkdirInput {
     /// The canonical native body, carrying no authority.
     pub fn command(&self) -> FsMkdir {
         FsMkdir {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.environment,
             path: self.path.clone(),
         }

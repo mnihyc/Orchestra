@@ -544,6 +544,9 @@ pub struct PageCovers {
 /// the caller may change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PermissionPage {
+    /// Current caller file reach and its native machine bound, on an environment only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_reach: Option<orch_access_contract::permissions::FileReachFacts>,
     /// What the page is of.
     pub object: ObjectRef,
     /// Whether it is a thing's page or a defaults page.
@@ -1216,6 +1219,9 @@ pub struct ResourceAccess {
 /// The least of a provider's models and efforts that would do, and where the work was to run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AccessOptions {
+    /// The work this request needs the provider for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<orch_access_contract::permissions::ProviderUsePurpose>>,
     /// The models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,

@@ -185,6 +185,8 @@ impl World {
         let facts = host
             .env_attach(
                 &EnvAttach {
+                    workspace: Default::default(),
+
                     resources: None,
                     data_generation: None,
                     storage: None,
@@ -460,6 +462,7 @@ async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_enviro
     let listed = world
         .host
         .fs_list(&FsList {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: world.id,
             mount: None,
             path: String::new(),
@@ -475,6 +478,7 @@ async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_enviro
         .host
         .fs_snapshot(
             &orch_link_contract::commands::FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: world.id,
                 job_id: orch_types::new_id(),
@@ -493,6 +497,7 @@ async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_enviro
         .host
         .fs_materialize(
             &orch_link_contract::commands::FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: world.id,
                 job_id: None,
@@ -550,6 +555,8 @@ async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_enviro
     let _ = session;
     world.stop().await;
     let attach = EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -1157,6 +1164,7 @@ async fn an_environment_without_browser_programs_still_lists_its_files_and_repor
     let files = world
         .host
         .fs_list(&FsList {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: world.id,
             mount: None,
             path: String::new(),
@@ -1806,6 +1814,8 @@ async fn a_connected_host_uses_its_private_profiles_only_while_the_machine_owner
     let id = orch_types::new_id();
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,
