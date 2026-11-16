@@ -3,13 +3,13 @@ import { screen,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach,expect,it,vi } from 'vitest';
 import { ApiError } from '@/api/client';
-import { MachinePolicyTab,policyCommand } from '@/features/resources/machines/Policy';
+import { MachineLimits,MachinePolicyTab,policyCommand } from '@/features/resources/machines/Policy';
 import type { MachinePolicy,MachinePolicyKey } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 const {read,write,openGuide}=vi.hoisted(()=>({read:vi.fn<()=>Promise<MachinePolicy>>(),write:vi.fn<()=>Promise<MachinePolicy>>(),openGuide:vi.fn()}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>openGuide}));
-vi.mock('@/api/resources',()=>({
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>openGuide}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),
   machinePolicyQuery:()=>({queryKey:['machine-policy','machine'],queryFn:read}),
   machineQuery:()=>({queryKey:['machine','machine']}),updateMachinePolicy:write,
 }));
@@ -22,6 +22,16 @@ function policy(command="'/home/ada/.local/bin/orch-connector' --data-dir '/data
   ]};
 }
 beforeEach(()=>{vi.clearAllMocks();read.mockResolvedValue(policy());});
+for(const locale of ['en','zh-CN'] as const)it(`names the physical operator in a unit's existing locally kept limit source (${locale})`,async()=>{
+  await setLocale(locale);
+  try {
+    const view=show(<MachineLimits machineId="machine" bounds="environment" id="limits" title="Machine limits" lead=""/>);
+    await screen.findByRole('region',{name:'Machine limits'});
+    const row=view.container.querySelector('[data-setting="environment.terminal"]');
+    expect(row).toHaveTextContent(locale==='en'?'Physical machine operator':'物理机器操作员');
+    expect(within(row as HTMLElement).queryByRole('button',{name:i18n.t('machines.policy.editTitle',{key:i18n.t('machines.policy.keys.environment_terminal.title')})})).not.toBeInTheDocument();
+  }finally{await setLocale('en');}
+});
 for(const locale of ['en','zh-CN'] as const)it(`keeps descriptions and exact kept commands behind Help, with shared keys shown once (${locale})`,async()=>{
   await setLocale(locale);
   try {
@@ -149,4 +159,20 @@ it('shows a mixed failure in the field and the existing alert', async () => {
   expect(await screen.findByRole('alert')).toBeVisible();
   expect(editor).toHaveAttribute('aria-invalid', 'true');
   expect(editor).toHaveAccessibleDescription(new RegExp(i18n.t('machines.policy.driverFaults.type')));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps the machine file bound a named choice independent of agent sandbox (${locale})`, async () => {
+  await setLocale(locale);
+  try {
+    read.mockResolvedValue({ ...policy(), keys: [{ ...entry('environment.files_reach', ['environment'], 'roots'), writable: true, delegated: true }, entry('agent.max_sandbox', ['agent'], 'workspace')] });
+    show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+    const name = i18n.t('machines.policy.keys.environment_files_reach.title');
+    await userEvent.click(await screen.findByRole('button', { name: i18n.t('machines.policy.editTitle', { key: name }) }));
+    const choice = screen.getByRole('combobox');
+    expect(choice).toHaveTextContent(i18n.t('fileReach.roots'));
+    await userEvent.click(choice);
+    await userEvent.click(screen.getByRole('option', { name: i18n.t('fileReach.machine') }));
+    expect(choice).toHaveTextContent(i18n.t('fileReach.machine'));
+    expect(screen.getByText(i18n.t('machines.policy.sandbox.workspace'))).toBeVisible();
+  } finally { await setLocale('en'); }
 });

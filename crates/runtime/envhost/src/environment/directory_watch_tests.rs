@@ -55,6 +55,8 @@ impl Rig {
         let environment = new_id();
         host.env_attach(
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
@@ -81,6 +83,8 @@ impl Rig {
 
     fn request(&self, watch: Id) -> FsList {
         FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.environment,
             path: String::new(),
             mount: None,
