@@ -7,7 +7,7 @@
  * read their mail.
  */
 import { randomUUID } from 'node:crypto';
-import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
+import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, ThreadComposer, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
 import { narrowingMerge, resolvedParts } from './day100-settings.ts';
 import { SETTINGS_REGISTRY } from '../../src/generated/settings-registry.ts';
 import type { RecoveryCodeBatch, RecoveryCodeStatus } from '../../src/generated/api-types.ts';
@@ -60,7 +60,7 @@ const REGISTRY: readonly Key[] = [
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets' || ['composer.paste_inline_context_share', 'thread.plan_first', 'thread.silent_after_secs', 'thread.plan_answered_by', 'orch_tools.owner_reads', 'threads.opening_items'].includes(def.key)).map((def): Key => {
     if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
@@ -194,7 +194,7 @@ export const AUTHENTICATOR_CODE = '135790';
 const AUTHENTICATOR_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 /** The keys the interface may keep for a person: the nine the server admits. */
-const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
+const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'interface', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
 
 /** A person's keys in the shape the server keeps them: the switch, and for each action its keys as text or none. */
 function keysFault(body: Record<string, unknown>): string | null {
@@ -736,6 +736,15 @@ export class Settings implements Part {
       }),
     ]).value;
     return { value, lockedBy: locking?.id ?? null };
+  }
+
+  /** Closed native controls keep their values and default marks without carrying the settings panel. */
+  composerModes(person: Person, nodeId: string): Pick<ThreadComposer, 'approval_default' | 'sandbox_mode' | 'sandbox_default'> {
+    const approval = this.resolve(person, nodeId, this.entryOf('approval.mode'));
+    const sandbox = this.resolve(person, nodeId, this.entryOf('sandbox.mode'));
+    return { approval_default: approval.source.scope !== 'thread',
+      sandbox_mode: typeof sandbox.value === 'string' ? sandbox.value : null,
+      sandbox_default: sandbox.source.scope !== 'thread' };
   }
 
   /** The binding preview carries the same actual creation value and its setting provenance. */
