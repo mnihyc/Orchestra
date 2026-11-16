@@ -122,9 +122,12 @@ pub(super) fn mismatch(
     let agent = version(reported_harness_version);
     descriptor.separated().filter(|entry| same_program(entry)).find_map(|entry| {
         let manifest = declared_program(entry)?;
-        let program = programs.get(&manifest.kind)?;
+        let name = manifest.names.en();
+        // A program the machine's owner has not confirmed supplies no tools, whatever its version.
+        let Some(program) = programs.get(&manifest.kind) else {
+            return Some(format!("{name} on {machine} is not confirmed. The machine's owner can confirm it on the machine's page."));
+        };
         (!allowed(overrides,&program.kind,&program.path,&program.version,agent)).then(|| {
-            let name = manifest.names.en();
             format!("{name} on {machine} is {}; this agent runs {agent}. An environment manager can allow it on the environment's page.",program.version)
         })
     })
@@ -400,6 +403,40 @@ mod tests {
                 "stale executor facts do not ask for consent that is already satisfied"
             );
         }
+    }
+
+    #[test]
+    fn a_machine_that_confirmed_no_program_is_told_so_instead_of_what_its_environment_offers() {
+        let descriptor = descriptor("same");
+        let provider = provider();
+        let place = place("1.0.0");
+        let none = BTreeMap::new();
+        let refused = super::candidates(
+            &descriptor,
+            &provider,
+            &place,
+            &none,
+            Some("1.0.0"),
+            &VersionOverrides::new(),
+        );
+        let (_, candidate) = refused
+            .iter()
+            .find(|(kind, _)| *kind == ArrangementType::Separated)
+            .unwrap();
+        assert_eq!(
+            super::mismatch(
+                &descriptor,
+                "Controlled machine",
+                &none,
+                Some("1.0.0"),
+                &VersionOverrides::new(),
+                candidate
+            )
+            .as_deref(),
+            Some(
+                "Codex on Controlled machine is not confirmed. The machine's owner can confirm it on the machine's page."
+            )
+        );
     }
 
     #[test]

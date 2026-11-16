@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-envhost --lib -- mount_transfer::export_tests::
+test -p orch-connector-core --test mount_data -- a_directory_mount_measurement_counts_the_whole_source_without_uploading_or_changing_it --exact
+test -p orch-connector-core --test mount_data -- a_mounts_new_owned_directory_is_distinct_and_can_be_cleaned_while_its_old_location_is_attached --exact
