@@ -43,6 +43,70 @@ async fn found(world: &World, by: &Who, text: &str, kinds: &str) -> Vec<NameHit>
 }
 
 #[tokio::test]
+async fn a_saved_target_gets_its_current_name_without_a_visit_and_keeps_private_names_hidden() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let org = make_org(&world, &ada, "Research", "research").await.base.id;
+    let project = make_project(&world, &ada, org, "Research project")
+        .await
+        .base
+        .id;
+    let topic = make_topic(&world, &ada, project, "Release plan")
+        .await
+        .base
+        .id;
+    make_topic(&world, &ada, project, "Release plan").await;
+    let exact = format!("id={topic}&kinds=topic");
+    let named = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert_eq!(named.items.len(), 1);
+    assert_eq!(named.items[0].id, topic);
+    assert_eq!(named.items[0].name, "Release plan");
+    sqlx::query("UPDATE nodes SET name = 'Updated release plan' WHERE id = $1")
+        .bind(topic)
+        .execute(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let renamed = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert_eq!(renamed.items[0].name, "Updated release plan");
+    let private = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&bea.token)
+        .raw_query(&exact)
+        .send()
+        .await
+        .ok();
+    assert!(
+        private.items.is_empty(),
+        "knowing the identity grants no name"
+    );
+    let wrong_kind = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&ada.token)
+        .raw_query(&format!("id={topic}&kinds=project"))
+        .send()
+        .await
+        .ok();
+    assert!(wrong_kind.items.is_empty());
+}
+
+#[tokio::test]
 async fn named_orgs_and_chats_have_the_same_stable_addresses_as_the_inventory() {
     let room = chat_world::Room::new().await;
     let direct = room.direct(&room.ada, &room.bea).await;

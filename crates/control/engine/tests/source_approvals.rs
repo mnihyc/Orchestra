@@ -294,7 +294,7 @@ async fn a_turn_tells_its_eligible_starter_and_otherwise_its_owner() {
             let schedule = orch_types::new_id();
             let occurrence = orch_types::new_id();
             let now = world.clock.now();
-            sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,timing,state,topic_seq,created_at,updated_at) VALUES($1,$2,$3,'Scheduled work',$4,$5,$6,'finished',0,$7,$7)")
+            sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,timing,state,topic_seq,created_at,updated_at,plan,delivery) VALUES($1,$2,$3,'Scheduled work',$4,$5,$6,'finished',0,$7,$7,false,'queue')")
                 .bind(schedule).bind(world.topic).bind(bo).bind(json!({"kind":"thread","thread_id":thread})).bind(json!([{"type":"text","text":"Start work"}])).bind(json!({"kind":"once","at":Time::new(now),"zone":"UTC"})).bind(now).execute(world.pool.pool()).await.unwrap();
             sqlx::query("INSERT INTO input_schedule_runs(id,schedule_id,occurrence,scheduled_for,state,thread_id,input_id,turn_id,topic_seq,created_at,started_at) VALUES($1,$2,'once',$3,'started',$4,$5,$6,0,$3,$3)")
                 .bind(occurrence).bind(schedule).bind(now).bind(thread).bind(input).bind(start.turn_id).execute(world.pool.pool()).await.unwrap();
