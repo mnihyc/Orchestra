@@ -408,6 +408,10 @@ async fn system_upload_inventory_records_owners_partials_and_shared_bytes_and_ad
         i64::try_from(b"a machine transfer that is not yet complete".len()).unwrap(),
         Some(machine),
         world.now(),
+        storage::UploadRetention {
+            seconds: 86400,
+            default_source: true,
+        },
     )
     .await
     .unwrap();

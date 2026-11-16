@@ -1,8 +1,7 @@
 /** Profile edits use accepted answers, pin searches wait for typing, and the two saves never race. */
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AnchorHTMLAttributes, ReactNode } from 'react';
-import type * as Router from '@tanstack/react-router';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
@@ -13,6 +12,7 @@ import type * as SearchApi from '@/api/search';
 import type { NameSearch } from '@/api/search';
 import { ProfileSettingsPage } from '@/features/profile/Settings';
 import { ProfilePage } from '@/features/profile/Page';
+import { CardDetails } from '@/features/profile/CardDetails';
 import type { Favorite, NameHit, UserProfile } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ADA } from '../doubles/chat-rows';
@@ -27,11 +27,10 @@ vi.mock('@/api/profile', async (original) => {
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>(), meQuery: { queryKey: ['editing-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada Lovelace')) } }));
 vi.mock('@/api/personal', async (original) => ({ ...await original<typeof PersonalApi>(), favoritesQuery: { queryKey: ['editing-favorites'], queryFn: calls.favorites } }));
 vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), namesQuery: (search: NameSearch) => ({ queryKey: ['editing-names', search.q], queryFn: () => calls.search(search.q), placeholderData: (previous: NameHit[] | undefined) => previous }) }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/shell/Page', () => ({ Page: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('@/features/access/AdminReachNotice', () => ({ AdminReachNotice: () => null }));
-vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), Link: ({ to, children, className }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string }) => <a href={to} className={className}>{children}</a> }));
 
 const PROFILE: UserProfile = { user: ADA, bio: 'Initial biography', pronouns: '', links: [], local_time: null, member_of: [], personal_org: null, pins: [], activity: false, is_me: true, can_message: false, inspected: null, joined_at: MADE_AT, settings: { audience: 'system', show_time: false, show_activity: false } };
 function name(id: string, title: string, root = 'Acme'): NameHit {
@@ -140,4 +139,19 @@ describe('editing a profile through its own controls', () => {
     expect(screen.getByRole('link', { name: t('actions.home.label') })).toHaveAttribute('href', '/');
     expect(calls.read).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it.each(['en', 'zh-CN'] as const)('opens a person page and its Edit link without reloading the document in %s', async (locale) => {
+  await setLocale(locale);
+  const onNavigate = vi.fn();
+  show(<CardDetails username="ada" onNavigate={onNavigate} />);
+  const profile = await screen.findByRole('link', { name: i18n.t('profile.page.open') });
+  expect(profile).toHaveAttribute('href', '/u/ada');
+  expect(fireEvent.click(profile)).toBe(false);
+  expect(onNavigate).toHaveBeenCalledTimes(1);
+  const edit = screen.getByRole('link', { name: i18n.t('profile.page.edit') });
+  expect(edit).toHaveAttribute('href', '/settings/your-page');
+  expect(fireEvent.click(edit)).toBe(false);
+  expect(onNavigate).toHaveBeenCalledTimes(2);
 });

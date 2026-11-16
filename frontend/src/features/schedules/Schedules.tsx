@@ -26,6 +26,7 @@ import { Table } from '@/ui/Table';
 import { Tooltip } from '@/ui/Tooltip';
 import { UserChip } from '@/ui/UserChip';
 import { HumanScheduleActions, ScheduleHistory } from './HumanSchedules';
+import { ScheduleModes } from './Editor';
 import { belongsToThread, isAgentSchedule } from './facts';
 
 export const AGENT_SCHEDULE_SETTINGS = ['threads.agent_schedules', 'threads.agent_schedule_hours', 'threads.agent_schedule_runs'] as const;
@@ -40,6 +41,7 @@ function ScheduleOutcome({ row }: { row: InputSchedule }) {
   const { t } = useTranslation();
   const describe = useErrorText();
   return <div className="flex min-w-0 flex-col items-start gap-1"><Badge>{t(`agentSchedules.states.${row.state}`)}</Badge>
+    <ScheduleModes plan={row.plan} delivery={row.delivery} />
     {row.last_run !== null && <div className="flex min-w-0 flex-col gap-1 text-sm text-text-muted"><span>{t(`agentSchedules.outcomes.${row.last_run.state}`)}</span><ScheduleTime at={row.last_run.started_at ?? row.last_run.scheduled_for} />{row.last_run.reason !== null && <span>{describe(row.last_run.reason).message}</span>}</div>}
   </div>;
 }

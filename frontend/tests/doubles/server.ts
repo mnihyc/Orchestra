@@ -171,7 +171,10 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
-    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 200)) };
+    const requested = query.get('limit');
+    const limit = requested !== null ? Number(requested) : world.places.rowOf(opening[1]) === undefined
+      ? 40 : Number(world.settings.valueAt(opening[1], 'threads.opening_items').value);
+    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], limit) };
   }
   const chat = /^GET \/chats\/([^/]+)\/opening$/.exec(route);
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };
@@ -520,7 +523,7 @@ live.on('connection', (socket: WebSocket) => {
         joined.clear();
         for (const { part } of world.parts) part.gone?.(subscriber);
         for (const feed of subs.values()) world.subscribers.get(feed)?.delete(subscriber);
-        subs.clear();
+        subs.clear();world.closeHierarchy(subscriber);
         for (const [id, feed] of former) subscriber.send({ op: 'resync', id, feed });
       } });
       if (frame.op === 'auth') {
@@ -531,6 +534,7 @@ live.on('connection', (socket: WebSocket) => {
           server_time: new Date().toISOString(),
           access_expires_at: new Date(Date.now() + world.accessLifeMs).toISOString(),
           heartbeat_secs: 25,
+          max_client_frame_bytes:16*1024,
           build: world.meta.build,
         });
       }
@@ -564,6 +568,12 @@ live.on('connection', (socket: WebSocket) => {
           socket.close(4403); return;
         }
         finally { pendingOpening = null; }
+        if(world.isHierarchy(feed)){
+          if(frame.window!==undefined){world.hierarchyWindow(subscriber,person,id,feed,frame.window);return;}
+          subs.set(id,feed);world.openHierarchy(subscriber,id,feed);
+          subscriber.send({op:'subscribed',id,feed,seq:null,mode:'ephemeral'});
+          return;
+        }
         const orgId = /^org:(.+)$/.exec(feed)?.[1];
         const tree = orgId === undefined ? undefined : world.trees.get(orgId);
         if (orgId === undefined || tree === undefined) {
@@ -598,6 +608,7 @@ live.on('connection', (socket: WebSocket) => {
         const feed = subs.get(id);
         if (feed !== undefined) {
           subs.delete(id);
+          world.closeHierarchy(subscriber,id);
           world.subscribers.get(feed)?.delete(subscriber);
           subscriber.send({ op: 'closed', id, feed, reason: 'unsubscribed' });
         }
@@ -613,6 +624,7 @@ live.on('connection', (socket: WebSocket) => {
   });
 
   socket.on('close', () => {
+    world.closeHierarchy(subscriber);
     clearTimeout(late);
     sockets.delete(socket);
     sessionReaders.delete(socket);
