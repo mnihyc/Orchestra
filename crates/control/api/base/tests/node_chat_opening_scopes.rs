@@ -49,13 +49,13 @@ async fn key(room: &Room, user: Id, rules: Vec<Value>) -> Key {
 
 async fn key_in(world: &support::World, user: Id, rules: Vec<Value>) -> Key {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let scope = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -359,7 +359,7 @@ async fn selected_provider(room: &Room) -> Id {
         .call(ProviderCreate, &[])
         .token(&room.ada.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: PROVIDER.into(),
             home_id: home.base.id,
             access: None,

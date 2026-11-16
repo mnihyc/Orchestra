@@ -88,6 +88,9 @@ struct Rig {
     exports: Arc<Mutex<Vec<Command>>>,
     /// The file commands the machine was given (`fs.snapshot` and `fs.materialize`), in order.
     files: Arc<Mutex<Vec<Command>>>,
+    /// The lists a unit was asked to write, read when it was asked: the copy's own content goes from the
+    /// server when the fork ends, so what a list named cannot be read afterwards.
+    written_lists: Arc<Mutex<Vec<(Hash, orch_engine::manifest::Manifest)>>>,
     native: Arc<Mutex<confirmed_source::NativePeer>>,
     open_refusals: Arc<Mutex<std::collections::VecDeque<CommandError>>>,
 }
@@ -225,6 +228,7 @@ impl Rig {
                     .find(|(agent, _)| *agent == start.agent_id)
                     .map_or_else(common::descriptor, |(_, descriptor)| descriptor.clone());
                 Ok(CommandResult::AgentStart(AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".to_owned(),
                     descriptor: serde_json::from_value(descriptor).unwrap(),
@@ -287,6 +291,7 @@ impl Rig {
             other_provider,
             exports,
             files,
+            written_lists: Arc::new(Mutex::new(Vec::new())),
             native,
             open_refusals: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         };
@@ -485,6 +490,7 @@ async fn a_checked_native_import_failure_is_named_and_carry_uses_neutral_without
         rig.other_agent,
         rig.world.machine_id,
         &orch_db::queries::resources::thread_engine::HarnessReport {
+            home: None,
             status: "online",
             detail: None,
             version: Some("1.0.0"),
@@ -1127,6 +1133,7 @@ async fn a_switch_to_a_profile_whose_option_holds_back_a_turns_end_past_the_time
             }
             assert!(start.agent_id == first || start.agent_id == second);
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(descriptor).unwrap(),
@@ -1248,6 +1255,46 @@ async fn a_running_turn_is_waited_for_and_the_switch_goes_on_when_it_ends() {
         .scalar("SELECT provider_id FROM threads WHERE node_id = $1", thread)
         .await;
     assert_eq!(provider, rig.other_provider);
+}
+
+#[tokio::test]
+async fn a_switch_keeps_the_requested_wait_and_health_check_times_above_the_old_limits() {
+    let can = Can {
+        export_native: true,
+        import_native: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Long check").await;
+    let request = ForkRequest {
+        options: Some(ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(3_601),
+            ..ChangeOptions::default()
+        }),
+        ..rig.to_other()
+    };
+    let plan = rig.plan(thread, &request).await;
+    assert_eq!(plan.options.wait_minutes, 1_441);
+    assert_eq!(plan.options.verify_timeout_secs, 3_601);
+    let mut shortest = request.clone();
+    shortest.options.as_mut().unwrap().verify_timeout_secs = Some(1);
+    assert_eq!(
+        rig.plan(thread, &shortest)
+            .await
+            .options
+            .verify_timeout_secs,
+        1
+    );
+    let mut outside_clock = request;
+    outside_clock.options.as_mut().unwrap().wait_minutes = Some(i64::MAX);
+    assert!(matches!(
+        rig.world
+            .engine()
+            .draft_fork(&rig.caller(), thread, &outside_clock)
+            .await,
+        Err(PlanError::Invalid { .. })
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1455,12 +1502,12 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
                 title: format!("Sub-agent {name}"),
                 started_at: orch_types::Time::new(rig.world.clock.now()),
                 duration_ms: Some(10),
-                raw: RawCall {
+                raw: Some(RawCall {
                     name: "Task".to_owned(),
                     input: OutputRef::of("Check the redirect"),
                     output: Some(OutputRef::of("Checked")),
                     is_error: false,
-                },
+                }),
             })
             .unwrap();
             let parent_ref = format!("native-{source_segment}-task-{name}");
@@ -2007,8 +2054,20 @@ async fn fork_into_a_new_environment(
     let seen: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
     for kind in [CommandKind::FsMaterialize, CommandKind::FsRemove] {
         let (kept, answer) = (Arc::clone(&seen), answer.clone());
+        let (lists, engine) = (Arc::clone(&rig.written_lists), rig.world.engine().clone());
         unit.added.machine.handler.on(kind, move |command| {
             kept.lock().unwrap().push(command.clone());
+            if let Command::FsMaterialize(write) = command
+                && tokio::runtime::Handle::current().runtime_flavor()
+                    == tokio::runtime::RuntimeFlavor::MultiThread
+            {
+                let (hash, engine) = (write.manifest_blob, engine.clone());
+                if let Ok(list) = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(engine.read_manifest(&hash))
+                }) {
+                    lists.lock().unwrap().push((hash, list));
+                }
+            }
             match command {
                 Command::FsMaterialize(_) => answer.clone().map(|()| {
                     CommandResult::FsMaterialize(
@@ -2176,22 +2235,28 @@ async fn selected_files_into_a_new_environment(alias: bool, live: bool) {
         })
         .collect();
     assert!(!copied.is_empty());
-    for hash in copied {
-        let manifest = rig.world.engine().read_manifest(&hash).await.unwrap();
-        assert_eq!(manifest.header().root, "/workspace/web");
-        assert_eq!(
-            manifest
-                .entries()
+    {
+        let lists = rig.written_lists.lock().unwrap();
+        for hash in copied {
+            let (_, manifest) = lists
                 .iter()
-                .map(|entry| (entry.path.as_str(), entry.size, entry.hash))
-                .collect::<Vec<_>>(),
-            [
-                ("src/a.txt", 10, Some(Hash::of(b"source-a0\n"))),
-                ("src/b.txt", 10, Some(Hash::of(b"source-b0\n"))),
-                ("src/c.txt", 10, Some(Hash::of(b"source-c0\n"))),
-            ],
-            "the selected bytes retain their paths below the thread directory"
-        );
+                .find(|(read, _)| *read == hash)
+                .expect("the list the unit was asked to write was read when it was asked");
+            assert_eq!(manifest.header().root, "/workspace/web");
+            assert_eq!(
+                manifest
+                    .entries()
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry.size, entry.hash))
+                    .collect::<Vec<_>>(),
+                [
+                    ("src/a.txt", 10, Some(Hash::of(b"source-a0\n"))),
+                    ("src/b.txt", 10, Some(Hash::of(b"source-b0\n"))),
+                    ("src/c.txt", 10, Some(Hash::of(b"source-c0\n"))),
+                ],
+                "the selected bytes retain their paths below the thread directory"
+            );
+        }
     }
     let source_environment: Id = rig
         .world

@@ -27,6 +27,7 @@ fn bytes() -> Proof<Vec<u8>> {
 
 fn stat(path: &str, bytes: &[u8], at: Time) -> Proof<orch_api_contract::workspace::FileStat> {
     Ok(orch_api_contract::workspace::FileStat {
+        facts: None,
         entry: orch_api_contract::workspace::DirEntry {
             name: path.rsplit('/').next().ok_or("no file name")?.into(),
             path: path.into(),
