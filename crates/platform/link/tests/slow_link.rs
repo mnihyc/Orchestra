@@ -181,6 +181,8 @@ async fn session_on(line: Line) {
         match controller.progress(command) {
             Some(
                 orch_link::commands::Progress::Accepted
+                | orch_link::commands::Progress::Running
+                | orch_link::commands::Progress::Released
                 | orch_link::commands::Progress::Succeeded(_)
                 | orch_link::commands::Progress::Failed(_),
             ) => {
@@ -374,7 +376,10 @@ async fn upload_across(line: Line) {
         outcome.smallest_piece >= 64 * 1024 || outcome.smallest_piece == 0 || outcome.requests > 0,
         "{outcome:?}"
     );
-    assert!(outcome.largest_piece <= 4 * 1024 * 1024);
+    assert!(
+        outcome.largest_piece
+            <= orch_link_contract::content::TransferPolicy::default().max_piece_bytes
+    );
     // A piece is about five seconds of the line.
     let five_seconds = i64::try_from(line.up * 5).unwrap();
     assert!(
@@ -412,9 +417,18 @@ async fn pieces_shrink_to_a_slow_line_and_grow_back_on_a_fast_one() {
         LinkMeter::new(),
         TransferOptions::default(),
     );
-    // After a minute on the slow line, the line gets fast.
+    // Observe requests by time, so a faster recovery does not move fast pieces into the slow sample.
+    let early = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let slow_requests = Arc::clone(&early);
+    let during = Arc::clone(&server);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        *slow_requests.lock().unwrap() = during
+            .requests()
+            .into_iter()
+            .filter(|(kind, _)| kind == "put")
+            .map(|(_, bytes)| bytes)
+            .collect();
         changer.set_shape(None);
     });
     transfers
@@ -427,17 +441,18 @@ async fn pieces_shrink_to_a_slow_line_and_grow_back_on_a_fast_one() {
         .filter(|(kind, _)| kind == "put")
         .map(|(_, bytes)| bytes)
         .collect();
-    let early = pieces.iter().take(8).copied().max().unwrap();
-    // The last piece is only what is left, so the pieces before it say what the line carried.
-    let late = pieces.iter().rev().skip(1).take(8).copied().min().unwrap();
+    let slow = early.lock().unwrap();
+    let policy = orch_link_contract::content::TransferPolicy::default();
+    assert!(slow.iter().copied().max().unwrap() <= policy.initial_piece_bytes as usize);
     assert!(
-        early <= 1024 * 1024,
-        "on the slow line pieces were about five seconds of it: {early}"
+        slow.iter()
+            .any(|bytes| *bytes <= policy.min_piece_bytes as usize)
     );
+    let largest = pieces.iter().copied().max().unwrap();
     assert_eq!(
-        late,
-        4 * 1024 * 1024,
-        "on the fast line they grew to the most a request may carry"
+        largest,
+        policy.piece_bytes(1e12, 0.3) as usize,
+        "fast pieces grow within the shared window"
     );
 }
 
@@ -494,7 +509,7 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     };
     let reply = EnrollReply {
@@ -510,7 +525,7 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
             name: "Orch".to_owned(),
             public_url: "https://orch.example.com".to_owned(),
         },
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
     };
     let up = serde_json::to_vec(&request).unwrap().len() as f64;
     let down = serde_json::to_vec(&reply).unwrap().len() as f64;
@@ -527,4 +542,444 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
             thread_id: Id::nil(),
         },
     );
+}
+
+/// Every request crosses the same serial wire; parallel requests do not invent extra bandwidth.
+struct WindowLine {
+    inner: ShapedBlobs,
+    rate: u64,
+    loss: bool,
+    metadata_delay: Duration,
+    quiet_get: bool,
+    quiet_put: bool,
+    silenced_get: std::sync::atomic::AtomicBool,
+    silenced_put: std::sync::atomic::AtomicBool,
+    gate: Option<Arc<PutGate>>,
+    wire: std::sync::Mutex<WindowWire>,
+}
+struct WindowWire {
+    free: Instant,
+    active: usize,
+    peak: usize,
+    offsets: Vec<i64>,
+    sizes: Vec<i64>,
+    lost: Option<i64>,
+    starts: std::collections::HashMap<Hash, Instant>,
+    first_completed_files: Option<usize>,
+    first_ack: Option<Instant>,
+    last_ack: Option<Instant>,
+}
+impl WindowLine {
+    fn new(server: Arc<BlobServer>, rate: u64, loss: bool) -> Self {
+        Self {
+            inner: ShapedBlobs::new(server, None, HUNDRED_MIB * 2),
+            rate,
+            loss,
+            metadata_delay: Duration::from_millis(700),
+            quiet_get: false,
+            quiet_put: false,
+            silenced_get: std::sync::atomic::AtomicBool::new(false),
+            silenced_put: std::sync::atomic::AtomicBool::new(false),
+            gate: None,
+            wire: std::sync::Mutex::new(WindowWire {
+                free: Instant::now(),
+                active: 0,
+                peak: 0,
+                offsets: Vec::new(),
+                sizes: Vec::new(),
+                lost: None,
+                starts: std::collections::HashMap::new(),
+                first_completed_files: None,
+                first_ack: None,
+                last_ack: None,
+            }),
+        }
+    }
+    async fn travel(&self, hash: &Hash, offset: i64, bytes: i64) -> bool {
+        let (end, lost) = {
+            let mut wire = self.wire.lock().unwrap();
+            wire.starts.entry(*hash).or_insert_with(Instant::now);
+            wire.active += 1;
+            wire.peak = wire.peak.max(wire.active);
+            wire.offsets.push(offset);
+            wire.sizes.push(bytes);
+            let end = wire.free.max(Instant::now())
+                + Duration::from_secs_f64(bytes as f64 / self.rate as f64);
+            wire.free = end;
+            let lost = self.loss && wire.offsets.len() == 4;
+            if lost {
+                wire.lost = Some(offset);
+            }
+            (end + Duration::from_millis(700), lost)
+        };
+        tokio::time::sleep_until(end).await;
+        let mut wire = self.wire.lock().unwrap();
+        wire.active -= 1;
+        if !lost {
+            wire.first_ack.get_or_insert_with(Instant::now);
+            wire.last_ack = Some(Instant::now());
+        }
+        lost
+    }
+}
+#[async_trait]
+impl orch_link::content::BlobEndpoint for WindowLine {
+    async fn status(
+        &self,
+        command: Id,
+        hash: &Hash,
+    ) -> Result<orch_link_contract::content::TransferStatus, orch_link::content::PutRefusal> {
+        tokio::time::sleep(self.metadata_delay).await;
+        self.inner.status(command, hash).await
+    }
+    async fn head(
+        &self,
+        command: Id,
+        hash: &Hash,
+    ) -> Result<Option<orch_link_contract::content::BlobProgress>, orch_link::content::PutRefusal>
+    {
+        self.inner.head(command, hash).await
+    }
+    async fn put(
+        &self,
+        command: Id,
+        hash: &Hash,
+        query: orch_link_contract::content::PutQuery,
+        body: Bytes,
+    ) -> Result<orch_link_contract::content::BlobProgress, orch_link::content::PutRefusal> {
+        if let Some(gate) = &self.gate {
+            gate.entered.notify_one();
+            let _ = gate.release.acquire().await;
+        }
+        if self.quiet_put
+            && body.len() as i64
+                > orch_link_contract::content::TransferPolicy::default().initial_piece_bytes
+            && !self
+                .silenced_put
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::time::sleep(Duration::from_secs(u64::from(
+                orch_link_contract::content::STALL_SECS,
+            )))
+            .await;
+            return Err(orch_link::content::PutRefusal::Silent);
+        }
+        if self.travel(hash, query.offset, body.len() as i64).await {
+            return Err(orch_link::content::PutRefusal::Failed(
+                "one middle piece lost".into(),
+            ));
+        }
+        let reply = self.inner.put(command, hash, query, body).await?;
+        if reply.complete {
+            let mut wire = self.wire.lock().unwrap();
+            let count = wire.starts.len();
+            wire.first_completed_files.get_or_insert(count);
+        }
+        Ok(reply)
+    }
+    async fn get(
+        &self,
+        command: Id,
+        hash: &Hash,
+        offset: i64,
+        len: i64,
+    ) -> Result<Bytes, orch_link::content::PutRefusal> {
+        if self.quiet_get
+            && len > orch_link_contract::content::TransferPolicy::default().initial_piece_bytes
+            && !self
+                .silenced_get
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::time::sleep(Duration::from_secs(u64::from(
+                orch_link_contract::content::STALL_SECS,
+            )))
+            .await;
+            return Err(orch_link::content::PutRefusal::Silent);
+        }
+        if self.travel(hash, offset, len).await {
+            return Err(orch_link::content::PutRefusal::Failed(
+                "one middle piece lost".into(),
+            ));
+        }
+        self.inner.get(command, hash, offset, len).await
+    }
+    async fn missing(
+        &self,
+        command: Id,
+        hashes: &[Hash],
+    ) -> Result<Vec<Hash>, orch_link::content::PutRefusal> {
+        self.inner.missing(command, hashes).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sixty_four_mebibytes_fill_a_700ms_line_in_both_directions_and_retry_only_the_lost_middle()
+{
+    let size = 64 * 1024 * 1024;
+    for rate in [8 * 1024 * 1024, 32 * 1024 * 1024, 1024 * 1024 * 1024] {
+        for download in [false, true] {
+            for loss in [false, true] {
+                let server = BlobServer::new();
+                let command = new_id();
+                server.open_command(command);
+                let hash = hash_of_pattern(size);
+                if download {
+                    server.insert(pattern(0, size));
+                }
+                let endpoint = Arc::new(WindowLine::new(Arc::clone(&server), rate, loss));
+                let transfers = Transfers::new(
+                    endpoint.clone(),
+                    LinkMeter::new(),
+                    TransferOptions::default(),
+                );
+                let started = Instant::now();
+                let outcome = if download {
+                    let mut sink = Memory::default();
+                    let outcome = transfers
+                        .download(command, hash, size, &mut sink)
+                        .await
+                        .unwrap();
+                    assert_eq!(Hash::of(&sink.held), hash);
+                    outcome
+                } else {
+                    let outcome = transfers
+                        .upload(command, hash, size, &mut Pattern { size })
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        server.content(&hash).map(|bytes| Hash::of(&bytes)),
+                        Some(hash)
+                    );
+                    outcome
+                };
+                let elapsed = started.elapsed().as_secs_f64();
+                let wire = endpoint.wire.lock().unwrap();
+                assert!(
+                    wire.peak > 1 && wire.peak <= 5,
+                    "{outcome:?}; {} simultaneous",
+                    wire.peak
+                );
+                assert!(
+                    size as f64 / elapsed >= (8.0_f64 * 1024.0 * 1024.0).min(rate as f64 * 0.7)
+                        || rate == 8 * 1024 * 1024 && loss,
+                    "{outcome:?}; {elapsed}s"
+                );
+                if rate == 8 * 1024 * 1024 && !loss {
+                    assert!(size as f64 / elapsed >= rate as f64 * 0.7);
+                }
+                if let Some(lost) = wire.lost {
+                    for offset in &wire.offsets {
+                        assert_eq!(
+                            wire.offsets.iter().filter(|other| *other == offset).count(),
+                            if *offset == lost { 2 } else { 1 }
+                        );
+                    }
+                }
+                eprintln!(
+                    "64 MiB {rate} B/s download={download} loss={loss}: {} requests, peak {}, {elapsed:.3}s, data {:?}",
+                    wire.offsets.len(),
+                    wire.peak,
+                    wire.last_ack.unwrap() - wire.first_ack.unwrap()
+                );
+                assert!(wire.offsets.len() < 40);
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn simultaneous_machine_files_share_one_piece_and_byte_window() {
+    let server = BlobServer::new();
+    let command = new_id();
+    server.open_command(command);
+    let endpoint = Arc::new(WindowLine::new(server, 32 * 1024 * 1024, false));
+    let transfers = Transfers::new(
+        endpoint.clone(),
+        LinkMeter::new(),
+        TransferOptions::default(),
+    );
+    let mut first = Pattern {
+        size: 64 * 1024 * 1024,
+    };
+    let mut second = Pattern {
+        size: 32 * 1024 * 1024,
+    };
+    let (one, two) = tokio::join!(
+        transfers.upload(command, hash_of_pattern(first.size), first.size, &mut first),
+        transfers.upload(
+            command,
+            hash_of_pattern(second.size),
+            second.size,
+            &mut second
+        )
+    );
+    one.unwrap();
+    two.unwrap();
+    let wire = endpoint.wire.lock().unwrap();
+    assert!(wire.peak <= 5);
+    assert_eq!(wire.first_completed_files, Some(2));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_download_does_not_prevent_an_upload_from_measuring_its_own_direction() {
+    let server = BlobServer::new();
+    let up = new_id();
+    let down = new_id();
+    server.open_command(up);
+    server.open_command(down);
+    let down_size = 64 * 1024 * 1024;
+    let up_size = 32 * 1024 * 1024;
+    let down_hash = server.insert(pattern(0, down_size));
+    let up_hash = hash_of_pattern(up_size);
+    let endpoint = Arc::new(WindowLine::new(server, 32 * 1024 * 1024, false));
+    let transfers = Transfers::new(
+        endpoint.clone(),
+        LinkMeter::new(),
+        TransferOptions::default(),
+    );
+    let mut source = Pattern { size: up_size };
+    let mut sink = Memory::default();
+    let (download, upload) = tokio::join!(
+        transfers.download(down, down_hash, down_size, &mut sink),
+        transfers.upload(up, up_hash, up_size, &mut source)
+    );
+    download.unwrap();
+    upload.unwrap();
+    let wire = endpoint.wire.lock().unwrap();
+    assert!(
+        wire.starts[&up_hash].max(wire.starts[&down_hash])
+            - wire.starts[&up_hash].min(wire.starts[&down_hash])
+            <= Duration::from_millis(700)
+    );
+    assert!(wire.peak <= 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn connection_setup_does_not_turn_a_thin_line_into_a_large_piece_estimate() {
+    let server = BlobServer::new();
+    let command = new_id();
+    server.open_command(command);
+    let rate = 300 * 1024;
+    let size = 8 * 1024 * 1024;
+    let mut line = WindowLine::new(server, rate, false);
+    line.metadata_delay = Duration::from_millis(2100);
+    let endpoint = Arc::new(line);
+    let transfers = Transfers::new(
+        endpoint.clone(),
+        LinkMeter::new(),
+        TransferOptions::default(),
+    );
+    transfers
+        .upload(command, hash_of_pattern(size), size, &mut Pattern { size })
+        .await
+        .unwrap();
+    let policy = orch_link_contract::content::TransferPolicy::default();
+    let ceiling =
+        rate as f64 * (policy.target_window_ms as f64 / 1000.0 + 2.1 * policy.window_rtts as f64);
+    assert!(
+        endpoint
+            .wire
+            .lock()
+            .unwrap()
+            .sizes
+            .iter()
+            .all(|bytes| *bytes as f64 <= ceiling)
+    );
+}
+
+struct PutGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+struct AcknowledgedSource {
+    pattern: Pattern,
+    confirmed: Arc<std::sync::Mutex<Vec<i64>>>,
+}
+#[async_trait]
+impl BlobSource for AcknowledgedSource {
+    fn accepted(&mut self, bytes: i64) {
+        self.confirmed.lock().unwrap().push(bytes);
+    }
+    async fn read(&mut self, offset: i64, len: i64) -> std::io::Result<Bytes> {
+        self.pattern.read(offset, len).await
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn upload_progress_reports_confirmed_bytes_rather_than_the_read_ahead_window() {
+    let server = BlobServer::new();
+    let command = new_id();
+    server.open_command(command);
+    let gate = Arc::new(PutGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let mut line = WindowLine::new(server, 32 * 1024 * 1024, false);
+    line.gate = Some(Arc::clone(&gate));
+    let endpoint = Arc::new(line);
+    let transfers = Transfers::new(endpoint, LinkMeter::new(), TransferOptions::default());
+    let size = 8 * 1024 * 1024;
+    let confirmed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut source = AcknowledgedSource {
+        pattern: Pattern { size },
+        confirmed: Arc::clone(&confirmed),
+    };
+    let upload = tokio::spawn(async move {
+        transfers
+            .upload(command, hash_of_pattern(size), size, &mut source)
+            .await
+    });
+    gate.entered.notified().await;
+    assert_eq!(*confirmed.lock().unwrap(), vec![0]);
+    gate.release.close();
+    upload.await.unwrap().unwrap();
+    let counts = confirmed.lock().unwrap();
+    assert_eq!(counts.last().copied(), Some(size));
+    assert!(counts.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_piece_restarts_small_without_leaving_a_download_behind_buffered_suffixes() {
+    for download in [false, true] {
+        let server = BlobServer::new();
+        let command = new_id();
+        server.open_command(command);
+        let size = 32 * 1024 * 1024;
+        let hash = hash_of_pattern(size);
+        if download {
+            server.insert(pattern(0, size));
+        }
+        let mut line = WindowLine::new(Arc::clone(&server), 32 * 1024 * 1024, false);
+        line.quiet_get = download;
+        line.quiet_put = !download;
+        let endpoint = Arc::new(line);
+        let transfers = Transfers::new(
+            endpoint.clone(),
+            LinkMeter::new(),
+            TransferOptions::default(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(90), async {
+            if download {
+                let mut sink = Memory::default();
+                let outcome = transfers
+                    .download(command, hash, size, &mut sink)
+                    .await
+                    .unwrap();
+                assert_eq!(Hash::of(&sink.held), hash);
+                outcome
+            } else {
+                let outcome = transfers
+                    .upload(command, hash, size, &mut Pattern { size })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    server.content(&hash).map(|bytes| Hash::of(&bytes)),
+                    Some(hash)
+                );
+                outcome
+            }
+        })
+        .await
+        .expect("a silent range must not strand its own retry behind buffered suffixes");
+        assert!(result.retries >= 1);
+    }
 }

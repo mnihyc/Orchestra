@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-link-contract --lib
+test -p orch-link --test slow_link -- --nocapture
+test -p orch-connector-core --lib --test file_transfers --test recording_keys
+test -p orch-gateway-core --lib --test renewal --test gateway_probes

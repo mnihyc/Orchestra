@@ -433,6 +433,7 @@ export class SearchWorld implements Part {
     const typed = regex ? raw : fold(raw).trim();
     const length = Array.from(typed).length;
     const scope = query.get('scope');
+    const stream = query.get('stream');
     const places = this.world.places;
     const scopeRow = scope === null ? undefined : places.rowOf(scope);
     const chatId = query.get('chat_id');
@@ -469,7 +470,7 @@ export class SearchWorld implements Part {
     const relevance = query.get('sort') === 'relevance';
     const found: (SearchHit & { sortAt: string; relevance: number })[] = [];
 
-    if ((relevance || titleOnly) && (kindsParam === null || titleOnly && [...kinds].some((kind) => kind !== 'document' && kind !== 'chat_message')) && author === null && !fileOnly && fileType === null && !mentionOnly && chatId === null && documentId === null) {
+    if (stream === null && (relevance || titleOnly) && (kindsParam === null || titleOnly && [...kinds].some((kind) => kind !== 'document' && kind !== 'chat_message')) && author === null && !fileOnly && fileType === null && !mentionOnly && chatId === null && documentId === null) {
       for (const hit of this.nodeNames(person)) {
         if (!this.inScope(hit.id, scope) || query.get('participating') === 'true' && hit.participating !== true) continue;
         if (kinds.size > 0 && hit.kind !== 'thread') continue;
@@ -501,6 +502,7 @@ export class SearchWorld implements Part {
       if (owner !== null && this.world.people.get(meta.owner)?.me.id !== owner || creator !== null || editor !== null) continue;
       if (shared && !this.world.access.namedAt(person, row.id)) continue;
       for (const item of items) {
+        if (stream !== null && item.stream !== stream) continue;
         if ((fileOnly && !hasFile(item.payload)) || !hasType(item.payload, fileType) || (mentionOnly && !namesPerson(item.payload,person.me.id))) continue;
         if (!wants(item.kind) || (author !== null && item.author?.id !== author) || !sourceTime(item.created_at, meta.createdAt, meta.updatedAt)) continue;
         const hit = this.snippet(this.textOf(item), typed,regex);
@@ -509,7 +511,7 @@ export class SearchWorld implements Part {
       }
     }
 
-    if (wants('chat_message') && documentId === null && !titleOnly && owner === null) {
+    if (stream === null && wants('chat_message') && documentId === null && !titleOnly && owner === null) {
       for (const { chat, path, messages, in: member } of chats) {
         const rec = this.world.chats.records.get(chat.id);
         if (rec === undefined || creator !== null && (rec.createdBy === null || this.world.people.get(rec.createdBy)?.me.id !== creator)) continue;
@@ -530,7 +532,7 @@ export class SearchWorld implements Part {
       }
     }
 
-    if (wants('document') && chatId === null) {
+    if (stream === null && wants('document') && chatId === null) {
       for (const { ref, path, blocks } of documents) {
         if (query.get('participating') === 'true' && ref.owner.id !== person.me.id && !this.world.access.namedOn(person, 'documents', ref.id)) continue;
         if (documentId !== null && ref.id !== documentId) continue;
