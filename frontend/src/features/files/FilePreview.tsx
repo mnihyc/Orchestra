@@ -55,6 +55,7 @@ export function useFileVisible(enabled = true) {
 
 /** All kinds share this slot: an image when cheap, otherwise its glyph and a truthful state. */
 export function FilePreview({ source, details = false, enabled = true }: { source: FileSource; details?: boolean; enabled?: boolean }) {
+  const { t } = useTranslation();
   const { ref, visible } = useFileVisible();
   const hint = sourceFacts(source);
   const hintedViewer = defaultViewer(hint).id;
@@ -72,7 +73,7 @@ export function FilePreview({ source, details = false, enabled = true }: { sourc
     {query.isError && state === 'private' ? <FileState state="private" /> : (query.isPending || query.isFetching) && (visual || details) ? <Skeleton className={visual ? 'h-full w-full' : 'h-16 w-full'} /> : visual && preview?.image !== null && preview?.image !== undefined && failedImage !== preview.image ?
       <img src={preview.image} alt={source.name} loading="lazy" decoding="async" style={CHECKERBOARD} className="h-full w-full object-contain" onError={() => setFailedImage(preview.image)} /> : <>
         <FileGlyph source={source} preview={query.data} className={visual ? 'size-6' : undefined} />
-        {(visual || details) && (text === null || text === undefined) && (visual || preview?.state !== 'ready') && <FileState state={state} />}
+        {(visual || details) && (text === null || text === undefined) && (visual || preview?.state !== 'ready') && (preview?.allowance !== null && preview?.allowance !== undefined ? <span className="text-sm text-text-muted" role="status">{t('fileFacts.previewExceeded')}</span> : <FileState state={state} />)}
         {details && typeof text === 'string' && <span className="max-h-28 overflow-hidden whitespace-pre-wrap font-mono text-xs wrap-anywhere">{text}</span>}
       </>}
   </span>;

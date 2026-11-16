@@ -9,7 +9,7 @@ import { mcpReason, mcpReasonCode } from '@/features/resources/mcp/words';
 import type { TFunction } from 'i18next';
 import type { MeasurementSizeData } from '@/features/change/Measurements';
 
-import type { EnvironmentRef, FilesPlan, ForkPlan, HistoryMethod, Holder, NodeRef, PendingUpdate, PlanBlocker, PlanMcpServer, PlanMount, PlannedEnvironment, ProviderModel, UserRef } from '@/generated/api-types';
+import type { EnvironmentRef, FilesPlan, FileSourcePolicy, ForkPlan, HistoryMethod, Holder, NodeRef, PendingUpdate, PlanBlocker, PlanMcpServer, PlanMount, PlannedEnvironment, ProviderModel, UserRef } from '@/generated/api-types';
 import { effortLabel, modelLabel } from '@/features/change/modelLabel';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { permissionLabel } from '@/lib/permissions';
@@ -29,6 +29,8 @@ export interface Line {
   people?: readonly UserRef[];
   /** Exact technical values stay behind the renderer's disclosure, outside the ordinary sentence. */
   technical?: PendingUpdate;
+  /** Captured source policy of this exact file/root copy; null means not reported. */
+  sourcePolicy?: FileSourcePolicy | null;
   size?: MeasurementSizeData;
   suffix?: string;
   hint?: 'history' | 'leaves' | 'page';
@@ -132,7 +134,7 @@ export function holderNames(holders: readonly Holder[], t: TFunction): string {
 export const filesLines = (plan: FilesPlan, locale: string, t: TFunction): Line[] => {
   const lines:Line[]=plan.kept_image_bytes === undefined || plan.kept_image_bytes === null ? [] : [{id:'kept-image',tone:'plain',text:t('keptLayers.carried',{size:formatBytes(plan.kept_image_bytes,locale)})}];
   lines.push({
-    id: 'files',
+    id: 'files', sourcePolicy: plan.source_policy ?? null,
     tone: 'plain',
     text: t('change.plan.files', { count: plan.file_count, size: formatBytes(plan.total_bytes, locale), up: formatBytes(plan.bytes_to_upload, locale), down: formatBytes(plan.bytes_to_download, locale) }),
   });
@@ -141,14 +143,14 @@ export const filesLines = (plan: FilesPlan, locale: string, t: TFunction): Line[
   if (plan.home !== null) {
     const home = plan.home;
     lines.push(home.measurement !== undefined && home.measurement !== null
-      ? { id: 'home', tone: 'plain', text: t('liveWork.home'), size: { reference: home.measurement, measured: home.measured, file_count: home.file_count, total_bytes: home.total_bytes } }
-      : { id: 'home', tone: home.measured ? 'plain' : 'warning', text: home.measured ? t('change.plan.home', { size: formatBytes(home.total_bytes, locale) }) : t('mountPlan.homeUnmeasured') });
+      ? { id: 'home', sourcePolicy: plan.home_policy ?? null, tone: 'plain', text: t('liveWork.home'), size: { reference: home.measurement, measured: home.measured, file_count: home.file_count, total_bytes: home.total_bytes } }
+      : { id: 'home', sourcePolicy: plan.home_policy ?? null, tone: home.measured ? 'plain' : 'warning', text: home.measured ? t('change.plan.home', { size: formatBytes(home.total_bytes, locale) }) : t('mountPlan.homeUnmeasured') });
   }
   if (plan.file_states !== null) {
     const states = plan.file_states;
     lines.push(states.measurement !== undefined && states.measurement !== null
-      ? { id: 'file-states', tone: 'plain', text: t('liveWork.file_states'), size: { reference: states.measurement, measured: states.complete, file_count: null, total_bytes: states.total_bytes } }
-      : { id: 'file-states', tone: states.complete ? 'plain' : 'warning', text: states.complete
+      ? { id: 'file-states', sourcePolicy: plan.file_states_policy ?? null, tone: 'plain', text: t('liveWork.file_states'), size: { reference: states.measurement, measured: states.complete, file_count: null, total_bytes: states.total_bytes } }
+      : { id: 'file-states', sourcePolicy: plan.file_states_policy ?? null, tone: states.complete ? 'plain' : 'warning', text: states.complete
         ? t('mountPlan.fileStates', { count: states.roots, size: formatBytes(states.total_bytes, locale) }) : t('mountPlan.fileStatesUnmeasured') });
   }
   for (const view of plan.private_views) {

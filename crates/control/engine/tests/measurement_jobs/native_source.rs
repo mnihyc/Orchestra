@@ -653,6 +653,7 @@ async fn completed_ordinary_observation_is_data_for_a_new_current_operation_with
     orch_db::queries::link::insert_command(
         &mut conn,
         &orch_db::queries::link::NewCommand {
+            content_transit: false,
             id: wire.id,
             machine_id: machine,
             kind: &wire.kind,

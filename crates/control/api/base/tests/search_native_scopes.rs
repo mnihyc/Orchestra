@@ -13,7 +13,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::search::{DocumentRelatedList, NameSearchList, NameSearchListQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
@@ -21,11 +21,12 @@ use support::World;
 async fn key_with_scope(world: &World, user: Id, value: Json) -> String {
     let scope: KeyScope = serde_json::from_value(value).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Usage native scope",
             token_hash: &token_hash(&secret),
@@ -103,6 +104,30 @@ async fn name_search_filters_native_candidates_before_its_limit_and_binds_contex
     assert_eq!(answer["items"].as_array().unwrap().len(), 1);
     assert_eq!(answer["items"][0]["id"], json!(target));
     assert_eq!(answer["items"][0]["name"], "Needle row selected");
+    let exact = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={target}&kinds=project"))
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(exact["items"].as_array().unwrap().len(), 1);
+    assert_eq!(exact["items"][0]["name"], "Needle row selected");
+    let outside = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={org}&kinds=org"))
+            .send_bytes()
+            .await,
+    );
+    assert!(
+        outside["items"].as_array().unwrap().is_empty(),
+        "an exact identity never widens the key's selected targets"
+    );
     let path = answer["items"][0]["path"].as_array().unwrap();
     assert!(
         path.iter().any(|step| step["id"] == json!(org)),
@@ -980,9 +1005,14 @@ async fn streamed_search_stops_delivery_after_the_actual_key_expires_between_fra
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
-    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let first: Json = serde_json::from_slice(&first).unwrap();
-    assert_eq!(first["type"], "options");
+    // A search opens with what its index covers, then with the options of this opening.
+    let mut opening = Vec::new();
+    while opening.last().map(String::as_str) != Some("options") {
+        let part = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let part: Json = serde_json::from_slice(&part).unwrap();
+        opening.push(part["type"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(opening, ["coverage", "options"]);
     world.advance(chrono::Duration::hours(2));
     assert!(
         body.frame().await.is_none_or(|frame| frame.is_err()),
