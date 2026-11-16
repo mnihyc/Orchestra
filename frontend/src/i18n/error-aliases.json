@@ -1,4 +1,6 @@
 {
+  "server_update_rolled_back": "serverUpdate.errors.rolledBack",
+  "server_update_failed": "serverUpdate.errors.failed",
   "read_unavailable": "ui.error.rawHistoryUnavailable",
   "context_overflow": "ui.error.contextLimit",
   "model_rerouted": "ui.error.modelRerouted",

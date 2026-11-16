@@ -136,6 +136,8 @@ async fn an_unexpected_session_exit_fails_the_running_turn_and_retains_its_reaso
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: world.opening_of(thread).await,
                     reason: reason.into(),
                 },
             ),
@@ -210,6 +212,8 @@ async fn a_session_lost_before_the_turn_begins_keeps_its_input_for_retry() {
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: world.opening_of(thread).await,
                     reason: "the session exited".into(),
                 },
             ),
@@ -608,6 +612,8 @@ async fn an_idle_session_exit_still_leaves_its_reason_in_the_conversation() {
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: world.opening_of(thread).await,
                     reason: "idle server exited unexpectedly".into(),
                 },
             ),

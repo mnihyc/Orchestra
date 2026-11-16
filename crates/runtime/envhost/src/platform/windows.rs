@@ -1,13 +1,11 @@
 //! Windows paths, job objects and ConPTY.
 //!
 //! The same functions as the POSIX implementation, on top of the standard library and the
-//! process table of `sysinfo`, which keeps the package free of `unsafe` code. What this cannot
-//! give is said here, not hidden:
+//! process table of `sysinfo`, with relative opens isolated in one private native boundary.
+//! Remaining platform limits are stated alongside their operations:
 //!
-//! - A [`Dir`] holds the path it was opened at and not an open handle, so a directory that is
-//!   swapped for a link while a request is served can redirect the next operation. Links are
-//!   never followed by name (files are opened as the reparse point they are), and a path is
-//!   resolved link by link before it is used, which closes everything but that short window.
+//! - A [`Dir`] holds its original directory handle. Child opens and creation use that handle.
+//!   Links and directory iteration still await this boundary before runtime verification.
 //! - A file has no permission bits beyond "read-only": a mode is kept as 0o444 or 0o666 (and
 //!   0o111 more for a directory), and the bits of a mode that was asked for are not stored.
 //! - A process cannot be asked to end, interrupted, held still or let go by number: `Term` ends it
@@ -17,9 +15,15 @@
 //!   group cannot be signalled. Since processes cannot be suspended, a child created between
 //!   the last tree scan and its parent ending can escape that scan.
 //!
-//! This module has been type-checked and linted for `x86_64-pc-windows-gnu` and never run.
+//! Native process controls have target-runner proof. Directory containment remains unverified.
 
 #![cfg(windows)]
+
+#[allow(
+    unsafe_code,
+    reason = "only this private Windows boundary owns NT pointers and converts successful handles to File"
+)]
+mod native;
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -34,9 +38,6 @@ use super::{Kind, Meta, Sig};
 
 /// File names do not differ by case on Windows unless a directory was set up that way.
 pub const CASE_SENSITIVE_BY_DEFAULT: bool = false;
-
-/// Opens a link as the link it is and does not follow it.
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// Lets a directory be opened as a file, which setting its times needs.
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -130,39 +131,50 @@ fn meta_of(metadata: &std::fs::Metadata) -> Meta {
     }
 }
 
-/// A directory, by the path it was opened at.
+/// A directory held by its original native handle; its path is only for display.
 #[derive(Debug)]
 pub struct Dir {
     path: PathBuf,
+    file: File,
 }
 
 impl Dir {
     /// Opens the directory at `path`, following links in the path: the root of a workspace, which
     /// is given by whoever set the environment up and is not a request's to name.
     pub fn open_path(path: &Path) -> io::Result<Self> {
-        if !std::fs::metadata(path)?.is_dir() {
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        if !file.metadata()?.is_dir() {
             return Err(io::Error::from(io::ErrorKind::NotADirectory));
         }
         Ok(Self {
             path: path.to_path_buf(),
+            file,
         })
     }
 
     /// Opens the directory called `name` in this one. A link called `name` is not followed.
     pub fn open_child(&self, name: &OsStr) -> io::Result<Self> {
         plain(name)?;
-        let child = self.path.join(name);
-        let metadata = std::fs::symlink_metadata(&child)?;
+        let file = native::open_directory(&self.file, name)?;
+        let metadata = file.metadata()?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(io::Error::from(io::ErrorKind::NotADirectory));
         }
-        Ok(Self { path: child })
+        Ok(Self {
+            path: self.path.join(name),
+            file,
+        })
     }
 
     /// Another handle on the same directory.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             path: self.path.clone(),
+            file: self.file.try_clone()?,
         })
     }
 
@@ -174,13 +186,15 @@ impl Dir {
 
     /// What this directory itself is.
     pub fn stat_self(&self) -> io::Result<Meta> {
-        std::fs::symlink_metadata(&self.path).map(|metadata| meta_of(&metadata))
+        self.file.metadata().map(|metadata| meta_of(&metadata))
     }
 
     /// What the entry called `name` is, without following it.
     pub fn lstat(&self, name: &OsStr) -> io::Result<Meta> {
         plain(name)?;
-        std::fs::symlink_metadata(self.path.join(name)).map(|metadata| meta_of(&metadata))
+        native::open_metadata(&self.file, name)?
+            .metadata()
+            .map(|metadata| meta_of(&metadata))
     }
 
     /// Where the link called `name` points, as written.
@@ -193,11 +207,9 @@ impl Dir {
     /// is not a regular file, so it is refused.
     pub fn open_read(&self, name: &OsStr) -> io::Result<File> {
         plain(name)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(self.path.join(name))?;
-        if !file.metadata()?.is_file() {
+        let file = native::open_read(&self.file, name)?;
+        let metadata = file.metadata()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "not a regular file",
@@ -210,18 +222,14 @@ impl Dir {
     /// Windows takes no permission bits at creation, so `mode` is not used.
     pub fn create_new(&self, name: &OsStr, _mode: u32) -> io::Result<File> {
         plain(name)?;
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(self.path.join(name))
+        native::create_file(&self.file, name)
     }
 
-    /// Makes the directory called `name`.
+    /// Makes the directory called `name` relative to this original handle.
     pub fn mkdir(&self, name: &OsStr, _mode: u32) -> io::Result<()> {
         plain(name)?;
-        std::fs::create_dir(self.path.join(name))
+        drop(native::create_directory(&self.file, name)?);
+        Ok(())
     }
 
     /// Makes a link called `name` that points to `target`. Making one takes a privilege that an
@@ -244,27 +252,26 @@ impl Dir {
     /// Removes the file or link called `name`.
     pub fn unlink(&self, name: &OsStr) -> io::Result<()> {
         plain(name)?;
-        let path = self.path.join(name);
-        // A link to a directory is removed like a directory, a link to a file like a file.
-        if std::fs::symlink_metadata(&path)?
-            .file_type()
-            .is_symlink_dir()
-        {
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
+        let file = native::open_delete(&self.file, name)?;
+        let metadata = file.metadata()?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            return Err(io::Error::from(io::ErrorKind::IsADirectory));
         }
+        native::delete(&file)
     }
 
-    /// Removes the empty directory called `name`.
+    /// Removes the empty directory itself through its opened handle.
     pub fn rmdir(&self, name: &OsStr) -> io::Result<()> {
         plain(name)?;
-        std::fs::remove_dir(self.path.join(name))
+        let file = native::open_delete(&self.file, name)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() && !metadata.file_type().is_symlink_dir() {
+            return Err(io::Error::from(io::ErrorKind::NotADirectory));
+        }
+        native::delete(&file)
     }
 
-    /// Renames `from` in this directory to `to` in `to_dir`. With `replace` false a destination
-    /// that is there is refused; the look and the rename are two steps here, which leaves a short
-    /// window that the POSIX implementation does not have.
+    /// Renames the opened source into the destination directory with one native replace decision.
     pub fn rename_to(
         &self,
         from: &OsStr,
@@ -274,11 +281,8 @@ impl Dir {
     ) -> io::Result<()> {
         plain(from)?;
         plain(to)?;
-        let target = to_dir.path.join(to);
-        if !replace && std::fs::symlink_metadata(&target).is_ok() {
-            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
-        }
-        std::fs::rename(self.path.join(from), target)
+        let file = native::open_delete(&self.file, from)?;
+        native::rename(&file, &to_dir.file, to, replace)
     }
 
     /// The names in this directory, without `.` and `..`, in no particular order.
@@ -312,8 +316,8 @@ impl Dir {
     /// whether it is read-only. Never of a link.
     pub fn set_mode(&self, name: &OsStr, mode: u32) -> io::Result<()> {
         plain(name)?;
-        let path = self.path.join(name);
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let file = native::open_attributes(&self.file, name)?;
+        let metadata = file.metadata()?;
         if metadata.file_type().is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -322,16 +326,13 @@ impl Dir {
         }
         let mut permissions = metadata.permissions();
         permissions.set_readonly(mode & 0o222 == 0);
-        std::fs::set_permissions(path, permissions)
+        file.set_permissions(permissions)
     }
 
-    /// Sets the modification time of the file or directory called `name`, never of a link.
+    /// Sets the modification time on the opened object, never by following a mutable leaf name.
     pub fn set_mtime(&self, name: &OsStr, mtime_ns: i64) -> io::Result<()> {
         plain(name)?;
-        let file = OpenOptions::new()
-            .write(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-            .open(self.path.join(name))?;
+        let file = native::open_attributes(&self.file, name)?;
         file.set_modified(nanos_to_time(mtime_ns))
     }
 }
@@ -470,4 +471,203 @@ pub fn send_group(_group: u32, _sig: Sig) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "Windows has no process groups",
     ))
+}
+
+#[cfg(test)]
+mod directory_identity_cases {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn a_held_directory_never_reads_a_replacement_ancestors_data() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        let moved = scratch.path().join("original");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("value"), b"original").unwrap();
+        // Establish that the test account can move this directory before it is held.
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        let directory = Dir::open_path(&nested).unwrap();
+        if std::fs::rename(&root, &moved).is_ok() {
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("value"), b"replacement").unwrap();
+        }
+        let mut bytes = Vec::new();
+        directory
+            .open_read(OsStr::new("value"))
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"original");
+    }
+
+    #[test]
+    fn creating_a_child_is_exclusive_and_directory_children_keep_the_original_parent() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let directory = Dir::open_path(&root).unwrap();
+        directory
+            .create_new(OsStr::new("kept"), MODE_WRITABLE)
+            .unwrap()
+            .write_all(b"original")
+            .unwrap();
+        assert_eq!(
+            directory
+                .create_new(OsStr::new("kept"), MODE_WRITABLE)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"original");
+        directory
+            .mkdir(OsStr::new("nested"), MODE_WRITABLE)
+            .unwrap();
+        let nested = directory.open_child(OsStr::new("nested")).unwrap();
+        let moved = scratch.path().join("moved");
+        let relocated = std::fs::rename(&root, &moved).is_ok();
+        if relocated {
+            std::fs::create_dir_all(root.join("nested")).unwrap();
+        }
+        nested
+            .create_new(OsStr::new("child"), MODE_WRITABLE)
+            .unwrap()
+            .write_all(b"owned")
+            .unwrap();
+        let actual = if relocated { &moved } else { &root };
+        assert_eq!(
+            std::fs::read(actual.join("nested/child")).unwrap(),
+            b"owned"
+        );
+        if relocated {
+            assert!(!root.join("nested/child").exists());
+        }
+    }
+
+    #[test]
+    fn a_held_directory_keeps_leaf_mutations_on_the_original_objects_after_ancestor_replacement() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(nested.join("empty")).unwrap();
+        std::fs::write(nested.join("data"), b"original").unwrap();
+        let directory = Dir::open_path(&nested).unwrap();
+        let moved = scratch.path().join("original");
+        let relocated = std::fs::rename(&root, &moved).is_ok();
+        if relocated {
+            std::fs::create_dir_all(nested.join("empty")).unwrap();
+            std::fs::write(nested.join("data"), b"replacement").unwrap();
+            std::fs::write(nested.join("empty/keep"), b"other directory").unwrap();
+        }
+        let actual = if relocated {
+            moved.join("nested")
+        } else {
+            nested.clone()
+        };
+        directory
+            .set_mode(OsStr::new("data"), MODE_READ_ONLY)
+            .unwrap();
+        assert!(
+            std::fs::metadata(actual.join("data"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        if relocated {
+            assert!(
+                !std::fs::metadata(nested.join("data"))
+                    .unwrap()
+                    .permissions()
+                    .readonly()
+            );
+        }
+        directory
+            .set_mode(OsStr::new("data"), MODE_WRITABLE)
+            .unwrap();
+        directory
+            .set_mtime(OsStr::new("data"), 1_700_000_000_000_000_000)
+            .unwrap();
+        assert_eq!(
+            nanos_of(std::fs::metadata(actual.join("data")).unwrap().modified()),
+            1_700_000_000_000_000_000
+        );
+        directory
+            .rename_to(OsStr::new("data"), &directory, OsStr::new("renamed"), false)
+            .unwrap();
+        assert_eq!(std::fs::read(actual.join("renamed")).unwrap(), b"original");
+        directory.unlink(OsStr::new("renamed")).unwrap();
+        directory.rmdir(OsStr::new("empty")).unwrap();
+        assert!(!actual.join("renamed").exists());
+        assert!(!actual.join("empty").exists());
+        if relocated {
+            assert_eq!(std::fs::read(nested.join("data")).unwrap(), b"replacement");
+            assert_eq!(
+                std::fs::read(nested.join("empty/keep")).unwrap(),
+                b"other directory"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_replacing_native_rename_keeps_an_existing_destination_and_both_original_bytes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let directory = Dir::open_path(scratch.path()).unwrap();
+        std::fs::write(scratch.path().join("source"), b"source").unwrap();
+        std::fs::write(scratch.path().join("target"), b"target").unwrap();
+        assert_eq!(
+            directory
+                .rename_to(
+                    OsStr::new("source"),
+                    &directory,
+                    OsStr::new("target"),
+                    false
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read(scratch.path().join("source")).unwrap(),
+            b"source"
+        );
+        assert_eq!(
+            std::fs::read(scratch.path().join("target")).unwrap(),
+            b"target"
+        );
+        directory
+            .rename_to(OsStr::new("source"), &directory, OsStr::new("target"), true)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(scratch.path().join("target")).unwrap(),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn a_cloned_directory_keeps_its_original_identity_and_can_still_create_children() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        let moved = scratch.path().join("original");
+        std::fs::create_dir(&root).unwrap();
+        let directory = Dir::open_path(&root).unwrap();
+        let clone = directory.try_clone().unwrap();
+        drop(directory);
+        let relocated = std::fs::rename(&root, &moved).is_ok();
+        if relocated {
+            std::fs::create_dir(&root).unwrap();
+        }
+        clone
+            .create_new(OsStr::new("child"), MODE_WRITABLE)
+            .unwrap()
+            .write_all(b"kept")
+            .unwrap();
+        let actual = if relocated { &moved } else { &root };
+        assert_eq!(std::fs::read(actual.join("child")).unwrap(), b"kept");
+        if relocated {
+            assert!(!root.join("child").exists());
+        }
+        drop(clone);
+    }
 }
