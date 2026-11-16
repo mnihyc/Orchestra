@@ -432,6 +432,7 @@ async fn topic_places_bind_the_actual_template_and_heterogeneous_rows_before_nat
         )
         .token(&c.admin.token)
         .body(&orch_api_contract::settings::NodeSettingSetBody {
+            model_choice: None,
             value: json!(chosen),
             locked: None,
             expected_revision: None,
