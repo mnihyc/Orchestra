@@ -583,6 +583,8 @@ pub struct Environment {
     /// only then.
     scanned: AtomicBool,
     mounts: Mounts,
+    data_directories: Vec<(u64, crate::platform::FileNumber)>,
+    _home_root: Option<Dir>,
     watcher: Mutex<Option<Watcher>>,
     /// Orders initial directory resets before subsequent native change batches.
     directory_reads: tokio::sync::Mutex<()>,
@@ -611,6 +613,9 @@ pub struct Environment {
     wanted: Mutex<Option<Wanted>>,
     reporters: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
+
+/// How often a recording that waits for its baseline looks again.
+const FILE_STATES_POLL: Duration = Duration::from_millis(100);
 
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -937,6 +942,8 @@ impl Environment {
     /// Turns what the watch says into the state of the index, the ignore rules and the directories
     /// somebody has open.
     async fn changed(self: &Arc<Self>, change: Change) {
+        // Until the baselines are brought up to date for this batch, a recording waits for it.
+        let refreshing = self.file_states.as_ref().map(|states| states.begin_work());
         let directory_loss = matches!(&change, Change::Rescan | Change::Unavailable);
         let (paths, mut rescan) = match change {
             Change::Paths(paths) => (paths, false),
@@ -1024,6 +1031,7 @@ impl Environment {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "the index could not be brought up to date"),
         }
+        drop(refreshing);
         if !directory_loss {
             self.notify_directories(&paths, rescan).await;
         }
@@ -1032,7 +1040,10 @@ impl Environment {
     /// Prepares requested file-state baselines off the path that records or starts a turn.
     fn seed_file_states(self: &Arc<Self>) {
         let environment = Arc::clone(self);
+        // Noted before the task starts, so that a recording that looks right now sees the work.
+        let work = self.file_states.as_ref().map(|states| states.begin_work());
         let task = tokio::spawn(async move {
+            let _work = work;
             if let Err(error) = environment.prepare_file_states().await {
                 tracing::warn!(%error, environment=%environment.id, "recorded file coverage could not be prepared");
             }
@@ -1329,6 +1340,7 @@ struct HostInner {
     executors: Vec<ExecutorFactory>,
     envs: Mutex<HashMap<Id, Arc<Environment>>>,
     retiring: Mutex<HashMap<Id, Arc<retirement::Finalizer>>>,
+    storage_locks: Arc<crate::storage_locks::StorageLocks>,
 }
 
 impl HostInner {
@@ -1385,6 +1397,7 @@ impl EnvHost {
                 executors,
                 envs: Mutex::new(HashMap::new()),
                 retiring: Mutex::new(HashMap::new()),
+                storage_locks: Arc::default(),
             }),
         }
     }
@@ -1401,6 +1414,26 @@ impl EnvHost {
     #[must_use]
     pub fn environments(&self) -> Vec<Arc<Environment>> {
         lock(&self.inner.envs).values().cloned().collect()
+    }
+
+    /// Mounted data remains occupied through the original attachment's actual native cleanup.
+    #[must_use]
+    pub fn mount_directory_in_use(&self, device: u64, inode: crate::platform::FileNumber) -> bool {
+        let environments = lock(&self.inner.envs);
+        let retiring = lock(&self.inner.retiring);
+        let identity = (device, inode);
+        environments
+            .values()
+            .any(|environment| environment.data_directories.contains(&identity))
+            || retiring
+                .values()
+                .any(|pending| pending.mount_directories.contains(&identity))
+    }
+
+    /// The same native storage fences used before an attachment publishes its opened roots.
+    #[must_use]
+    pub fn storage_locks(&self) -> Arc<crate::storage_locks::StorageLocks> {
+        Arc::clone(&self.inner.storage_locks)
     }
 
     /// Replaces what the machine's owner has switched on, as `machine.policy.set` does.
@@ -1502,6 +1535,7 @@ impl EnvHost {
             environment,
             first_scan,
             lost_shells,
+            data_holds: _data_holds,
         } = attach(&self.inner, &settings, body, secrets, previous.as_ref()).await?;
         let (cleanup, start) = {
             let mut environments = lock(&self.inner.envs);
@@ -2233,6 +2267,7 @@ impl EnvHost {
             body,
             orch_types::new_id(),
             Time::new(until),
+            Time::new(until),
             tokio_util::sync::CancellationToken::new(),
         )
         .await?
@@ -2240,13 +2275,40 @@ impl EnvHost {
         .await
     }
 
+    /// Waits until `ready_by` for the baseline of `directory` to be ready, as long as background work that
+    /// brings it up to date is going on: when none is left and the baseline is not ready, nothing more is
+    /// coming, and the recording answers what it has.
+    async fn wait_for_file_states(
+        &self,
+        states: &Arc<crate::file_states::FileStates>,
+        directory: &RelPath,
+        ready_by: Time,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        while states.needs_preparing(directory) && states.work_in_flight() {
+            if self.inner.clock.time() >= ready_by {
+                return Ok(());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(HostError::Cancelled),
+                () = tokio::time::sleep(FILE_STATES_POLL) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Seals local state, its immutable upload source and retention before the serial key is released.
     /// The command owner signals cancellation and joins this future; it must not detach blocking work.
+    ///
+    /// A baseline that is not ready is never walked or hashed here: the pass that makes it ready runs in
+    /// the background, and this waits for it only until `ready_by`, then answers that the files are not
+    /// ready. `until` is the end of the protection of what is captured.
     pub async fn fs_record_capture(
         &self,
         body: &orch_link_contract::source::FsRecord,
         operation: Id,
         until: Time,
+        ready_by: Time,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::file_states::CapturedState> {
         if cancel.is_cancelled() {
@@ -2287,14 +2349,21 @@ impl EnvHost {
             {
                 // A new directory and a re-enabled policy need their indexed baseline before
                 // this immutable identity is answered. Otherwise a scheduling race permanently
-                // freezes not_ready even though the worker completes a moment later.
+                // freezes not_ready even though the worker completes a moment later. The pass that
+                // makes it ready runs in the background (this command only waits for it, up to
+                // `ready_by`), so a large directory never holds the turn or the environment's line.
+                let scope = directory.clone();
                 let kept = states.clone();
                 let policy = crate::state_store::RecordPolicy {
                     record_days: body.record_days,
                     max_bytes: body.max_bytes,
                 };
                 blocking(move || kept.store().keep_policy(&directory, policy)).await?;
-                environment.prepare_file_states().await?;
+                if needs_seed || !states.work_in_flight() {
+                    environment.seed_file_states();
+                }
+                self.wait_for_file_states(&states, &scope, ready_by, &cancel)
+                    .await?;
             }
         }
         if cancel.is_cancelled() {
@@ -3724,6 +3793,7 @@ struct Attached {
     environment: Arc<Environment>,
     first_scan: Option<FirstScan>,
     lost_shells: Vec<Id>,
+    data_holds: Vec<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 /// Opens the workspace root and finds out how it spells its names.
@@ -3889,6 +3959,22 @@ async fn attach(
         )?,
         (None, _) => Mounts::none(),
     };
+
+    let mut data_directories: std::collections::BTreeSet<_> =
+        mounts.directory_identities().collect();
+    let workspace_identity = files.root().root_meta()?;
+    data_directories.insert((workspace_identity.dev, workspace_identity.ino));
+    let home_root = home.as_ref().and_then(|path| Dir::open_path(path).ok());
+    if let Some(home) = &home_root
+        && let Ok(actual) = home.stat_self()
+    {
+        data_directories.insert((actual.dev, actual.ino));
+    }
+    let data_holds = host
+        .storage_locks
+        .hold_directories(data_directories.iter().copied())
+        .await?;
+    let data_directories = data_directories.into_iter().collect();
 
     // Kept browser profiles belong outside the workspace and never enter a snapshot or a fork.
     let browser_directory = if settings.managed.is_some() {
@@ -4172,6 +4258,8 @@ async fn attach(
         index,
         scanned: AtomicBool::new(first_scan.is_none()),
         mounts,
+        data_directories,
+        _home_root: home_root,
         watcher: Mutex::new(None),
         directory_reads: tokio::sync::Mutex::new(()),
         watches: Mutex::new(
@@ -4209,6 +4297,7 @@ async fn attach(
         environment,
         first_scan,
         lost_shells,
+        data_holds,
     })
 }
 

@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-driver-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::

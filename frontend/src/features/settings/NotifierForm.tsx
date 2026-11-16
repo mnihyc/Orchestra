@@ -130,7 +130,7 @@ export function NotifierDialog({ title, lead, notifiers, existing, submitLabel, 
           autoComplete="off"
         />
         {notifier !== undefined && (
-          <FieldForm fields={fields} values={values} errors={errors} onChange={(field: string, value: FormValue) => setValues((before) => ({ ...before, [field]: value }))} />
+          <FieldForm fields={fields} values={values} errors={errors} secretsSet={existing?.secretsSet} onChange={(field: string, value: FormValue) => setValues((before) => ({ ...before, [field]: value }))} />
         )}
         {extra}
         {sent && hold !== null && <InlineAlert tone="danger">{hold}</InlineAlert>}
