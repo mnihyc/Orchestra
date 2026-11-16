@@ -211,7 +211,7 @@ pub async fn tool_item(
     }
     // Refused local approvals never reach the target, even when the native tool prints an error.
     let denied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM approvals a LEFT JOIN items i ON i.id=a.tool_item_id WHERE a.turn_id=$1 AND a.state='denied' AND (a.native_ref=$2 OR i.native_ref=$2))")
-        .bind(turn).bind(native).fetch_one(&mut *conn).await.map_err(DbError::from)?;
+        .bind(turn).bind(orch_types::storable::encode_key(native)).fetch_one(&mut *conn).await.map_err(DbError::from)?;
     if denied {
         return Ok(());
     }
