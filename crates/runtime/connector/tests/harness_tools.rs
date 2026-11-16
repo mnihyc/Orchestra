@@ -154,6 +154,7 @@ async fn a_harness_reaches_the_executor_of_another_machine_through_its_listener_
 
     // A turn that runs in a stricter sandbox is held to it in the tools: the mode follows the turn.
     let turn = orch_link_contract::commands::TurnStart {
+        transport: None,
         native_model: None,
         native_wake: None,
         plan: false,
@@ -346,12 +347,12 @@ async fn a_harness_whose_environment_is_on_its_own_machine_reaches_its_tools_wit
             "native_session_ref": null, "archive": null, "history": null, "upto_turn_ordinal": null,
             "workspace_root": workspace, "instruction_root_marker": false,
             "directory": directory, "cwd": directory, "mounts": [],
-            "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request",
+            "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
             "sandbox_mode": "workspace", "instructions": "x", "memory": null,
             "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
             "exec": { "executor": executor, "tool_set": (executor == "orch-exec").then_some("plain"),
                       "environment_id": rig.environment, "generation": facts.generation },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         }))
         .unwrap();
         rig.succeed(&open).await;
@@ -457,11 +458,11 @@ async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
         "native_session_ref": null, "archive": null, "history": null, "upto_turn_ordinal": null,
         "workspace_root": workspace, "instruction_root_marker": false,
         "directory": directory, "cwd": directory, "mounts": [],
-        "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request",
+        "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
         "sandbox_mode": "workspace", "instructions": "x", "memory": null,
         "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
         "exec": { "executor": null, "environment_id": rig.environment, "generation": facts.generation },
-        "mcp": [{ "name": "allowed", "ticket": ticket }], "orch_tools": [], "raw_events": false
+        "mcp": [{ "name": "allowed", "ticket": ticket }], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
     }))
     .unwrap();
     rig.succeed(&open).await;

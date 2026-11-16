@@ -14,6 +14,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{str::FromStr, time::Duration};
+use tracing::Instrument as _;
+use tracing::instrument::WithSubscriber as _;
 
 /// One connection, alone or inside a transaction.
 pub type Conn = sqlx::PgConnection;
@@ -269,8 +271,17 @@ impl Tx {
     /// Commits. The commit runs what the transaction left for it (`orch_commit_work`): a change
     /// of authority it decided under refuses it as [`DbError::Retry`].
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        let Self { inner, held } = self;
-        let done = inner.commit().await;
+        let Self { mut inner, held } = self;
+        let done = finish_boundary(async move {
+            // Run deferred checks while a rejected transaction still needs its
+            // rollback. A failed PostgreSQL COMMIT has already ended it, while
+            // SQLx would otherwise queue another rollback on the same session.
+            sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+                .execute(&mut *inner)
+                .await?;
+            inner.commit().await
+        })
+        .await;
         drop(held);
         done
     }
@@ -278,10 +289,77 @@ impl Tx {
     /// Rolls back.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         let Self { inner, held } = self;
-        let done = inner.rollback().await;
+        let done = finish_boundary(async move { inner.rollback().await }).await;
         drop(held);
         done
     }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct BeginAcquireProbe {
+    started: std::sync::atomic::AtomicUsize,
+    closed: std::sync::atomic::AtomicUsize,
+    changed: tokio::sync::Notify,
+}
+#[cfg(test)]
+tokio::task_local! {static BEGIN_ACQUIRE_PROBE:std::sync::Arc<BeginAcquireProbe>;}
+#[cfg(test)]
+struct Acquiring(Option<std::sync::Arc<BeginAcquireProbe>>);
+#[cfg(test)]
+impl Acquiring {
+    fn begin() -> Self {
+        let probe = BEGIN_ACQUIRE_PROBE.try_with(std::sync::Arc::clone).ok();
+        if let Some(probe) = &probe {
+            probe.started.fetch_add(1, Ordering::SeqCst);
+            probe.changed.notify_one();
+        }
+        Self(probe)
+    }
+}
+#[cfg(test)]
+impl Drop for Acquiring {
+    fn drop(&mut self) {
+        if let Some(probe) = &self.0 {
+            probe.closed.fetch_add(1, Ordering::SeqCst);
+            probe.changed.notify_one();
+        }
+    }
+}
+#[cfg(test)]
+fn with_acquire_probe<F: Future>(work: F) -> impl Future<Output = F::Output> {
+    let probe = BEGIN_ACQUIRE_PROBE.try_with(std::sync::Arc::clone).ok();
+    async move {
+        match probe {
+            Some(probe) => BEGIN_ACQUIRE_PROBE.scope(probe, work).await,
+            None => work.await,
+        }
+    }
+}
+
+/// Trace the exact wait for a connection, independently of its wire boundary.
+async fn acquire_for_begin(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, sqlx::Error> {
+    #[cfg(test)]
+    let _acquiring = Acquiring::begin();
+    pool.acquire()
+        .instrument(tracing::trace_span!("database_transaction_acquire"))
+        .await
+}
+
+/// Once BEGIN, COMMIT or ROLLBACK is sent, one task owns it through the
+/// server's answer. Cancelling its waiter cannot return a half-finished boundary
+/// to the pool. A BEGIN whose caller disappeared drops its completed transaction
+/// normally; a COMMIT already begun finishes even if the HTTP request goes away.
+async fn finish_boundary<T: Send + 'static>(
+    work: impl Future<Output = Result<T, sqlx::Error>> + Send + 'static,
+) -> Result<T, sqlx::Error> {
+    #[cfg(test)]
+    let work = with_acquire_probe(work);
+    tokio::spawn(work.with_current_subscriber())
+        .await
+        .map_err(|error| sqlx::Error::Io(std::io::Error::other(error)))?
 }
 
 /// What went wrong in the database, by what a caller can do about it.
@@ -501,7 +579,10 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let inner = self.pool.begin().await?;
+        // Pool capacity waits remain cancellable; a ready connection transfers at BEGIN.
+        let conn = acquire_for_begin(&self.pool).await?;
+        let inner =
+            finish_boundary(async move { sqlx::Transaction::begin(conn, None).await }).await?;
         self.measure(asked.elapsed());
         let mut tx = Tx {
             inner,
@@ -524,7 +605,9 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let mut inner = self.pool.begin().await?;
+        let conn = acquire_for_begin(&self.pool).await?;
+        let mut inner =
+            finish_boundary(async move { sqlx::Transaction::begin(conn, None).await }).await?;
         self.measure(asked.elapsed());
         sqlx::query(isolation).execute(&mut *inner).await?;
         let mut tx = Tx {
@@ -648,5 +731,88 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
         assert!(db.ping().await);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_begins_leave_no_waiter_before_a_held_connection_is_released() {
+        struct Resume;
+        impl Drop for Resume {
+            fn drop(&mut self) {
+                tokio::time::resume();
+            }
+        }
+        let test = TestDb::fresh().await;
+        let db =
+            Db::connect_with_limits(&test.url, 1, SLOW_DEFAULT, SLOW_DEFAULT, Limits::REQUESTS)
+                .await
+                .unwrap();
+        let held = db.acquire().await.unwrap();
+        let counts = std::sync::Arc::<BeginAcquireProbe>::default();
+        // No database IO is needed in this phase: the sole connection stays
+        // held. A paused clock prevents an acquire timeout hiding abandoned work.
+        tokio::time::pause();
+        let resume = Resume;
+        let paused = tokio::time::Instant::now();
+        let mut requests = Vec::new();
+        for mode in 0..3 {
+            let db = db.clone();
+            let probe = counts.clone();
+            requests.push(tokio::spawn(BEGIN_ACQUIRE_PROBE.scope(probe, async move {
+                match mode {
+                    0 => db.begin().await,
+                    1 => db.begin_snapshot().await,
+                    _ => {
+                        db.begin_isolated("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                            .await
+                    }
+                }
+            })));
+        }
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let changed = counts.changed.notified();
+                if counts.started.load(Ordering::SeqCst) == 3 {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("each begin reached the held pool");
+        for request in &requests {
+            request.abort();
+        }
+        for request in requests {
+            let Err(error) = request.await else {
+                panic!("a held begin completed instead of being cancelled");
+            };
+            assert!(error.is_cancelled(), "{error}");
+        }
+        assert_eq!(
+            counts.closed.load(Ordering::SeqCst),
+            3,
+            "cancelling callers drops every queued acquisition before a connection becomes available"
+        );
+        assert_eq!(
+            tokio::time::Instant::now(),
+            paused,
+            "no deadline ended an abandoned acquire"
+        );
+        drop(resume);
+        drop(held);
+        let mut live = BEGIN_ACQUIRE_PROBE
+            .scope(counts.clone(), db.begin_snapshot())
+            .await
+            .unwrap();
+        let isolation: String =
+            sqlx::query_scalar("SELECT current_setting('transaction_isolation')")
+                .fetch_one(&mut *live)
+                .await
+                .unwrap();
+        assert_eq!(isolation, "repeatable read");
+        live.commit().await.unwrap();
+        assert_eq!(counts.started.load(Ordering::SeqCst), 4);
+        assert_eq!(counts.closed.load(Ordering::SeqCst), 4);
+        db.pool().close().await;
     }
 }

@@ -11,10 +11,21 @@ use chrono::Duration;
 use common::{World, eventually};
 use hosting::{ScriptedHost, running, serve, template};
 use orch_db::queries::environments::{retained, temporary};
-use orch_link_contract::commands::CommandKind as K;
-use orch_types::{Clock, Id, ManualClock};
+use orch_link_contract::commands::{Cmd, CommandKind as K};
+use orch_types::{Clock, Id, ManualClock, Time};
 use serde_json::json;
 use std::sync::Arc;
+
+async fn issue_time(world: &World, command: &Cmd) -> Time {
+    let info = world
+        .commands
+        .as_engine()
+        .status(command.id)
+        .await
+        .unwrap()
+        .unwrap();
+    Time::new(info.issued_at)
+}
 
 async fn setup() -> (World, Arc<ManualClock>, ScriptedHost, Id) {
     let clock = Arc::new(orch_testkit::clock::manual());
@@ -159,6 +170,46 @@ async fn only_the_creating_threads_archive_starts_the_warning_and_keep_withdraws
             .is_none()
     );
     assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+}
+
+#[tokio::test]
+async fn a_maintenance_snapshot_cannot_forget_the_environments_creating_thread() {
+    let (world, clock, host, template) = setup().await;
+    let (id, _, _unit) = running(&world, &host, template, "Concurrent association").await;
+    opt_in(&world, id, "thread").await;
+    let creator = world.thread("The actual creator").await;
+    world.engine().stop();
+    let snapshot = temporary::read(&mut world.pool.acquire().await.unwrap(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.thread_id.is_none());
+    temporary::associate(
+        &mut world.pool.acquire().await.unwrap(),
+        id,
+        creator,
+        world.ada,
+    )
+    .await
+    .unwrap();
+    // A sweep that read before association saves its timing after association.
+    // It owns those timing fields, never the first creating-thread relationship.
+    temporary::save(
+        &mut world.pool.acquire().await.unwrap(),
+        &snapshot,
+        clock.now(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        temporary::read(&mut world.pool.acquire().await.unwrap(), id)
+            .await
+            .unwrap()
+            .unwrap()
+            .thread_id,
+        Some(creator)
+    );
 }
 
 #[tokio::test]
@@ -318,7 +369,14 @@ async fn owned_directory_cleanup_retries_busy_detach_with_a_new_id_same_body_and
     assert_eq!(attempts[0].0, attempts[1].0);
     assert_eq!(attempts[0].1.body, attempts[1].1.body);
     assert_eq!(attempts[0].1.key, attempts[1].1.key);
-    assert_eq!(attempts[0].1.deadline, attempts[1].1.deadline);
+    let deadline = Time::new(
+        issue_time(&world, &attempts[0].1).await.get()
+            + chrono::Duration::from_std(attempts[0].1.work).unwrap(),
+    );
+    assert_eq!(
+        attempts[1].1.work,
+        Cmd::work_budget(issue_time(&world, &attempts[1].1).await, deadline)
+    );
     let commands = world.commands.as_engine();
     let mut busy = 0;
     let mut succeeded = 0;
@@ -472,14 +530,15 @@ async fn recovery_after_the_original_deadline_replays_original_and_busy_child_su
         );
         let attempts = world.commands.issued_commands("env.detach");
         assert_eq!(attempts.len(), count);
-        assert!(
-            attempts
-                .iter()
-                .all(|(machine, cmd)| *machine == connector.id
-                    && cmd.deadline == deadline
-                    && cmd.key == Some(environment.to_string())
-                    && cmd.body == json!({"environment_id":environment}))
-        );
+        for (machine, cmd) in &attempts {
+            assert_eq!(*machine, connector.id);
+            assert_eq!(
+                cmd.work,
+                Cmd::work_budget(issue_time(&world, cmd).await, deadline)
+            );
+            assert_eq!(cmd.key, Some(environment.to_string()));
+            assert_eq!(cmd.body, json!({"environment_id":environment}));
+        }
         assert_eq!(
             connector.count(K::EnvDataRemove),
             1,
@@ -560,11 +619,12 @@ async fn a_cleanup_that_stays_busy_ends_with_a_visible_job_failure_without_delet
     assert_eq!(pending, 0);
     let attempts = world.commands.issued_commands("env.detach");
     assert!(!attempts.is_empty());
-    assert!(
-        attempts
-            .iter()
-            .all(|(_, cmd)| cmd.deadline == original_deadline)
-    );
+    for (_, cmd) in &attempts {
+        assert_eq!(
+            cmd.work,
+            Cmd::work_budget(issue_time(&world, cmd).await, original_deadline)
+        );
+    }
     assert!(
         original_deadline.get() < clock.now(),
         "an unfinished cleanup obtains no new deadline"

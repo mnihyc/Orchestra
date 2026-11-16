@@ -266,13 +266,23 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
             .as_u64()
             .is_some_and(|value| value > 0)
     );
+    let at = s
+        .world
+        .commands
+        .as_engine()
+        .status(id)
+        .await?
+        .ok_or("the original issue receipt is absent")?
+        .issued_at;
+    let deadline = Time::new(at + chrono::Duration::from_std(actual.work)?);
     let canonical = Outgoing {
+        after: None,
         id,
         machine: s.world.machine_id,
         kind: CommandKind::FsSnapshot,
         key: SerialKey::Environment(s.world.environment),
         body: actual.body.clone(),
-        deadline: Some(actual.deadline),
+        deadline: Some(deadline),
         authority: None,
     };
     assert!(s.allows(&canonical).await?);

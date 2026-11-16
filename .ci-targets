@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-db --lib
+test -p orch-engine --lib
+test -p orch-engine --test turns --test temporary_environments -- --nocapture
+test -p orch-api-core --lib --features test-observers

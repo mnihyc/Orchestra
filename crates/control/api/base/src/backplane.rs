@@ -75,6 +75,9 @@ use orch_link::commands::Progress;
 use orch_link::controller::ControllerLink;
 
 use orch_link::controller::Notice;
+use orch_link::framing::{
+    LinkMeter, MessageAssembly, MessageSink, Refused, TransportError, backplane_queues, write_loop,
+};
 
 use orch_link::streams::Delivery;
 
@@ -110,7 +113,7 @@ use orch_link_contract::backplane::UpFrame;
 
 use orch_link_contract::commands::Cmd;
 
-use orch_link_contract::commands::CommandError;
+use orch_link_contract::commands::{CommandError, CommandKind};
 
 use orch_link_contract::commands::ErrorCode;
 
@@ -124,7 +127,7 @@ use orch_link_contract::events::EventKind;
 
 use orch_link_contract::frames;
 
-use orch_link_contract::frames::Text;
+use orch_link_contract::frames::{PartFrame, Text};
 
 use orch_link_contract::session::Role;
 
@@ -187,8 +190,9 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 use tokio_util::sync::CancellationToken;
-/// How the oldest connector the system accepts is named when nothing says
-/// otherwise: the first release, which spoke this protocol.
+/// The release a system states as its own when it is run without a build of its own, such as one made for a
+/// test: the first release, which spoke this protocol. A system takes in the connectors of its release and of
+/// the ones after it, so this one accepts every connector.
 pub const FIRST_CONNECTOR_VERSION: &str = "0.1.0";
 
 /// The share of a new measurement of a machine's rate in the average the
@@ -196,10 +200,14 @@ pub const FIRST_CONNECTOR_VERSION: &str = "0.1.0";
 /// slow link.
 pub const RATE_WEIGHT: f64 = 0.25;
 
-/// The most bytes of one frame of the backplane. A frame of a machine is at
-/// most a session's frame limit, and the wrapper around it is a few hundred
-/// bytes; this is the bound the link's own socket has for a message.
+/// The most bytes of one live frame: the figure that pages and transient messages kept for the browser are
+/// measured against. What the backplane carries between a gateway and the system is not held to it: that is
+/// a machine's largest message whole, and the setting of the link says how large (`Limits::backplane_bytes`).
 pub const MAX_BACKPLANE_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// What the type `"t":"cmd",` adds to a command written as a frame: the machine's session is sent the command
+/// with its type in front of its members.
+const COMMAND_FRAME_TAG_BYTES: usize = 10;
 
 // JSON framing adds a type name, request reference and separators around a local reply.
 // Reserve more than that fixed envelope before accepting a complete canonical DTO.
@@ -389,6 +397,8 @@ impl LinkSettings {
         let limits = Limits {
             max_frame_bytes: u32::try_from(config.link.max_frame_bytes)
                 .unwrap_or(Limits::default().max_frame_bytes),
+            max_message_bytes: u32::try_from(config.link.max_message_bytes)
+                .unwrap_or(Limits::default().max_message_bytes),
             tunnel_window_bytes: u32::try_from(config.link.tunnel_window_bytes)
                 .unwrap_or(Limits::default().tunnel_window_bytes),
             max_channels: MAX_CHANNELS,
@@ -398,15 +408,51 @@ impl LinkSettings {
             gateway_sample_max_age_secs: config.link.dead_after_secs,
             tunnel_session_idle_secs: config.link.tunnel_session_idle_secs,
             limits,
-            versions: ConnectorVersions {
-                min: FIRST_CONNECTOR_VERSION.to_owned(),
-                recommended: release_version.to_owned(),
-            },
+            versions: ConnectorVersions::of_release(release_version),
         }
+    }
+
+    /// The oldest connector this system accepts: the figure its gateways refuse older connectors by,
+    /// and the one a page names when a machine has to update.
+    #[must_use]
+    pub fn connector_minimum(&self) -> &str {
+        &self.versions.min
     }
 }
 
 // ---------------------------------------------------------------- gateway connections
+
+/// The backplane uses the same paced and ordered writer as machine sessions.
+struct ApiBackplaneSink(futures::stream::SplitSink<WebSocket, Message>);
+
+#[async_trait]
+impl MessageSink for ApiBackplaneSink {
+    async fn ready(&mut self) {
+        let _ = futures::future::poll_fn(|cx| {
+            futures::Sink::poll_ready(std::pin::Pin::new(&mut self.0), cx)
+        })
+        .await;
+    }
+    async fn send(&mut self, message: orch_link::framing::Message) -> Result<(), TransportError> {
+        let message = match message {
+            orch_link::framing::Message::Text(text) => Message::Text(text.into()),
+            orch_link::framing::Message::Binary(bytes) => Message::Binary(bytes),
+        };
+        self.0
+            .send(message)
+            .await
+            .map_err(|error| TransportError::Io(error.to_string()))
+    }
+    async fn ping(&mut self) -> Result<(), TransportError> {
+        self.0
+            .send(Message::Ping(Bytes::new()))
+            .await
+            .map_err(|error| TransportError::Io(error.to_string()))
+    }
+    async fn close(&mut self) {
+        let _ = self.0.close().await;
+    }
+}
 
 /// What is sent to a gateway.
 #[derive(Debug)]
@@ -423,7 +469,7 @@ enum Outbound {
 impl Outbound {
     fn observed_bytes(&self) -> Option<usize> {
         match self {
-            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES)
+            Self::Frame(frame) => frames::encode(frame.as_ref(), usize::MAX)
                 .ok()
                 .map(|text| text.len()),
             Self::Data(bytes) => Some(bytes.len()),
@@ -504,6 +550,8 @@ enum Mirrored {
     Queued,
     Sent,
     Accepted,
+    Running,
+    Released,
     Over,
 }
 
@@ -513,6 +561,8 @@ impl Mirrored {
             Progress::Queued => Self::Queued,
             Progress::Sent => Self::Sent,
             Progress::Accepted => Self::Accepted,
+            Progress::Running => Self::Running,
+            Progress::Released => Self::Released,
             Progress::Succeeded(_)
             | Progress::Failed(_)
             | Progress::Expired
@@ -555,6 +605,7 @@ type UpItem = (Arc<GatewayConn>, Id, UpFrame);
 pub struct MachineEntry {
     pub id: Id,
     pub controller: ControllerLink,
+    command_preparations: usize,
     state: Mutex<EntryState>,
     retired: CancellationToken,
     /// The tasks of the machine's streams, each taking its stream's frames in the order they came
@@ -890,6 +941,12 @@ impl Link {
     pub fn component_update_finished(&self, machine: Id) {
         let applier = Arc::clone(&lock(&self.inner.applier));
         applier.component_update_finished(machine);
+    }
+
+    /// The oldest connector this system accepts, as it states it to its gateways.
+    #[must_use]
+    pub fn connector_minimum(&self) -> &str {
+        self.inner.settings.connector_minimum()
     }
 
     /// The certificate authority and what is made with it.
@@ -1236,7 +1293,7 @@ impl Link {
     }
 
     async fn create_entry(&self, id: Id) -> Result<Arc<MachineEntry>, EntryError> {
-        let (row, cursors, open) = {
+        let (row, cursors, open, command_preparations) = {
             let mut conn = self.inner.db.acquire().await?;
             let row = resources::machine(&mut conn, id)
                 .await?
@@ -1247,7 +1304,22 @@ impl Link {
             }
             let cursors = queries::cursors(&mut conn, id).await?;
             let open = queries::open_commands(&mut conn, id).await?;
-            (row, cursors, open)
+            let preparations = orch_settings::get::<u64>(
+                &mut conn,
+                orch_settings::Place::System,
+                orch_settings_contract::registry::keys::LINK_COMMAND_PREPARATIONS,
+            )
+            .await
+            .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
+            let command_preparations = preparations
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    DbError::Other(sqlx::Error::Decode(
+                        "the command preparation setting is not a positive count".into(),
+                    ))
+                })?;
+            (row, cursors, open, command_preparations)
         };
         #[cfg(any(test, feature = "test-support"))]
         command_admission_tests::entry_loaded(id).await;
@@ -1257,6 +1329,7 @@ impl Link {
         let entry = Arc::new(MachineEntry {
             id,
             controller,
+            command_preparations,
             state: Mutex::new(EntryState::default()),
             retired: CancellationToken::new(),
             streams: Mutex::new(HashMap::new()),
@@ -1266,7 +1339,11 @@ impl Link {
         });
         for row in open {
             let progress = if row.state == "accepted" {
-                Progress::Accepted
+                match row.key_phase {
+                    1 => Progress::Running,
+                    2 => Progress::Released,
+                    _ => Progress::Accepted,
+                }
             } else {
                 Progress::Queued
             };
@@ -1546,8 +1623,8 @@ impl Link {
         }
         let roles: Vec<String> = query.roles.iter().map(role_name).collect();
         let changed_roles = roles != row.roles;
-        let minimum_node = row.roles.iter().any(|role| role == "node")
-            && query.roles.contains(&Role::Node)
+        let minimum_program = (row.placement == "connected"
+            || (row.roles.iter().any(|role| role == "node") && query.roles.contains(&Role::Node)))
             && matches!(
                 self.inner
                     .settings
@@ -1569,7 +1646,7 @@ impl Link {
                 .await
                 .map_err(busy)?
         } else {
-            if !minimum_node && update.is_some_and(|update| update.state == "updating") {
+            if !minimum_program && update.is_some_and(|update| update.state == "updating") {
                 // The old process may have stopped after acknowledging but before installation.
                 // Preserve its drain fence and give this session a fresh journal identity.
                 orch_db::queries::component_updates::reconnected(&mut conn, row.id, now)
@@ -1578,7 +1655,7 @@ impl Link {
             }
             false
         };
-        let pending_update = if minimum_node {
+        let pending_update = if minimum_program {
             let recommended = &self.inner.settings.versions.recommended;
             self.request_automatic_component_update(
                 &mut conn,
@@ -1759,6 +1836,9 @@ impl Link {
             return;
         }
         match frame {
+            UpFrame::CmdSeen(_) => {
+                entry.controller.up(session, frame);
+            }
             UpFrame::CmdAck(_) => {
                 entry.controller.up(session, frame);
                 entry.mirror.notify_one();
@@ -1984,13 +2064,13 @@ impl Link {
         }
         if let UpFrame::PortLocalAsk(request) = frame {
             let handler = lock(&self.inner.machine_requests).clone();
-            // Reserve room for the frame tag/correlation; a whole DTO that does not fit is
-            // refused, never silently truncated or put into a retained command result.
+            // Reserve room for the frame tag/correlation; a whole DTO that does not fit a message of the
+            // link is refused, never silently truncated or put into a retained command result.
             let reply_bytes = self
                 .inner
                 .settings
                 .limits
-                .frame_bytes()
+                .message_bytes()
                 .saturating_sub(PORT_LOCAL_ENVELOPE_BYTES);
             let Ok(permit) = Arc::clone(&self.inner.port_local_slots).try_acquire_owned() else {
                 gateway.send(BackplaneFrame::Down(Down {
@@ -2032,7 +2112,7 @@ impl Link {
                     } else {
                         orch_link_contract::local_ports::PortLocalAnswer::unavailable(
                             id,
-                            "the whole live reply exceeds this link's frame bound",
+                            "the whole live reply exceeds what a message of this link may be",
                         )
                     };
                 if let Some(route) = entry.route() {
@@ -2135,6 +2215,11 @@ impl Link {
             }
             match allowed {
                 Ok(false) => {
+                    // A unit that enrolled before its environment names it is not another machine: nothing
+                    // is answered, so that it sends the report again once the environment names it.
+                    if self.awaits_its_environment(machine, &stream).await {
+                        return;
+                    }
                     // A node can still send its own work after discarding another host's report.
                     // Keep consecutive refusals in the link's acknowledgement order, with no DB
                     // cursor. Whole foreign streams and gaps are discarded before ordering.
@@ -2297,6 +2382,7 @@ impl Link {
                     if !matches!(allowed, Ok::<_, DbError>(true)) {
                         if matches!(allowed, Ok(false))
                             && let Ok(stream) = eph.stream.parse::<Stream>()
+                            && !self.awaits_its_environment(entry.id, &stream).await
                         {
                             self.record_report_refusal(entry.id, &stream, 1).await;
                         }
@@ -2346,6 +2432,7 @@ impl Link {
         enum Taken {
             Applied(Option<crate::realtime::raw_traffic::Boundary>),
             Refused,
+            Waits,
             CursorMismatch,
         }
         let stream = delivery.stream.to_string();
@@ -2376,6 +2463,16 @@ impl Link {
             )
             .await?
             {
+                if let Stream::Env { environment_id } = delivery.stream
+                    && orch_db::queries::machine_reports::awaits_attachment(
+                        &mut tx,
+                        machine,
+                        environment_id,
+                    )
+                    .await?
+                {
+                    return Ok(Taken::Waits);
+                }
                 return Ok(Taken::Refused);
             }
             if delivery
@@ -2492,6 +2589,14 @@ impl Link {
                     tracing::debug!(%error, "committed diagnostic or sign-in events could not be forwarded");
                 }
                 true
+            }
+            Ok(Taken::Waits) => {
+                tracing::debug!(
+                    %machine, stream,
+                    "the report of a unit waits until its environment names it; it is sent again"
+                );
+                controller.abandoned(&delivery);
+                false
             }
             Ok(Taken::Refused) => {
                 if let Some(entry) = self.loaded_entry(machine) {
@@ -2712,6 +2817,8 @@ impl Link {
             machine = %entry.id, stream, from = notice.from, reason = ?notice.reason,
             "a machine says that events of a stream are gone"
         );
+        metrics::counter!("orch_link_stream_resets_total", "reason" => notice.reason.as_str())
+            .increment(1);
         let result = async {
             let mut tx = self.inner.db.begin().await?;
             if !report_sources::owns(&mut tx, entry.id, &notice.stream).await? {
@@ -2736,8 +2843,10 @@ impl Link {
                 state.discarded_through.remove(&stream);
             }
             Ok(false) => {
-                self.record_report_refusal(entry.id, &notice.stream, 1)
-                    .await;
+                if !self.awaits_its_environment(entry.id, &notice.stream).await {
+                    self.record_report_refusal(entry.id, &notice.stream, 1)
+                        .await;
+                }
                 return;
             }
             Err(error) => {
@@ -2756,91 +2865,6 @@ impl Link {
                 .await;
             if let Err(error) = resync {
                 tracing::error!(%error, machine = %entry.id, "a session could not be asked to report again");
-            }
-        }
-    }
-
-    async fn down_loop(
-        &self,
-        entry: Arc<MachineEntry>,
-        mut down: mpsc::UnboundedReceiver<DownFrame>,
-        #[cfg(feature = "test-observers")] observed: orch_link::test_observers::ReceiverLifetime,
-    ) {
-        loop {
-            let frame = tokio::select! {
-                () = entry.retired.cancelled() => return,
-                () = self.inner.shutdown.cancelled() => return,
-                frame = down.recv() => frame,
-            };
-            let Some(frame) = frame else { return };
-            #[cfg(feature = "test-observers")]
-            let flight = observed.selected(
-                frames::encode(&frame, usize::MAX)
-                    .ok()
-                    .map(|text| text.len()),
-            );
-            let Some(route) = entry.route() else {
-                // The machine has no session: what was meant for it is sent
-                // again when it has, as the rules of the link have it.
-                #[cfg(feature = "test-observers")]
-                flight.processed();
-                continue;
-            };
-            let mut current_callers = Vec::new();
-            let frame = match frame {
-                DownFrame::Cmd(cmd) => {
-                    let id = cmd.id;
-                    let original = cmd.clone();
-                    let prepared = self
-                        .prepare(&entry, route.fingerprint.as_deref(), cmd)
-                        .await;
-                    let admitted = match prepared {
-                        Ok(cmd) => self.admit_wire_command(&entry, &original, cmd).await,
-                        Err(error) => Err(error),
-                    };
-                    match admitted {
-                        Ok(Some((cmd, callers))) => {
-                            current_callers = callers;
-                            DownFrame::Cmd(cmd)
-                        }
-                        Ok(None) => {
-                            #[cfg(feature = "test-observers")]
-                            flight.processed();
-                            continue;
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, command = %id, "a command cannot be put on the wire");
-                            // The native ACK reaches the controller before its DB mirror.
-                            // Atomically preserve that acknowledgement (or a native result)
-                            // when a queued duplicate fails preparation or scope admission.
-                            self.refuse_unaccepted_publication(&entry, id, &error);
-                            #[cfg(any(test, feature = "test-support"))]
-                            crate::backplane::command_admission_tests::local_refused(id).await;
-                            #[cfg(feature = "test-observers")]
-                            flight.processed();
-                            continue;
-                        }
-                    }
-                }
-                other => other,
-            };
-            // Publication is synchronous and holds no database lease. Rebuild/route
-            // replacement cannot let an older output task publish after its successor.
-            let command = match &frame {
-                DownFrame::Cmd(command) => Some(command.id),
-                _ => None,
-            };
-            let sent = self.send_current(&entry, &route, frame, &current_callers);
-            if let Err(error) = &sent
-                && let Some(id) = command
-            {
-                self.refuse_unaccepted_publication(&entry, id, error);
-            }
-            #[cfg(feature = "test-observers")]
-            if matches!(sent, Ok(true)) {
-                flight.complete();
-            } else {
-                flight.processed();
             }
         }
     }
@@ -2877,7 +2901,9 @@ impl Link {
             if progress.as_ref().is_some_and(Progress::is_final) {
                 return Ok(false);
             }
-            let accepted = matches!(progress, Some(Progress::Accepted));
+            let accepted = progress
+                .as_ref()
+                .is_some_and(|progress| progress.key_phase().is_some());
             if !accepted
                 && callers.iter().any(|(caller, source_deadline)| {
                     caller.as_ref().is_some_and(|caller| {
@@ -2891,6 +2917,21 @@ impl Link {
                 ));
             }
         }
+        // A command larger than a message may be is failed here, with its size and the setting, and is not
+        // handed to a gateway that would refuse it.
+        if let DownFrame::Cmd(cmd) = &frame
+            && !cmd
+                .kind
+                .parse::<CommandKind>()
+                .is_ok_and(CommandKind::is_paged)
+            && let Ok(written) = serde_json::to_vec(cmd)
+        {
+            let bytes = written.len() + COMMAND_FRAME_TAG_BYTES;
+            let limit = self.inner.settings.limits.message_bytes();
+            if bytes > limit {
+                return Err(orch_link::commands::command_too_large(bytes, limit));
+            }
+        }
         let sent = route.gateway.send(BackplaneFrame::Down(Down {
             machine_id: entry.id,
             frame,
@@ -2900,6 +2941,46 @@ impl Link {
             entry.mirror.notify_one();
         }
         Ok(sent)
+    }
+
+    /// The ordinary backplane message allowance, including its machine/session envelope.
+    /// Paged values cross it in bounded parts.
+    #[must_use]
+    pub fn backplane_bytes(&self) -> usize {
+        self.inner.settings.limits.backplane_bytes()
+    }
+
+    /// A gateway could not put a frame of ours into a machine's session. A command it was fails at once, with
+    /// the reason, and is not left to wait for a machine that never had it.
+    fn down_refused(&self, refused: orch_link_contract::backplane::DownRefused) {
+        tracing::error!(
+            machine = %refused.machine_id,
+            frame = %refused.frame,
+            bytes = refused.bytes,
+            limit = refused.limit,
+            "a gateway could not put a frame into a machine's session"
+        );
+        let Some(id) = refused.command else {
+            return;
+        };
+        let entry = lock(&self.inner.machines)
+            .get(&refused.machine_id)
+            .and_then(|cell| cell.get().cloned());
+        let Some(entry) = entry else {
+            return;
+        };
+        let error = if refused.bytes == 0 {
+            CommandError::new(
+                ErrorCode::Internal,
+                "the command could not be written for the machine",
+            )
+        } else {
+            orch_link::commands::command_too_large(
+                usize::try_from(refused.bytes).unwrap_or(usize::MAX),
+                usize::try_from(refused.limit).unwrap_or(usize::MAX),
+            )
+        };
+        self.refuse_unaccepted_publication(&entry, id, &error);
     }
 
     fn refuse_unaccepted_publication(&self, entry: &MachineEntry, id: Id, error: &CommandError) {
@@ -3024,31 +3105,6 @@ impl Link {
                 self.sync_commands(entry).await;
                 if ticks.is_multiple_of(SWEEP_EVERY_TICKS) {
                     self.discover(entry, false);
-                }
-            }
-            if ticks.is_multiple_of(SWEEP_EVERY_TICKS) {
-                // A command a loaded link follows is ended by that link (its issuer lets one that no machine
-                // took expire, and its mirror writes it); its row may not yet say that its machine took it,
-                // and the sweep must not end one its machine is running (C-turns).
-                let followed: Vec<Id> = entries
-                    .iter()
-                    .flat_map(|entry| {
-                        lock(&entry.state)
-                            .tracked
-                            .keys()
-                            .copied()
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
-                let swept = async {
-                    let mut conn = self.inner.db.acquire().await?;
-                    queries::expire_unstarted(&mut conn, self.inner.clock.now(), &followed).await
-                }
-                .await;
-                match swept {
-                    Ok(expired) if !expired.is_empty() => self.inner.finished.notify_waiters(),
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "expired commands could not be swept"),
                 }
             }
         }
@@ -3184,17 +3240,21 @@ impl Link {
 
     /// Serves one connection of a gateway until it ends.
     pub async fn serve_gateway(&self, socket: WebSocket) {
-        let (mut sink, mut source) = socket.split();
+        let ceiling = self.backplane_bytes();
+        let (sink, mut source) = socket.split();
         let first = tokio::time::timeout(HELLO_TIMEOUT, source.next()).await;
         let hello = match first {
             Ok(Some(Ok(Message::Text(text)))) => {
-                match frames::decode::<BackplaneFrame>(text.as_str(), MAX_BACKPLANE_FRAME_BYTES) {
+                match frames::decode::<BackplaneFrame>(text.as_str(), ceiling) {
                     Ok(Text::Known(BackplaneFrame::GwHello(hello))) => hello,
                     _ => return,
                 }
             }
             _ => return,
         };
+        if hello.link_protocol != orch_link_contract::version::PROTOCOL_VERSION {
+            return;
+        }
         let (out, mut queued) = mpsc::unbounded_channel();
         let gateway = Arc::new(GatewayConn {
             generation: self.inner.generations.fetch_add(1, Ordering::Relaxed),
@@ -3222,70 +3282,92 @@ impl Link {
         self.heartbeat(&hello.version, &gateway).await;
 
         let writer_closed = gateway.closed.clone();
+        let limits = self.inner.settings.limits;
         #[cfg(feature = "test-observers")]
         let writer_observed = Arc::clone(&gateway.observed);
+        let (transport_out, transport_queues) = backplane_queues(limits);
+        let transport_closed = gateway.closed.clone();
+        let transport_writer = tokio::spawn(async move {
+            let result = write_loop(
+                Box::new(ApiBackplaneSink(sink)),
+                transport_queues,
+                LinkMeter::new(),
+                limits.frame_bytes(),
+                transport_closed.clone(),
+            )
+            .await;
+            transport_closed.cancel();
+            result
+        });
         let writer = tokio::spawn(async move {
             #[cfg(feature = "test-observers")]
             let _receiver_lifetime = writer_observed.receiver();
             let mut ping = tokio::time::interval(PING_EVERY);
             ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                #[cfg(feature = "test-observers")]
-                let mut observed_send = None;
-                let message = tokio::select! {
+                let item = tokio::select! {
                     () = writer_closed.cancelled() => break,
-                    _ = ping.tick() => Message::Ping(Bytes::new()),
-                    item = queued.recv() => match item {
-                        None => break,
-                        Some(Outbound::Frame(frame)) => {
-                            #[cfg(feature = "test-observers")]
-                            {
-                                observed_send = Some(writer_observed.selected(frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES).ok().map(|text| text.len())));
-                                orch_link::test_observers::api_sending(frame.as_ref());
-                            }
-                            match frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES) {
-                            Ok(text) => Message::Text(text.into()),
-                            Err(error) => {
-                                tracing::error!(%error, "a frame of the backplane cannot be written");
-                                continue;
-                            }
-                        }},
-                        Some(Outbound::Data(bytes)) => {
-                            #[cfg(feature = "test-observers")]
-                            { observed_send = Some(writer_observed.selected(Some(bytes.len()))); }
-                            Message::Binary(bytes)
-                        },
-                        Some(Outbound::Datagram {machine,packet}) => {
-                            let data=orch_link_contract::ports::BackplanePortDatagram {machine_id:machine,datagram:packet.frame.clone()};
-                            let encoded = data.encode();
-                            #[cfg(feature = "test-observers")]
-                            { observed_send = Some(writer_observed.selected(encoded.as_ref().ok().map(|bytes| bytes.len()))); }
-                            let Ok(bytes)=encoded else {continue;};
-                            if sink.send(Message::Binary(bytes)).await.is_err() {break;}
-                            packet.delivered();
-                            #[cfg(feature = "test-observers")]
-                            if let Some(flight) = observed_send.take() { flight.complete(); }
-                            continue;
-                        },
+                    _ = ping.tick() => {
+                        if transport_out.keep_alive().is_err() { break; }
+                        continue;
                     },
+                    item = queued.recv() => match item { Some(item) => item, None => break },
                 };
-                if sink.send(message).await.is_err() {
-                    break;
-                }
                 #[cfg(feature = "test-observers")]
-                if let Some(flight) = observed_send.take() {
-                    flight.complete();
+                let observed_send = writer_observed.selected(item.observed_bytes());
+                let mut lease = None;
+                let receipt = match item {
+                    Outbound::Frame(frame) => {
+                        #[cfg(feature = "test-observers")]
+                        orch_link::test_observers::api_sending(frame.as_ref());
+                        transport_out.backplane(frame.as_ref())
+                    }
+                    Outbound::Data(bytes) => {
+                        transport_out.data_bytes_sent(bytes).map_err(Refused::from)
+                    }
+                    Outbound::Datagram { machine, packet } => {
+                        let data = orch_link_contract::ports::BackplanePortDatagram {
+                            machine_id: machine,
+                            datagram: packet.frame.clone(),
+                        };
+                        let Ok(bytes) = data.encode() else {
+                            continue;
+                        };
+                        lease = Some(packet);
+                        transport_out.data_bytes_sent(bytes).map_err(Refused::from)
+                    }
+                };
+                let receipt = match receipt {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        tracing::error!(%error, "a frame of the backplane cannot be queued");
+                        continue;
+                    }
+                };
+                if lease.is_some() || cfg!(feature = "test-observers") {
+                    tokio::spawn(async move {
+                        if receipt.await.is_ok() {
+                            if let Some(packet) = lease {
+                                packet.delivered();
+                            }
+                            #[cfg(feature = "test-observers")]
+                            observed_send.complete();
+                        }
+                    });
                 }
             }
-            let _ = sink.close().await;
         });
 
         let dead_after = PING_EVERY * DEAD_AFTER_PINGS;
+        let mut assembly = MessageAssembly::default();
         loop {
+            let read_until = assembly
+                .deadline(dead_after)
+                .unwrap_or_else(|| tokio::time::Instant::now() + dead_after);
             let message = tokio::select! {
                 () = gateway.closed.cancelled() => break,
                 () = self.inner.shutdown.cancelled() => break,
-                message = tokio::time::timeout(dead_after, source.next()) => message,
+                message = tokio::time::timeout_at(read_until, source.next()) => message,
             };
             let message = match message {
                 Ok(Some(Ok(message))) => message,
@@ -3296,9 +3378,31 @@ impl Link {
                 }
             };
             match message {
+                Message::Binary(bytes)
+                    if bytes.first().is_some_and(|kind| PartFrame::is_kind(*kind)) =>
+                {
+                    match assembly.take_backplane(bytes, limits, tokio::time::Instant::now()) {
+                        Ok(Some(text)) => match frames::decode::<BackplaneFrame>(&text, usize::MAX)
+                        {
+                            Ok(Text::Known(frame)) if text.len() <= ceiling || frame.is_paged() => {
+                                #[cfg(feature = "test-observers")]
+                                orch_link::test_observers::api_received(&frame);
+                                self.on_frame(&gateway, &hello.version, frame).await;
+                            }
+                            _ => {
+                                tracing::warn!("a gateway sent an invalid paged frame");
+                                break;
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "a gateway sent an invalid part");
+                            break;
+                        }
+                    }
+                }
                 Message::Text(text) => {
-                    match frames::decode::<BackplaneFrame>(text.as_str(), MAX_BACKPLANE_FRAME_BYTES)
-                    {
+                    match frames::decode::<BackplaneFrame>(text.as_str(), ceiling) {
                         Ok(Text::Known(frame)) => {
                             #[cfg(feature = "test-observers")]
                             orch_link::test_observers::api_received(&frame);
@@ -3335,6 +3439,7 @@ impl Link {
         }
         gateway.closed.cancel();
         let _ = writer.await;
+        let _ = transport_writer.await;
         self.gateway_lost(&gateway, &hello.gateway_id).await;
     }
 
@@ -3374,6 +3479,7 @@ impl Link {
             }
             BackplaneFrame::MachineUp(up) => self.machine_up(gateway, up).await,
             BackplaneFrame::MachineDown(down) => self.machine_down(down).await,
+            BackplaneFrame::DownRefused(refused) => self.down_refused(refused),
             BackplaneFrame::Up(up) => {
                 if !up.purpose.is_primary() {
                     return;
@@ -3530,7 +3636,11 @@ impl Link {
                 for row in open {
                     if matches!(row.kind.as_str(), "watch.set" | "fs.list" | "fs.unwatch") {
                         let progress = if row.state == "accepted" {
-                            Progress::Accepted
+                            match row.key_phase {
+                                1 => Progress::Running,
+                                2 => Progress::Released,
+                                _ => Progress::Accepted,
+                            }
                         } else {
                             Progress::Queued
                         };
@@ -3649,8 +3759,9 @@ pub(crate) async fn write_progress(
         }
         // Handing over is written from the hand-overs the link keeps ([`Link::sync_commands`]).
         Progress::Sent => {}
-        Progress::Accepted => {
-            queries::mark_accepted(conn, id, now).await?;
+        Progress::Accepted | Progress::Running | Progress::Released => {
+            let phase = progress.key_phase().map_or(0, |phase| phase as i16);
+            queries::mark_accepted_phase(conn, id, phase, now).await?;
         }
         Progress::Succeeded(result) => {
             queries::finish_command(conn, id, &queries::Ending::Succeeded(result), now).await?;
@@ -3744,3 +3855,6 @@ pub mod report_refusals;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "backplane/command_admission_tests.rs"]
 pub mod command_admission_tests;
+
+#[path = "backplane/command_output.rs"]
+mod command_output;

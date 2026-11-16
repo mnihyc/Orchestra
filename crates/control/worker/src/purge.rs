@@ -119,9 +119,11 @@ pub async fn expired(
     let legacy_before = now
         .checked_sub_signed(ttl_of_keys(config))
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let idempotency_keys = idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
+    let mut idempotency_keys =
+        idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
     let link_codes = routes::drop_expired_codes(&mut tx, now).await?;
     tx.commit().await.map_err(DbError::from)?;
+    idempotency_keys += orch_db::queries::thread_history_cuts::purge_requests(db).await?;
     let (deliveries, inbox) = deliveries_and_inbox(db, now).await?;
     // This metadata holds no authority. Purge it after the exclusive sign-in
     // transaction, using the existing bounded upkeep batch and cadence.

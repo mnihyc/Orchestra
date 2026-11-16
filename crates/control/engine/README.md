@@ -140,8 +140,12 @@ shells and with a real connector process.
 
 A ready fork also has its selected conversation before its first send. The history phase remembers
 the completed-turn boundary it actually handed over; the source can continue while that happens.
-`fork_history::copy_conversation` materializes independent historical segments, turns, inputs, child
-lanes and requests in the existing SQL-only commit. Source ids, live leases, pending decisions, file
+`fork_history::copy_captured_conversation` materializes independent historical segments, turns,
+inputs, child lanes and requests from an already-owned durable cut. Ask Keep commits its checked
+capture before publishing in a fresh guarded transaction, so source questions continue during a
+large copy. Only an unchanged temporary source is marked kept. Request-owned captures retire
+before their body and pin cleanup; interrupted requests have an owned cleanup and ordinary expiry
+as its durable fallback. Source ids, live leases, pending decisions, file
 restore boundaries and model-input records do not become active actions in the result. Attachment
 owners are pinned independently. Native-fork replay aliases are scoped to that exact new session;
 converted imports and handoff files never treat a source id as a new harness id. Repeating the copy
