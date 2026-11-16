@@ -44,7 +44,7 @@ use orch_agent_contract::facts::{AgentProfile, HarnessState, HarnessStatus};
 use orch_agent_contract::loopback::Loopback as AdapterLoopback;
 use orch_agent_contract::session::ThreadId;
 use orch_link_contract::commands::{
-    AgentStart, CommandError, ErrorCode, Secret as LinkSecret, SecretOrText,
+    AgentStart, AgentStartResult, CommandError, ErrorCode, Secret as LinkSecret, SecretOrText,
 };
 use orch_link_contract::events::{Event, RawFrame};
 use orch_link_contract::session::MachineFactsAdapter;
@@ -67,6 +67,14 @@ struct RuntimeEnvironment {
 
 fn runtime_environment_name(provider: Id, agent: Id) -> String {
     format!("harness-runtime-{provider}-{agent}")
+}
+
+/// Native sign-ins live with the environment home, separately from replaceable connector identity.
+fn environment_connection_home(root: &Path, provider: Id, agent: Id) -> PathBuf {
+    root.join(".orch")
+        .join("provider-connections")
+        .join(provider.to_string())
+        .join(agent.to_string())
 }
 
 fn process_environment(services: &Services, mut start: AdapterStart) -> AdapterStart {
@@ -409,6 +417,7 @@ pub struct Process {
     ctx: Arc<Context>,
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
+    interrupt: Mutex<Option<orch_agent_contract::adapter::Interrupt>>,
     output_directory: Mutex<Option<PathBuf>>,
     adapter_start: AdapterStart,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
@@ -585,9 +594,20 @@ impl Process {
             ));
         }
         let mut adapter = self.adapter.lock().await;
-        work(adapter.as_mut())
-            .await
-            .map_err(|error| command_error(&error))
+        let result = work(adapter.as_mut()).await;
+        *lock(&self.interrupt) = adapter.interrupt_handle();
+        result.map_err(|error| command_error(&error))
+    }
+
+    /// Stops one exact turn without joining an adapter call that may be exporting or replaying history.
+    pub async fn interrupt(&self, thread: ThreadId, turn: Id) -> Result<(), CommandError> {
+        let handle = lock(&self.interrupt).clone();
+        if let Some(handle) = handle {
+            return handle(thread, turn)
+                .await
+                .map_err(|error| command_error(&error));
+        }
+        self.call(|adapter| adapter.interrupt(thread, turn)).await
     }
 
     async fn publish(&self, stream: Stream, event: Event) {
@@ -616,6 +636,7 @@ impl Process {
         };
         self.state().detail = detail.clone();
         let report = HarnessStatus {
+            home: Some(self.home_fact()),
             status,
             detail,
             harness_version: Some(version),
@@ -715,7 +736,14 @@ impl Process {
     }
 
     /// A session opened in the adapter: it is kept, in the process and on disk.
-    pub fn session_opened(&self, binding: &SessionBinding, native_session_ref: &str) {
+    pub fn session_opened(
+        &self,
+        binding: &SessionBinding,
+        native_session_ref: &str,
+        directory: &str,
+        cwd: &str,
+        output_capture_bytes: u64,
+    ) {
         self.state().sessions.insert(
             binding.thread_id,
             OpenSession {
@@ -736,7 +764,11 @@ impl Process {
                 thread_id: binding.thread_id,
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
+                directory: directory.to_owned(),
+                cwd: cwd.to_owned(),
+                output_capture_bytes,
                 running_turn: None,
+                native_turn_ref: None,
             },
         );
     }
@@ -967,13 +999,18 @@ impl Process {
                 }
                 self.ctx
                     .ledger
-                    .turn_running(*thread_id, Some(started.turn_id));
+                    .turn_native(*thread_id, started.turn_id, &started.native_turn_ref);
             }
             SessionEvent::TurnCompleted(completed) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.running_turn == Some(completed.turn_id)
+                {
                     session.running_turn = None;
+                    self.ctx.ledger.turn_running(*thread_id, None);
                 }
-                self.ctx.ledger.turn_running(*thread_id, None);
+                // Replayed recovery has no open slot. Its retained source stays until the next
+                // open/close replaces it, so a crash before publication can safely replay it again.
                 let commands = lock(&self.scratch).remove(&completed.turn_id);
                 if let Some(commands) = commands {
                     let content = Arc::clone(&self.ctx.services.content);
@@ -1017,6 +1054,7 @@ impl Process {
                 segment_id: session.segment_id,
             };
             let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+                uncertain: false,
                 reason: format!("the harness process died: {reason}"),
             });
             if let Ok(body) = serde_json::to_value(&event)
@@ -1095,6 +1133,7 @@ impl Process {
             .await
             .map_err(|error| command_error(&error))?;
         let output_directory = adapter.output_directory();
+        *lock(&self.interrupt) = adapter.interrupt_handle();
         drop(adapter);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.output_directory) = output_directory;
@@ -1281,6 +1320,42 @@ impl Hosting {
     ) -> Result<Option<PathBuf>, CommandError> {
         let services = &self.ctx.services;
         let source = Self::home_source(request, profile);
+        if request
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.environment_home)
+        {
+            if !services.policy.is_managed()
+                || !services
+                    .config
+                    .connector
+                    .roles
+                    .iter()
+                    .any(|role| role == "environment")
+            {
+                return Err(unavailable(
+                    "this connector has no managed environment home",
+                ));
+            }
+            if let Some(orch_agent_contract::facts::EnvironmentDataSource::ExistingDirectory {
+                path,
+            }) = &source
+            {
+                let path = PathBuf::from(path);
+                crate::policy::writable_environment_directory(&path)?;
+                return Ok(Some(path));
+            }
+            let root = std::env::var_os("ORCH_HOME_DIR")
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    unavailable("this environment has not reported its persistent home")
+                })?;
+            return Ok(Some(environment_connection_home(
+                &root,
+                request.provider_id,
+                request.agent_id,
+            )));
+        }
         if let Ok(mapped) = std::env::var("ORCH_HARNESS_HOME") {
             let actual: orch_agent_contract::facts::EnvironmentDataSource =
                 std::env::var("ORCH_HARNESS_HOME_SOURCE")
@@ -1417,7 +1492,7 @@ impl Hosting {
         self: &Arc<Self>,
         command: Option<Id>,
         request: &AgentStart,
-    ) -> Result<(String, AgentDescriptor, bool), CommandError> {
+    ) -> Result<AgentStartResult, CommandError> {
         let key = (request.provider_id, request.agent_id);
         let existing = lock(&self.processes).get(&key).cloned();
         let previous_group = lock(&self.processes)
@@ -1461,7 +1536,12 @@ impl Hosting {
                 }
                 let (version, descriptor) = process.started();
                 return match descriptor {
-                    Some(descriptor) => Ok((version, descriptor, true)),
+                    Some(descriptor) => Ok(AgentStartResult {
+                        home: Some(process.home_fact()),
+                        harness_version: version,
+                        descriptor,
+                        reused: true,
+                    }),
                     None => Err(unavailable("the harness did not say what it is")),
                 };
             }
@@ -1561,6 +1641,7 @@ impl Hosting {
             }
         };
         let output_directory = adapter.output_directory();
+        let interrupt = adapter.interrupt_handle();
         let process = Arc::new(Process {
             provider_id: request.provider_id,
             agent_id: request.agent_id,
@@ -1568,6 +1649,7 @@ impl Hosting {
             ctx: Arc::clone(&self.ctx),
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
+            interrupt: Mutex::new(interrupt),
             output_directory: Mutex::new(output_directory),
             adapter_start,
             resource_group,
@@ -1593,7 +1675,12 @@ impl Hosting {
         lock(&self.processes).insert(key, Arc::clone(&process));
         process.publish_status(HarnessState::Online, None).await;
         process.publish_descriptor().await;
-        Ok((started.harness_version, started.descriptor, false))
+        Ok(AgentStartResult {
+            home: Some(process.home_fact()),
+            harness_version: started.harness_version,
+            descriptor: started.descriptor,
+            reused: false,
+        })
     }
 
     /// Stops the process of a provider and an agent profile, and the sessions in it.
@@ -1814,6 +1901,37 @@ impl Hosting {
 }
 
 impl Process {
+    /// The actual running process's home and the choice that produced it.
+    #[must_use]
+    pub fn home_fact(&self) -> orch_driver_contract::runtime::HarnessHome {
+        use orch_driver_contract::runtime::{HarnessHome, HarnessHomeSource};
+        let request = lock(&self.request);
+        let source = if request
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.home.as_ref())
+            .is_some()
+        {
+            HarnessHomeSource::Runtime
+        } else if request
+            .profile
+            .attach
+            .as_ref()
+            .and_then(|attach| attach.home.as_ref())
+            .is_some()
+        {
+            HarnessHomeSource::Profile
+        } else if self.adapter_start.home.is_some() {
+            HarnessHomeSource::Managed
+        } else {
+            HarnessHomeSource::Native
+        };
+        HarnessHome {
+            path: self.adapter_start.home.clone(),
+            source,
+        }
+    }
+
     /// Whether the resolved home is a private home made by the connector, rather than a person's home.
     #[must_use]
     pub const fn home_owned(&self) -> bool {
@@ -1840,30 +1958,42 @@ impl Process {
         ))
     }
 
-    /// Lists the sessions the adapter holds, by their native references.
-    pub async fn native_refs(&self) -> Option<Vec<String>> {
-        let capable = self
-            .state()
-            .descriptor
-            .as_ref()
-            .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
-        if !capable {
-            return None;
-        }
-        self.call(|adapter| Box::pin(async move { adapter.discover_sessions().await }))
-            .await
-            .ok()
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .map(|session| session.native_session_ref)
-                    .collect()
+    /// Inspects only the exact admitted native turn; no model input, resume or interruption is submitted.
+    pub async fn recover_recorded_turn(
+        &self,
+        session: &HostedSession,
+    ) -> Result<bool, CommandError> {
+        let Some(turn) = session.running_turn else {
+            let native = session.native_session_ref.clone();
+            self.call(move |adapter| {
+                Box::pin(async move { adapter.read_session(&native, false).await })
             })
+            .await?;
+            return Ok(true);
+        };
+        let source = orch_agent_contract::history::NativePrefixSource {
+            thread_id: session.thread_id,
+            segment_id: session.segment_id,
+            native_session_ref: session.native_session_ref.clone(),
+        };
+        let native = session.native_turn_ref.clone();
+        let directory = session.directory.clone();
+        let cwd = session.cwd.clone();
+        let capture = session.output_capture_bytes;
+        self.call(move |adapter| {
+            Box::pin(async move {
+                adapter
+                    .recover_turn(source, turn, native, directory, cwd, capture)
+                    .await
+            })
+        })
+        .await
     }
 
     /// Reports a session of this process as lost, to the stream of its session.
     pub async fn report_lost(&self, thread: ThreadId, segment: Id, reason: &str) {
         let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+            uncertain: false,
             reason: reason.to_owned(),
         });
         if let Ok(body) = serde_json::to_value(&event)
@@ -1914,6 +2044,25 @@ impl Hosting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_connections_keep_distinct_native_homes_on_the_environment_home_volume() {
+        let provider = orch_types::new_id();
+        let agent = orch_types::new_id();
+        let root = Path::new("/persistent/environment-home");
+        let home = environment_connection_home(root, provider, agent);
+        assert!(home.starts_with(root));
+        assert_eq!(home, environment_connection_home(root, provider, agent));
+        assert_ne!(
+            home,
+            environment_connection_home(root, orch_types::new_id(), agent)
+        );
+        assert_ne!(
+            home,
+            environment_connection_home(root, provider, orch_types::new_id())
+        );
+        assert!(!home.starts_with("/connector-state"));
+    }
 
     fn idle_lane() -> OpenSession {
         OpenSession {
@@ -2006,6 +2155,7 @@ mod tests {
 
     fn status(state: HarnessState, detail: Option<&str>) -> HarnessStatus {
         HarnessStatus {
+            home: None,
             status: state,
             detail: detail.map(str::to_owned),
             harness_version: None,

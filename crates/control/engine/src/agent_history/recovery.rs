@@ -532,6 +532,7 @@ impl Engine {
         link::insert_command(
             &mut tx,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

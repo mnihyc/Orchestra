@@ -219,6 +219,11 @@ pub(crate) async fn view_with_machine_sources(
         None
     };
     Ok(Job {
+        calculation: row
+            .plan
+            .get("calculation")
+            .cloned()
+            .and_then(|calculation| serde_json::from_value(calculation).ok()),
         call_recovery,
         id: row.id,
         kind: row.kind.clone(),

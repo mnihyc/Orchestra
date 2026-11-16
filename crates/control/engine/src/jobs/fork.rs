@@ -1615,6 +1615,11 @@ impl Forking {
                 )
                 .await?;
             }
+            // What the source uploaded belongs to this fork until it ends: held for the target to
+            // fetch, let go of, and removed from the server, with the job.
+            engine
+                .hold_for_transfer(job.id(), "fork_live_pins", taken.manifest_blob)
+                .await?;
             job.progress(
                 f64::from(pass) / 2.0 + 0.25,
                 Some("the files are read from the source"),
@@ -2879,7 +2884,11 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            files_changed_complete: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2906,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2905,6 +2915,7 @@ impl Engine {
             plan: false,
         };
         let input = threads::InputRow {
+            native_image_delivery: None,
             id: Id::nil(),
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2984,6 +2995,7 @@ impl Engine {
             tools,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3015,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,

@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test providers --test provider_setup --test provider_setup_scopes --test blob_housekeeping
