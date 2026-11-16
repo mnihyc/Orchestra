@@ -9,15 +9,15 @@ import { privateProvider } from '@/features/resources/providers/plan';
 import { choiceObservation, speedText } from '@/features/usage/performance';
 import { reportedHarnessName } from '@/features/resources/agents/descriptor';
 import { programNameIn } from '@/features/resources/programNames';
-import type { Agent, CapStatus, Environment, Host, HostRef, MachineRef, McpServer, McpState, ModelParameters, Mount, PlaceHost, Provider, ProviderChoiceUsage, ResourceSample, Skill, Template } from '@/generated/api-types';
-import { formatBytes, formatNumber, formatPercent } from '@/lib/format';
+import type { Agent, CapStatus, Environment, Host, HostRef, MachineRef, McpServer, McpState, ModelParameters, Mount, PlaceHost, Provider, ProviderRuntimeRow, ProviderChoiceUsage, ResourceSample, Skill, Template } from '@/generated/api-types';
+import { formatBytes, formatNumber } from '@/lib/format';
 import { formatSpan, formatTimeOfDay, type TimeContext } from '@/lib/time';
 
 /** Resource counts use the binary megabytes and gigabytes already used by the places list. */
 export const MEMORY_BYTES_PER_MB = 1024 * 1024;
 export const DISK_BYTES_PER_GB = 1024 * 1024 * 1024;
 
-export type ProviderFacts = Pick<Provider, 'id' | 'name'> & Partial<Provider>;
+export type ProviderFacts = Pick<Provider, 'id' | 'name'> & Omit<Partial<Provider>, 'runtime'> & { runtime?: Provider['runtime'] | ProviderRuntimeRow };
 export type HostFacts = Pick<Host, 'id' | 'name'> & Partial<Host>;
 export type EnvironmentFacts = Pick<Environment, 'id' | 'name'> & Partial<Environment>;
 type Named<T extends { id: string; name: string }> = Pick<T, 'id' | 'name'> & Partial<T>;
@@ -52,13 +52,20 @@ export interface Hint { text: string; warning: boolean }
 export interface FactContext extends TimeContext { t: TFunction; now: number }
 const hint = (text: string, warning = false): Hint => ({ text, warning });
 
-/** Only a fully readable provider can disclose vendor amounts or its caps. */
-export function fullProvider(provider: ProviderFacts): provider is Provider {
-  return provider.facts !== undefined && provider.facts_state !== undefined && provider.access !== undefined;
+/** A provider with what its hints read: a list's row of it has these and no models, and so does a thread's own row of it. */
+type ProviderStanding = ProviderFacts & Pick<Provider, 'facts' | 'facts_state' | 'access' | 'running_threads'>;
+function hasStanding(provider: ProviderFacts): provider is ProviderStanding {
+  return provider.facts !== undefined && provider.facts_state !== undefined && provider.access !== undefined && provider.running_threads !== undefined;
 }
 
-export function fullHost(host: HostFacts): host is Host { return host.capacity !== undefined && host.machine !== undefined && host.access !== undefined; }
-export function fullEnvironment(environment: EnvironmentFacts): environment is Environment { return environment.access !== undefined && environment.exec !== undefined; }
+/** Only a fully readable provider can disclose vendor amounts or its caps, and draw its whole card: a list's row of it lacks its models. */
+export function fullProvider(provider: ProviderFacts): provider is Provider {
+  return !('list_row' in provider && provider.list_row === true) && hasStanding(provider) && provider.models !== undefined && provider.models_count !== undefined && provider.models.length >= provider.models_count
+    && provider.sources !== undefined;
+}
+
+export function fullHost(host: HostFacts): host is Host { return !('list_row' in host && host.list_row === true) && host.capacity !== undefined && host.machine !== undefined && host.access !== undefined; }
+export function fullEnvironment(environment: EnvironmentFacts): environment is Environment { return !('list_row' in environment && environment.list_row === true) && environment.access !== undefined && environment.exec !== undefined; }
 
 /** Applicable provider caps retain server-side subject and replacement decisions; model groups use the shared pattern rule. */
 export function modelCaps(subject: Extract<ResourceSubject, { kind: 'model' }>): CapStatus[] {
@@ -76,7 +83,7 @@ export function providerHint(provider: ProviderFacts, context: FactContext, scop
   const { t, locale } = context;
   if (provider.status === undefined) return hint(t('providerPlan.notReported'));
   if (provider.status !== 'ready' && provider.status !== 'exhausted') return hint(t('resourceFacts.unavailable'), true);
-  if (!fullProvider(provider)) return hint(t('providerPlan.notReported'));
+  if (!hasStanding(provider)) return hint(t('providerPlan.notReported'));
   if (privateProvider(provider)) return hint(t('providerPlan.roomHidden'));
   const caps = (provider.choice_usage?.caps ?? []).filter(({ cap }) => cap.models.length === 0 && cap.tiers.length === 0 && cap.harness_kinds.length === 0 && cap.node === null && (scope === 'choice' || cap.meter !== 'running'));
   const reached = caps.find((cap) => cap.state === 'reached');
@@ -119,20 +126,24 @@ export function hostHint(subject: Extract<ResourceSubject, { kind: 'host' }>, co
   if (host.machine?.online === false) return hint(host.offline_since === null || host.offline_since === undefined
     ? t('resourceFacts.offline') : t('resourceFacts.offlineSince', { time: formatTimeOfDay(host.offline_since, context, context.now) }), true);
   const capacity = place?.capacity ?? host.capacity;
-  const declared = place?.declared ?? host.declared;
   const full = place?.warnings.includes('full') === true || place?.reasons.includes('full') === true || host.full === true;
   if (full) return hint(t('resourceFacts.full'), true);
   if (place?.usable === false || host.schedulable === false) return hint(t('resourceFacts.unavailable'), true);
   const count = place?.environments.running ?? host.running?.environment;
+  // What a person decides with is what the host has free of what it has, as it measured them: never what the
+  // environments there say they need, which reserves nothing and sits on the host's own page.
   const memory = place?.used.memory_mb ?? host.usage?.memory_used_mb;
-  const storages = place?.storages ?? host.storages;
-  const free = storages === undefined || storages.length === 0 ? null : storages.reduce((sum, storage) => sum + storage.free_gb, 0);
+  const memoryTotal = capacity === undefined || capacity.memory_mb <= 0 ? null : formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, locale);
+  const memoryWords = memoryTotal === null || capacity === undefined ? null : memory === undefined || memory === null
+    ? t('resourceFacts.memoryTotal', { total: memoryTotal })
+    : t('resourceFacts.memoryFree', { free: formatBytes(Math.max(0, capacity.memory_mb - memory) * MEMORY_BYTES_PER_MB, locale), total: memoryTotal });
+  const disk = place?.used.disk_gb;
+  const diskWords = capacity === undefined || capacity.disk_gb <= 0 || disk === undefined || disk === null ? null
+    : t('resourceFacts.diskFree', { free: formatNumber(Math.max(0, capacity.disk_gb - disk), locale), total: formatNumber(capacity.disk_gb, locale) });
   return hint([
     count === undefined ? null : t('resourceFacts.running', { count, value: formatNumber(count, locale) }),
-    capacity === undefined || capacity.memory_mb <= 0 ? null : memory !== undefined && memory !== null
-      ? t('resourceFacts.memoryPercent', { percent: formatPercent(memory / capacity.memory_mb, locale) })
-      : declared === undefined ? null : t('resourceFacts.declaredPercent', { percent: formatPercent(declared.memory_mb / capacity.memory_mb, locale) }),
-    free === null ? null : t('resourceFacts.free', { size: formatBytes(free * DISK_BYTES_PER_GB, locale) }),
+    memoryWords,
+    diskWords,
   ].filter(Boolean).join(t('resourceFacts.separator')) || t('providerPlan.notReported'));
 }
 

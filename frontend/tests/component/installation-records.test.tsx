@@ -6,15 +6,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { Installation } from '@/features/admin/Installation';
-import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, ReleaseCheck, ResolvedSetting } from '@/generated/api-types';
+import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, Meta, ReleaseCheck, ResolvedSetting } from '@/generated/api-types';
+import { setLocale } from '@/i18n';
+import { meta } from '../doubles/fixtures';
 
 import { show } from './support';
 
-const { read, settings, check, restore } = vi.hoisted(() => ({
+const { read, settings, check, restore, metaRead } = vi.hoisted(() => ({
   read: vi.fn<() => Promise<InstallationRecords>>(),
   settings: vi.fn<() => Promise<ResolvedSetting[]>>(),
   check: vi.fn<() => Promise<ReleaseCheck>>(),
   restore: vi.fn<() => Promise<BackupRestoreList | null>>(),
+  metaRead: vi.fn<() => Promise<Meta>>(),
+}));
+vi.mock('@/api/auth', async (original) => ({ ...await original<object>(),
+  metaQuery: { queryKey: ['meta'], queryFn: metaRead },
 }));
 vi.mock('@/api/admin', async (original) => ({ ...await original<object>(),
   installationRecordsQuery: { queryKey: ['admin', 'installation-records'], queryFn: read },
@@ -33,8 +39,9 @@ function setting(key: string, value: number): ResolvedSetting {
   return { key, value, source: { scope: 'default', node: null }, own: null, locked_by: null, writable: true, parts: [] };
 }
 
-function draw() {
+function draw(metadata?: Meta) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  if (metadata !== undefined) client.setQueryData(['meta'], metadata);
   settings.mockResolvedValue([setting('release.check_days', 0), setting('backup.warn_days', 2)]);
   restore.mockResolvedValue(null);
   const result = show(<QueryClientProvider client={client}><Installation /></QueryClientProvider>);
@@ -42,6 +49,21 @@ function draw() {
 }
 
 describe('installation records', () => {
+  it.each(['en', 'zh-CN'] as const)('names the certificate-free address from held facts without a new read and clears its exception for HTTPS in %s', async (locale) => {
+    await setLocale(locale);
+    try {
+      read.mockResolvedValue(empty());
+      const { client } = draw(meta({ public_url: 'http://edge.example/' }));
+      expect(await screen.findByText('http://edge.example/')).toBeVisible();
+      expect(screen.getByText(locale === 'en' ? 'No certificate at this address · slower over long lines' : '此地址没有证书 · 跨地区访问较慢')).toBeVisible();
+      act(() => { client.setQueryData(['meta'], meta({ public_url: 'https://edge.example/' })); });
+      expect(await screen.findByText('https://edge.example/')).toBeVisible();
+      expect(screen.queryByText(locale === 'en' ? /No certificate at this address/ : /此地址没有证书/)).not.toBeInTheDocument();
+      expect(metaRead).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally { await setLocale('en'); }
+  });
+
   it('keeps checks off until asked and shows an absent backup without a completion claim', async () => {
     read.mockResolvedValue(empty());
     draw();

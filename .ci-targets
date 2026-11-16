@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test thread_opening_scopes --test harness_checks --test threads_settings
+test -p orch-api-core --test thread_session_configuration
+test -p orch-engine --test approval_review
