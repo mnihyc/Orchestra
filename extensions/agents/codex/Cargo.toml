@@ -33,6 +33,8 @@ tracing.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+orch-model-contract.workspace = true
+orch-translator-responses-messages.workspace = true
 sha2.workspace = true      # integrity of the published native protocol schema fixtures
 orch-conformance.workspace = true
 orch-testkit.workspace = true

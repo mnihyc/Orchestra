@@ -391,7 +391,7 @@ async fn enrollment_roles_sections_and_dedication_are_bound_to_the_token_and_eac
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent],
     };
     assert_eq!(

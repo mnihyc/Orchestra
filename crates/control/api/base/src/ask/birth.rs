@@ -198,14 +198,14 @@ async fn files(
             )
             .with("limit", limit));
         }
-        let taken = crate::attachments::Taken {
-            meta: orch_blob_contract::range::BlobMeta {
+        let taken = crate::attachments::Taken::protected(
+            orch_blob_contract::range::BlobMeta {
                 hash: blob,
                 size: meta.size,
             },
-            name: crate::uploads::clean_name("first_input.content.name", &name)?,
-            supplied_bytes: false,
-        };
+            crate::uploads::clean_name("first_input.content.name", &name)?,
+            false,
+        );
         // Retain through the original native source witness before inspecting any stored bytes.
         crate::attachments::retain(ctx, conn, principal, &taken).await?;
         let described = crate::attachments::describe(ctx, &taken.meta, &taken.name).await?;

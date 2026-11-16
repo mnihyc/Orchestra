@@ -126,7 +126,7 @@ async fn enroll(flags: &Flags) -> Result<(), Failure> {
         name: flags.get("name").unwrap_or("by-hand").to_owned(),
         platform: PLATFORM,
         connector_version: VERSION.to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     };
     let tls = pinned_client_config(

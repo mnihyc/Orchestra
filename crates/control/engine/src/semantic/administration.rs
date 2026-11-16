@@ -334,6 +334,7 @@ impl EmbeddingCommand {
         self.current_issue_callers(
             conn,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -404,6 +405,7 @@ impl EmbeddingCommand {
             .background_provider_use(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Embeddings,
                     person: self.writer,
                     node: self.work.org(),
                     provider: self.provider,

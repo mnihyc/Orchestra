@@ -333,10 +333,7 @@ pub fn explicit_local_keys(text: &str) -> Result<Vec<String>, toml::de::Error> {
         .filter(|key| **key != PolicyKey::PolicyDelegated)
         .filter(|key| match key.as_str().split_once('.') {
             Some((section, member)) => written.get(section).and_then(|v| v.get(member)).is_some(),
-            None => {
-                written.get(key.as_str()).is_some()
-                    || (**key == PolicyKey::Storages && written.get("storage").is_some())
-            }
+            None => written.get(key.as_str()).is_some(),
         })
         .map(|key| key.as_str().into())
         .collect())
@@ -744,6 +741,10 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             }
         }
         Command::FsWrite(_)
+        | Command::FsRelayReceive(_)
+        | Command::FsRelayVerify(_)
+        | Command::FsRelayPrepare(_)
+        | Command::FsRelayCommit(_)
         | Command::FsMkdir(_)
         | Command::FsDataImport(_)
         | Command::FsRename(_)
@@ -1533,6 +1534,7 @@ mod tests {
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
+            output_capture_bytes: 67_108_864,
             native_model: None,
             transport_only: false,
             turn_changes_require_restart: false,
@@ -1559,6 +1561,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,
@@ -1977,6 +1980,8 @@ mod tests {
         let policy = here();
         let attach = |root: &str| {
             Command::EnvAttach(EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,

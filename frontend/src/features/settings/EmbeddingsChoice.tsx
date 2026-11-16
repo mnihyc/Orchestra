@@ -3,9 +3,12 @@
  * The row's own revision, lock and saving stay the only writer: this hands back the whole value each time.
  */
 import { useTranslation } from 'react-i18next';
+import { useState } from 'react';
+import { SettingsSuggestion } from '@/features/settings/SettingsSuggestion';
 import type { TFunction } from 'i18next';
 
 import { ProviderDefaultChoice, ProviderDefaultName } from '@/features/settings/ProviderChoice';
+import { ProviderModelChoice } from '@/features/settings/ProviderModelChoice';
 import { type Shape, words } from '@/features/settings/settingsModel';
 import { searchFieldName } from '@/features/settings/settingText';
 import { ValueControl, type ValueControlProps } from '@/features/settings/ValueControl';
@@ -49,18 +52,22 @@ export function SemanticTuningSummary({value,inControl=false,label}:{value:unkno
 
 /** The member that names the provider; the others are edited as the registry draws them. */
 const PROVIDER_MEMBER = 'provider_id';
+/** The member that names the model; it is chosen among the provider's enabled models, never typed. */
+const MODEL_MEMBER = 'model_name';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export function EmbeddingsChoice(props: ValueControlProps) {
   const { t } = useTranslation();
+  const [suggested,setSuggested]=useState<string|null>(null);
   const { shape, value, onChange, disabled } = props;
   const labelField = memberLabel(t);
   if (shape.type !== 'object') return <ValueControl {...props} />;
   const held = isRecord(value) ? value : {};
   const provider = typeof held[PROVIDER_MEMBER] === 'string' ? held[PROVIDER_MEMBER] : '';
-  const rest: Shape = { ...shape, members: shape.members.filter((member) => member.name !== PROVIDER_MEMBER) };
-  const others = Object.fromEntries(Object.entries(held).filter(([name]) => name !== PROVIDER_MEMBER));
+  const model = typeof held[MODEL_MEMBER] === 'string' ? held[MODEL_MEMBER] : '';
+  const rest: Shape = { ...shape, members: shape.members.filter((member) => member.name !== PROVIDER_MEMBER && member.name !== MODEL_MEMBER) };
+  const others = Object.fromEntries(Object.entries(held).filter(([name]) => name !== PROVIDER_MEMBER && name !== MODEL_MEMBER));
   return (
     <div className="flex flex-col gap-4">
       <ProviderDefaultChoice
@@ -70,16 +77,24 @@ export function EmbeddingsChoice(props: ValueControlProps) {
         showLabel
         hideLabel
         disabled={disabled === true}
-        onChange={(next) => onChange({ ...held, [PROVIDER_MEMBER]: next })}
+        onChange={(next) => {setSuggested(null);onChange({ ...held, [PROVIDER_MEMBER]: next, [MODEL_MEMBER]: '' });}}
+        proposal={disabled===true || provider!=='' && model!=='' ? undefined : <SettingsSuggestion request={{kind:'model',purpose:'embedding',...(provider===''?{}:{provider})}} onUse={(choice)=>{
+          if(choice.kind!=='model')return;
+          setSuggested(`${choice.provider.id}:${choice.model.model_name}`);props.onEdited?.();
+          onChange({...held,[PROVIDER_MEMBER]:choice.provider.id,[MODEL_MEMBER]:choice.model.model_name});
+        }}/>} 
         {...(props.onEdited === undefined ? {} : { onEdited: props.onEdited })}
       />
+      <ProviderModelChoice providerId={provider} value={model} label={labelField(MODEL_MEMBER)} disabled={disabled === true}
+        onChange={(next) => {setSuggested(null); props.onEdited?.(); onChange({ ...held, [MODEL_MEMBER]: next }); }} />
+      {suggested===`${provider}:${model}` && <span className="text-sm text-text-muted">{t('settingsSuggestions.source')}</span>}
       <ValueControl
         {...props}
         shape={rest}
         memberLabel={labelField}
         value={others}
         hideLabel
-        onChange={(next) => onChange({ ...(isRecord(next) ? next : {}), [PROVIDER_MEMBER]: provider })}
+        onChange={(next) => onChange({ ...(isRecord(next) ? next : {}), [PROVIDER_MEMBER]: provider, [MODEL_MEMBER]: model })}
       />
     </div>
   );
