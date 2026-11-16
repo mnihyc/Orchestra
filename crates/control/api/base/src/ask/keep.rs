@@ -7,7 +7,7 @@ use crate::registry::OperationFuture;
 use crate::registry::OperationPlan;
 
 use orch_access_contract::key_scope::KeyTargetKind;
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Destination {
     node: Id,
     new_topic: bool,
@@ -219,14 +219,84 @@ async fn history_range(
 }
 
 pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<api::AskKeepReply> {
+    let mut owner = crate::middleware::idempotency::history::begin(&ctx).await?;
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let row = source(&ctx, &mut tx, guard.principal(), ctx.id("id")?, true).await?;
-    let person = guard.user().id();
     if row.state != "ready" {
         return Err(denied("Stop Ask before keeping it as a thread"));
     }
-    let range = history_range(&mut tx, &row, body.to_turn).await?;
     let destination = *guard.operation_data::<Destination>()?;
+    let source_thread = threads::thread(&mut tx, row.id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let range = match history_range(&mut tx, &row, body.to_turn).await? {
+        Some(range) => range,
+        None => (
+            1,
+            orch_db::queries::thread_history_cuts::last_finished(
+                &mut tx,
+                row.id,
+                source_thread.active_continuation_id,
+            )
+            .await?
+            .unwrap_or(0),
+        ),
+    };
+    let binding = match row.segment {
+        Some(segment) => Some(
+            rows::segment_binding(&mut tx, row.id, segment)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::internal("The retained conversation segment has no provider")
+                })?,
+        ),
+        None => None,
+    };
+    guard.check_deadline(&ctx)?;
+    orch_db::queries::thread_history_cuts::capture_for_request(
+        &mut tx,
+        &orch_db::queries::thread_history_cuts::Capture {
+            id: owner.id,
+            thread: row.id,
+            view: source_thread.active_continuation_id,
+            job: None,
+            owner_thread: None,
+            segment: row.segment,
+            execution_revision: source_thread.execution_revision,
+            range: Some(range),
+            at: guard.now().get(),
+        },
+        owner.user,
+        &owner.key,
+    )
+    .await?;
+    guard.check_deadline(&ctx)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+
+    // A new action frame owns publication, while the frozen request owns its
+    // words. Neither live selection nor a source row lock crosses this phase.
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    owner.lock(&mut tx).await?;
+    let current = source(&ctx, &mut tx, guard.principal(), row.id, false).await?;
+    if current.root_org_id != row.root_org_id
+        || current.user_id != row.user_id
+        || *guard.operation_data::<Destination>()? != destination
+    {
+        return Err(ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "The conversation or Keep destination changed; choose it again",
+        ));
+    }
+    let captured = orch_db::queries::thread_history_cuts::cut(&mut tx, owner.id)
+        .await?
+        .filter(|cut| cut.artifacts.get("request_released").is_none())
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "The captured conversation is no longer available",
+            )
+        })?;
+    let person = guard.user().id();
     let copy_boundary = crate::routes::duplicates::copy_boundary(
         &mut tx,
         guard.principal(),
@@ -292,31 +362,39 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         ctx.now,
     )
     .await?;
-    if let Some(source_segment) = row.segment {
-        let binding = rows::segment_binding(&mut tx, row.id, source_segment)
-            .await?
-            .ok_or_else(|| {
-                ApiError::internal("The retained conversation segment has no provider")
-            })?;
+    if let Some(binding) = binding {
         let segment = new_id();
         let mut unit = orch_engine::unit::Unit::new(&mut tx, ctx.now);
         let seq = unit.stamp(thread).await.map_err(ApiError::internal)?;
         rows::segment(unit.conn, segment, thread, &binding, person, ctx.now, seq).await?;
-        orch_engine::fork_history::copy_conversation(
-            &mut unit,
-            row.id,
-            thread,
-            segment,
-            range,
-            row.segment,
+        orch_engine::fork_history::copy_captured_conversation(
+            &mut unit, &captured, thread, segment,
         )
         .await
         .map_err(ApiError::internal)?;
         unit.finish().await.map_err(ApiError::internal)?;
     }
     rows::copy_files(&mut tx, row.id, thread, ctx.now).await?;
-    if row.temporary {
-        rows::kept(&mut tx, row.id, thread).await?;
+    orch_engine::binding::finish_thread_birth(&mut tx, thread, topic, person, ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
+    super::creation::observe_keep(&mut tx, guard.user().id(), row.id, thread, topic).await?;
+    if let Some(boundary) = copy_boundary {
+        orch_engine::copy_out::record(
+            &mut tx,
+            boundary,
+            orch_db::audit::Actor::User(person),
+            &crate::sign_in::origin(&ctx),
+            thread,
+            ctx.now,
+        )
+        .await
+        .map_err(ApiError::engine)?;
+    }
+    if row.temporary
+        && rows::kept_if_unchanged(&mut tx, row.id, thread, captured.continuation_id, row.seq)
+            .await?
+    {
         let days = retention(
             &mut tx,
             row.root_org_id,
@@ -336,24 +414,14 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         )
         .await?;
     }
-    orch_engine::binding::finish_thread_birth(&mut tx, thread, topic, person, ctx.now)
-        .await
-        .map_err(ApiError::engine)?;
-    super::creation::observe_keep(&mut tx, guard.user().id(), row.id, thread, topic).await?;
-    if let Some(boundary) = copy_boundary {
-        orch_engine::copy_out::record(
-            &mut tx,
-            boundary,
-            orch_db::audit::Actor::User(person),
-            &crate::sign_in::origin(&ctx),
-            thread,
-            ctx.now,
-        )
-        .await
-        .map_err(ApiError::engine)?;
-    }
+    orch_db::queries::thread_history_cuts::retire_request(&mut tx, owner.id).await?;
     guard.check_deadline(&ctx)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
+    // Publication is already accepted. Cleanup has no source lock and remains
+    // eligible for ordinary request expiry if this response disappears.
+    if let Err(error) = owner.cleanup().await {
+        tracing::warn!(%error,capture=%owner.id,"The copied history's temporary capture awaits cleanup.");
+    }
     let receipt = api::AskKeepReply {
         conversation_id: row.id,
         thread_id: thread,

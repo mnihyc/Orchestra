@@ -179,7 +179,15 @@ async fn succeeds(fixture: &Fixture, original: &StoredCommand) -> Proof {
     );
     assert_eq!(sent[0].body, original.body);
     assert_eq!(sent[0].key, original.key);
-    assert_eq!(Some(sent[0].deadline), original.deadline);
+    assert_eq!(
+        sent[0].work,
+        orch_link_contract::commands::Cmd::work_budget(
+            fixture.clock.time(),
+            original
+                .deadline
+                .ok_or("the original work grant is absent")?,
+        )
+    );
     assert!(
         wire.iter().all(|command| matches!(
             command.kind.as_str(),

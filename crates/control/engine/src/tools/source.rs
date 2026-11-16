@@ -854,6 +854,7 @@ pub(crate) async fn download_state(
     let environment: Id = serde_json::from_value(row.body["environment_id"].clone())?;
     Ok(Some((
         Outgoing {
+            after: None,
             authority: None,
             id,
             machine: row.machine_id,

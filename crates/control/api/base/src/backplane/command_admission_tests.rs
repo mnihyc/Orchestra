@@ -143,6 +143,7 @@ enum Phase {
     NativeInput,
     NativeLogin,
     NativeHandover,
+    NativeCancel,
     MirrorAccepted,
     LocalRefusal,
 }
@@ -423,6 +424,7 @@ impl CommandHandler for Native {
                 self.writes.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandResult::FsWrite(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.rsplit('/').next().unwrap_or_default().into(),
                             path: body.path,
@@ -591,6 +593,7 @@ impl CommandHandler for Native {
                 }
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.clone(),
                             path: body.path,
@@ -616,6 +619,8 @@ impl CommandHandler for Native {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -728,7 +733,7 @@ fn peer(
                                             &gateway,
                                             machine,
                                             session,
-                                            UpFrame::CmdAck(CmdAck { id }),
+                                            UpFrame::CmdAck(CmdAck { id, key_phase: orch_link_contract::commands::CommandKeyPhase::Queued }),
                                         )
                                         .await;
                                         // Only an explicitly declared mirror gate needs an
@@ -757,10 +762,12 @@ fn peer(
                     });
                 }
                 DownFrame::CmdCancel(cancel) => {
+                    let id = cancel.id;
                     if delay_cancel {
                         until(|| native.entered.load(Ordering::SeqCst)).await?;
                     }
                     server.on_cancel(cancel).await;
+                    pause(id, Phase::NativeCancel).await;
                 }
                 _ => {
                     return Err(
@@ -1035,6 +1042,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
             + chrono::Duration::seconds(i64::from(CommandKind::TurnStart.deadline_secs())),
     );
     let body = serde_json::to_value(TurnStart {
+        transport: None,
         native_model: None,
         native_wake: None,
         thread_id: thread,
@@ -1153,7 +1161,10 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
             .ok_or("the start was not sent")?;
         assert_eq!(sent.body, original.body);
         assert_eq!(sent.key, original.key);
-        assert_eq!(sent.deadline, deadline);
+        assert_eq!(
+            sent.work,
+            orch_link_contract::commands::Cmd::work_budget(Time::new(saved.created_at), deadline)
+        );
     }
     fixture.close().await
 }
@@ -1228,16 +1239,15 @@ pub fn __api_run_a_stale_startup_open_row_cannot_resurrect_after_cancellation_be
 }
 
 #[cfg(any(test, feature = "test-support"))]
-async fn a_probe_after_cancellation_cannot_pass_the_write_already_owned_by_its_output_iteration()
--> Proof {
+async fn a_probe_after_cancellation_waits_for_the_native_write_that_already_owns_its_key() -> Proof
+{
     let mut fixture = Fixture::new(true).await?;
-    within(fixture.connect(true)).await??;
+    within(fixture.connect(false)).await??;
     let original = fixture.original().await?;
     let id = original.id.ok_or("the original ID is absent")?;
     let (checked, release) = gate(id, Phase::Wire);
     fixture.dispatcher.issue_stored(original.clone()).await?;
     within(checked).await??;
-    assert!(fixture.dispatcher.cancel(id).await?);
     let fence = fixture.probe().await?;
     assert!(fixture.server.entry(id).is_none());
     assert!(fixture.server.entry(fence).is_none());
@@ -1269,6 +1279,10 @@ async fn a_probe_after_cancellation_cannot_pass_the_write_already_owned_by_its_o
         0,
         "a real accepted probe cannot leave the still-owned native key"
     );
+    // Cancellation passes API preparation, but the actual native writer still owns
+    // its key until its already-started I/O has returned.
+    assert!(fixture.dispatcher.cancel(id).await?);
+    assert_eq!(fixture.native.probes.load(Ordering::SeqCst), 0);
     fixture.native.release.add_permits(1);
     assert!(matches!(
         within(fixture.dispatcher.wait(fence)).await??,
@@ -1291,9 +1305,11 @@ async fn a_probe_after_cancellation_cannot_pass_the_write_already_owned_by_its_o
 }
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub fn __api_run_a_probe_after_cancellation_cannot_pass_the_write_already_owned_by_its_output_iteration()
+pub fn __api_run_a_probe_after_cancellation_waits_for_the_native_write_that_already_owns_its_key()
 -> ::futures::future::LocalBoxFuture<'static, crate::backplane::command_admission_tests::Proof> {
-    ::std::boxed::Box::pin(self::a_probe_after_cancellation_cannot_pass_the_write_already_owned_by_its_output_iteration())
+    ::std::boxed::Box::pin(
+        self::a_probe_after_cancellation_waits_for_the_native_write_that_already_owns_its_key(),
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1415,6 +1431,9 @@ pub mod publication;
 
 #[path = "command_admission_tests/quota.rs"]
 pub mod quota;
+
+#[path = "command_admission_tests/queueing.rs"]
+pub mod queueing;
 
 #[path = "command_admission_tests/reference_previews.rs"]
 pub mod reference_previews;

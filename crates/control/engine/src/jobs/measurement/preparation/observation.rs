@@ -272,6 +272,7 @@ async fn receipt_matches(
         let expected = build_command(row, *phase, row.started_at.unwrap_or(row.created_at))?;
         if let Some(actual) = orch_db::queries::link::command(conn, answer.command).await? {
             let retained = RetainedCommand {
+                after: actual.after_command_id,
                 machine: actual.machine_id,
                 kind: actual.kind.clone(),
                 key: actual.serial_key().map(str::to_owned),
@@ -319,6 +320,7 @@ async fn from_receipts(conn: &mut Conn, row: &JobRow) -> Result<Option<Witness>,
             return Ok(None);
         };
         let retained = RetainedCommand {
+            after: None,
             machine: actual.machine_id,
             kind: actual.kind.clone(),
             key: actual.serial_key().map(str::to_owned),
