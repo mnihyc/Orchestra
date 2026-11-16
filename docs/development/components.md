@@ -122,7 +122,6 @@ describe the implemented behavior and any remaining work.
 | [settings](../../frontend/src/features/settings/README.md) | Personal and hierarchical configuration |
 | [admin](../../frontend/src/features/admin/README.md) | System management |
 | [start](../../frontend/src/features/start/README.md) | Type-and-go and explicit binding |
-| [fork](../../frontend/src/features/fork/README.md) | Fork, switch, move and update |
 | [inbox](../../frontend/src/features/inbox/README.md) | Notification inbox |
 | [approvals](../../frontend/src/features/approvals/README.md) | All approval kinds |
 | [usage](../../frontend/src/features/usage/README.md) | Usage at three depths, caps, rates and passing a limit |

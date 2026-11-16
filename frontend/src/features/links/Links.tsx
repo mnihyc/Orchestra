@@ -4,6 +4,7 @@
  * drawn, and with all four off the inline section stays hidden; an explicitly opened view explains that choice. The counts are the rows already read: a count that
  * reaches more pages says so with a plus, and nothing counts a row the reader may not see.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useParams } from '@tanstack/react-router';
@@ -67,7 +68,7 @@ export function LinksPanel({ documentId, seq, enabled = true, explainHidden = fa
   const [picked, setPicked] = useState<string | null>(null);
   const [configuring, setConfiguring] = useState(false);
   const chosen = picked ?? stored;
-  const choose = (tab: string) => { setPicked(tab); remember(tab); };
+  const choose = carryDeviceChoice((tab: string) => { setPicked(tab); remember(tab); }, remember);
   if (!enabled) return null;
   if (tabs.isPending) return <SkeletonRows read={tabs} rows={LOADING_ROWS} />;
   if (tabs.isError) return <ErrorAlert error={tabs.error} action={<Button size="sm" onClick={() => void tabs.refetch()}>{t('common.tryAgain')}</Button>} />;

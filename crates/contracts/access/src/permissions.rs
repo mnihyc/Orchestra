@@ -1490,9 +1490,23 @@ impl Arrangement {
     }
 }
 
+words! {
+    /// The use an entry allows through a provider.
+    pub enum ProviderUsePurpose ("provider use purpose") {
+        /// Read-only Ask conversations.
+        #[schemars(extend("x-default-selected" = true))]
+        Ask = "ask",
+        /// Threads, summaries and other work.
+        #[schemars(extend("x-default-selected" = true))]
+        Work = "work",
+    }
+}
+
 /// A member of the options of an entry in the Use row of a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryMember {
+    /// Which uses are allowed.
+    Purposes,
     /// The models.
     Models,
     /// The service offerings.
@@ -1505,6 +1519,47 @@ pub enum EntryMember {
     Where,
 }
 
+/// What a ledger row was spent on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename = "UsagePurpose")]
+pub enum ProviderPurpose {
+    /// A turn of an agent.
+    Turn,
+    /// The summary of a topic.
+    Summary,
+    /// Vectors of an org's text, or of a query, for search by meaning.
+    Embeddings,
+    /// An agent permission review, accounted apart from its generation.
+    Review,
+    /// A native or selected service web search.
+    WebSearch,
+    /// A native or selected service page fetch.
+    PageFetch,
+    /// Image generation by the selected offering.
+    ImageGeneration,
+    /// A question explicitly issued by a person.
+    Ask,
+}
+
+impl ProviderPurpose {
+    /// Which entry permission covers this factual work category.
+    #[must_use]
+    pub const fn permission_use(self) -> ProviderUsePurpose {
+        match self {
+            Self::Ask => ProviderUsePurpose::Ask,
+            _ => ProviderUsePurpose::Work,
+        }
+    }
+}
+
+impl std::str::FromStr for ProviderPurpose {
+    type Err = serde_json::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        serde_json::from_value(Json::String(value.to_owned()))
+    }
+}
+
 /// What an entry in the Use row of a provider lets its holder run. A member
 /// that is left out does not narrow, except the arrangement types: an entry
 /// that names none allows only those in which the credential stays where it
@@ -1512,6 +1567,9 @@ pub enum EntryMember {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUse {
+    /// Which uses this entry allows. Left out, Ask and other work are both allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ProviderUsePurpose>>,
     /// The models the holder may run, by name; left out, every enabled model
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1638,6 +1696,7 @@ impl Options {
         };
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
+                purposes: reader.words::<ProviderUsePurpose>("purposes"),
                 models: reader.texts("models"),
                 services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
@@ -1863,6 +1922,7 @@ impl ProviderUse {
     #[must_use]
     pub fn or(&self, other: &Self) -> Self {
         Self {
+            purposes: either(self.purposes.as_ref(), other.purposes.as_ref()),
             models: either(self.models.as_ref(), other.models.as_ref()),
             services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
@@ -1878,6 +1938,12 @@ impl ProviderUse {
     #[must_use]
     pub fn allows_model(&self, model: &str) -> bool {
         allowed(self.models.as_ref(), model)
+    }
+
+    /// Whether this entry permits Ask or other work, before applying its remaining limits.
+    #[must_use]
+    pub fn allows_purpose(&self, purpose: ProviderUsePurpose) -> bool {
+        allowed(self.purposes.as_ref(), &purpose)
     }
 
     /// Whether the entry lets its holder run at `effort`.
@@ -1944,6 +2010,12 @@ impl ProviderUse {
             }
         }
         let mut beyond = Vec::new();
+        if ProviderUsePurpose::ALL
+            .iter()
+            .any(|purpose| self.allows_purpose(*purpose) && !other.allows_purpose(*purpose))
+        {
+            beyond.push(EntryMember::Purposes);
+        }
         if !names_within(self.models.as_ref(), other.models.as_ref()) {
             beyond.push(EntryMember::Models);
         }
@@ -2072,6 +2144,25 @@ mod tests {
 
     fn through(permission: Permission) -> Vec<Permission> {
         permission.held_through().collect()
+    }
+
+    #[test]
+    fn accounting_categories_keep_ask_separate_from_every_kind_of_other_work() {
+        assert_eq!(
+            ProviderPurpose::Ask.permission_use(),
+            ProviderUsePurpose::Ask
+        );
+        for purpose in [
+            ProviderPurpose::Turn,
+            ProviderPurpose::Summary,
+            ProviderPurpose::Embeddings,
+            ProviderPurpose::Review,
+            ProviderPurpose::WebSearch,
+            ProviderPurpose::PageFetch,
+            ProviderPurpose::ImageGeneration,
+        ] {
+            assert_eq!(purpose.permission_use(), ProviderUsePurpose::Work);
+        }
     }
 
     #[test]
@@ -3000,6 +3091,7 @@ mod tests {
     #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
+            purposes: None,
             models: Some(vec!["a".into()]),
             services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
@@ -3007,6 +3099,7 @@ mod tests {
             r#where: None,
         };
         let other = ProviderUse {
+            purposes: None,
             models: Some(vec!["b".into(), "a".into()]),
             services: Some(vec!["fetch".into()]),
             efforts: None,
@@ -3043,6 +3136,59 @@ mod tests {
             Options::ProviderUse(options) => options,
             other => panic!("the use of a provider takes options: {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_ask_only_entry_is_read_back_and_cannot_be_given_as_permission_for_other_work() {
+        let written = json!({"purposes":["ask"]});
+        let ask = provider_use(&written);
+        let work = provider_use(&json!({"purposes":["work"]}));
+        let all = provider_use(&json!({}));
+        let none = provider_use(&json!({"purposes":[]}));
+        assert_eq!(Options::ProviderUse(ask.clone()).to_json(), written);
+        assert!(ask.allows_purpose(ProviderUsePurpose::Ask));
+        assert!(!ask.allows_purpose(ProviderUsePurpose::Work));
+        assert!(ask.within(&all));
+        assert!(none.within(&ask));
+        assert_eq!(all.members_beyond(&ask), [EntryMember::Purposes]);
+        assert!(!work.within(&ask));
+        for purpose in ProviderUsePurpose::ALL {
+            assert!(all.allows_purpose(*purpose));
+            assert!(ask.or(&work).allows_purpose(*purpose));
+            assert!(!none.allows_purpose(*purpose));
+        }
+        assert!(Options::parse(P::ProviderUse, &json!({"purposes":["unknown"]})).is_err());
+    }
+
+    #[test]
+    fn the_provider_use_form_starts_with_both_uses_selected() {
+        let schema = P::ProviderUse.options_schema().unwrap();
+        let variants = schema["$defs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find_map(|def| {
+                def["oneOf"]
+                    .as_array()
+                    .filter(|variants| variants.iter().any(|variant| variant["const"] == "ask"))
+            })
+            .unwrap_or_else(|| panic!("the provider uses are in the schema: {schema}"));
+        for purpose in ProviderUsePurpose::ALL {
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| variant["const"] == purpose.as_str()
+                        && variant["x-default-selected"] == true)
+            );
+        }
+    }
+
+    #[test]
+    fn naming_every_provider_use_allows_the_same_grant_as_leaving_the_list_out() {
+        let omitted = provider_use(&json!({}));
+        let named = provider_use(&json!({"purposes":["ask","work"]}));
+        assert!(omitted.within(&named));
+        assert!(named.within(&omitted));
     }
 
     #[test]
