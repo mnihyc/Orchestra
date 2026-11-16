@@ -1,0 +1,2 @@
+fmt
+test -p orch-api-core --test thread_opening_scopes -- the_same_first_screen_uses_the_same_statement_budget_when_its_history_grows_fourfold --nocapture
