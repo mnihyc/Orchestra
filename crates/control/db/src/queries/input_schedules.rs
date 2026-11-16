@@ -19,6 +19,10 @@ pub struct ScheduleRow {
     pub target: Json,
     /// Private frozen authored parts.
     pub content: Json,
+    /// Authored planning choice.
+    pub plan: bool,
+    /// Authored delivery mode.
+    pub delivery: String,
     /// Optional private native selection.
     pub native_action: Option<Json>,
     /// Private captured definition origins; never projected as schedule metadata.
@@ -62,6 +66,9 @@ pub struct RunRow {
     pub turn_id: Option<Id>,
     /// Safe reason, with no draft content.
     pub reason: Option<String>,
+    /// The immutable occurrence decision, separate from later input progress.
+    #[sqlx(default)]
+    pub outcome: Option<Json>,
     /// Current topic stamp.
     pub topic_seq: Seq,
     /// Occurrence creation.
@@ -105,18 +112,20 @@ pub async fn topic(
 
 /// Inserts a frozen authored definition; caller already checked and pinned its content.
 pub async fn insert(conn: &mut Conn, row: &ScheduleRow) -> Result<(), DbError> {
-    sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,native_action,timing,state,next_run_at,revision,topic_seq,created_at,updated_at,deleted_at,definition_authority) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+    sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,native_action,timing,state,next_run_at,revision,topic_seq,created_at,updated_at,deleted_at,definition_authority,plan,delivery) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
         .bind(row.id).bind(row.topic_id).bind(row.author_id).bind(&row.name).bind(&row.target).bind(&row.content)
         .bind(&row.native_action).bind(&row.timing).bind(&row.state).bind(row.next_run_at).bind(row.revision)
-        .bind(row.topic_seq).bind(row.created_at).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority).execute(conn).await?;
+        .bind(row.topic_seq).bind(row.created_at).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority)
+        .bind(row.plan).bind(&row.delivery).execute(conn).await?;
     Ok(())
 }
 
 /// Updates the definition and future state while the caller holds its row lock.
 pub async fn update(conn: &mut Conn, row: &ScheduleRow) -> Result<(), DbError> {
-    sqlx::query("UPDATE input_schedules SET name=$2,target=$3,content=$4,native_action=$5,timing=$6,state=$7,next_run_at=$8,revision=$9,topic_seq=$10,updated_at=$11,deleted_at=$12,definition_authority=$13 WHERE id=$1")
+    sqlx::query("UPDATE input_schedules SET name=$2,target=$3,content=$4,native_action=$5,timing=$6,state=$7,next_run_at=$8,revision=$9,topic_seq=$10,updated_at=$11,deleted_at=$12,definition_authority=$13,plan=$14,delivery=$15 WHERE id=$1")
         .bind(row.id).bind(&row.name).bind(&row.target).bind(&row.content).bind(&row.native_action).bind(&row.timing)
         .bind(&row.state).bind(row.next_run_at).bind(row.revision).bind(row.topic_seq).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority)
+        .bind(row.plan).bind(&row.delivery)
         .execute(conn).await?;
     Ok(())
 }
@@ -139,17 +148,17 @@ pub async fn runs(conn: &mut Conn, id: Id) -> Result<Vec<RunRow>, DbError> {
 
 /// The unique occurrence protects both thread creation and input acceptance from replay.
 pub async fn insert_run(conn: &mut Conn, row: &RunRow) -> Result<bool, DbError> {
-    Ok(sqlx::query("INSERT INTO input_schedule_runs(id,schedule_id,occurrence,scheduled_for,state,thread_id,input_id,turn_id,reason,topic_seq,created_at,started_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(schedule_id,occurrence) DO NOTHING")
+    Ok(sqlx::query("INSERT INTO input_schedule_runs(id,schedule_id,occurrence,scheduled_for,state,thread_id,input_id,turn_id,reason,topic_seq,created_at,started_at,outcome) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(schedule_id,occurrence) DO NOTHING")
         .bind(row.id).bind(row.schedule_id).bind(&row.occurrence).bind(row.scheduled_for).bind(&row.state)
         .bind(row.thread_id).bind(row.input_id).bind(row.turn_id).bind(&row.reason).bind(row.topic_seq)
-        .bind(row.created_at).bind(row.started_at).execute(conn).await?.rows_affected()==1)
+        .bind(row.created_at).bind(row.started_at).bind(&row.outcome).execute(conn).await?.rows_affected()==1)
 }
 
 /// Publishes the accepted work or safe failure in the same occurrence transaction.
 pub async fn update_run(conn: &mut Conn, row: &RunRow) -> Result<(), DbError> {
-    sqlx::query("UPDATE input_schedule_runs SET state=$2,thread_id=$3,input_id=$4,turn_id=$5,reason=$6,topic_seq=$7,started_at=$8 WHERE id=$1")
+    sqlx::query("UPDATE input_schedule_runs SET state=$2,thread_id=$3,input_id=$4,turn_id=$5,reason=$6,topic_seq=$7,started_at=$8,outcome=$9 WHERE id=$1")
         .bind(row.id).bind(&row.state).bind(row.thread_id).bind(row.input_id).bind(row.turn_id).bind(&row.reason)
-        .bind(row.topic_seq).bind(row.started_at).execute(conn).await?;
+        .bind(row.topic_seq).bind(row.started_at).bind(&row.outcome).execute(conn).await?;
     Ok(())
 }
 

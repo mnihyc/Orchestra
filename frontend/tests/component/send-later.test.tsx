@@ -6,7 +6,7 @@ import type * as Schedules from '@/api/inputSchedules';
 import type * as Auth from '@/api/auth';
 import type * as Library from '@/api/resourceLibrary';
 import { ApiError, client } from '@/api/client';
-import { ScheduleEditor } from '@/features/schedules/Editor';
+import { ScheduleEditor, type AuthoredScheduleDraft } from '@/features/schedules/Editor';
 import { HumanScheduleActions } from '@/features/schedules/HumanSchedules';
 import { inputSchedule, SCHEDULE_THREAD, SCHEDULE_TOPIC } from '../doubles/input-schedules';
 import { i18n, setLocale } from '@/i18n';
@@ -29,19 +29,50 @@ vi.mock('@/features/start/BindingDialog', async () => {
 });
 const previous = client.session.getState(), appearance = useAppearance.getState();
 const attachment: ContentPart = { type: 'file', name: 'notes.txt', path: '.orch/attachments/notes.txt', blob: 'b'.repeat(64), size: 5 };
-const draft = { content: [{ type: 'text', text: 'The whole authored draft' } as const, attachment], nativeAction: { action_id: 'native-choice', revision: 'catalogue-1', arguments: { query: 'status' } } };
-const definition = () => inputSchedule({ kind: null, agent: null, author: ADA, definition: { content: draft.content, native_action: draft.nativeAction, target: { kind: 'thread', thread_id: SCHEDULE_THREAD } } });
+const draft: AuthoredScheduleDraft = { plan: true, delivery: 'steer', content: [{ type: 'text', text: 'The whole authored draft' }, attachment], nativeAction: { action_id: 'native-choice', revision: 'catalogue-1', arguments: { query: 'status' } } };
+const definition = () => inputSchedule({ kind: null, agent: null, author: ADA, plan: draft.plan, delivery: draft.delivery, definition: { content: draft.content, native_action: draft.nativeAction, target: { kind: 'thread', thread_id: SCHEDULE_THREAD } } });
 beforeEach(() => {
   vi.clearAllMocks(); calls.same.mockReturnValue(true); client.session.setState({ status: 'signed_in', userId: ADA.id, readerVersion: 1200 }); useAppearance.setState({ timeZone: 'UTC', locale: 'en' });
   calls.create.mockResolvedValue({ projection: 'receipt', schedule_id: 'made-schedule', revision: 1, topic_seq: 3 });
   calls.update.mockResolvedValue({ projection: 'receipt', schedule_id: 'made-schedule', revision: 2, topic_seq: 4 }); calls.read.mockResolvedValue(definition());
 });
 afterEach(async () => { cleanup(); client.session.setState(previous); useAppearance.setState(appearance); await setLocale('en'); });
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps recurring civil rules in the preview's one disclosure without saving or running (${locale})`, async () => {
+    await setLocale(locale);
+    show(<ScheduleEditor topic={SCHEDULE_TOPIC} draft={draft} onClose={() => undefined} />);
+    await userEvent.click(screen.getByRole('radio', { name: i18n.t('sendLater.repeat') }));
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+    const facts = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+    expect(facts).toHaveTextContent(locale === 'en' ? 'Repeated time' : '重复时刻');
+    expect(facts).toHaveTextContent(locale === 'en' ? 'Earlier instant' : '使用较早时间');
+    expect(facts).toHaveTextContent(locale === 'en' ? 'Missing time' : '不存在的时刻');
+    expect(facts).toHaveTextContent(locale === 'en' ? 'Not replayed' : '不补发');
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.update).not.toHaveBeenCalled();
+  });
+}
 async function once(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByRole('textbox', { name: i18n.t('sendLater.date') }), '2030-02-01');
   const time = document.querySelector<HTMLInputElement>('input[type=time]'); if (time === null) throw new Error('Missing time input');
   fireEvent.change(time, { target: { value: '09:30' } });
 }
+
+it('keeps the authored Plan and delivery choices visible until the person changes them', async () => {
+  const user = userEvent.setup();
+  show(<ScheduleEditor topic={SCHEDULE_TOPIC} draft={{ ...draft, plan: true, delivery: 'steer' }} onClose={() => undefined} />);
+  expect(screen.getByRole('checkbox', { name: 'Plan' })).toBeChecked();
+  expect(screen.getByRole('combobox', { name: 'Delivery' })).toHaveTextContent('Steer');
+  await once(user);
+  await user.click(screen.getByRole('checkbox', { name: 'Plan' }));
+  await user.click(screen.getByRole('combobox', { name: 'Delivery' }));
+  await user.click(screen.getByRole('option', { name: 'Interrupt' }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('sendLater.destination') }));
+  await user.click(screen.getByRole('option', { name: i18n.t('sendLater.newThread') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('common.save') }));
+  await waitFor(() => expect(calls.create).toHaveBeenCalledOnce());
+  expect(calls.create.mock.calls[0]?.[1]).toMatchObject({ plan: false, delivery: 'interrupt' });
+});
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`opens Once without an invented date/time and keeps the entire draft visible (${locale})`, async () => {
     await setLocale(locale); show(<ScheduleEditor topic={SCHEDULE_TOPIC} draft={draft} onClose={() => undefined} />);
@@ -54,7 +85,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await user.click(screen.getByRole('combobox', { name: i18n.t('sendLater.destination') })); await user.click(screen.getByRole('option', { name: i18n.t('sendLater.newThread') }));
     await user.click(screen.getByRole('button', { name: i18n.t('common.save') }));
     await waitFor(() => expect(calls.create).toHaveBeenCalledOnce());
-    expect(calls.create.mock.calls[0]?.[1]).toEqual({ name: null, content: draft.content, native_action: draft.nativeAction, timing: { kind: 'once', at: '2030-02-01T09:30:00.000Z', zone: 'UTC' }, target: { kind: 'new_thread', config: {} } });
+    expect(calls.create.mock.calls[0]?.[1]).toEqual({ name: null, content: draft.content, native_action: draft.nativeAction, plan: draft.plan, delivery: draft.delivery, timing: { kind: 'once', at: '2030-02-01T09:30:00.000Z', zone: 'UTC' }, target: { kind: 'new_thread', config: {} } });
     expect(accepted).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce(); expect(calls.update).not.toHaveBeenCalled();
   });
   it(`a refused save retains full draft, native selection and chosen timing (${locale})`, async () => {

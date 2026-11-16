@@ -6,13 +6,16 @@
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
-import type { Thread } from '@/generated/api-types';
+import type { Thread, Turn } from '@/generated/api-types';
+import { stoppingSince } from '@/lib/threadStopping';
 import { i18n } from '@/i18n';
 import { sandboxWords } from '@/features/resources/SandboxReadiness';
+import { sourceFailure } from '@/features/source/words';
 
 const APPROVAL_KEYS=['threadConfinement.approvalNotAllowed','threadConfinement.approvalUnsupported'] as const;
 const CONFINEMENT_KEYS=[...APPROVAL_KEYS,'threadConfinement.sandboxUnsupported','agentHistory.removingDetail','agentHistory.sideNeedsImport'] as const;
 const MACHINE_PROGRAM_VERSION = /^Codex on (.+) is ([^;\r\n]+); this agent runs ([^\r\n]+)\. An environment manager can allow it on the environment's page\.$/u;
+const NATIVE_END_UNCONFIRMED = "native_turn_still_running: the native turn's end is not known; fresh work waits for its actual completion";
 
 /** Only this complete engine sentence names the environment's current machine-program version refusal. */
 export function isMachineProgramVersionMismatch(raw: string): boolean {
@@ -25,8 +28,15 @@ export function isAgentHistoryRemoving(thread: Thread): boolean {
   return thread.state === 'blocked' && thread.blocked?.detail === i18n.getFixedT('en')('agentHistory.removingDetail');
 }
 
+/** The source owns its state and reason; prose is never a protocol for a failed preparation. */
+function sourceFailedWords(source: Thread['source'], t: TFunction): string | null {
+  return source?.state === 'failed' ? sourceFailure(t, source.reason ?? 'workspace.source_failed') : null;
+}
+
 /** Only known engine explanations are translated; unknown/native error details remain verbatim. */
-export function blockedDetail(raw:string,t:TFunction):string {
+export function blockedDetail(raw:string,t:TFunction,source: Thread['source'] = null):string {
+  const sourceFailed = sourceFailedWords(source, t);
+  if (sourceFailed !== null) return sourceFailed;
   const programVersion = MACHINE_PROGRAM_VERSION.exec(raw);
   if (programVersion?.[1] !== undefined && programVersion[2] !== undefined && programVersion[3] !== undefined) {
     return t('environmentTools.versionMismatch', { machine: programVersion[1],
@@ -73,6 +83,76 @@ function lockWords(kind: string, t: TFunction): string {
   }
 }
 
+/** What a kind of command that a start waits for is doing, in words; null for a kind that has none. */
+function startWork(command: string, t: TFunction): string | null {
+  switch (command) {
+    case 'fs.stat': return t('thread.starting.work.fsStat');
+    case 'fs.mkdir': return t('thread.starting.work.fsMkdir');
+    case 'git.prepare': return t('thread.starting.work.gitPrepare');
+    case 'git.worktree': return t('thread.starting.work.gitWorktree');
+    case 'fs.record': return t('thread.starting.work.fsRecord');
+    case 'fs.materialize': return t('thread.starting.work.fsMaterialize');
+    case 'fs.materialize_if_absent': return t('thread.starting.work.fsNotesCopy');
+    case 'session.open': return t('thread.starting.work.sessionOpen');
+    default: return null;
+  }
+}
+
+/** The other work that holds a start up, as a noun, so that it reads after "waiting behind". */
+function otherWork(command: string, t: TFunction): string {
+  switch (command) {
+    case 'fs.record': return t('thread.starting.other.fsRecord');
+    case 'git.prepare': return t('thread.starting.other.gitPrepare');
+    case 'git.worktree': return t('thread.starting.other.gitWorktree');
+    case 'fs.materialize': return t('thread.starting.other.fsMaterialize');
+    case 'fs.materialize_if_absent': return t('thread.starting.other.fsNotesCopy');
+    case 'fs.snapshot': return t('thread.starting.other.fsSnapshot');
+    case 'fs.mkdir': return t('thread.starting.other.fsMkdir');
+    case 'fs.write': return t('thread.starting.other.fsWrite');
+    case 'env.attach': return t('thread.starting.other.envAttach');
+    default: return t('thread.starting.other.work');
+  }
+}
+
+/** The step a thread that starts is waiting for, in words. */
+function startingStepWords(thread: Thread, t: TFunction, provider: string, agent: string): string {
+  switch (thread.starting_step) {
+    case 'environment':
+      if (thread.environment_preparation !== null && thread.environment_preparation !== undefined && thread.environment_preparation.environment.id === thread.environment?.id) return t(`placeFacts.environmentStages.${thread.environment_preparation.kind}`);
+      return t(thread.environment?.status === 'provisioning' ? 'thread.starting.environmentMaking' : 'thread.starting.environment');
+    case 'source':
+      return t('thread.starting.source');
+    case 'recording':
+      return t('thread.starting.recording');
+    case 'files':
+      return t('thread.starting.files');
+    case 'provider':
+      return t('thread.starting.provider', { provider });
+    case 'harness':
+      return t('thread.starting.harness', { agent });
+    case 'credential':
+      return t('thread.starting.credential', { provider });
+    case 'session':
+      return t('thread.starting.session');
+    case 'turn':
+      return t('thread.starting.turn', { agent });
+    default:
+      return t('thread.starting.none');
+  }
+}
+
+/** When the step a starting thread waits for began (an instant, as the server wrote it), or null when it waits for nothing in
+ * particular: the status line draws the time that has gone by since, beside the words of {@link waitingWords}. */
+export function waitingSince(thread: Thread | null): string | null {
+  if (thread?.state !== 'starting') return null;
+  return thread.starting_since ?? null;
+}
+
+/** The words of a thread that is being stopped; null otherwise. */
+export function stoppingWords(thread: Thread | null, t: TFunction, turn: Turn | null = null): string | null {
+  return stoppingSince(thread, turn) === null ? null : t('thread.stopping.line');
+}
+
 /** A resource pause keeps its note apart from the fixed operational status. */
 function pauseNote(raw: string, prefix: string): string | null {
   return raw.startsWith(`${prefix} · `) ? raw.slice(prefix.length + 3) : null;
@@ -85,31 +165,17 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
   const provider = thread.binding?.provider.name ?? '';
   const agent = thread.binding?.agent.name ?? '';
   if (thread.state === 'starting') {
-    switch (thread.starting_step) {
-      case 'environment':
-        return t('thread.starting.environment');
-      case 'source':
-        return t('thread.starting.source');
-      case 'files':
-        return t('thread.starting.files');
-      case 'provider':
-        return t('thread.starting.provider', { provider });
-      case 'harness':
-        return t('thread.starting.harness', { agent });
-      case 'credential':
-        return t('thread.starting.credential', { provider });
-      case 'session':
-        return t('thread.starting.session');
-      case 'turn':
-        return t('thread.starting.turn', { agent });
-      default:
-        return t('thread.starting.none');
-    }
+    const step = startingStepWords(thread, t, provider, agent);
+    const work = thread.starting_work ?? null;
+    if (work === null) return step;
+    // The command the step waits for, once it has lasted: more exact than the step, and, when other work holds it up, that too.
+    const what = startWork(work.command, t) ?? step;
+    return work.behind === null ? what : t('thread.starting.behind', { what, other: otherWork(work.behind, t) });
   }
   if (thread.state === 'blocked' && thread.blocked !== null) {
     if (isAgentHistoryRemoving(thread)) return t('agentHistory.removing');
     const raw = thread.blocked.sandbox===null || thread.blocked.sandbox===undefined?thread.blocked.detail ?? '':sandboxWords(thread.blocked.sandbox,t);
-    const detail = raw === '' ? '' : t('thread.blocked.withDetail', { detail: blockedDetail(raw,t) });
+    const detail = raw === '' ? '' : t('thread.blocked.withDetail', { detail: blockedDetail(raw,t,thread.blocked.reason === 'source_failed' ? thread.source : null) });
     const common = { detail, provider, agent, model: thread.model_display ?? thread.model ?? '', machine: thread.environment?.name ?? '' };
     switch (thread.blocked.reason) {
       case 'unbound':
@@ -138,7 +204,11 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
           return t('resourceImpact.environmentDisabled',{name:thread.environment.name,note:note===null?'':` · ${note}`});
         }
         const key = raw.startsWith('the environment failed: files:') ? 'startRecovery.filesFailed' : thread.environment?.status === 'failed' ? 'startRecovery.failed' : 'startRecovery.unavailable';
-        const reason = t(key, { environment: thread.environment?.name ?? t('source.prepare.workspace') });
+        const status = thread.environment?.status;
+        const environment = thread.environment?.name ?? t('source.prepare.workspace');
+        const reason = key === 'startRecovery.unavailable' && (status === 'offline' || status === 'removed' || status === 'moving' || status === 'recreating')
+          ? t('startRecovery.lifecycle', { environment, state: t(`environments.status.${status}`) })
+          : t(key, { environment });
         return thread.pending_inputs > 0 ? `${reason} ${t('startRecovery.held')}` : reason;
       }
       case 'model_not_set':
@@ -159,7 +229,10 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
         return t('thread.blocked.workspace_trust', common);
       case 'switching':
         return t('thread.blocked.switching');
+      case 'source_failed':
+        return t('source.prepare.stopped', { reason: sourceFailedWords(thread.source, t) ?? sourceFailure(t, 'workspace.source_failed') });
       case 'error':
+        if (raw === NATIVE_END_UNCONFIRMED) return t('thread.blocked.nativeEnd');
         return t('thread.blocked.error', common);
     }
   }
@@ -170,3 +243,5 @@ export function useWaitingWords(thread: Thread | null): string | null {
   const { t } = useTranslation();
   return waitingWords(thread, t);
 }
+
+export { stoppingSince } from '@/lib/threadStopping';

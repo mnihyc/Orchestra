@@ -731,7 +731,33 @@ async fn the_read_positions_of_the_callers_threads_are_listed_by_org() {
 }
 
 #[tokio::test]
-async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_person() {
+async fn public_interface_metadata_uses_the_registered_catchup_default_and_later_system_value() {
+    let world = World::new().await;
+    let first = world
+        .app
+        .call(orch_api_contract::auth::MetaGet, &[])
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.interface_defaults.catch_up_above_items, Some(20));
+    world
+        .set_at(
+            orch_settings::Target::System,
+            orch_settings_contract::registry::keys::INTERFACE_CATCH_UP_ABOVE_ITEMS,
+            json!(37),
+        )
+        .await;
+    let later = world
+        .app
+        .call(orch_api_contract::auth::MetaGet, &[])
+        .send()
+        .await
+        .ok();
+    assert_eq!(later.interface_defaults.catch_up_above_items, Some(37));
+}
+
+#[tokio::test]
+async fn the_personal_interface_keeps_declared_values_whole_and_follows_the_person() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
     let bob = person(&world, "bob").await;
@@ -757,6 +783,14 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
     );
     // The whole value is replaced.
     assert_eq!(set(&ada, "help", json!({ "closed": [] })).await.status, 204);
+    let reading = json!({
+        "kept_closed_tabs": 25,
+        "progress_delay_ms": 333,
+        "catch_up_above_items": 3,
+        "read_freshness_ms": { "lookup": 2000 },
+        "other_choice": "kept"
+    });
+    assert_eq!(set(&ada, "interface", reading.clone()).await.status, 204);
     let state = world
         .app
         .call(MeStateGet, &[])
@@ -766,7 +800,8 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .ok();
     assert_eq!(state["help"], json!({ "closed": [] }));
     assert_eq!(state["layouts"]["wide"]["panes"], 3);
-    assert_eq!(state.len(), 2);
+    assert_eq!(state["interface"], reading);
+    assert_eq!(state.len(), 3);
     // Nobody else's.
     let other = world
         .app
@@ -776,6 +811,18 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .await
         .ok();
     assert!(other.is_empty());
+    for invalid_reading in [
+        json!({ "kept_closed_tabs": -1 }),
+        json!({ "progress_delay_ms": "soon" }),
+        json!({ "catch_up_above_items": -1 }),
+        json!({ "catch_up_above_items": 1.5 }),
+        json!({ "catch_up_above_items": "later" }),
+        json!({ "read_freshness_ms": { "lookups": 2000 } }),
+        json!([]),
+    ] {
+        let refused = set(&ada, "interface", invalid_reading).await.problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    }
     // No other key, and no value over 64 KiB.
     let unknown = set(&ada, "theme", json!(1)).await.problem();
     assert_eq!(unknown.code, ErrorCode::RequestInvalid);
