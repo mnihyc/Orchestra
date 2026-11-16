@@ -388,7 +388,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -749,7 +749,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -1361,6 +1361,7 @@ impl Cluster {
                 };
                 *lock(&session) = Some((open.thread_id, open.segment_id, ticket.clone()));
                 Ok(CommandResult::SessionOpen(SessionOpenResult {
+                    mcp: None,
                     native_session_ref: format!("native-{}", open.segment_id),
                     resumed: false,
                     import_report: None,
