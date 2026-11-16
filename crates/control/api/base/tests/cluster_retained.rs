@@ -160,6 +160,17 @@ async fn a_cluster_reports_its_limits_removes_only_its_unit_and_restores_the_sam
     host.wait_for(CommandKind::NodeRuntimeStart, 2).await;
     let recovered = host.started().unwrap();
     assert_ne!(recovered, original);
+    // The restored unit is told which runtime it is of, whatever the unit it restores was told: its connector puts the
+    // machine of the old unit, which was revoked, aside by that.
+    let creates: Vec<_> = host
+        .calls()
+        .into_iter()
+        .filter(|call| call.kind == CommandKind::NodeRuntimeCreate)
+        .collect();
+    assert_eq!(
+        creates.last().unwrap().body["env"]["ORCH_RUNTIME_ID"],
+        serde_json::json!(recovered)
+    );
     let _restored = hosting::enroll(&world, recovered).await;
     let (state, _, error) = hosting::wait_over(&world, restore.id).await;
     assert_eq!(state, "succeeded", "{error:?}");

@@ -9,6 +9,7 @@ import type { ButtonHTMLAttributes, MouseEvent, ReactNode, Ref } from 'react';
 import { ActionIcon, actionForLabel, type ActionId } from '@/ui/actions';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
+import { useReadProgress } from '@/lib/useReadProgress';
 
 export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'children'> {
   /** What the button does, in words. */
@@ -65,6 +66,7 @@ export function IconButton({
   ref,
   ...rest
 }: IconButtonProps) {
+  const slow = useReadProgress(pending);
   const act = action ?? actionForLabel(label);
   const look = LOOKS[variant];
   const press = (event: MouseEvent<HTMLButtonElement>) => {
@@ -97,7 +99,7 @@ export function IconButton({
         onClick={press}
         {...rest}
       >
-        {pending ? <LoaderCircle className="animate-spin" aria-hidden /> : act === undefined ? icon : <ActionIcon action={act} />}
+        {slow ? <LoaderCircle className="animate-spin" aria-hidden /> : act === undefined ? icon : <ActionIcon action={act} />}
       </IconButtonFace>
   );
   return <Tooltip content={reason ?? label} shortcut={shortcut} side={side}>

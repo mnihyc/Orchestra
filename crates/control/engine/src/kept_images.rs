@@ -68,7 +68,11 @@ impl Engine {
                     .await?
                     .is_some_and(|row| row.plan.get("kept_image_pins").is_none())
                 {
-                    if orch_db::queries::storage::pin_blobs(&mut tx, &[archive.hash]).await? != 1 {
+                    if orch_db::queries::storage::pin_transfer_blobs(&mut tx, &[archive.hash])
+                        .await?
+                        .len()
+                        != 1
+                    {
                         return Err(Stop::Failed(Failure::new(
                             "blob_missing",
                             "the kept-image archive was not stored",

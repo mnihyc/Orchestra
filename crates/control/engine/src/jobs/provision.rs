@@ -318,11 +318,14 @@ pub struct SpecInputs<'a> {
     pub volumes: &'a Json,
 }
 
+/// The variable that gives the connector in a unit the identifier of the runtime the unit is of.
+pub const UNIT_VARIABLE: &str = "ORCH_RUNTIME_ID";
+
 /// The body of `node.runtime.create`, in the stored form: the token is the reference to the secret that
 /// holds it, which the link seals to the host's key when the command is written.
 #[must_use]
 pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
-    let env: BTreeMap<String, String> = inputs
+    let mut env: BTreeMap<String, String> = inputs
         .spec
         .get("env")
         .and_then(Json::as_object)
@@ -335,12 +338,15 @@ pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
                 .collect()
         })
         .unwrap_or_default();
+    // The connector in the unit keeps the state of its machine on a volume that outlives the unit: it
+    // tells its own state from that of an earlier unit by this.
+    env.insert(UNIT_VARIABLE.to_owned(), inputs.runtime.to_string());
     // A harness that runs beside the tools needs the connector in the unit to host agents as well.
     let beside = !orch_agent_programs::Programs::colocated_for(inputs.spec).is_empty();
     let roles: &[&str] = if beside {
-        &["environment", "agent"]
+        &["environment", "agent", "provider"]
     } else {
-        &["environment"]
+        &["environment", "provider"]
     };
     json!({
         "runtime_id": inputs.runtime,
@@ -718,6 +724,7 @@ impl Provision {
             &mut tx,
             job.id(),
             &json!({
+                "calculation": chosen.place.calculation,
                 "host": chosen.place.host.id,
                 "host_name": chosen.place.host.name,
                 "runtime": runtime_id,
@@ -1358,6 +1365,11 @@ impl Provision {
                     spec[field] = value.clone();
                 }
             }
+            // What was kept says which runtime the old unit was of; this unit is of its own, and its connector
+            // puts the machine of the old unit aside by that.
+            if let Some(env) = spec["env"].as_object_mut() {
+                env.insert(UNIT_VARIABLE.to_owned(), json!(placed.runtime.id));
+            }
         }
         // Runtime replacement keeps the exact command definition for later recreation.
         job.remember(&json!({ "created_spec": spec })).await?;
@@ -1842,7 +1854,8 @@ impl Provision {
             )
             .await?;
         }
-        crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
+        let copy_released =
+            crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
         if self.mode == Mode::Make {
             crate::resource_facts::library::created(
                 &mut tx,
@@ -1887,6 +1900,9 @@ impl Provision {
             checked.check(self.engine.inner.clock.as_ref())?;
         }
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(released) = copy_released {
+            released.settle(&self.engine).await;
+        }
         Ok(Done::Finished)
     }
 
@@ -1914,11 +1930,12 @@ impl Provision {
 
     async fn undo_make(&self, job: &Job, why: &Stop) -> Undone {
         if let Ok(mut tx) = self.engine.db().begin().await
-            && crate::initial_files::release(&mut tx, job.id(), Time::new(job.now()))
-                .await
-                .is_ok()
+            && let Ok(released) =
+                crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await
+            && tx.commit().await.is_ok()
+            && let Some(released) = released
         {
-            let _ = tx.commit().await;
+            released.settle(&self.engine).await;
         }
         let Ok(plan) = job.plan().await else {
             return Undone::Partly("the job's plan could not be read".to_owned());
@@ -2238,6 +2255,7 @@ impl Phased for Provision {
             "runtime": plan.get("runtime"),
             "host": plan.get("host"),
             "warnings": plan.get("warnings"),
+            "calculation": plan.get("calculation"),
         }))
     }
 }
@@ -2337,8 +2355,12 @@ mod tests {
             spec["enroll_token"],
             json!({ "$secret": enrollment.secret })
         );
-        assert_eq!(spec["roles"], json!(["environment"]));
-        assert_eq!(spec["env"], json!({ "A": "b" }), "only text is a variable");
+        assert_eq!(spec["roles"], json!(["environment", "provider"]));
+        assert_eq!(
+            spec["env"],
+            json!({ "A": "b", "ORCH_RUNTIME_ID": runtime }),
+            "only text is a variable, and the unit is told which runtime it is of"
+        );
         assert_eq!(spec["labels"]["orch.system"], "acme");
         assert_eq!(spec["labels"]["orch.kind"], "environment");
         assert!(

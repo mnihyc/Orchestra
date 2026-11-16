@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-link-contract --test largest_messages
+test -p orch-engine --lib -- tools::source::tests::
+test -p orch-engine --test provider_runtime --test provider_fact_reads
+test -p orch-connector-core --test translations
