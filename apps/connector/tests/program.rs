@@ -1020,11 +1020,11 @@ async fn the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_s
         "workspace_root": work.path(), "instruction_root_marker": false,
         "directory": work.path(), "cwd": work.path(), "mounts": [],
         "model": "fake-large", "effort": "medium", "params": {},
-        "approval_mode": "on_request", "sandbox_mode": "workspace",
+        "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace",
         "instructions": "You are working inside Orch.", "memory": null, "arrangement": "together",
         "provider": { "path": "native", "provider_id": provider },
         "exec": { "executor": null, "environment_id": new_id(), "generation": 1 },
-        "mcp": [], "orch_tools": [], "raw_events": false
+        "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
     }))
     .unwrap();
     let thread_key = SerialKey::Thread(thread);

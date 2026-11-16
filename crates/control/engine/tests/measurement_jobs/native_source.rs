@@ -649,6 +649,15 @@ async fn completed_ordinary_observation_is_data_for_a_new_current_operation_with
         .into_iter()
         .find(|(_, wire)| wire.id == receipt)
         .ok_or("actual native frame missing")?;
+    let issued_at = s
+        .world
+        .commands
+        .as_engine()
+        .status(wire.id)
+        .await?
+        .ok_or("actual native issue receipt missing")?
+        .issued_at;
+    let deadline = Time::new(issued_at).get() + chrono::Duration::from_std(wire.work)?;
     let mut conn = s.world.pool.acquire().await?;
     orch_db::queries::link::insert_command(
         &mut conn,
@@ -658,9 +667,9 @@ async fn completed_ordinary_observation_is_data_for_a_new_current_operation_with
             kind: &wire.kind,
             body: &wire.body,
             serial_key: wire.key.as_deref(),
-            deadline_at: wire.deadline.get(),
+            deadline_at: deadline,
         },
-        s.clock.now(),
+        issued_at,
     )
     .await?;
     let native_result = before.result.as_ref().ok_or("native result missing")?;
