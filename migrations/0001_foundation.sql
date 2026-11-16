@@ -259,47 +259,94 @@ $$;
 CREATE FUNCTION public.access_holders(person uuid, sampled_at timestamp with time zone, system_admin boolean DEFAULT false) RETURNS TABLE(kind text, id uuid, role text)
     LANGUAGE sql STABLE
     SET jit TO 'off'
+    -- Preserve the source-first lookup chains when preparing this recursive statement.
+    SET join_collapse_limit TO '1'
+    SET from_collapse_limit TO '1'
     AS $$
-  WITH RECURSIVE open_nodes AS (
-    SELECT n.* FROM nodes n JOIN users u ON u.id = person AND u.status = 'active'
-     WHERE n.kind <> 'thread' AND n.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM nodes p WHERE p.id = ANY(n.path) AND p.deleted_at IS NOT NULL)
+  WITH RECURSIVE active_person AS MATERIALIZED (
+    SELECT u.is_system_admin FROM users u WHERE u.id=person AND u.status='active'
+  ), open_nodes AS NOT MATERIALIZED (
+    SELECT n.* FROM nodes n
+     WHERE (SELECT EXISTS (SELECT 1 FROM active_person))
+       AND n.kind <> 'thread' AND n.deleted_at IS NULL
+       -- Follow this path by primary key instead of scanning unrelated deleted nodes.
+       AND NOT EXISTS (SELECT 1 FROM unnest(n.path) ancestor(id)
+         WHERE (SELECT p.deleted_at FROM nodes p WHERE p.id=ancestor.id) IS NOT NULL)
        AND NOT EXISTS (
        SELECT 1 FROM org_suspensions s WHERE s.user_id = person AND s.org_id = ANY(n.path))
-  ), view_scopes AS (
-    SELECT n.id AS place, r.permission,
-           CASE WHEN r.object_kind = 'system' THEN 0 ELSE array_position(n.path, r.object_id) END AS rank,
-           r.inherit, r.locked AND r.page = 'defaults' AS locked
-      FROM open_nodes n JOIN permission_rows r ON r.permission IN (n.kind || '.view', n.kind || '.interact', n.kind || '.manage', n.kind || '.archive',
-        'access.manage','access.external','settings.manage','members.manage','audit.view','usage.view','usage.manage',
-        'chat.view','chat.interact','chat.manage','chat.export','doc.view','doc.edit','doc.manage','doc.create','doc.comment','doc.export')
-       AND r.profile = 'any' AND (
-         (r.object_kind = 'system' AND r.page = 'defaults')
-         OR (r.object_kind = 'node' AND r.object_id = ANY(n.path)
-             AND ((r.page = 'live' AND r.object_id = n.id) OR (r.page = 'defaults' AND r.object_id <> n.id))))
-     WHERE n.kind <> 'thread'
-  ), view_sources AS (
-    SELECT n.id AS place, COALESCE(n.parent_id, n.id) AS parent_place, n.kind AS place_kind, e.*,
+  ), view_sources AS NOT MATERIALIZED (
+    SELECT n.id AS place, n.parent_id, n.path, n.kind AS place_kind, e.*,
            CASE WHEN e.object_kind = 'system' THEN 0 ELSE array_position(n.path, e.object_id) END AS rank
-      FROM open_nodes n JOIN permission_entries e
-        ON e.permission IN (n.kind || '.view', n.kind || '.interact', n.kind || '.manage', n.kind || '.archive',
+      FROM open_nodes n CROSS JOIN LATERAL (
+        SELECT e.* FROM permission_entries e
+         WHERE e.object_kind='node' AND e.object_id=n.id AND e.page='live' AND e.removed_at IS NULL
+        UNION ALL
+        SELECT e.* FROM permission_entries e
+         WHERE e.object_kind='node' AND e.object_id=ANY(n.path) AND e.object_id<>n.id
+           AND e.page='defaults' AND e.removed_at IS NULL
+        UNION ALL
+        SELECT e.* FROM permission_entries e
+         WHERE e.object_kind='system' AND e.page='defaults' AND e.removed_at IS NULL
+        OFFSET 0
+      ) e
+     WHERE e.permission IN (n.kind || '.view', n.kind || '.interact', n.kind || '.manage', n.kind || '.archive',
           'access.manage','access.external','settings.manage','members.manage','audit.view','usage.view','usage.manage',
           'chat.view','chat.interact','chat.manage','chat.export','doc.view','doc.edit','doc.manage','doc.create','doc.comment','doc.export') AND e.profile = 'any'
-       AND ((e.object_kind = 'node' AND e.page = 'live' AND e.object_id = n.id)
-         OR (e.page = 'defaults' AND (e.object_kind = 'system'
-           OR (e.object_kind = 'node' AND e.object_id = ANY(n.path) AND e.object_id <> n.id))))
-     WHERE n.kind <> 'thread' AND e.removed_at IS NULL AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
+       AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
        AND e.holder_kind IN ('user','group','members','role','everyone')
        AND (e.source <> 'creation' OR (e.holder_kind = 'user' AND e.holder_id = person))
-  ), counted_views AS (
-    SELECT e.* FROM view_sources e
-     WHERE e.rank <= COALESCE((SELECT min(r.rank) FROM view_scopes r
-       WHERE r.place = e.place AND r.permission = e.permission AND r.locked), 2147483647)
-       AND NOT EXISTS (SELECT 1 FROM view_scopes r
-         WHERE r.place = e.place AND r.permission = e.permission AND NOT r.inherit AND r.rank > e.rank
-           AND r.rank <= COALESCE((SELECT min(l.rank) FROM view_scopes l
-             WHERE l.place = e.place AND l.permission = e.permission AND l.locked), 2147483647))
-  ), edges(source_kind, source_id, source_role, target_kind, target_id, target_role) AS MATERIALIZED (
+  ), counted_views AS NOT MATERIALIZED (
+    SELECT e.* FROM view_sources e CROSS JOIN LATERAL (
+      WITH relevant AS MATERIALIZED (
+        SELECT CASE WHEN r.object_kind='system' THEN 0 ELSE array_position(e.path,r.object_id) END AS rank,
+               NOT r.inherit AS blocks, r.locked AND r.page='defaults' AS locked
+          FROM permission_rows r WHERE r.profile='any' AND r.permission=e.permission
+           AND ((r.object_kind='system' AND r.page='defaults') OR
+             (r.object_kind='node' AND r.object_id=ANY(e.path)
+              AND ((r.page='live' AND r.object_id=e.place) OR (r.page='defaults' AND r.object_id<>e.place))))
+      ), ceiling AS (SELECT COALESCE(min(rank) FILTER (WHERE locked),2147483647) AS rank FROM relevant)
+      SELECT c.rank AS ceiling,
+             (SELECT max(rank) FROM relevant WHERE blocks AND rank<=c.rank) AS barrier FROM ceiling c
+    ) cut
+    WHERE e.rank<=cut.ceiling AND e.rank>=COALESCE(cut.barrier,e.rank)
+  ), entry_view_sources AS NOT MATERIALIZED (
+    SELECT n.id AS place, n.parent_id, n.path, n.kind AS place_kind, e.*,
+           CASE WHEN e.object_kind = 'system' THEN 0 ELSE array_position(n.path, e.object_id) END AS rank
+      FROM permission_entries e CROSS JOIN LATERAL (
+        SELECT n.* FROM open_nodes n
+         WHERE e.object_kind='node' AND e.page='live' AND n.id=e.object_id
+        UNION ALL
+        SELECT n.* FROM open_nodes n
+         WHERE e.object_kind='node' AND e.page='defaults' AND n.path @> ARRAY[e.object_id] AND n.id<>e.object_id
+        UNION ALL
+        SELECT n.* FROM open_nodes n
+         WHERE e.object_kind='system' AND e.page='defaults'
+         OFFSET 0
+      ) n
+     WHERE e.profile='any' AND e.removed_at IS NULL AND (e.expires_at IS NULL OR e.expires_at>sampled_at)
+       AND e.source<>'creation' AND e.holder_kind IN ('user','group','members','role','everyone')
+       AND (e.holder_kind='everyone' OR e.holder_id IS NOT NULL)
+       AND e.object_kind IN ('system','node') AND e.page IN ('live','defaults')
+       AND e.permission IN (n.kind || '.view', n.kind || '.interact', n.kind || '.manage', n.kind || '.archive',
+          'access.manage','access.external','settings.manage','members.manage','audit.view','usage.view','usage.manage',
+          'chat.view','chat.interact','chat.manage','chat.export','doc.view','doc.edit','doc.manage','doc.create','doc.comment','doc.export')
+       -- Owners use their own membership-bound expansion below, never this viewing relation.
+       AND e.permission<>'access.own'
+  ), counted_entry_views AS NOT MATERIALIZED (
+    SELECT e.* FROM entry_view_sources e CROSS JOIN LATERAL (
+      WITH relevant AS MATERIALIZED (
+        SELECT CASE WHEN r.object_kind='system' THEN 0 ELSE array_position(e.path,r.object_id) END AS rank,
+               NOT r.inherit AS blocks, r.locked AND r.page='defaults' AS locked
+          FROM permission_rows r WHERE r.profile='any' AND r.permission=e.permission
+           AND ((r.object_kind='system' AND r.page='defaults') OR
+             (r.object_kind='node' AND r.object_id=ANY(e.path)
+              AND ((r.page='live' AND r.object_id=e.place) OR (r.page='defaults' AND r.object_id<>e.place))))
+      ), ceiling AS (SELECT COALESCE(min(rank) FILTER (WHERE locked),2147483647) AS rank FROM relevant)
+      SELECT c.rank AS ceiling,
+             (SELECT max(rank) FROM relevant WHERE blocks AND rank<=c.rank) AS barrier FROM ceiling c
+    ) cut
+    WHERE e.rank<=cut.ceiling AND e.rank>=COALESCE(cut.barrier,e.rank)
+  ), edges(source_kind, source_id, source_role, target_kind, target_id, target_role) AS NOT MATERIALIZED (
     SELECT 'user', m.user_id, ''::text, 'members', o.id, ''::text
       FROM org_members m JOIN open_nodes d ON d.id = m.domain_id
       JOIN open_nodes o ON o.kind = 'org' AND o.id = ANY(d.path) WHERE m.user_id = person
@@ -318,48 +365,72 @@ CREATE FUNCTION public.access_holders(person uuid, sampled_at timestamp with tim
       FROM open_nodes n WHERE n.kind <> 'thread' AND n.parent_id IS NOT NULL
     UNION ALL
     -- Page-only viewing is a separate identity: it never propagates a role to children.
-    SELECT CASE WHEN e.source = 'creation' THEN 'reachable'
-                WHEN e.holder_kind = 'role' AND e.holder_id IS NULL THEN 'page_role'
-                WHEN e.holder_kind = 'members' THEN 'members' WHEN e.holder_kind = 'everyone' THEN 'user'
-                ELSE e.holder_kind END,
-           CASE WHEN e.source = 'creation' THEN e.parent_place
-                WHEN e.holder_kind = 'everyone' THEN person ELSE COALESCE(e.holder_id, e.place) END,
-           COALESCE(e.holder_role, ''),
+    -- Separate source identities expose their actual lookup keys to the recursive reader.
+    SELECT 'reachable', e.parent_id, COALESCE(e.holder_role, ''),
            CASE WHEN e.permission IN (e.place_kind || '.view', e.place_kind || '.interact', e.place_kind || '.manage')
                 THEN 'visible' ELSE 'reachable' END, e.place, 'viewer'
-      FROM counted_views e
+      FROM counted_views e WHERE e.source='creation' AND e.parent_id IS NOT NULL
+    UNION ALL
+    SELECT 'reachable', e.place, COALESCE(e.holder_role, ''),
+           CASE WHEN e.permission IN (e.place_kind || '.view', e.place_kind || '.interact', e.place_kind || '.manage')
+                THEN 'visible' ELSE 'reachable' END, e.place, 'viewer'
+      FROM counted_views e WHERE e.source='creation' AND e.parent_id IS NULL
+    UNION ALL
+    SELECT 'page_role', e.place, COALESCE(e.holder_role, ''),
+           CASE WHEN e.permission IN (e.place_kind || '.view', e.place_kind || '.interact', e.place_kind || '.manage')
+                THEN 'visible' ELSE 'reachable' END, e.place, 'viewer'
+      FROM counted_views e WHERE e.source<>'creation' AND e.holder_kind='role' AND e.holder_id IS NULL
+    UNION ALL
+    SELECT 'user', person, COALESCE(e.holder_role, ''),
+           CASE WHEN e.permission IN (e.place_kind || '.view', e.place_kind || '.interact', e.place_kind || '.manage')
+                THEN 'visible' ELSE 'reachable' END, e.place, 'viewer'
+      FROM counted_entry_views e WHERE e.holder_kind='everyone'
+    UNION ALL
+    SELECT e.holder_kind, e.holder_id, COALESCE(e.holder_role, ''),
+           CASE WHEN e.permission IN (e.place_kind || '.view', e.place_kind || '.interact', e.place_kind || '.manage')
+                THEN 'visible' ELSE 'reachable' END, e.place, 'viewer'
+      FROM counted_entry_views e WHERE e.holder_kind<>'everyone' AND e.holder_id IS NOT NULL
     UNION ALL
     SELECT 'visible', n.id, '', 'reachable', n.id, '' FROM open_nodes n WHERE n.kind <> 'thread'
     UNION ALL
     SELECT 'role', n.id, 'admin', 'reachable', n.id, '' FROM open_nodes n WHERE n.kind <> 'thread'
     UNION ALL
     SELECT e.holder_kind, e.holder_id, '', 'role', n.id, 'admin'
-      FROM permission_entries e JOIN open_nodes n ON n.id = e.object_id AND n.kind <> 'thread'
+      FROM permission_entries e CROSS JOIN LATERAL (
+        SELECT n.* FROM open_nodes n WHERE n.id=e.object_id OFFSET 0
+      ) n
       JOIN org_members m ON m.org_id = n.org_id AND m.user_id = person
      WHERE e.object_kind = 'node' AND e.page = 'live' AND e.permission = 'access.own'
        AND e.holder_kind IN ('user','group') AND e.removed_at IS NULL
        AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
     UNION ALL
     SELECT e.holder_kind, e.holder_id, '', 'visible', n.id, 'viewer'
-      FROM permission_entries e JOIN open_nodes n ON n.id = e.object_id AND n.kind <> 'thread'
+      FROM permission_entries e CROSS JOIN LATERAL (
+        SELECT n.* FROM open_nodes n WHERE n.id=e.object_id OFFSET 0
+      ) n
       JOIN org_members m ON m.org_id = n.org_id AND m.user_id = person
      WHERE e.object_kind = 'node' AND e.page = 'live' AND e.permission = 'access.own'
        AND e.holder_kind IN ('user','group') AND e.removed_at IS NULL
        AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
     UNION ALL
     SELECT 'user', person, '', 'role', n.id, 'admin'
-      FROM open_nodes n JOIN users u ON u.id = person
-     WHERE system_admin AND u.is_system_admin AND n.kind <> 'thread'
+      FROM open_nodes n
+     WHERE system_admin AND (SELECT p.is_system_admin FROM active_person p) AND n.kind <> 'thread'
   ), held(kind, id, role) AS (
     SELECT 'user'::text, person, ''::text
     UNION
-    SELECT e.target_kind, e.target_id, COALESCE(e.target_role, h.role) FROM held h JOIN edges e
-      ON (e.source_kind = h.kind OR (e.source_kind = 'role' AND h.kind = 'visible' AND e.source_role = 'viewer')
+    SELECT e.target_kind, e.target_id, COALESCE(e.target_role, h.role) FROM held h
+    CROSS JOIN LATERAL (
+      SELECT e.* FROM edges e
+      WHERE (e.source_kind = h.kind OR (e.source_kind = 'role' AND h.kind = 'visible' AND e.source_role = 'viewer')
           OR (e.source_kind = 'page_role' AND h.kind = 'role'))
      AND e.source_id = h.id
      AND NOT (e.source_kind = 'role' AND e.source_role = 'viewer' AND h.kind = 'role')
      AND (e.source_role = '' OR array_position(ARRAY['viewer','interactor','developer','admin'], h.role)
                               >= array_position(ARRAY['viewer','interactor','developer','admin'], e.source_role))
+      -- Keep expansion on the identities already reached instead of building unrelated edges.
+      OFFSET 0
+    ) e
   )
   SELECT h.kind, h.id,
          CASE WHEN h.kind = 'role' THEN (ARRAY['viewer','interactor','developer','admin'])[
@@ -817,6 +888,8 @@ DECLARE
   n       bigint;
   expect  text := COALESCE(current_setting('orch.cache_expect', true), '');
   root    record;
+  epoch_place uuid;
+  epoch_value bigint;
 BEGIN
   -- 1. Authorization: every epoch decided under and every one moved, locked in org order, compared, then moved.
   places := ARRAY(SELECT DISTINCT p FROM (SELECT k::uuid FROM jsonb_object_keys(seen) k UNION ALL SELECT unnest(advance)) x(p) ORDER BY 1);
@@ -824,10 +897,18 @@ BEGIN
   -- the first competing authority change cannot insert past an absent-row lock.
   INSERT INTO authz_epochs (org_id) SELECT unnest(places) ORDER BY 1 ON CONFLICT (org_id) DO NOTHING;
   IF cardinality(advance) > 0 THEN
-    -- Consume the complete locked set before comparing it. A mismatch filter or
-    -- LIMIT in the locking query can skip equal rows and leave them unfenced.
-    SELECT COALESCE(jsonb_object_agg(e.org_id::text,e.epoch),'{}') INTO locked_epochs
-      FROM (SELECT org_id, epoch FROM authz_epochs WHERE org_id = ANY(places) ORDER BY org_id FOR NO KEY UPDATE) e;
+    -- Lock every dependency in one org order. Only advanced epochs need a write lock;
+    -- unchanged dependencies, including the system epoch of an org-only change, stay shared.
+    FOR epoch_place IN SELECT unnest(places) ORDER BY 1 LOOP
+      IF epoch_place=ANY(advance) THEN
+        SELECT e.epoch INTO epoch_value FROM authz_epochs e
+         WHERE e.org_id=epoch_place FOR NO KEY UPDATE;
+      ELSE
+        SELECT e.epoch INTO epoch_value FROM authz_epochs e
+         WHERE e.org_id=epoch_place FOR SHARE;
+      END IF;
+      locked_epochs:=locked_epochs || jsonb_build_object(epoch_place::text,epoch_value);
+    END LOOP;
   ELSIF cardinality(places) > 0 THEN
     SELECT COALESCE(jsonb_object_agg(e.org_id::text,e.epoch),'{}') INTO locked_epochs
       FROM (SELECT org_id, epoch FROM authz_epochs WHERE org_id = ANY(places) ORDER BY org_id FOR SHARE) e;
@@ -841,21 +922,7 @@ BEGIN
   IF cardinality(advance) > 0 THEN
     UPDATE authz_epochs SET epoch = epoch + 1 WHERE org_id = ANY(advance);
   END IF;
-  -- 2. The cache epoch: moved once and announced with its new value, or checked for a background decision.
-  IF COALESCE(current_setting('orch.authz_bump', true), '') <> '' THEN
-    INSERT INTO authz_state (id, epoch) VALUES (true, 1)
-      ON CONFLICT (id) DO UPDATE SET epoch = authz_state.epoch + 1 RETURNING epoch INTO n;
-    IF expect <> '' AND n - 1 <> expect::bigint THEN
-      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
-    END IF;
-    PERFORM pg_notify('orch_authz', n::text);
-  ELSIF expect <> '' THEN
-    SELECT COALESCE((SELECT s.epoch FROM authz_state s WHERE s.id FOR SHARE), 0) INTO n;
-    IF n <> expect::bigint THEN
-      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
-    END IF;
-  END IF;
-  -- 3. Trees: each root org's next number, for the nodes stamped in it (already locked by this transaction).
+  -- 2. Trees: each root org's next number, for the nodes stamped in it (already locked by this transaction).
   FOR root IN SELECT key::uuid AS org, value AS stamps FROM jsonb_each(orch_setting_json('orch.tree_stamps', '{}')) ORDER BY 1 LOOP
     UPDATE orgs SET tree_seq = tree_seq + 1,
                     tree_changed_at = GREATEST(tree_changed_at, COALESCE((root.stamps ->> 'at')::timestamptz, now()))
@@ -870,7 +937,7 @@ BEGIN
       PERFORM pg_notify('orch_tree', root.org::text || ':' || n::text);
     END IF;
   END LOOP;
-  -- 4. Number each changed row once, in its first-write order within this commit.
+  -- 3. Number each changed row once, in its first-write order within this commit.
   -- Replay of an already committed immutable event keeps its original cursor.
   WITH touched AS MATERIALIZED (
     SELECT table_name, id, min(ordinal) AS first_ordinal
@@ -900,6 +967,21 @@ BEGIN
    WHERE numbered.table_name='usage_running' AND target.id=numbered.id;
   DELETE FROM usage_commit_rows WHERE xact=NEW.xact;
   DELETE FROM commit_work WHERE xact = NEW.xact;
+  -- 4. The cache epoch is last: no tree counter or local journal can make its owner wait.
+  -- Move it once and announce the actual value, or check the background decision's version.
+  IF COALESCE(current_setting('orch.authz_bump', true), '') <> '' THEN
+    INSERT INTO authz_state (id, epoch) VALUES (true, 1)
+      ON CONFLICT (id) DO UPDATE SET epoch = authz_state.epoch + 1 RETURNING epoch INTO n;
+    IF expect <> '' AND n - 1 <> expect::bigint THEN
+      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
+    END IF;
+    PERFORM pg_notify('orch_authz', n::text);
+  ELSIF expect <> '' THEN
+    SELECT COALESCE((SELECT s.epoch FROM authz_state s WHERE s.id FOR SHARE), 0) INTO n;
+    IF n <> expect::bigint THEN
+      RAISE EXCEPTION 'who may do this changed while it was being done; try again' USING ERRCODE = '40001', CONSTRAINT = 'authz_epoch_moved';
+    END IF;
+  END IF;
   RETURN NULL;
 END
 $$;
@@ -934,6 +1016,41 @@ BEGIN
       WHERE source_kind='comment' AND part_id=NEW.id AND source_moment IS DISTINCT FROM NEW.created_at;
   END IF;
   RETURN NEW;
+END
+$$;
+
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
 END
 $$;
 
@@ -1098,7 +1215,7 @@ $$;
 CREATE FUNCTION public.orch_participation_objects_changed() RETURNS trigger
     LANGUAGE plpgsql
     AS $_$
-DECLARE kind text; home_column text; live_sql text; joins text:=''; keys_sql text;
+DECLARE kind text; home_column text; live_sql text; joins text:=''; keys_sql text; changed boolean;
 BEGIN
  keys_sql:=CASE TG_OP WHEN 'INSERT' THEN 'SELECT id FROM participation_new_objects'
   WHEN 'DELETE' THEN 'SELECT id FROM participation_old_objects'
@@ -1116,6 +1233,19 @@ BEGIN
   ('mounts','mount','home_id','o.deleted_at IS NULL'),
   ('skills','skill','home_id','o.deleted_at IS NULL')
  ) x(table_name,kind,home_column,live_sql) WHERE x.table_name=TG_TABLE_NAME;
+ IF TG_OP='UPDATE' THEN
+  -- Only placement and liveness feed these projections. Content, clocks and factual reports
+  -- must not lock assignment rows or re-plan their maintenance for every streaming update.
+  keys_sql:=format('SELECT COALESCE(n.id,o.id) id FROM participation_new_objects n
+   FULL JOIN participation_old_objects o USING(id) WHERE n.id IS NULL OR o.id IS NULL OR %s',
+   CASE kind
+    WHEN 'node' THEN '(n.path,n.org_id,n.deleted_at) IS DISTINCT FROM (o.path,o.org_id,o.deleted_at)'
+    WHEN 'host' THEN '(n.home_id,n.org_id,n.machine_id) IS DISTINCT FROM (o.home_id,o.org_id,o.machine_id)'
+    ELSE format('(n.%1$I,n.org_id,n.deleted_at) IS DISTINCT FROM (o.%1$I,o.org_id,o.deleted_at)',home_column)
+   END);
+  EXECUTE 'SELECT EXISTS('||keys_sql||')' INTO changed;
+  IF NOT changed THEN RETURN NULL; END IF;
+ END IF;
  IF kind='host' THEN joins:=' LEFT JOIN machines m ON m.id=o.machine_id '; END IF;
  EXECUTE format('WITH changed AS (%s) SELECT f.object_id FROM participation_object_facts f
   WHERE f.object_kind=%L AND f.object_id IN(SELECT id FROM changed) ORDER BY f.object_id FOR UPDATE OF f',keys_sql,kind);
@@ -2537,6 +2667,50 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+
+CREATE FUNCTION public.orch_provider_source_choices(sources jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$
+WITH elements AS (
+    SELECT name,COALESCE(NULLIF(sources->name,'null'::jsonb),'{}'::jsonb) choice
+    FROM unnest(ARRAY['facts','models','presenter']) name
+)
+SELECT jsonb_object_agg(name,jsonb_build_object(
+    'by',COALESCE(choice->>'by','default'),
+    -- A default's name is learned from its credential/endpoints, never selected by the person.
+    'name',CASE WHEN choice->>'by' IN ('builtin','program') THEN choice->'name' END,
+    'address',CASE WHEN choice->>'by'='address' THEN choice->'address' END,
+    'config',COALESCE(NULLIF(choice->'config','null'::jsonb),'{}'::jsonb),
+    'secrets',COALESCE(NULLIF(choice->'secrets','null'::jsonb),'[]'::jsonb)))
+FROM elements
+$$;
+
+CREATE FUNCTION public.orch_provider_revision() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    -- The form's revision follows editable configuration. Runtime placement, custody, status,
+    -- sign-in reports and learned source metadata advance only the observation counter.
+    IF (NEW.id,NEW.name,NEW.owner_id,NEW.org_id,NEW.home_id,NEW.home_overridden_at,
+        NEW.kind,NEW.harness_kind,NEW.agent_id,NEW.upstreams,NEW.model_group_options,NEW.service_offerings,
+        NEW.config,NEW.protocols,NEW.key_machine_id,NEW.arrangements,NEW.runtime_config,NEW.credential_home,
+        NEW.facts_overrides,NEW.deleted_at,
+        NEW.status='disabled',CASE WHEN NEW.status='disabled' THEN NEW.status_detail END,
+        orch_provider_source_choices(NEW.sources))
+       IS DISTINCT FROM
+       (OLD.id,OLD.name,OLD.owner_id,OLD.org_id,OLD.home_id,OLD.home_overridden_at,
+        OLD.kind,OLD.harness_kind,OLD.agent_id,OLD.upstreams,OLD.model_group_options,OLD.service_offerings,
+        OLD.config,OLD.protocols,OLD.key_machine_id,OLD.arrangements,OLD.runtime_config,OLD.credential_home,
+        OLD.facts_overrides,OLD.deleted_at,
+        OLD.status='disabled',CASE WHEN OLD.status='disabled' THEN OLD.status_detail END,
+        orch_provider_source_choices(OLD.sources)) THEN
+        NEW.revision := OLD.revision+1;
+        NEW.observation_revision := OLD.observation_revision;
+    ELSE
+        NEW.revision := OLD.revision;
+        NEW.observation_revision := OLD.observation_revision + CASE WHEN NEW IS DISTINCT FROM OLD THEN 1 ELSE 0 END;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 CREATE FUNCTION public.orch_group_holder_revision() RETURNS trigger
     LANGUAGE plpgsql

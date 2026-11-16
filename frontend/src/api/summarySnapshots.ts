@@ -12,7 +12,7 @@ interface Waiter {
 }
 interface Group { waiters: Waiter[]; controller: AbortController }
 interface Pending { reader: string; client: QueryClient; waiters: Waiter[] }
-const pending = new WeakMap<QueryClient, Map<string, Pending>>();
+const pending = new WeakMap<ReturnType<QueryClient['getQueryCache']>, Map<string, Pending>>();
 const targetKey = (target: SummaryTarget) => `${target.kind}:${target.id}`;
 const rangeKey = (range: SummaryChatRange | undefined) => JSON.stringify([range?.after ?? null, range?.through ?? null]);
 const retired = () => new DOMException('The summary reader changed', 'AbortError');
@@ -72,7 +72,7 @@ async function flush(queue: Pending): Promise<void> {
     && typeof query.queryKey[1] === 'string' && nodes.has(query.queryKey[1]) && query.state.fetchStatus === 'fetching');
   await Promise.allSettled(openings.map((query) => query.promise).filter((promise) => promise !== undefined));
   if (openings.length > 0) await nextPaint();
-  pending.get(queue.client)?.delete(queue.reader);
+  pending.get(queue.client.getQueryCache())?.delete(queue.reader);
   const groups: Waiter[][] = [];
   for (const waiter of queue.waiters.filter((waiter) => !waiter.done)) {
     if (queue.reader !== summaryReaderKey()) { finish(waiter, undefined, retired()); continue; }
@@ -97,8 +97,8 @@ export function readSummarySnapshot(client: QueryClient, target: SummaryTarget, 
     signal.addEventListener('abort', waiter.abort, { once: true });
     // Polling follows the server's clock directly; only cold openings need a mounting cohort.
     if (!cold) { void readGroup({ reader, client, waiters: [waiter] }, [waiter]); return; }
-    let queues = pending.get(client);
-    if (queues === undefined) { queues = new Map(); pending.set(client, queues); }
+    let queues = pending.get(client.getQueryCache());
+    if (queues === undefined) { queues = new Map(); pending.set(client.getQueryCache(), queues); }
     let queue = queues.get(reader);
     if (queue === undefined) {
       queue = { reader, client, waiters: [] }; queues.set(reader, queue);

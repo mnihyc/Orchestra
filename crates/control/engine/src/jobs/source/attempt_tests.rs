@@ -135,8 +135,6 @@ impl Fixture {
                     },
                 },
                 source: frozen,
-                record_days: 7,
-                max_bytes: 1024,
             }
         } else {
             Action::Prepare {
