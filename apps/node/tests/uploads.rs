@@ -61,6 +61,7 @@ async fn uploaded(app: &TestApp, token: &str, bytes: &[u8]) -> Hash {
         .call(UploadSessionCreate, &[])
         .token(token)
         .body(&UploadSessionCreateBody {
+            to: None,
             name: "authored.txt".into(),
             size: bytes.len() as i64,
             media_type: Some("text/plain".into()),
@@ -85,6 +86,8 @@ async fn uploaded(app: &TestApp, token: &str, bytes: &[u8]) -> Hash {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained private upload has completed verification")
         .blob
 }
 
@@ -170,6 +173,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
                 data_sources: None,
                 environment_id: unit.environment_id,
                 workspace_root: None,
+                workspace: Default::default(),
                 ignore: Vec::new(),
                 index: IndexMode::Full,
                 mounts: Some(Vec::new()),
@@ -221,6 +225,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         .token(&token)
         .query(&ThroughThreadQuery::default())
         .body(&EnvironmentUploadWriteBody {
+            relay: None,
             path: "authored.txt".into(),
             blob,
             expected_hash: Some(Hash::of(original.as_bytes()).to_string()),

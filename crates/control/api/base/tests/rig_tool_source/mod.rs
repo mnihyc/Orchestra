@@ -60,6 +60,7 @@ pub async fn active(scene: &rig::Scene, thread: Id) -> Proof<Id> {
             }
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".into(),
                     descriptor: typed.clone(),

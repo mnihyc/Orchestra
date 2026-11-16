@@ -43,6 +43,8 @@ pub use resolver::{
     resolve_all, snapshots_at_providers,
 };
 mod provider_runtime;
+pub mod provider_translation;
+pub mod provider_upstream;
 pub use provider_runtime::{
     ProviderSignIn, credential_home, credential_home_choice, harness_home_owned,
     machine_home_owned, profile_home, profile_home_choice, profile_home_in, provider_home,

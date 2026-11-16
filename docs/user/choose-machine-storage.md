@@ -30,14 +30,14 @@ that data: use a reviewed move or copy operation for an existing environment.
 
 ## Configure named storages
 
-A node operator declares names and paths in `[[node.storage]]` in `orch.toml`.
-A directory-running connector uses `[[storage]]` in its `config.toml`, with the
-same `name`, `path` and `default` members. Paths must be existing directories
+Nodes and directory-running connectors declare named paths in `[[storages]]` in
+their data-directory `config.toml`. A node operator can use `orch-node policy set storages`
+to write that same canonical policy. Each entry has `name`, `path` and `default` members. Paths must be existing directories
 under the machine's allowed `environment.roots`; the machine checks that policy
 before exposing or creating data. Exactly one declared storage is the default.
 
 ```toml
-[[storage]]
+[[storages]]
 name = "fast"
 path = "/srv/work"
 default = true

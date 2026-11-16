@@ -115,7 +115,7 @@ pub async fn read_candidates(
     now: DateTime<Utc>,
 ) -> Result<Vec<super::settings::ProviderRuntimeRow>, DbError> {
     let sql = format!("SELECT p.id,p.home_id,p.runtime_config,p.revision FROM providers p
-        LEFT JOIN machines m ON m.id = p.key_machine_id WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
+        LEFT JOIN machines m ON m.id = COALESCE(p.key_machine_id,p.machine_id) WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
         AND (p.facts_requested_at IS NULL OR p.facts_requested_at <= $1 - interval '1 minute' OR {RESET_READ_DUE})
         AND {SOURCE_INTERVAL_DUE}");
     // A valid cadence is at least one minute; reset reads keep their independent due time.
@@ -124,6 +124,80 @@ pub async fn read_candidates(
         .bind(INTENTIONAL_STOP_DETAILS.as_slice())
         .fetch_all(conn)
         .await?)
+}
+
+/// Read-only evidence for the same ordinary Refresh claim, including a vendor reset that bypasses coalescing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshEligibility {
+    /// Whether an ordinary claim can read now.
+    pub eligible: bool,
+    /// Next known eligibility, absent before the first attempt or outside representable time.
+    pub next_at: Option<DateTime<Utc>>,
+    /// The source's declared minimum controls the reuse window.
+    pub source_minimum: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct RefreshAttempt {
+    id: Id,
+    attempt: Option<DateTime<Utc>>,
+    source: String,
+    reset_due: bool,
+    eligible: bool,
+}
+
+/// Projects the exact durable claim conditions in one query; this does not claim or refresh a source.
+pub async fn refresh_eligibility(
+    conn: &mut Conn,
+    providers: &[Id],
+    now: DateTime<Utc>,
+    interval: Duration,
+) -> Result<std::collections::HashMap<Id, RefreshEligibility>, DbError> {
+    let sql = format!("SELECT p.id,p.facts_requested_at AS attempt,
+        CASE WHEN p.sources #>> '{{facts,descriptor,facts,min_interval_secs}}' ~ '^[0-9]+$'
+        THEN GREATEST(60,(p.sources #>> '{{facts,descriptor,facts,min_interval_secs}}')::numeric)::text ELSE '0' END AS source,
+        {RESET_READ_DUE} AS reset_due,
+        (p.facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1-p.facts_requested_at))*1000 >= $3::bigint OR {RESET_READ_DUE}) AND {SOURCE_INTERVAL_DUE} AS eligible
+        FROM providers p WHERE p.id=ANY($2) AND p.deleted_at IS NULL");
+    let rows: Vec<RefreshAttempt> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(now)
+        .bind(providers)
+        .bind(interval.num_milliseconds())
+        .fetch_all(conn)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |RefreshAttempt {
+                 id,
+                 attempt,
+                 source,
+                 reset_due,
+                 eligible,
+             }| {
+                let source = source
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(Duration::try_seconds)
+                    .unwrap_or(Duration::MAX);
+                let deployment = if reset_due {
+                    Duration::zero()
+                } else {
+                    interval
+                };
+                let source_minimum = source >= deployment && source > Duration::zero();
+                let next_at = attempt.and_then(|at| at.checked_add_signed(source.max(deployment)));
+                (
+                    id,
+                    RefreshEligibility {
+                        eligible,
+                        next_at,
+                        source_minimum,
+                    },
+                )
+            },
+        )
+        .collect())
 }
 
 /// Admits one ordinary reader per interval across processes, including attempts that tell nothing.
@@ -138,17 +212,18 @@ pub async fn claim_read(
     claim_read_inner(conn, provider, force, now, interval, false).await
 }
 
-/// A scheduled claim serializes with stop/start admission and rechecks its durable stop reason.
+/// A background claim serializes with stop/start admission; force bypasses reuse, never a deliberate stop.
 pub async fn claim_scheduled_read(
     conn: &mut Conn,
     provider: Id,
+    force: bool,
     now: DateTime<Utc>,
     interval: Duration,
 ) -> Result<bool, DbError> {
     if !lock_provider(conn, provider).await? {
         return Ok(false);
     }
-    claim_read_inner(conn, provider, false, now, interval, true).await
+    claim_read_inner(conn, provider, force, now, interval, true).await
 }
 
 async fn claim_read_inner(
@@ -162,7 +237,7 @@ async fn claim_read_inner(
     // This query's first argument is the observation clock, shared with the due-reader condition.
     let sql = format!(
         "UPDATE providers p SET facts_requested_at = $1 WHERE id = $3 AND deleted_at IS NULL
-        AND ($4 OR facts_requested_at IS NULL OR facts_requested_at <= $5 OR {RESET_READ_DUE})
+        AND ($4 OR facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1-facts_requested_at))*1000 >= $5::bigint OR {RESET_READ_DUE})
         AND (NOT $6 OR {SCHEDULED_READ_ALLOWED}) AND {SOURCE_INTERVAL_DUE}"
     );
     // Only this module's constants are put into the statement.
@@ -171,7 +246,7 @@ async fn claim_read_inner(
         .bind(INTENTIONAL_STOP_DETAILS.as_slice())
         .bind(provider)
         .bind(force)
-        .bind(now - interval)
+        .bind(interval.num_milliseconds())
         .bind(scheduled)
         .execute(conn)
         .await?
@@ -222,7 +297,7 @@ pub async fn due_reads(
     let idle: Vec<i64> = schedules.iter().map(|schedule| schedule.idle).collect();
     let refused: Vec<i64> = schedules.iter().map(|schedule| schedule.refused).collect();
     let sql = format!("SELECT p.id FROM providers p
-         LEFT JOIN machines m ON m.id = p.key_machine_id
+         LEFT JOIN machines m ON m.id = COALESCE(p.key_machine_id,p.machine_id)
          JOIN UNNEST($3::uuid[],$4::bigint[],$5::bigint[],$6::bigint[],$7::bigint[])
            AS cadence(provider_id,recent,active,idle,refused) ON cadence.provider_id = p.id
          WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
@@ -432,17 +507,18 @@ pub async fn reset_request(conn: &mut Conn, command: Id) -> Result<Option<Json>,
 }
 
 /// The current provider binding and credential generation, without exposing any credential material.
+/// Observation writes advance both revision counters, so their difference changes only on other edits.
 /// The sealed-value digest also distinguishes two rotations made at the same stepped clock time.
 pub async fn credential_epoch(
     conn: &mut Conn,
     provider: Id,
-    revision: Option<i64>,
+    configuration_revision: Option<i64>,
 ) -> Result<Option<Json>, DbError> {
-    Ok(sqlx::query_scalar("SELECT jsonb_build_array(p.revision,p.machine_id,p.key_machine_id,p.agent_id,p.login_state,
+    Ok(sqlx::query_scalar("SELECT jsonb_build_array(p.revision-p.observation_revision,p.machine_id,p.key_machine_id,p.agent_id,p.login_state,
         COALESCE((SELECT jsonb_agg(jsonb_build_array(s.id,s.name,s.rotated_at,s.created_at,md5(s.sealed)) ORDER BY s.name)
           FROM secrets s WHERE s.owner_kind = 'provider' AND s.owner_id = p.id),'[]'::jsonb))
-        FROM providers p WHERE p.id = $1 AND p.deleted_at IS NULL AND ($2::bigint IS NULL OR p.revision = $2)")
-        .bind(provider).bind(revision).fetch_optional(conn).await?)
+        FROM providers p WHERE p.id = $1 AND p.deleted_at IS NULL AND ($2::bigint IS NULL OR p.revision-p.observation_revision = $2)")
+        .bind(provider).bind(configuration_revision).fetch_optional(conn).await?)
 }
 
 /// Whether a manager's one reserved input or turn is still pending.

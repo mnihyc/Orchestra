@@ -24,7 +24,7 @@ describe('an import upload', () => {
     const begin = vi.fn((source: File) => Promise.resolve({ upload_id: source.name, chunk_bytes: 1024, expires_at: '2999-01-01T00:00:00Z' }));
     const put = vi.fn((id: string, offset: number, bytes: Blob) => {
       if (id === 'two.md' && failure) { failure = false; return Promise.reject(new Error('Connection lost')); }
-      return Promise.resolve(offset + bytes.size);
+      return Promise.resolve({ received: offset + bytes.size, expires_at: '2999-01-01T00:00:00Z' });
     });
     const complete = vi.fn((id: string) => Promise.resolve({ blob: id, name: id, media_type: 'text/plain', size: id === first.name ? first.size : second.size }));
     const transport: UploadTransport = { begin, put, complete };
@@ -48,7 +48,7 @@ describe('an import upload', () => {
     const complete = vi.fn(() => Promise.resolve({ blob: 'blob', name: 'one.md', media_type: 'text/plain', size: 5 }));
     const transport: UploadTransport = {
       begin: (source) => Promise.resolve({ upload_id: source.name, chunk_bytes: 1024, expires_at: '2999-01-01T00:00:00Z' }),
-      put: (id, offset, bytes, signal) => id === 'one.md' ? Promise.resolve(offset + bytes.size) : new Promise<number>((_resolve, reject) => {
+      put: (id, offset, bytes, signal) => id === 'one.md' ? Promise.resolve({ received: offset + bytes.size, expires_at: '2999-01-01T00:00:00Z' }) : new Promise<{ received: number; expires_at: string }>((_resolve, reject) => {
           signal.addEventListener('abort', () => reject(signal.reason instanceof Error ? signal.reason : new DOMException('Upload cancelled', 'AbortError')), { once: true });
           begun();
         }),

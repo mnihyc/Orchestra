@@ -1207,3 +1207,49 @@ async fn the_statement_belongs_to_the_use_it_came_with() {
     meanwhile(Duration::from_millis(400)).await;
     assert_eq!(counted_of(&world, start.turn_id).await, (900, 90, 2));
 }
+
+#[tokio::test]
+async fn a_public_model_request_is_counted_once_for_its_actual_caller_in_the_relay_category() {
+    let world = World::new().await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let org: Id = sqlx::query_scalar("SELECT org_id FROM providers WHERE id=$1")
+        .bind(world.provider)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let id = new_id();
+    let own = OwnUse {
+        purpose: OwnPurpose::Relay,
+        timing: None,
+        id,
+        at: world.clock.now(),
+        topic: org,
+        thread: None,
+        provider: world.provider,
+        entry: None,
+        person: Some(world.ada),
+        model: MODEL,
+        protocol: Some("openai-responses"),
+        tokens: Tokens {
+            input: 100,
+            output: 20,
+            total: 120,
+            ..Default::default()
+        },
+        request_ref: Some("public-model-request"),
+    };
+    let engine = world.engine();
+    assert!(engine.count_own_use(&mut conn, &own).await.unwrap());
+    assert!(!engine.count_own_use(&mut conn, &own).await.unwrap());
+    let row: (String, String, Option<Id>, Option<Id>, i64) = sqlx::query_as(
+        "SELECT origin,purpose,user_id,thread_id,total_tokens FROM usage_events WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        ("orch".into(), "relay".into(), Some(world.ada), None, 120)
+    );
+}
