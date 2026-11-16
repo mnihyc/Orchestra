@@ -694,6 +694,7 @@ async fn move_operation(
         ));
     }
     Ok(orch_engine::notifications::NotificationOperation {
+        actor: principal.user(),
         id,
         kind: "move".into(),
         name: state.name,

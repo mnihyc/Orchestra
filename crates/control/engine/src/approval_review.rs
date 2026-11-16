@@ -8,6 +8,13 @@ use orch_db::Conn;
 use orch_db::queries::threads::ThreadRow;
 use orch_types::{Id, Json};
 
+pub(crate) struct ReviewSource {
+    pub thread: Id,
+    pub segment: Id,
+    pub serving: bool,
+    pub opening_id: Option<Id>,
+}
+
 impl Engine {
     /// Native modes the thread can choose now, with the same model and confinement gates as opening it.
     pub async fn offered_approval_modes(
@@ -44,8 +51,9 @@ impl Engine {
             if !allowed.contains(mode) {
                 continue;
             }
-            // Auto exists only where the descriptor of the build says so (it keeps the mode only for a build whose
-            // check proved it) and declares the reviewer, and only for someone who may use that reviewer's model.
+            // Auto exists only where the descriptor of the build says so (it keeps the mode for a program that has the
+            // trial of it, unless a check of this build ran the trial and it failed) and declares the reviewer, and
+            // only for someone who may use that reviewer's model.
             let reviewer = match binding {
                 Some((path, model)) => {
                     reviewer_allowed_for(*mode, Some(descriptor), models, path, model)
@@ -139,12 +147,17 @@ impl Engine {
     pub(crate) async fn record_review_item(
         &self,
         unit: &mut crate::unit::Unit<'_>,
-        thread: Id,
-        segment: Id,
+        source: ReviewSource,
         native_ref: &str,
         turn: Option<Id>,
         payload: &Json,
     ) -> Result<(), EngineError> {
+        let ReviewSource {
+            thread,
+            segment,
+            serving,
+            opening_id,
+        } = source;
         let Some(detail) = detail(payload) else {
             return Ok(());
         };
@@ -169,20 +182,35 @@ impl Engine {
                 .unwrap_or(false),
             usage_apart: usage.is_some(),
         };
-        let seq = unit.stamp(thread).await?;
-        sqlx::query("UPDATE segments SET approval_reviewer=$2,seq_updated=$3 WHERE id=$1")
-            .bind(segment)
-            .bind(serde_json::to_value(reviewer)?)
-            .bind(seq)
-            .execute(&mut *unit.conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
+        let current = serving
+            && orch_db::queries::session_dependencies::model_member_matches(
+                unit.conn, segment, opening_id, turn,
+            )
+            .await?
+            && match turn {
+                Some(turn) => {
+                    orch_db::queries::thread_history::selected_turn(unit.conn, thread, turn).await?
+                }
+                None => orch_db::queries::threads::active_turn(unit.conn, thread)
+                    .await?
+                    .is_none(),
+            };
+        if current {
+            let seq = unit.stamp(thread).await?;
+            sqlx::query("UPDATE segments SET approval_reviewer=$2,seq_updated=$3 WHERE id=$1")
+                .bind(segment)
+                .bind(serde_json::to_value(reviewer)?)
+                .bind(seq)
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        }
         let Some(usage) = usage else {
             return Ok(());
         };
         let turn = match turn {
             Some(turn) => orch_db::queries::threads::turn(&mut *unit.conn, turn).await?,
-            None => orch_db::queries::threads::active_turn(&mut *unit.conn, thread).await?,
+            None => None,
         };
         let Some(turn) = turn.filter(|turn| turn.segment_id == segment && turn.thread_id == thread)
         else {

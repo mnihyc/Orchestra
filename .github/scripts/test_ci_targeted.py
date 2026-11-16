@@ -21,6 +21,20 @@ class TargetedJobs(unittest.TestCase):
                 result = ci_targeted.main(targets, group)
         return result, run.call_args_list, prepare.call_args_list
 
+    def test_named_environment_checks_run_on_native_platforms_without_docker_or_a_connector_build(self):
+        target = "test -p orch-envhost --test native_process_tree --test terminal"
+        result, calls, fixtures = self.invoke(target + "\ntest -p orch-api-core --lib\nweb lint\nfmt\n", "platform")
+        self.assertEqual(result, 0)
+        self.assertEqual(fixtures, [])
+        self.assertEqual([call.args[0] for call in calls], [target])
+        self.assertEqual(calls[0].args[1], ["cargo", "test", "--locked", "--no-fail-fast", "-p", "orch-envhost", "--test", "native_process_tree", "--test", "terminal"])
+
+    def test_platform_selection_never_turns_a_mixed_or_other_package_into_a_native_environment_run(self):
+        for target in ("test -p orch-api-core --lib", "test -p orch-envhost-extra --lib", "test -p orch-envhost -p orch-api-core --lib"):
+            result, calls, fixtures = self.invoke(target + "\n", "platform")
+            self.assertEqual((result, calls, fixtures), (0, [], []))
+        self.assertEqual(ci_targeted.native_checks(["fmt", "web lint", "test -p orch-envhost --lib"]), ["test -p orch-envhost --lib"])
+
     def test_independent_jobs_keep_every_target_and_web_never_starts_rust_or_fixtures(self):
         targets = "test -p orch-api-core --test skills\ncontracts\nweb typecheck\nweb lint\nweb-e2e tests/e2e/history.spec.ts\n"
         rust_result, rust, rust_fixtures = self.invoke(targets, "rust")

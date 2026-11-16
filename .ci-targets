@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test forks --test ingest --test source --test background_wake --test background_wake_native --test native_executor_loss
+test -p orch-api-core --test real_connector --test kmounts_files --test hosts --test installation_records
+test -p orch-gateway-core --test tunnels --test tunnel_attachments
+test -p orch-settings-contract --lib
+test -p orch-api-core --test accounts --test machines --test koidc --test certificates --test reset_links

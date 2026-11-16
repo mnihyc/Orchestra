@@ -13,6 +13,7 @@ import { admissionMetaQuery } from '@/shell/admission';
 import { client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { setSystemName } from '@/lib/title';
+import type { Meta } from '@/generated/api-types';
 
 /** Whom a route is for. */
 export type RouteNeeds =
@@ -84,13 +85,35 @@ interface Visit {
   onward: unknown;
 }
 
-async function admissionFacts() {
+/**
+ * What admission needs to know: whether this browser holds a session and, for a visitor with none, what the system says of
+ * itself. Somebody signed in is let in at the session's answer: a system that has a person in it has a user, and the shell's
+ * first read (started at that same answer, see `shell/startup.ts`) lands in its cache by itself, so nothing here waits for it.
+ */
+async function admissionFacts(): Promise<{ meta: Meta | null; signedIn: boolean }> {
   // Admission still owns Meta when restoration unmounts the last AuthFrame observer.
   // Disabled retains without fetching; Infinity does not block a caller-specific refetch.
   const reader = new QueryObserver(queryClient, { ...admissionMetaQuery, enabled: false, staleTime: Infinity });
-  const release = reader.subscribe(() => undefined);
+  const unsubscribe = reader.subscribe(() => undefined);
+  let released = false;
+  const release = () => { if (!released) { released = true; unsubscribe(); } };
+  const meta = queryClient.query({ ...admissionMetaQuery, staleTime: 'static' });
+  const read = { settled: false };
+  void meta.then(() => { read.settled = true; }, () => { read.settled = true; });
+  let signedIn: boolean;
   try {
-    return await Promise.all([queryClient.query({ ...admissionMetaQuery, staleTime: 'static' }), client.restore()]);
+    signedIn = await client.restore();
+  } catch (error) {
+    release();
+    throw error;
+  }
+  if (signedIn) {
+    // Admission goes on without Meta, but keeps its lease until the read that is under way has settled.
+    if (read.settled) release(); else void meta.then(release, release);
+    return { meta: null, signedIn };
+  }
+  try {
+    return { meta: await meta, signedIn };
   } finally { release(); }
 }
 
@@ -99,11 +122,11 @@ async function admissionFacts() {
  * enter. A failure to ask is thrown as it is, and the root route shows it with a way to try again.
  */
 export async function admit(visit: Visit): Promise<void> {
-  const [meta, signedIn] = await admissionFacts();
-  setSystemName(meta.name);
+  const { meta, signedIn } = await admissionFacts();
+  if (meta !== null) setSystemName(meta.name);
 
   // A system with no user has one screen, and everything leads to it.
-  if (meta.needs_setup) {
+  if (meta?.needs_setup === true) {
     if (visit.needs === 'setup') return;
     throw redirect({ to: '/setup', replace: true });
   }

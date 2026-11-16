@@ -259,6 +259,7 @@ async fn administrative_embedding_queue_insert_rechecks_after_its_actual_native_
             .unwrap();
         let dispatcher = s.rig.world.app.app.link.dispatcher();
         let command = orch_api_core::dispatch::StoredCommand {
+            native_target: frame.native_target.clone(),
             id: Some(call),
             machine: frame.machine,
             kind: frame.kind.as_str().to_owned(),
