@@ -206,6 +206,16 @@ ensure_node_lock() {
   chmod 600 "$path"
 }
 
+# First start grants the bundled node's shipped facilities in its single machine policy.
+seed_node_policy() {
+  local path=runtime/node/config.toml initial=runtime/node/.config.toml.initial
+  if [ -e "$path" ] || [ -L "$path" ]; then return 0; fi
+  (umask 077; cat config/node.toml > "$initial") || die "the bundled node policy could not be prepared"
+  chmod 600 "$initial"
+  [ "$(id -u)" -ne 0 ] || chown "$SERVICE_UID:$SERVICE_GID" "$initial"
+  mv -- "$initial" "$path"
+}
+
 prepare_dirs() {
   local kind
   private_env
@@ -1050,8 +1060,9 @@ cmd_first_start() {
   check_password
   if [ -L runtime/server/current ] && [ -f "$STATE" ]; then die "a release is installed already ($(state_get current_tag)); ./update.sh latest or vX.Y.Z updates it"; fi
   if [ -f "$JOURNAL" ]; then journal_load || true; [ "${J[kind]:-}" = first-start ] || die "a ${J[kind]:-transaction} was interrupted; run ./update.sh recover first"; fi
-  for file in compose.yml nginx.conf config/orch.toml; do [ -f "$file" ] || die "$file is missing"; done
+  for file in compose.yml nginx.conf config/orch.toml config/node.toml; do [ -f "$file" ] || die "$file is missing"; done
   prepare_dirs
+  seed_node_policy
   fetch_release "$selector"
   J=(); J[id]="$(stamp)-$$"; J[kind]=first-start; J[from_tag]=; J[to_tag]="$TAG"; jset step begin
   say "installing release $TAG"

@@ -2800,6 +2800,7 @@ pub type Trial<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 /// and asking, without leaving it made.
 pub async fn begin_trial(conn: &mut Conn) -> Result<Trial<'_>, DbError> {
     use sqlx::Connection;
+    crate::pool::discard_read_facts();
     Ok(conn.begin().await?)
 }
 
@@ -5220,6 +5221,99 @@ mod tests {
             .await
             .unwrap();
         assert!(roots.iter().all(|(_, root)| *root == w.root));
+    }
+
+    #[tokio::test]
+    async fn path_state_reads_current_deleted_and_archived_ancestors_without_needing_every_node() {
+        async fn state(conn: &mut Conn, path: &[Id]) -> (bool, bool) {
+            sqlx::query_as("SELECT live,archived FROM orch_path_state($1)")
+                .bind(path)
+                .fetch_one(conn)
+                .await
+                .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let path = [w.root, w.department, w.project];
+        assert_eq!(state(&mut conn, &path).await, (true, false));
+        sqlx::query("UPDATE nodes SET archived_at=$2 WHERE id=$1")
+            .bind(w.department)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (true, true));
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(w.root)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (false, true));
+        sqlx::query("UPDATE nodes SET deleted_at=NULL,archived_at=NULL WHERE id=ANY($1)")
+            .bind(path.as_slice())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (true, false));
+        assert_eq!(state(&mut conn, &[]).await, (true, false));
+        assert_eq!(state(&mut conn, &[new_id()]).await, (true, false));
+    }
+
+    #[tokio::test]
+    async fn repeated_navigation_reads_keep_current_grants_people_suspensions_and_expiry() {
+        async fn can_develop(conn: &mut Conn, person: Id, place: Id, at: DateTime<Utc>) -> bool {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM access_holders($1,$2,false) h
+                  WHERE h.kind='role' AND h.id=$3 AND h.role IN ('developer','admin'))",
+            )
+            .bind(person)
+            .bind(at)
+            .bind(place)
+            .fetch_one(conn)
+            .await
+            .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        insert_member(&mut conn, w.root, w.bo, w.department)
+            .await
+            .unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
+        give_role(
+            &mut conn,
+            w.department,
+            "user",
+            w.bo,
+            "developer",
+            w.ada,
+            Some(at + Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+
+        let outsider = new_id();
+        insert_user(&mut conn, outsider, "outsider").await.unwrap();
+        assert!(!can_develop(&mut conn, outsider, w.project, at).await);
+        assert!(!can_develop(&mut conn, w.bo, w.project, at + Duration::seconds(2)).await);
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+
+        suspend_in(&mut conn, w.department, w.bo, w.ada)
+            .await
+            .unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
+        lift_suspension(&mut conn, w.department, w.bo)
+            .await
+            .unwrap();
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+        suspend(&mut conn, w.bo).await.unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
     }
 
     #[tokio::test]
