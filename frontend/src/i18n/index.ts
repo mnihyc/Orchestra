@@ -10,6 +10,7 @@
 /// <reference types="vite/client" />
 import i18next from 'i18next';
 import { initReactI18next } from 'react-i18next';
+import { beginWords, fullWordsAdded, hasFullWords, prepareWords, wordsReady } from './wordRuntime';
 
 import type { Locale } from '@/generated/api-types';
 
@@ -41,8 +42,6 @@ const catalogues: Record<Locale, () => Promise<{ default: unknown }>> = {
   'zh-CN': () => import('./zh-CN.json'),
 };
 
-/** A gallery bundle alone does not mean the application words of that language have arrived. */
-const loadedCatalogues = new Set<Locale>();
 const missingWords = new Set<string>();
 
 export function isLocale(value: unknown): value is Locale {
@@ -60,10 +59,10 @@ export function nearestLocale(languages: readonly string[]): Locale {
 }
 
 async function load(locale: Locale): Promise<void> {
-  if (loadedCatalogues.has(locale) && i18next.hasResourceBundle(locale, 'translation')) return;
+  if (hasFullWords(locale)) return;
   const catalogue = await catalogues[locale]();
   i18next.addResourceBundle(locale, 'translation', catalogue.default, true, true);
-  loadedCatalogues.add(locale);
+  fullWordsAdded(locale);
 }
 
 /** The local setting finder indexes both shipped vocabularies when it first needs the registry. */
@@ -71,8 +70,9 @@ export async function loadSearchCatalogues(): Promise<void> {
   await Promise.all(LOCALES.map(({ locale }) => load(locale)));
 }
 
-/** Starts the catalogues in `locale`. Called once, before anything is drawn. */
+/** Starts only the frame's vocabulary in the reader's language. Feature code brings its own words. */
 export async function startI18n(locale: Locale): Promise<void> {
+  beginWords();
   const warnMissing = import.meta.env.DEV;
   await i18next.use(initReactI18next).init({
     lng: locale,
@@ -89,14 +89,15 @@ export async function startI18n(locale: Locale): Promise<void> {
       }
     },
   });
-  await Promise.all(locale === 'en' ? [load('en')] : [load('en'), load(locale)]);
+  wordsReady();
+  await prepareWords('initial', locale);
   // The bundle arrived after the start: tell what is already drawn.
   await i18next.changeLanguage(locale);
 }
 
 /** Changes the language of everything on screen, fetching its catalogue first. */
 export async function setLocale(locale: Locale): Promise<void> {
-  await Promise.all(locale === 'en' ? [load('en')] : [load('en'), load(locale)]);
+  await load(locale);
   await i18next.changeLanguage(locale);
 }
 

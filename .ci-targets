@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test error_words
+test -p orch-api-core --test machine_probe_scopes --test kmounts_files -- directory_
