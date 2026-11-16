@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-link-contract --test largest_messages
+test -p orch-connector-core --test environment_role -- a_machine_browses_only_current_allowed_directories_before_any_environment_is_attached
+test -p orch-connector-core --test environment_role -- a_directory_continuation_refuses_changed_membership_or_a_different_filter
+test -p orch-api-core --test machine_probe_scopes
+test -p orch-xtask --bin orch-xtask -- names::tests::the_tree_of_the_product_names_no_program_in_shared_code

@@ -301,6 +301,8 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
 
 fn attach_body(environment_id: orch_types::Id, root: &std::path::Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -794,6 +796,107 @@ async fn an_executor_that_runs_a_harnesss_build_is_not_available_in_a_runtime_th
     assert!(
         rig.connector.as_ref().unwrap().facts().harnesses.is_empty(),
         "it has no harness to report"
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_machine_browses_only_current_allowed_directories_before_any_environment_is_attached() {
+    use orch_link_contract::commands::MachineDirectoryList;
+    let mut rig = EnvRig::new();
+    let root = rig.home.path().to_path_buf();
+    let orch = rig.directory("orch");
+    rig.directory("organ");
+    std::fs::create_dir(orch.join("module")).unwrap();
+    std::fs::write(root.join("or-file.txt"), b"not a directory").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("private-child")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("or-escape")).unwrap();
+    std::os::unix::fs::symlink(&orch, root.join("or-alias")).unwrap();
+    let mut request = MachineDirectoryList {
+        root: root.to_string_lossy().into_owned(),
+        path: String::new(),
+        prefix: "or".into(),
+        recent: vec!["organ".into()],
+        cursor: None,
+        limit: 1,
+        page_bytes: 4096,
+    };
+    rig.start().await;
+    let first = rig.succeed(&request).await;
+    assert_eq!(
+        first["entries"],
+        json!(["organ"]),
+        "recent actual children come first"
+    );
+    let mut names = vec!["organ".to_owned()];
+    let mut cursor = first["next_cursor"].as_str().map(str::to_owned);
+    while let Some(next) = cursor {
+        request.cursor = Some(next);
+        let page = rig.succeed(&request).await;
+        names.extend(
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap().to_owned()),
+        );
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(names, ["organ", "or-alias", "orch"]);
+    request.cursor = None;
+    request.path = "or-alias".into();
+    request.prefix.clear();
+    request.recent.clear();
+    assert_eq!(rig.succeed(&request).await["entries"], json!(["module"]));
+    request.path = "or-escape".into();
+    let (code, message) = rig.failure(&request).await;
+    assert_eq!(code, "policy.root_not_allowed");
+    assert!(message.contains("environment.roots"));
+    request.path = outside.path().to_string_lossy().into_owned();
+    assert_eq!(rig.fail(&request).await, "policy.root_not_allowed");
+    rig.stop().await;
+    rig.config.environment.roots = vec![outside.path().to_string_lossy().into_owned()];
+    rig.start().await;
+    request.path.clear();
+    request.cursor = first["next_cursor"].as_str().map(str::to_owned);
+    assert_eq!(
+        rig.fail(&request).await,
+        "policy.root_not_allowed",
+        "a previous page never lends its old policy"
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_directory_continuation_refuses_changed_membership_or_a_different_filter() {
+    use orch_link_contract::commands::MachineDirectoryList;
+    let mut rig = EnvRig::new();
+    rig.directory("alpha");
+    rig.directory("beta");
+    let mut request = MachineDirectoryList {
+        root: rig.home.path().to_string_lossy().into_owned(),
+        path: String::new(),
+        prefix: String::new(),
+        recent: Vec::new(),
+        cursor: None,
+        limit: 1,
+        page_bytes: 4096,
+    };
+    rig.start().await;
+    let first = rig.succeed(&request).await;
+    request.cursor = first["next_cursor"].as_str().map(str::to_owned);
+    assert!(request.cursor.is_some());
+    request.prefix = "b".into();
+    assert_eq!(rig.fail(&request).await, "conflict");
+    request.prefix.clear();
+    rig.directory("gamma");
+    assert_eq!(
+        rig.fail(&request).await,
+        "conflict",
+        "native membership changes invalidate the captured page"
     );
     rig.stop().await;
 }

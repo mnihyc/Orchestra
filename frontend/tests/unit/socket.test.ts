@@ -611,6 +611,21 @@ describe('a feed that is kept in order', () => {
     expect(last().of('sub')).toEqual([]);
   });
 
+  it('keeps the affected view and a readable capacity reason while its subscription waits', async () => {
+    const { socket, last } = harness(); socket.start(); last().ready();
+    const acme = tree('acme', [node('thread', 1, 'Kept selection')], 1);
+    const failed = vi.fn<(error: unknown) => void>();
+    const follower = followFeed(socket, { ...acme.feed, failed }); await settle();
+    const id = last().of('sub').find((frame) => frame.feed === 'org:acme')?.id;
+    last().say({ op: 'error', id, code: 'too_many_subscriptions', detail: 'opaque native capacity detail' });
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed.mock.calls[0]?.[0]).toMatchObject({ code: 'too_many_subscriptions' });
+    expect(JSON.stringify(failed.mock.calls[0]?.[0])).toBe('{}');
+    expect(acme.names()).toEqual(['Kept selection']); expect(follower.lastSeq()).toBe(1);
+    expect(acme.loads).toEqual([null]);
+    follower.stop();
+  });
+
   it('is loaded over HTTP first and subscribed from the sequence of that answer', async () => {
     const { socket, last } = harness();
     socket.start();

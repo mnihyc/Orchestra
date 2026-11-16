@@ -17,8 +17,8 @@ use orch_api_contract::{
     machine_sources::{self as declarations, Source as Role},
     operation_sources::Declaration,
     resources::{
-        HostUpdate, MachinePolicyUpdate, MachinePolicyUpdateBody, MachineProbe,
-        MachineProgramsChange, MachineRolesSet,
+        HostUpdate, MachineDirectoryList, MachinePolicyUpdate, MachinePolicyUpdateBody,
+        MachineProbe, MachineProgramsChange, MachineRolesSet,
     },
     routes::{Endpoint, Route},
 };
@@ -74,6 +74,7 @@ trait Operation: Send + Sync + 'static {
     const KIND: CommandKind;
     const EXCLUSIVE: bool = false;
     const REQUIRE_VIEW: bool = true;
+    const PERMISSION: Permission = Permission::MachineManage;
     const FAMILY: KeyTargetKind = KeyTargetKind::Object(ObjectKind::Machine);
     fn valid_body(body: &Json) -> bool;
     fn policy_request(_body: &Json) -> Option<MachinePolicyUpdateBody> {
@@ -98,6 +99,18 @@ impl Operation for Probe {
     const KIND: CommandKind = CommandKind::MachineProbe;
     fn valid_body(body: &Json) -> bool {
         body == &serde_json::json!({})
+    }
+}
+#[derive(Clone, PartialEq, Eq)]
+struct Directories;
+impl Operation for Directories {
+    const ROUTE: Route = MachineDirectoryList::ROUTE;
+    const DECLARATION: &'static Declaration<Role> = &declarations::DIRECTORIES;
+    const KIND: CommandKind = CommandKind::MachineDirectoryList;
+    const PERMISSION: Permission = Permission::MachineUse;
+    fn valid_body(body: &Json) -> bool {
+        serde_json::from_value::<orch_link_contract::commands::MachineDirectoryList>(body.clone())
+            .is_ok_and(|body| body.limit > 0 && body.page_bytes > 0)
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -276,7 +289,7 @@ impl<F: Operation> Source for Native<F> {
         _value: &'a Physical,
     ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
-            for permission in [Permission::MachineView, Permission::MachineManage] {
+            for permission in [Permission::MachineView, F::PERMISSION] {
                 if !F::REQUIRE_VIEW && permission == Permission::MachineView {
                     continue;
                 }
@@ -526,7 +539,7 @@ macro_rules! native_command {
             }
         }
         impl $name {
-            pub(super) async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
+            pub(crate) async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
                 self.0.lock_source(conn).await
             }
             /// Capture this concrete native operation and exact original raw credential.
@@ -550,7 +563,7 @@ macro_rules! native_command {
             ) -> Result<Option<(Caller, Option<Time>)>, EngineError> {
                 self.0.current(conn, clock).await
             }
-            pub(super) async fn current_issue_callers(
+            pub(crate) async fn current_issue_callers(
                 &self,
                 conn: &mut Conn,
                 command: &NewCommand<'_>,
@@ -558,7 +571,7 @@ macro_rules! native_command {
             ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
                 self.0.current_issue_callers(conn, command, clock).await
             }
-            pub(super) async fn current_callers(
+            pub(crate) async fn current_callers(
                 &self,
                 conn: &mut Conn,
                 command: &CommandRow,
@@ -595,4 +608,10 @@ native_command!(
     HostPolicyAuthority,
     HostPolicy,
     "Private native Host policy synchronization provenance, retaining its original HostUpdate operation."
+);
+
+native_command!(
+    MachineDirectoryAuthority,
+    Directories,
+    "Private native directory-read provenance, retaining its exact registration authority and physical source."
 );
