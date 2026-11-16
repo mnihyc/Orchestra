@@ -6,10 +6,12 @@
  * Ctrl+Alt+Del, Fit to this panel and Close…. The same view stands beside a thread and as the VNC tab of
  * the environment's page, following the environment's feed of displays.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Ellipsis, Hand, MonitorPlay, ScreenShare } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
+import { client as apiClient } from '@/api/client';
 
 import { closeDisplay, displayKeys, displaysQuery, lookAgainForDisplays, openDisplay } from '@/api/displays';
 import { useBrowserRequests } from '@/features/browser/store';
@@ -28,6 +30,9 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { Select } from '@/ui/Select';
+import { useViewChoice } from '@/lib/viewChoices';
+import { InteractiveFacts } from '@/features/browser/InteractiveFacts';
 import { StatusDot } from '@/ui/StatusDot';
 import { Textarea } from '@/ui/Textarea';
 
@@ -57,27 +62,57 @@ export interface DisplaysPanelProps {
   load?: () => Promise<RfbConstructor>;
 }
 
-export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProps) {
+export function DisplaysPanel(props: DisplaysPanelProps) {
+  const scope = useStore(apiClient.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <DisplayContents key={`${scope}:${props.environment.id}`} {...props} scope={scope} />;
+}
+function DisplayContents({ environment, threadId, load, scope }: DisplaysPanelProps & { scope: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const query = useQuery(displaysQuery(environment.id));
+  const [keptState, setKeptState] = useViewChoice<string>('display-list', 'state', 'open', environment.id);
+  const closed = keptState === 'closed';
+  const [search, setSearch] = useState('');
+  const canonical = useQuery({ ...displaysQuery(environment.id), enabled: false });
+  const specification = displaysQuery(environment.id, { closed, query: search });
+  const pageKey = [...specification.queryKey, 'pages', scope, closed, search];
+  const query = useInfiniteQuery({ queryKey: pageKey, initialPageParam: null as string | null,
+    queryFn: async (context): Promise<EnvironmentDisplays> => {
+      if (!closed && search === '' && context.pageParam === null) return client.query(displaysQuery(environment.id));
+      const page = displaysQuery(environment.id, { closed, query: search, ...(context.pageParam === null ? {} : { cursor: context.pageParam }) });
+      const read = page.queryFn;
+      if (typeof read !== 'function') throw new Error('The display reader is unavailable');
+      return read({ ...context, queryKey: page.queryKey });
+    }, getNextPageParam: (page) => page.next_cursor ?? undefined, placeholderData: (previous) => previous });
   useDisplaysFeed(environment.id);
   const [front, setFront] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const [closing, setClosing] = useState<Display | null>(null);
   const requests = useBrowserRequests();
-  const look = useMutation({ mutationFn: () => lookAgainForDisplays(environment.id), onSuccess: (list) => client.setQueryData(displayKeys.list(environment.id), list) });
+  // A deliberate Open from a tool can name a later page. Follow only that intent, never preload a list.
+  const wanted = requests.display;
+  const wantedPresent = query.data?.pages.some((page) => page.displays.some((row) => row.id === wanted)) === true;
+  const { isPending: reading, isFetchingNextPage: readingMore, isPlaceholderData: placeholder, hasNextPage: more, fetchNextPage: readNext } = query;
+  useEffect(() => {
+    if (wanted === null) return;
+    if (closed) { setKeptState('open'); return; }
+    if (!wantedPresent && !reading && !readingMore && !placeholder && more) void readNext();
+  }, [wanted, closed, setKeptState, wantedPresent, reading, readingMore, placeholder, more, readNext]);
+  const look = useMutation({ mutationFn: () => lookAgainForDisplays(environment.id), onSuccess: (list) => { client.setQueryData(displayKeys.list(environment.id), list); client.setQueryData(pageKey, { pages: [list], pageParams: [null] }); } });
   const mayWork = environment.access.permissions.includes('vnc.manage');
 
   if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
-  const data = query.data;
-  const displays = data.displays.filter((display) => display.state !== 'closed');
+  const first = !closed && search === '' ? canonical.data ?? query.data.pages[0] : query.data.pages[0];
+  if (first === undefined) return null;
+  const held = [first, ...query.data.pages.slice(1)].flatMap((page) => page.displays);
+  const data = { ...first, displays: [...new Map(held.map((row) => [row.id, row])).values()] };
+  const displays = data.displays.filter((display) => (display.state === 'closed') === closed && `${display.name} ${display.note ?? ''} ${display.x_display ?? ''}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const asked = requests.display !== null && displays.some((display) => display.id === requests.display) ? requests.display : null;
-  const shown = displays.find((display) => display.id === (asked ?? front)) ?? displays[0] ?? null;
+  const shown = closed ? null : displays.find((display) => display.id === (asked ?? front)) ?? displays[0] ?? null;
   const found = data.support.servers.length > 0;
   const choose = (id: string) => {
     requests.takeDisplay();
+    setKeptState('open');
     setFront(id);
   };
 
@@ -90,6 +125,11 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
             {t('vnc.list.open')}
           </Button>
         )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Select size="sm" label={t('interactiveHistory.state')} value={closed ? 'closed' : 'open'} onValueChange={(value) => { requests.takeDisplay(); setKeptState(value); }}
+          options={[{ value: 'open', label: t('vnc.state.open') }, { value: 'closed', label: t('vnc.state.closed') }]} />
+        {(data.displays.length > 10 || query.hasNextPage || search !== '') && <Input type="search" label={t('interactiveHistory.search')} value={search} onChange={(event) => { requests.takeDisplay(); setSearch(event.target.value); }} />}
       </div>
       {data.off !== null && <OffNotice off={data.off} environment={environment} />}
       {data.off === null && !found && (
@@ -113,7 +153,7 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
           {displays.map((display) => (
             <li key={display.id} className={cx('flex items-start gap-2 border-b border-border px-2 py-1 last:border-0', display.id === shown?.id && 'bg-bg-subtle')} data-display-row={display.id}>
               <StatusDot className="h-(--control-sm)" tone={display.state === 'open' ? 'success' : 'info'} label={t(`vnc.state.${display.state}`)} />
-              <button type="button" className="min-w-0 flex-1 text-left" aria-pressed={display.id === shown?.id} onClick={() => choose(display.id)}>
+              <button type="button" className="min-w-0 flex-1 text-left" aria-pressed={display.id === shown?.id} disabled={display.state === 'closed'} onClick={() => choose(display.id)}>
                 <span className="block truncate text-sm font-medium leading-(--control-sm)">
                   {display.name}
                   {display.x_display !== null && <span className="ml-2 font-mono text-xs text-text-muted">{display.x_display}</span>}
@@ -125,7 +165,8 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
                   {display.note !== null && <span className="wrap-anywhere">{display.note}</span>}
                 </span>
               </button>
-              {mayWork && (
+              <InteractiveFacts subject={display} />
+              {!closed && mayWork && (
                 <Menu
                   label={t('vnc.menu.label')}
                   align="end"
@@ -137,7 +178,9 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
           ))}
         </ul>
       )}
-      {displays.length === 0 && data.off === null && found && <EmptyState compact icon={<MonitorPlay aria-hidden />} title={t('vnc.list.empty')} description={mayWork ? t('vnc.list.emptyHint') : undefined} />}
+      {query.hasNextPage && <Button size="sm" pending={query.isFetchingNextPage} disabled={query.isPlaceholderData} onClick={() => void query.fetchNextPage()}>{t('interactiveHistory.more')}</Button>}
+      {closed && !query.isPlaceholderData && displays.length === 0 && <EmptyState compact title={t('interactiveHistory.empty')} />}
+      {!closed && displays.length === 0 && data.off === null && found && <EmptyState compact icon={<MonitorPlay aria-hidden />} title={t('vnc.list.empty')} description={mayWork ? t('vnc.list.emptyHint') : undefined} />}
       {shown !== null && <Front key={shown.id} display={shown} environment={environment} mayWork={mayWork} onClose={() => setClosing(shown)} {...(load === undefined ? {} : { load })} />}
       {opening && <OpenDisplay environment={environment} threadId={threadId} onClose={() => setOpening(false)} onOpened={(display) => { setOpening(false); choose(display.id); }} />}
       {closing !== null && <CloseDisplay display={closing} onClose={() => setClosing(null)} />}

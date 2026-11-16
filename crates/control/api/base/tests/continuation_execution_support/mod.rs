@@ -135,6 +135,7 @@ pub fn install(
             Ok(CommandResult::SessionPrefixOpen(NativePrefixOpened {
                 prefix: body.prefix.clone(),
                 session: orch_agent_contract::session::SessionOpened {
+                    mcp: None,
                     native_session_ref: child,
                     resumed: false,
                     import_report: None,
@@ -203,6 +204,7 @@ pub fn install(
             });
             Ok(CommandResult::SessionContinuationResume(
                 SessionOpenResult {
+                    mcp: None,
                     native_session_ref: body.source.native_session_ref.clone(),
                     resumed: true,
                     import_report: None,
@@ -246,6 +248,7 @@ pub fn install(
                 ));
             }
             Ok(CommandResult::SessionOpenFenced(SessionOpenResult {
+                mcp: None,
                 native_session_ref: held.native_session_ref.clone(),
                 resumed: true,
                 import_report: None,

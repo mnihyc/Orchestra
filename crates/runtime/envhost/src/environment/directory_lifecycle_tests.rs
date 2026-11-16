@@ -73,6 +73,8 @@ impl Rig {
         self.host
             .env_attach(
                 &EnvAttach {
+                    workspace: Default::default(),
+
                     resources: None,
                     data_generation: None,
                     storage: None,
