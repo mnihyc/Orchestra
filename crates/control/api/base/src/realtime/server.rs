@@ -861,7 +861,45 @@ async fn write(
                     continue;
                 };
                 connection.waiting(Half::Writer, "the identity of the delivery to be refreshed");
-                match super::watches::delivery_guard(&inner, &connection).await {
+                #[cfg(any(test, feature = "test-support"))]
+                let delivery_feed = {
+                    let recording = inner
+                        .frame_sql_trace
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_some();
+                    // Presence and other events on the same subscription are separate frames.
+                    // Only the owed durable sync belongs to this read/publication measurement.
+                    let sync = recording
+                        && serde_json::from_str::<serde_json::Value>(&text)
+                            .is_ok_and(|frame| frame["op"] == "sync");
+                    pending.tag.filter(|_| sync).and_then(|tag| {
+                        connection
+                            .subscriptions()
+                            .into_iter()
+                            .find(|sub| sub.tag() == tag)
+                            .map(|sub| sub.feed().clone())
+                    })
+                };
+                #[cfg(not(any(test, feature = "test-support")))]
+                let delivery_feed = None;
+                match inner
+                    .traced_frame_sql(
+                        delivery_feed.as_ref(),
+                        connection.user,
+                        "publication.identity",
+                        async {
+                            if pending.tag.is_some() {
+                                // recheck refreshes this credential under the subscription lock
+                                // before its access decision and physical acceptance below.
+                                Ok::<_, Fail>(Some(()))
+                            } else {
+                                super::watches::delivery_guard(&inner, &connection).await
+                            }
+                        },
+                    )
+                    .await
+                {
                     Ok(Some(())) => {}
                     Ok(None) => {
                         discard_resource(&connection, pending).await;
@@ -893,7 +931,15 @@ async fn write(
                         Half::Writer,
                         "the authorization epoch to be read, the subscription locked",
                     );
-                    let epoch = match super::sync::read_epoch(&inner).await {
+                    let epoch = match inner
+                        .traced_frame_sql(
+                            delivery_feed.as_ref(),
+                            connection.user,
+                            "publication.epoch",
+                            super::sync::read_epoch(&inner),
+                        )
+                        .await
+                    {
                         Ok(epoch) => epoch,
                         Err(error) => {
                             tracing::warn!(%error, "a socket publication epoch could not be read");
@@ -908,13 +954,23 @@ async fn write(
                         Half::Writer,
                         "the subscription to be asked again, its lock held",
                     );
-                    let allowed = if pending.event
-                        && matches!(sub.feed(), orch_realtime_contract::feeds::Feed::User)
-                    {
-                        Box::pin(inner.recheck_personal(&sub, &mut state, epoch)).await
-                    } else {
-                        Box::pin(inner.recheck(&sub, &mut state, epoch)).await
+                    let check = async {
+                        if pending.event
+                            && matches!(sub.feed(), orch_realtime_contract::feeds::Feed::User)
+                        {
+                            Box::pin(inner.recheck_personal(&sub, &mut state, epoch)).await
+                        } else {
+                            Box::pin(inner.recheck(&sub, &mut state, epoch)).await
+                        }
                     };
+                    let allowed = inner
+                        .traced_frame_sql(
+                            delivery_feed.as_ref(),
+                            connection.user,
+                            "publication.access",
+                            check,
+                        )
+                        .await;
                     match allowed {
                         Ok(true) => {}
                         Ok(false) => {

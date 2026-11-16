@@ -121,7 +121,7 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
         .call(ThreadInterrupt, &[&id])
         .token(&s.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: active.turn_id,
+            turn_id: Some(active.turn_id),
         })
         .send()
         .await

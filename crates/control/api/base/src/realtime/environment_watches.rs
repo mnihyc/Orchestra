@@ -118,7 +118,11 @@ fn failed(error: crate::dispatch::RunError) -> DirectoryWatchError {
         .problem;
     DirectoryWatchError {
         retryable: problem.status >= 500
-            || problem.code == orch_api_contract::common::ErrorCode::ConflictStaleRevision,
+            || matches!(
+                problem.code,
+                orch_api_contract::common::ErrorCode::ConflictStaleRevision
+                    | orch_api_contract::common::ErrorCode::ConflictConcurrentChange
+            ),
         code: problem.code,
         reason: problem
             .extra
@@ -176,7 +180,7 @@ fn directory_data(
         .map_err(Fail::other)?;
     Ok(
         serde_json::json!({"as_of":metadata.as_ref().map_or(at, |meta| meta.as_of), "reset":true,
-        "truncated":listing.truncated,"changed":listing.entries,"removed":[],
+        "truncated":listing.truncated,"changed":listing.entries,"removed":[],"facts":listing.facts,
         "revision":metadata.as_ref().map(|meta| &meta.revision),
         "next_cursor":metadata.as_ref().and_then(|meta| meta.next_cursor.as_ref()),
         "observed_from":metadata.as_ref().and_then(|meta| meta.observed_from),
@@ -677,15 +681,9 @@ impl Sources {
                 else {
                     return Ok(());
                 };
-                let observation = orch_types::new_id();
                 inner
                     .engine()?
-                    .begin_git_read(id, &target.1, observation, eph.at)
-                    .await
-                    .map_err(Fail::other)?;
-                inner
-                    .engine()?
-                    .finish_git_read(id, &target.1, observation, eph.at, &report.status)
+                    .remember_git_report(id, &target.1, eph.at, &report.status)
                     .await
                     .map_err(Fail::other)?;
                 for (feed, selected) in &self.git_targets {
@@ -718,7 +716,7 @@ impl Sources {
                     .transpose()
                     .map_err(Fail::other)?;
                 let data = serde_json::json!({"as_of": metadata.as_ref().map_or(eph.at, |meta| meta.as_of),
-                    "changed": eph.body["changed"], "removed": eph.body["removed"],
+                    "changed": eph.body["changed"], "removed": eph.body["removed"], "facts":eph.body["facts"],
                     "reset": eph.body["reset"].as_bool().unwrap_or(false), "truncated": eph.body["truncated"].as_bool().unwrap_or(false),
                     "invalidated":eph.body["invalidated"].as_bool().unwrap_or(false),
                     "revision":metadata.as_ref().map(|meta| &meta.revision),

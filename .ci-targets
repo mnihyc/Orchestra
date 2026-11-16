@@ -1,0 +1,2 @@
+fmt
+test -p orch-db --lib --test commit_epochs --test usage_commit_order --test participation_summaries --test released_migrations --test migration_progress -- --nocapture

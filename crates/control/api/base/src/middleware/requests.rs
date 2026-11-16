@@ -71,7 +71,7 @@ impl ApiError {
     }
 
     /// A failure of the engine. A commit refused because what it decided under changed meanwhile is the
-    /// caller's to send again, as any write's is (`conflict.stale_revision`); anything else is a failure
+    /// caller's to send again (`conflict.concurrent_change`); anything else is a failure
     /// nobody foresaw. A database fault of another kind stays the engine's: it is not the request's fault.
     #[must_use]
     pub fn engine(error: orch_engine::EngineError) -> Self {
@@ -211,8 +211,8 @@ impl From<DbError> for ApiError {
             }
             DbError::Retry => {
                 let mut error = Self::new(
-                    ErrorCode::ConflictStaleRevision,
-                    "it was changed at the same moment; try again",
+                    ErrorCode::ConflictConcurrentChange,
+                    "a concurrent change interrupted this operation; try again",
                 );
                 error.database_retry = true;
                 error
@@ -317,9 +317,18 @@ pub mod check_tests {
             ErrorCode::ConflictStaleRevision,
             "an explicit business revision conflict",
         );
-        assert_eq!(conflict.code(), revision.code());
+        assert_ne!(
+            conflict.code(),
+            revision.code(),
+            "a database race says nothing about a revision the caller supplied"
+        );
+        assert_eq!(conflict.code().as_str(), "conflict.concurrent_change");
         assert!(conflict.is_database_retry());
         assert!(!revision.is_database_retry());
+        assert!(
+            !ApiError::from((*conflict.problem).clone()).is_database_retry(),
+            "a serialized error code cannot authorize a server-side replay"
+        );
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -330,7 +339,8 @@ pub mod check_tests {
     #[cfg(any(test, feature = "test-support"))]
     fn an_engine_commit_that_lost_a_race_is_the_callers_to_send_again_and_nothing_else_is() {
         let lost = ApiError::engine(orch_engine::EngineError::Db(DbError::Retry));
-        assert_eq!(lost.problem.code, ErrorCode::ConflictStaleRevision);
+        assert_ne!(lost.problem.code, ErrorCode::ConflictStaleRevision);
+        assert_eq!(lost.problem.code.as_str(), "conflict.concurrent_change");
         assert_eq!(lost, ApiError::from(DbError::Retry));
         let broken = ApiError::engine(orch_engine::EngineError::Db(DbError::Check {
             table: "jobs".to_owned(),
