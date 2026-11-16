@@ -263,6 +263,7 @@ impl Forks {
         let reported = declared.clone();
         handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(reported.clone()).unwrap(),
@@ -316,7 +317,12 @@ impl Forks {
 
     /// A thread of Ada's that has said something and been answered.
     async fn thread_with_history(&self, name: &str) -> Id {
-        let thread = self.s.thread_by(&self.s.ada, name).await.base.id;
+        self.thread_with_history_by(&self.s.ada, name).await
+    }
+
+    /// A thread of `owner`'s that has said something (Ada says it) and been answered.
+    async fn thread_with_history_by(&self, owner: &Who, name: &str) -> Id {
+        let thread = self.s.thread_by(owner, name).await.base.id;
         self.s
             .exchange(thread, 0, "Plan the work", "The plan is ready")
             .await;
@@ -1614,6 +1620,7 @@ async fn switching_away_from_a_disabled_provider_or_environment_keeps_queue_posi
                     .put_bytes(bytes::Bytes::from(manifest.bytes))
                     .await
                     .unwrap();
+            let archive_hash = archive.hash;
             for blob in [content, archive] {
                 orch_db::queries::storage::register_blob(
                     &mut w.s.rig.db.acquire().await.unwrap(),
@@ -1635,7 +1642,7 @@ async fn switching_away_from_a_disabled_provider_or_environment_keeps_queue_posi
                     assert_eq!(snapshot.environment_id, original);
                     assert!(!snapshot.selection.include.is_empty());
                     Ok(CommandResult::FsSnapshot(FsSnapshotResult {
-                        manifest_blob: archive.hash,
+                        manifest_blob: archive_hash,
                         file_count: 1,
                         total_bytes: 9,
                         uploaded_bytes: 9,

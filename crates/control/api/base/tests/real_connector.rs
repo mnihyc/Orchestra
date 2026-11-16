@@ -388,7 +388,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -749,7 +749,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -1336,6 +1336,7 @@ impl Cluster {
             move |command| {
                 lock(&told).push(serde_json::to_string(command).unwrap());
                 Ok(CommandResult::AgentStart(AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".to_owned(),
                     descriptor: serde_json::from_value(key_separated_agent()).unwrap(),

@@ -576,6 +576,7 @@ impl Engine {
             });
         };
         let mut snapshot = Snapshot {
+            translation: None,
             registry: Registry::default(),
             context: ThreadContext::default(),
         };

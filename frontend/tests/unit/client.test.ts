@@ -6,6 +6,9 @@ import { ApiError, createApiClient, done, ok, ReceiptAcknowledged, RENEW_BEFORE_
 import type { AuthResult, Me } from '@/generated/api-types';
 import { NetworkError, retryRead } from '@/lib/requests';
 import { beginOpening, openingId } from '@/lib/opening';
+import { i18n, setLocale } from '@/i18n';
+import { formatSpan } from '@/lib/time';
+import { errorText } from '@/ui/errorText';
 
 const BASE = 'http://orch.test/api/v1';
 
@@ -36,8 +39,71 @@ function server(answer: (request: Request, seen: Request[]) => Response | Promis
   return { fetch, seen, paths: () => seen.map((request) => `${request.method} ${new URL(request.url).pathname.replace('/api/v1', '')}`) };
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+  await setLocale('en');
+});
+
+it('records the actual renewal schedule, attempt and completion without borrowing a later grant’s timing', async () => {
+  vi.useFakeTimers(); const now = Date.now(); let finish!: (reply: Response) => void;
+  const { fetch, seen } = server(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-old', RENEW_BEFORE_END_MS + 5_000));
+  const original = client.session.getState();
+  expect(original).toMatchObject({ renewal: { phase: 'scheduled', scheduled_at: now + 5_000, renewed_at: null } });
+  await vi.advanceTimersByTimeAsync(4_999); expect(seen).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(1); expect(seen).toHaveLength(1);
+  expect(client.session.getState()).toMatchObject({ renewal: { phase: 'in_progress', scheduled_at: null } });
+  finish(json(200, grant('synthetic-fresh'))); await vi.advanceTimersByTimeAsync(0);
+  expect(client.session.getState()).toMatchObject({ renewal: { phase: 'completed', renewed_at: now + 5_000 } });
+  expect(original).toMatchObject({ renewal: { scheduled_at: now + 5_000 } });
+});
+
+it('keeps a temporary renewal failure factual while the held session remains usable', async () => {
+  vi.useFakeTimers(); const next = Date.now() + 15 * 60_000 - RENEW_BEFORE_END_MS;
+  const { fetch, paths } = server(() => { throw new TypeError('Synthetic connection failed'); });
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-held'));
+  await expect(client.renew()).rejects.toBeInstanceOf(NetworkError);
+  expect(client.session.getState()).toMatchObject({ status: 'signed_in', userId: me.id, renewal: { phase: 'failed', scheduled_at: next, renewed_at: null } });
+  expect(paths()).toEqual(['POST /auth/refresh']);
+});
+
+it('keeps a long admitted renewal deadline instead of letting the browser timer overflow renew immediately', async () => {
+  vi.useFakeTimers(); const now = Date.now(), life = 35 * 24 * 60 * 60_000;
+  const { fetch, seen } = server(() => json(200, grant('synthetic-later')));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-long', life));
+  const deadline = now + life - RENEW_BEFORE_END_MS;
+  await vi.advanceTimersByTimeAsync(1); expect(seen).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(2_147_483_647 - 1); expect(seen).toHaveLength(0);
+  expect(client.session.getState()).toMatchObject({ renewal: { phase: 'scheduled', scheduled_at: deadline } });
+  await vi.advanceTimersByTimeAsync(deadline - Date.now()); expect(seen).toHaveLength(1);
+});
+
+it('does not let a former renewal overwrite an explicit fresh grant for the same person', async () => {
+  let finish!: (reply: Response) => void;
+  const { fetch } = server(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-former'));
+  const old = client.renew(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  client.adopt(grant('synthetic-explicit'));
+  finish(problem(401, 'auth.invalid_token')); await old;
+  expect(client.accessToken()).toBe('synthetic-explicit');
+  expect(client.session.getState()).toMatchObject({ status: 'signed_in', renewal: { phase: 'scheduled', renewed_at: null } });
+});
+
+it('lets a replacement reader own renewal while the former reader’s renewal still waits', async () => {
+  const replies: ((reply: Response) => void)[] = [];
+  const { fetch } = server(() => new Promise<Response>((resolve) => replies.push(resolve)));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-former'));
+  const former = client.renew(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  client.adopt({ ...grant('synthetic-next'), user: { ...me, id: 'next-reader' } });
+  const next = client.renew(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  try {
+    expect(replies).toHaveLength(2);
+    replies[0]?.(problem(401, 'auth.invalid_token')); await former;
+    expect(client.session.getState()).toMatchObject({ userId: 'next-reader', renewal: { phase: 'in_progress' } });
+    replies[1]?.(json(200, { ...grant('synthetic-complete'), user: { ...me, id: 'next-reader' } })); await next;
+    expect(client.session.getState()).toMatchObject({ userId: 'next-reader', renewal: { phase: 'completed' } });
+  } finally { for (const reply of replies) reply(json(200, grant('synthetic-final'))); await Promise.all([former, next]); }
 });
 
 it('shares one logical opening across HTTP reads and uses a fresh one for the next navigation', async () => {
@@ -331,6 +397,51 @@ describe('a slow answer', () => {
     expect(error).toMatchObject({ failure: 'silent' });
   });
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const stage of ['response', 'body'] as const) {
+  it(`names the ${stage} silence stage and the admitted request's own duration in ${locale}`, async () => {
+    await setLocale(locale);
+    vi.useFakeTimers();
+    const limit = stage === 'response' ? 45_000 : 120_000;
+    const { fetch, paths } = server(() => stage === 'response' ? new Promise<Response>(() => undefined)
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    const client = createApiClient({ baseUrl: BASE, fetch, silenceLimitMs: limit });
+    const pending = ok(client.api.GET('/meta')).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(limit);
+    const error = await pending;
+    expect(error).toBeInstanceOf(NetworkError);
+    if (!(error instanceof NetworkError)) throw new Error('The admitted request must keep its native network failure');
+    const duration = formatSpan(limit, { locale });
+    const expected = locale === 'en' ? stage === 'response' ? `No response for ${duration}` : `Transfer stalled for ${duration}`
+      : stage === 'response' ? `等待响应已达 ${duration}` : `传输停滞已达 ${duration}`;
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).message).toBe(expected);
+    expect(error.failure).toBe('silent'); expect(retryRead(0, error)).toBe(true);
+    expect(paths()).toEqual(['GET /meta']);
+    expect(client.session.getState().status).toBe('unknown');
+    await setLocale('en');
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const stage of ['response', 'body'] as const) {
+  it(`names a connection failure during ${stage} without changing its read retry in ${locale}`, async () => {
+    await setLocale(locale);
+    vi.stubGlobal('navigator', { onLine: true });
+    const { fetch, paths } = server(() => stage === 'response' ? Promise.reject(new TypeError('private connection diagnostic'))
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.error(new TypeError('private transfer diagnostic')); } }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    const error = await ok(client.api.GET('/meta')).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(NetworkError);
+    if (!(error instanceof NetworkError)) throw new Error('The native connection failure must be preserved');
+    const expected = locale === 'en' ? stage === 'response' ? 'Connection failed before a response' : 'Connection failed during transfer'
+      : stage === 'response' ? '响应前连接失败' : '传输期间连接失败';
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).message).toBe(expected);
+    expect(error.failure).toBe('failed'); expect(retryRead(0, error)).toBe(true);
+    expect(paths()).toEqual(['GET /meta']);
+    expect(client.session.getState().status).toBe('unknown');
+  });
+}
 
 describe('a request that creates something', () => {
   it('carries the key of the act, so that a second attempt makes nothing twice', async () => {

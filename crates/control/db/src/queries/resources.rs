@@ -796,8 +796,10 @@ pub mod thread_engine {
         pub sources: Json,
         /// What the harness or the endpoint last reported.
         pub facts: Json,
-        /// The binding and credential revision captured for a correlated observation.
+        /// The stored revision, including observation updates.
         pub revision: i64,
+        /// Observation writes included in that revision; their difference fences configuration.
+        pub observation_revision: i64,
         /// When it was deleted.
         pub deleted_at: Option<DateTime<Utc>>,
     }
@@ -806,7 +808,7 @@ pub mod thread_engine {
     pub async fn provider(conn: &mut Conn, id: Id) -> Result<Option<ProviderRow>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, protocols, provider_placement(machine_id) AS placement, machine_id,
-                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, deleted_at
+                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, observation_revision, deleted_at
                FROM providers WHERE id = $1",
         )
         .bind(id)
@@ -821,7 +823,7 @@ pub mod thread_engine {
         }
         Ok(sqlx::query_as(
             "SELECT id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, protocols, provider_placement(machine_id) AS placement, machine_id,
-                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, deleted_at
+                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, observation_revision, deleted_at
                FROM providers WHERE id = ANY($1)",
         ).bind(ids).fetch_all(conn).await?)
     }
@@ -1032,6 +1034,8 @@ pub mod thread_engine {
     /// What a harness process says of itself.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct HarnessReport<'a> {
+        /// Actual process home, only when the report supplied fresh evidence.
+        pub home: Option<&'a Json>,
         /// `online`, `starting`, `offline`, `error`: its state.
         pub status: &'a str,
         /// A sentence about it.
@@ -1063,10 +1067,11 @@ pub mod thread_engine {
         .await?;
         sqlx::query(
             "INSERT INTO harnesses (provider_id, agent_id, machine_id, status, status_detail, harness_version,
-                                    sessions_open, last_active_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+                                    sessions_open, last_active_at, updated_at, home)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9)
              ON CONFLICT (provider_id, agent_id, machine_id) DO UPDATE
                 SET status = EXCLUDED.status, status_detail = EXCLUDED.status_detail,
+                    home = COALESCE(EXCLUDED.home, harnesses.home),
                     harness_version = COALESCE(EXCLUDED.harness_version, harnesses.harness_version),
                     sessions_open = EXCLUDED.sessions_open, last_active_at = EXCLUDED.last_active_at,
                     updated_at = EXCLUDED.updated_at",
@@ -1079,6 +1084,7 @@ pub mod thread_engine {
         .bind(report.version)
         .bind(report.sessions_open)
         .bind(at)
+        .bind(report.home)
         .execute(conn)
         .await?;
         Ok(before)
@@ -1189,12 +1195,19 @@ pub mod thread_engine {
         pub platform_os: String,
         /// `connected` or `managed`.
         pub placement: String,
+        /// The host of a managed machine.
+        pub host_id: Option<Id>,
     }
 
-    /// A machine, as a reference to it names it.
+    /// A machine, as a reference to it names it. The machine of a host's container is called by its host's name:
+    /// its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_name(conn: &mut Conn, id: Id) -> Result<Option<MachineName>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines WHERE id = $1",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement, m.host_id
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = $1",
         )
         .bind(id)
         .fetch_optional(conn)
@@ -2990,6 +3003,21 @@ pub async fn models_of_provider(
     .await?)
 }
 
+/// Only model rows whose names a thread's first screen actually draws.
+pub async fn models_named_of_provider(
+    conn: &mut Conn,
+    provider: Id,
+    names: &[String],
+) -> Result<Vec<ProviderModelRow>, DbError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(
+        "SELECT model_name,display_name,parameters,provider_option_layers(provider_id,groups) AS option_layers,groups,enabled
+           FROM provider_models WHERE provider_id=$1 AND model_name=ANY($2) ORDER BY model_name",
+    ).bind(provider).bind(names).fetch_all(conn).await?)
+}
+
 /// The same native model rows for several actual providers, grouped after one query.
 pub async fn models_of_providers(
     conn: &mut Conn,
@@ -3081,6 +3109,18 @@ pub mod routes {
         .await?)
     }
 
+    /// Machine metadata for already selected connector identities, without one query per environment.
+    pub async fn machines_among(conn: &mut Conn, ids: &[Id]) -> Result<Vec<MachineRow>, DbError> {
+        Ok(sqlx::query_as(concat!(
+            "SELECT ",
+            machine_columns!(),
+            " FROM machines WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY id"
+        ))
+        .bind(ids)
+        .fetch_all(conn)
+        .await?)
+    }
+
     /// Just the physical machines selected by a bounded inventory page.
     pub async fn physical_machines_among(
         conn: &mut Conn,
@@ -3143,6 +3183,8 @@ pub mod routes {
         pub platform_os: String,
         /// `connected` or `managed`.
         pub placement: String,
+        /// The host of a managed machine.
+        pub host_id: Option<Id>,
     }
 
     /// Live physical reference identities, before any machine payload is projected.
@@ -3155,14 +3197,18 @@ pub mod routes {
         )
     }
 
-    /// The machines `ids` that are not deleted, in one statement.
+    /// The machines `ids` that are not deleted, in one statement. The machine of a host's container is called by
+    /// its host's name: its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_names(
         conn: &mut Conn,
         ids: &[Id],
     ) -> Result<Vec<MachineNameRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines
-              WHERE id = ANY($1) AND deleted_at IS NULL",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement, m.host_id
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.deleted_at IS NULL",
         )
         .bind(ids)
         .fetch_all(conn)
@@ -3540,6 +3586,8 @@ pub mod routes {
         pub facts_at: Option<DateTime<Utc>>,
         /// The revision a change names.
         pub revision: i64,
+        /// Observation writes included in the revision, distinct from configuration edits.
+        pub observation_revision: i64,
         /// When it was made.
         pub created_at: DateTime<Utc>,
         /// When it was last changed.
@@ -3548,7 +3596,7 @@ pub mod routes {
 
     const PROVIDER_COLUMNS: &str = "id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, upstreams,
         config, model_group_options, service_offerings, protocols, provider_placement(machine_id) AS placement, machine_id, key_machine_id, arrangements, held_by_environment_id, held_since,
-        runtime_config, status, status_detail, runtime_unavailable, sources, facts, facts_overrides, facts_at, revision, created_at, updated_at";
+        runtime_config, status, status_detail, runtime_unavailable, sources, facts, facts_overrides, facts_at, revision, observation_revision, created_at, updated_at";
 
     /// The providers `ids` that are not deleted, in the order they were made.
     pub async fn providers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<ProviderRow>, DbError> {
@@ -3623,6 +3671,8 @@ pub mod routes {
     /// What a change of a provider sets; what is left out stays.
     #[derive(Debug, Clone, Copy, Default, PartialEq)]
     pub struct ProviderChange<'a> {
+        /// Replacement public relay choice.
+        pub relay: Option<&'a Json>,
         /// A new name.
         pub name: Option<&'a str>,
         /// New endpoints, with the protocols they serve.
@@ -3657,7 +3707,7 @@ pub mod routes {
             "UPDATE providers SET name = COALESCE($3, name), upstreams = COALESCE($4, upstreams),
                     protocols = COALESCE($5, protocols), config = COALESCE($6, config),
                     arrangements = COALESCE($7, arrangements), runtime_config = COALESCE($8, runtime_config),
-                    facts_overrides = COALESCE($9, facts_overrides), model_group_options = COALESCE($11, model_group_options), service_offerings = COALESCE($12, service_offerings), revision = revision + 1, updated_at = $10
+                    facts_overrides = COALESCE($9, facts_overrides), model_group_options = COALESCE($11, model_group_options), service_offerings = COALESCE($12, service_offerings), relay = COALESCE($13, relay), revision = revision + 1, updated_at = $10
               WHERE id = $1 AND revision = $2 AND deleted_at IS NULL",
         )
         .bind(id)
@@ -3672,6 +3722,7 @@ pub mod routes {
         .bind(at)
         .bind(change.model_group_options)
         .bind(change.service_offerings)
+        .bind(change.relay)
         .execute(conn)
         .await?
         .rows_affected();
@@ -3826,6 +3877,8 @@ pub mod routes {
     /// A harness process started for a provider, with the profile and the machine.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct HarnessProcessRow {
+        /// Home evidence from this actual start, not the current profile.
+        pub home: Option<Json>,
         /// The provider.
         pub provider_id: Id,
         /// The profile it runs.
@@ -3854,7 +3907,7 @@ pub mod routes {
         ids: &[Id],
     ) -> Result<Vec<HarnessProcessRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT provider_id, agent_id, machine_id, status, status_detail, harness_version, sessions_open,
+            "SELECT home, provider_id, agent_id, machine_id, status, status_detail, harness_version, sessions_open,
                     last_active_at, last_error_at, last_error_detail
                FROM harnesses WHERE provider_id = ANY($1) ORDER BY provider_id, agent_id, machine_id",
         )
@@ -4540,7 +4593,7 @@ pub mod keeper {
             return Ok(false);
         };
         let done = sqlx::query(
-            "UPDATE providers SET facts = $2, facts_at = $3, revision = revision + 1, updated_at = $3
+            "UPDATE providers SET facts = $2, facts_at = $3, revision = revision + 1, observation_revision = observation_revision + 1, updated_at = $3
               WHERE id = $1 AND deleted_at IS NULL AND (facts IS DISTINCT FROM $2 OR facts_at IS DISTINCT FROM $3)",
         )
         .bind(provider)
@@ -5102,6 +5155,8 @@ pub mod hosting {
         pub driver_configuration_schemas: Json,
         /// What it reports that it has.
         pub capacity: Json,
+        /// Receipt time of the actual capacity report, independent of edits and load reports.
+        pub capacity_at: Option<DateTime<Utc>>,
         /// What it reports that it uses.
         pub load: Json,
         /// Its storages, as it reports them.
@@ -5127,7 +5182,7 @@ pub mod hosting {
     }
 
     const HOST_COLUMNS: &str = "h.id, h.machine_id, h.owner_id, h.org_id, h.home_id, h.name, h.labels, h.drivers, h.driver_configuration_schemas,
-        h.capacity, h.load, h.storages, h.schedulable, h.disabled, h.when_full, m.lost_at, m.online, m.offline_since, m.status AS machine_status,
+        h.capacity, h.capacity_at, h.load, h.storages, h.schedulable, h.disabled, h.when_full, m.lost_at, m.online, m.offline_since, m.status AS machine_status,
         m.platform_os, m.platform_arch";
 
     /// The hosts `ids` whose machine is not deleted; every host when none are named.
@@ -5169,6 +5224,45 @@ pub mod hosting {
         )
     }
 
+    /// The host that runs `machine` as the container of one of its providers or environments (a
+    /// unit). Any other machine has none. A unit enrols as a machine of its own that has no owner,
+    /// home or page: the page of the host that runs it governs it.
+    pub async fn host_running(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT host_id FROM machines WHERE id = $1 AND runtime_id IS NOT NULL AND host_id IS NOT NULL",
+        )
+        .bind(machine)
+        .fetch_optional(conn)
+        .await?)
+    }
+
+    /// The host whose page names each of these machines, as `(machine, host, host name)`: the host
+    /// whose node a machine is, or the host that runs it as a unit. A machine that is neither is
+    /// not among them.
+    pub async fn hosts_naming(
+        conn: &mut Conn,
+        machines: &[Id],
+    ) -> Result<Vec<(Id, Id, String)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT machine_id, id, name FROM hosts WHERE machine_id = ANY($1)
+             UNION ALL
+             SELECT m.id, h.id, h.name FROM machines m JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.runtime_id IS NOT NULL",
+        )
+        .bind(machines)
+        .fetch_all(conn)
+        .await?)
+    }
+
+    /// The host whose page names `machine`, as [`hosts_naming`] answers it for one machine.
+    pub async fn host_naming(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+        Ok(hosts_naming(conn, &[machine])
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, host, _)| host))
+    }
+
     /// Records what a host's node reports it has and can make.
     pub async fn record_node_facts(
         conn: &mut Conn,
@@ -5180,7 +5274,7 @@ pub mod hosting {
         at: DateTime<Utc>,
     ) -> Result<(), DbError> {
         sqlx::query(
-            "UPDATE hosts SET capacity = $2, drivers = $3, driver_configuration_schemas = $4, storages = $5, updated_at = GREATEST(updated_at, $6)
+            "UPDATE hosts SET capacity = $2, capacity_at = $6, drivers = $3, driver_configuration_schemas = $4, storages = $5, updated_at = GREATEST(updated_at, $6)
               WHERE id = $1",
         )
         .bind(host)
@@ -6073,8 +6167,15 @@ pub mod provider_runtime {
     pub const STOPPED_IDLE: &str = "provider_idle_stop";
     /// A person asked the runtime to stay stopped.
     pub const STOPPED_PERSON: &str = "provider_person_stop";
+    /// A person stopped the runtime by force: it reads as stopped, and its host has not yet said that it stopped it.
+    pub const STOPPED_FORCED: &str = "provider_forced_stop";
+    /// The unit an update made beside the provider's was left when the update was ended where it stood; its host is
+    /// to stop and remove it.
+    pub const UPDATE_ENDED: &str = "provider_update_ended";
+    /// A unit that read as being made, that no work made any more, and that its host reported.
+    pub const UNFINISHED: &str = "provider_unit_unfinished";
     /// Shared by scheduled candidate, admission and start guards.
-    pub const INTENTIONAL_STOP_DETAILS: [&str; 2] = [STOPPED_IDLE, STOPPED_PERSON];
+    pub const INTENTIONAL_STOP_DETAILS: [&str; 3] = [STOPPED_IDLE, STOPPED_PERSON, STOPPED_FORCED];
 
     /// Whether this unit is being or has been stopped deliberately.
     #[must_use]
@@ -6480,6 +6581,27 @@ pub mod provider_runtime {
         .await?)
     }
 
+    /// The units of providers stopped by force whose online hosts have not confirmed their stops,
+    /// excluding units this process already follows so one busy batch cannot hide later ones.
+    pub async fn forced_stops(
+        conn: &mut Conn,
+        followed: &[Id],
+        limit: i64,
+    ) -> Result<Vec<RuntimeFull>, DbError> {
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {RUNTIME_COLUMNS} FROM runtimes
+              WHERE kind = 'provider' AND state = 'stopped' AND state_detail = $1
+                AND NOT (id = ANY($2))
+                AND host_id IN (SELECT h.id FROM hosts h JOIN machines m ON m.id = h.machine_id WHERE m.online)
+              ORDER BY updated_at, id LIMIT $3"
+        )))
+        .bind(STOPPED_FORCED)
+        .bind(followed)
+        .bind(limit)
+        .fetch_all(conn)
+        .await?)
+    }
+
     /// The retired runtimes of providers whose time to be removed has come.
     pub async fn retired_due(
         conn: &mut Conn,
@@ -6814,32 +6936,27 @@ pub mod provider_runtime {
         pub provider_id: Id,
         /// When the token lapses.
         pub expires_at: DateTime<Utc>,
-        /// When the credential was issued, where its own claims or stated life supplied it.
-        pub issued_at: Option<DateTime<Utc>>,
-        /// Where it stands.
-        pub status: String,
-        /// The root org of its home.
-        pub org_id: Id,
-        /// Its name.
-        pub name: String,
     }
 
     /// The providers not deleted whose facts say when a token lapses.
-    pub async fn token_ends(conn: &mut Conn, limit: i64) -> Result<Vec<TokenEnd>, DbError> {
+    pub async fn token_ends(
+        conn: &mut Conn,
+        after: Option<Id>,
+        limit: i64,
+    ) -> Result<Vec<TokenEnd>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id AS provider_id,
                     (facts #>> '{credential,expires_at}')
-                        ::timestamptz AS expires_at,
-                    (facts #>> '{credential,issued_at}')
-                        ::timestamptz AS issued_at,
-                    status, org_id, name
+                        ::timestamptz AS expires_at
                FROM providers
               WHERE deleted_at IS NULL AND facts #>> '{credential,yields}' IN ('token','key')
                 AND (facts #>> '{credential,expires_at}')
                     IS NOT NULL
+                AND ($2::uuid IS NULL OR id > $2)
               ORDER BY id LIMIT $1",
         )
         .bind(limit)
+        .bind(after)
         .fetch_all(conn)
         .await?)
     }
