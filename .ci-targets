@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-envhost --lib -- mount_transfer::
+test -p orch-connector-core --test mount_data

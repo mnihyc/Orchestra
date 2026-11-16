@@ -1528,6 +1528,8 @@ pub mod hosting {
     /// A runtime, as stored.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct RuntimeFull {
+        /// The host's latest complete report says that this unit no longer exists.
+        pub loss_missing: bool,
         /// Exact owned installed-files source, retained even when its archived unit is absent.
         #[sqlx(default)]
         pub kept_image: Option<Json>,
@@ -1571,7 +1573,7 @@ pub mod hosting {
         pub updated_at: DateTime<Utc>,
     }
 
-    const RUNTIME_COLUMNS: &str = "id, kind, host_id, machine_id, unit_name, successor_of, provider_id, environment_id,
+    const RUNTIME_COLUMNS: &str = "id, kind, host_id, machine_id, unit_name, successor_of, provider_id, environment_id, loss_missing,
         driver, template_id, spec_hash, generation, state, state_detail, remove_at, volumes, kept_image, last_active_at,
         created_at, updated_at";
 
