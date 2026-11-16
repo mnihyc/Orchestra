@@ -1,0 +1,2 @@
+test -p orch-api-core --test uploads --test threads_bound --test workspace_files --test workspace_pages
+test -p orch-node --test uploads

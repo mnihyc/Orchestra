@@ -1113,3 +1113,49 @@ async fn a_key_nobody_set_costs_no_statement_beyond_the_rows_of_the_chain() {
         .unwrap();
     assert_eq!(Statements::now() - start, 1, "the system's rows");
 }
+
+#[tokio::test]
+async fn translation_defaults_are_captured_and_a_place_cannot_reopen_a_policy_closed_above_it() {
+    let world = World::new().await;
+    let before = orch_settings::provider_translation::load(
+        &mut world.db.pool.acquire().await.unwrap(),
+        Place::Node(world.topic),
+    )
+    .await
+    .unwrap();
+    assert!(before.allowed);
+    assert_eq!(before.output_tokens, 4096);
+    world
+        .set(
+            Target::System,
+            keys::PROVIDERS_TRANSLATION_OUTPUT_TOKENS,
+            json!(16384),
+        )
+        .await;
+    world
+        .set(
+            Target::Node(world.root),
+            keys::PROVIDERS_TRANSLATION,
+            json!(false),
+        )
+        .await;
+    world
+        .set(
+            Target::Node(world.project),
+            keys::PROVIDERS_TRANSLATION,
+            json!(true),
+        )
+        .await;
+    let after = orch_settings::provider_translation::load(
+        &mut world.db.pool.acquire().await.unwrap(),
+        Place::Node(world.topic),
+    )
+    .await
+    .unwrap();
+    assert!(!after.allowed);
+    assert_eq!(after.output_tokens, 16384);
+    assert_eq!(
+        before.output_tokens, 4096,
+        "a later edit cannot rewrite an admitted request's capture"
+    );
+}
