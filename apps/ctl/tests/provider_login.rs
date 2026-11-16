@@ -40,6 +40,7 @@ async fn a_piped_access_token_signs_in_and_is_in_no_argument_output_or_control_j
     s.rig.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(
             orch_link_contract::commands::AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(reported.clone()).unwrap(),

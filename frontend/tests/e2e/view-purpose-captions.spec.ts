@@ -3,8 +3,7 @@ import { expect, test } from '@playwright/test';
 import { id } from '../doubles/fixtures.ts';
 import { ADA } from '../doubles/thread-scenes.ts';
 import { resourceFixtures } from '../../e2e/layout-fixtures.ts';
-import { inspectLayout } from '../../e2e/layout-rules-dom.ts';
-import { duplicateAccessibleNames, LAYOUT_INPUT, screenReady } from '../../e2e/layout-rules-helpers.ts';
+import { duplicateAccessibleNames, inspectSettled, LAYOUT_INPUT, screenReady } from '../../e2e/layout-rules-helpers.ts';
 import { asAdmin } from './admin-mode-support.ts';
 import { caption } from '../../e2e/capture/open.ts';
 import { replySent, scenario, signIn } from './support';
@@ -63,7 +62,7 @@ for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) 
       await expect(inactive).toHaveAccessibleName(purpose);
       await expect(strip.getByRole('tab').filter({ hasText: ADA.display_name })).toHaveCount(1);
     }
-    expect((await page.evaluate(inspectLayout, LAYOUT_INPUT)).faults.filter((fault) => fault.rule.startsWith('duplicate-'))).toEqual([]);
+    expect((await inspectSettled(page, LAYOUT_INPUT)).faults.filter((fault) => fault.rule.startsWith('duplicate-'))).toEqual([]);
     expect(await duplicateAccessibleNames(page)).toEqual([]);
     await expect(owner).toBeInViewport();
     await info.attach('purpose-caption', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });

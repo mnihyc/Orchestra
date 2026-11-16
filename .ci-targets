@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib -- queries::link::tests::
+test -p orch-connector-core --test key_facts
+test -p orch-conformance --test plugins
