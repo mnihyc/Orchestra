@@ -1564,6 +1564,21 @@ async fn a_change_against_an_old_revision_is_refused_and_a_change_that_asks_for_
     let c = company(&world).await;
     let id = a_host(&world, &c.boss, Some(c.acme), "Build box").await;
     let first = read(&world, &c.boss, id).await;
+    orch_db::queries::resources::hosting::record_node_load(
+        &mut *world.conn().await,
+        id,
+        &json!({"cpus":1,"memory_mb":100}),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hosts SET capacity=jsonb_set(capacity,'{cpus}','16',true),storages='[]' WHERE id=$1")
+        .bind(id).execute(&world.db.pool).await.unwrap();
+    assert_eq!(
+        read(&world, &c.boss, id).await.revision,
+        first.revision,
+        "capacity, storage and load reports leave the pending host edit current"
+    );
     let renamed = world
         .app
         .call(HostUpdate, &[&id])
@@ -1890,7 +1905,7 @@ fn host_enrollment_request(
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Node],
     }
 }

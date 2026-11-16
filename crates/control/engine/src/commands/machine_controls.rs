@@ -227,7 +227,7 @@ async fn physical_locks<F: Operation>(conn: &mut Conn, physical: &Physical) -> R
     sqlx::query(if F::EXCLUSIVE {
         "SELECT id FROM machines WHERE id=$1 FOR UPDATE"
     } else {
-        "SELECT id FROM machines WHERE id=$1 FOR SHARE"
+        "SELECT id FROM machines WHERE id=$1 FOR KEY SHARE"
     })
     .bind(physical.machine)
     .fetch_one(&mut *conn)
