@@ -117,9 +117,15 @@ pub struct CommandRow {
     pub body: Json,
     /// Its protected serial queue identity; absent on an older retained row.
     pub serial_key: Option<String>,
+    /// The original prerequisite a pipelined command waits for on its machine.
+    pub after_command_id: Option<Id>,
     /// Where it stands: `queued`, `sent`, `accepted`, `succeeded`,
     /// `failed`, `expired` or `cancelled`.
     pub state: String,
+    /// Queued, running with its key, or released, as the link acknowledgement reports.
+    pub key_phase: i16,
+    /// When the API first observed actual native work, rather than queue acceptance.
+    pub work_started_at: Option<DateTime<Utc>>,
     /// What the machine answered, once it succeeded; none again once the
     /// answer of a read was cleared because the one who asked had it.
     pub result: Option<Json>,
@@ -127,7 +133,7 @@ pub struct CommandRow {
     pub error: Option<Json>,
     /// How many times it was handed to a gateway.
     pub attempts: i32,
-    /// The moment after which it is not to be started.
+    /// The original creation-budget endpoint; subtract created_at to recover the work duration.
     pub deadline_at: DateTime<Utc>,
     /// When it was made.
     pub created_at: DateTime<Utc>,
@@ -153,10 +159,27 @@ impl CommandRow {
 
 /// The columns of a command, in the order [`CommandRow`] has them.
 macro_rules! command_columns {
-    () => {
-        "id, machine_id, kind, body, serial_key, state, result, error, attempts, deadline_at, created_at, updated_at"
+    ($($table:literal)?) => {
+        concat!(
+            $($table, ".",)? "id,",
+            $($table, ".",)? "machine_id,",
+            $($table, ".",)? "kind,",
+            $($table, ".",)? "body,",
+            $($table, ".",)? "serial_key,",
+            $($table, ".",)? "after_command_id,",
+            $($table, ".",)? "state,",
+            $($table, ".",)? "key_phase,",
+            $($table, ".",)? "work_started_at,",
+            $($table, ".",)? "result,",
+            $($table, ".",)? "error,",
+            $($table, ".",)? "attempts,",
+            $($table, ".",)? "deadline_at,",
+            $($table, ".",)? "created_at,",
+            $($table, ".",)? "updated_at"
+        )
     };
 }
+pub(crate) use command_columns;
 
 /// What a command is made with.
 #[derive(Debug, Clone, PartialEq)]
@@ -171,7 +194,7 @@ pub struct NewCommand<'a> {
     pub body: &'a Json,
     /// Its serial queue identity, stored separately from the machine request.
     pub serial_key: Option<&'a str>,
-    /// The moment after which it is not to be started.
+    /// The original creation-budget endpoint; subtract created_at to recover the work duration.
     pub deadline_at: DateTime<Utc>,
 }
 
@@ -204,10 +227,21 @@ pub async fn insert_command_with_authority(
     at: DateTime<Utc>,
     authority: Option<&Json>,
 ) -> Result<bool, DbError> {
+    insert_command_with_dependency(conn, command, at, authority, None).await
+}
+
+/// Preserve a command's prerequisite with its canonical first row.
+pub async fn insert_command_with_dependency(
+    conn: &mut Conn,
+    command: &NewCommand<'_>,
+    at: DateTime<Utc>,
+    authority: Option<&Json>,
+    after: Option<Id>,
+) -> Result<bool, DbError> {
     let inserted = sqlx::query(
-        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required)
+        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required, after_command_id)
          VALUES ($1, $2, $3, CASE WHEN jsonb_typeof($4::jsonb) = 'object'
-                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8, $9)
+                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8, $9, $10)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(command.id)
@@ -219,6 +253,7 @@ pub async fn insert_command_with_authority(
     .bind(at)
     .bind(authority)
     .bind(authority.is_some())
+    .bind(after)
     .execute(&mut *conn)
     .await?
     .rows_affected();
@@ -419,15 +454,20 @@ pub async fn mark_queued(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<b
 
 /// Notes that the machine wrote the command down.
 pub async fn mark_accepted(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<bool, DbError> {
-    let changed = sqlx::query(
-        "UPDATE commands SET state = 'accepted', updated_at = $2
-          WHERE id = $1 AND state IN ('queued', 'sent')",
-    )
-    .bind(id)
-    .bind(at)
-    .execute(conn)
-    .await?
-    .rows_affected();
+    mark_accepted_phase(conn, id, 0, at).await
+}
+
+/// Key phases advance independently of the terminal result; replay cannot reacquire a released key.
+pub async fn mark_accepted_phase(
+    conn: &mut Conn,
+    id: Id,
+    phase: i16,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let changed = sqlx::query("UPDATE commands SET state = 'accepted', key_phase = GREATEST(key_phase, $3),
+        work_started_at = CASE WHEN $3 >= 1 THEN COALESCE(work_started_at, $2) ELSE work_started_at END, updated_at = $2
+        WHERE id = $1 AND (state IN ('queued', 'sent') OR state = 'accepted' AND key_phase < $3)")
+        .bind(id).bind(at).bind(phase).execute(conn).await?.rows_affected();
     Ok(changed > 0)
 }
 
@@ -477,24 +517,46 @@ pub async fn finish_command(
     Ok(changed.is_some())
 }
 
-/// Expires the commands that no machine took before their deadline, on any
-/// machine, and returns them. A command the machine has written down stays
-/// open: the machine owes an answer. The commands in `followed` are left to
-/// the link that follows them, whose row may not yet say that their machine
-/// took them.
-pub async fn expire_unstarted(
+/// The oldest unfinished command ahead of an accepted command in its machine's line.
+/// A command already releasing its result holds no place in that line. An unsent command
+/// waits for its machine rather than for work that machine has accepted.
+pub async fn held_up_by(
     conn: &mut Conn,
-    now: DateTime<Utc>,
-    followed: &[Id],
-) -> Result<Vec<(Id, Id)>, DbError> {
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
     Ok(sqlx::query_as(
-        "UPDATE commands SET state = 'expired', updated_at = $1
-          WHERE state IN ('queued', 'sent') AND deadline_at <= $1 AND NOT (id = ANY($2))
-      RETURNING machine_id, id",
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted' AND me.key_phase = 0
+            AND ahead.state = 'accepted' AND ahead.key_phase < 2
+            AND (ahead.created_at, ahead.id) < (me.created_at, me.id)
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
     )
-    .bind(now)
-    .bind(followed)
-    .fetch_all(conn)
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// The machine's actual key owner, whose elapsed work may pause a queued command's patience.
+/// Accepted commands that have not acquired the key still appear in the line, but cannot
+/// grant unlimited time to another command merely because their acknowledgement arrived first.
+pub async fn key_holder(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted' AND me.key_phase = 0
+            AND ahead.id <> me.id AND ahead.state = 'accepted' AND ahead.key_phase = 1
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
     .await?)
 }
 
@@ -568,6 +630,9 @@ pub async fn purge_finished(
             WHERE c.state IN ('succeeded', 'failed', 'expired', 'cancelled')
               AND c.updated_at < $1
               AND c.kind <> ALL($2)
+              AND NOT EXISTS (SELECT 1 FROM commands dependent
+                  WHERE dependent.after_command_id=c.id
+                    AND dependent.state IN ('queued','sent','accepted'))
               AND NOT (c.kind IN ('agent.credential.return','provider.credential.accept')
                   AND c.state='succeeded' AND c.result IS NOT NULL
                   AND EXISTS(SELECT 1 FROM providers p WHERE p.id::text=c.body->>'provider_id'
@@ -706,6 +771,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_uploading_recording_no_longer_holds_the_next_recordings_patience() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let owner = machine(&mut conn).await;
+        let now = clock::start();
+        let body = json!({});
+        let mut first = new_command(owner, &body, now + Duration::seconds(30));
+        first.kind = "fs.record";
+        first.serial_key = Some("environment");
+        let mut next = new_command(owner, &body, now + Duration::seconds(30));
+        next.serial_key = first.serial_key;
+        insert_command(&mut conn, &first, now).await.unwrap();
+        insert_command(&mut conn, &next, now + Duration::seconds(1))
+            .await
+            .unwrap();
+        mark_accepted(&mut conn, first.id, now).await.unwrap();
+        mark_accepted(&mut conn, next.id, now).await.unwrap();
+        assert!(held_up_by(&mut conn, next.id).await.unwrap().is_some());
+        assert!(key_holder(&mut conn, next.id).await.unwrap().is_none());
+        mark_accepted_phase(&mut conn, first.id, 1, now)
+            .await
+            .unwrap();
+        assert!(held_up_by(&mut conn, next.id).await.unwrap().is_some());
+        assert!(key_holder(&mut conn, next.id).await.unwrap().is_some());
+        mark_accepted_phase(&mut conn, first.id, 2, now)
+            .await
+            .unwrap();
+        assert!(
+            held_up_by(&mut conn, next.id).await.unwrap().is_none(),
+            "the older upload no longer owns the environment key"
+        );
+        assert!(key_holder(&mut conn, next.id).await.unwrap().is_none());
+        assert!(
+            !mark_accepted_phase(&mut conn, first.id, 0, now)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            command(&mut conn, first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .key_phase,
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn a_command_reload_preserves_its_protected_queue_key_and_reads_an_older_retained_body() {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
@@ -796,26 +909,6 @@ mod tests {
         assert_eq!(stored.attempts, 2);
         assert!(stored.is_over());
         assert!(open_commands(&mut conn, machine).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn only_commands_no_machine_took_expire_at_their_deadline() {
-        let test = TestDb::fresh().await;
-        let mut conn = test.pool.acquire().await.unwrap();
-        let (machine, now) = (machine(&mut conn).await, clock::start());
-        let body = json!({});
-        let waiting = new_command(machine, &body, now + Duration::seconds(10));
-        let taken = new_command(machine, &body, now + Duration::seconds(10));
-        for command in [&waiting, &taken] {
-            insert_command(&mut conn, command, now).await.unwrap();
-        }
-        mark_accepted(&mut conn, taken.id, now).await.unwrap();
-        let later = now + Duration::seconds(11);
-        let expired = expire_unstarted(&mut conn, later, &[]).await.unwrap();
-        assert_eq!(expired, vec![(machine, waiting.id)]);
-        let still = open_commands(&mut conn, machine).await.unwrap();
-        assert_eq!(still.len(), 1);
-        assert_eq!(still[0].id, taken.id);
     }
 
     #[tokio::test]

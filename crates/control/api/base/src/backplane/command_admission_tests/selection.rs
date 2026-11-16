@@ -617,6 +617,19 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
     assert_eq!(Some(input), accepted.input_id);
     assert_ne!(new_segment, segment);
     assert_eq!(selected_segment, new_segment);
+    common::eventually(
+        "the selected opening's actual native reference is recorded",
+        || async {
+            world
+                .scalar::<Option<String>>(
+                    "SELECT native_session_ref FROM segments WHERE id=$1",
+                    new_segment,
+                )
+                .await
+                .is_some()
+        },
+    )
+    .await;
     let child_native: String = world
         .scalar(
             "SELECT native_session_ref FROM segments WHERE id=$1",

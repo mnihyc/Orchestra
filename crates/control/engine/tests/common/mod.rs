@@ -17,6 +17,7 @@ mod paid_commands;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
 use orch_access_contract::decisions::MissingAccess;
 use orch_access_contract::pages as contract_pages;
 use orch_agent_contract::descriptor::ArrangementType;
@@ -430,6 +431,8 @@ struct Issued {
     machine: Id,
     handle: CommandHandle,
     at: DateTime<Utc>,
+    work_started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// The API's end of a machine's commands: each is kept from the moment it is issued, a command asked for
@@ -669,7 +672,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -697,6 +700,7 @@ impl Commands for Process {
     ) -> Result<Option<orch_engine::commands::RetainedCommand>, CommandsError> {
         Ok(lock(&self.commands.issued).get(&id).map(|issued| {
             orch_engine::commands::RetainedCommand {
+                after: issued.cmd.after,
                 machine: issued.machine,
                 kind: issued.cmd.kind.clone(),
                 key: issued.cmd.key.clone(),
@@ -707,13 +711,11 @@ impl Commands for Process {
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         self.alive()?;
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline: Time::new(
-                self.commands.clock.now()
-                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-            ),
+            work: std::time::Duration::from_secs(u64::from(command.kind.deadline_secs())),
             body: command.body,
         };
         let handle = self.commands.link_of(command.machine).commands().issue(cmd);
@@ -726,6 +728,30 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        {
+            let issued = lock(&self.commands.issued);
+            if issued.contains_key(&command.id) {
+                if let Some(check) = before {
+                    check().map_err(CommandsError::BeforeEffect)?;
+                }
+                return Ok(());
+            }
+        }
+        // Durable admission can precede adoption by this scripted issuer. The
+        // production dispatcher derives the work grant from that original row,
+        // rather than spending it while a command waits to be put on the wire.
+        let retained = {
+            let mut conn = self
+                .commands
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            link_queries::command(&mut conn, command.id)
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?
+        };
+        self.alive()?;
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -733,15 +759,21 @@ impl Commands for Process {
             }
             return Ok(());
         }
-        let now = self.commands.clock.now();
-        let deadline = command.deadline.unwrap_or_else(|| {
-            Time::new(now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
-        });
+        let at = retained
+            .as_ref()
+            .map_or_else(|| self.commands.clock.now(), |row| row.created_at);
+        let deadline = command
+            .deadline
+            .or_else(|| retained.as_ref().map(|row| Time::new(row.deadline_at)))
+            .unwrap_or_else(|| {
+                Time::new(at + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
+            });
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline,
+            work: Cmd::work_budget(Time::new(at), deadline),
             body: command.body,
         };
         if let Some(check) = before {
@@ -758,7 +790,9 @@ impl Commands for Process {
                 cmd,
                 machine: command.machine,
                 handle,
-                at: now,
+                at,
+                work_started_at: None,
+                completed_at: None,
             },
         );
         Ok(())
@@ -766,11 +800,34 @@ impl Commands for Process {
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
         self.alive()?;
-        Ok(lock(&self.commands.issued).get(&id).map(|entry| {
+        Ok(lock(&self.commands.issued).get_mut(&id).map(|entry| {
             let progress = entry.handle.progress();
+            if entry.work_started_at.is_none()
+                && matches!(
+                    progress,
+                    Progress::Running
+                        | Progress::Released
+                        | Progress::Succeeded(_)
+                        | Progress::Failed(_)
+                )
+            {
+                entry.work_started_at = Some(self.commands.clock.now());
+            }
+            if progress.is_final() && entry.completed_at.is_none() {
+                entry.completed_at = Some(self.commands.clock.now());
+            }
             Info {
-                stage: stage_of(&progress),
+                stage: if (entry.cmd.after.is_some()
+                    || matches!(entry.cmd.kind.as_str(), "turn.start" | "turn.start.fenced"))
+                    && progress == Progress::Accepted
+                {
+                    Stage::Sent
+                } else {
+                    stage_of(&progress)
+                },
                 issued_at: entry.at,
+                work_started_at: entry.work_started_at.or(entry.completed_at),
+                completed_at: entry.completed_at,
                 outcome: outcome_of(&progress),
             }
         }))
@@ -782,6 +839,11 @@ impl Commands for Process {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let outcome = self.wait_handle(handle).await?;
+        if let Some(entry) = lock(&self.commands.issued).get_mut(&id)
+            && entry.completed_at.is_none()
+        {
+            entry.completed_at = Some(self.commands.clock.now());
+        }
         self.commands.complete_admitted(id, outcome).await
     }
 
@@ -1067,7 +1129,7 @@ pub struct World {
     applier_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     machines: Mutex<Vec<Weak<ScriptedMachine>>>,
     config: Mutex<EngineConfig>,
-    gate: Arc<tokio::sync::Mutex<()>>,
+    gate: Arc<tokio::sync::RwLock<()>>,
     appliers: Arc<AtomicU64>,
     /// How many words about a machine's presence (a session up, a session down) the appliers have written
     /// to the database and told the engine of, by machine.
@@ -1193,6 +1255,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1393,7 +1456,7 @@ impl World {
             applier_tasks: Mutex::new(Vec::new()),
             machines: Mutex::new(Vec::new()),
             config: Mutex::new(waits),
-            gate: Arc::new(tokio::sync::Mutex::new(())),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
             appliers: Arc::new(AtomicU64::new(0)),
             presence_words: Arc::new(Mutex::new(HashMap::new())),
             ada,
@@ -1547,7 +1610,7 @@ impl World {
         self.engine().stop();
         // What is being applied right now is committed first; what comes later reaches nobody until the
         // new link stands.
-        let quiet = self.gate.lock().await;
+        let quiet = self.gate.write().await;
         // Nothing the process that is gone still had in hand commits from now on.
         self.appliers.fetch_add(1, Ordering::SeqCst);
         let cursors = {
@@ -1611,18 +1674,40 @@ impl World {
         let gate = Arc::clone(&self.gate);
         let words = Arc::clone(&self.presence_words);
         let task = tokio::spawn(async move {
-            while let Some(notice) = notices.recv().await {
-                let gone = current.load(Ordering::SeqCst) != mine;
-                match notice {
-                    Notice::Deliver(delivery) => {
-                        if gone {
-                            link.abandoned(&delivery);
-                            continue;
-                        }
-                        let held = gate.lock().await;
+            // Match the API's shipped eight-delivery share of its 32-connection
+            // pool. The receiver releases a stream's next frame only after its
+            // previous frame commits; other streams need no common write lock.
+            const DELIVERIES_AT_ONCE: usize = 8;
+            let mut applying =
+                futures::stream::FuturesUnordered::<futures::future::BoxFuture<'static, ()>>::new();
+            loop {
+                let notice = tokio::select! {
+                    completed = applying.next(), if !applying.is_empty() => {
+                        let _ = completed;
+                        continue;
+                    }
+                    notice = notices.recv(), if applying.len() < DELIVERIES_AT_ONCE => notice,
+                };
+                let Some(notice) = notice else {
+                    while applying.next().await.is_some() {}
+                    return;
+                };
+                if let Notice::Deliver(delivery) = notice {
+                    let (pool, engine, clock, current, gate, link) = (
+                        pool.clone(),
+                        engine.clone(),
+                        Arc::clone(&clock),
+                        Arc::clone(&current),
+                        Arc::clone(&gate),
+                        link.clone(),
+                    );
+                    applying.push(Box::pin(async move {
+                        // Restart takes the write side, draining old transactions
+                        // before changing generation or loading durable cursors.
+                        let _held = gate.read().await;
                         if current.load(Ordering::SeqCst) != mine {
                             link.abandoned(&delivery);
-                            continue;
+                            return;
                         }
                         let applied = async {
                             let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -1671,8 +1756,15 @@ impl World {
                                 link.abandoned(&delivery);
                             }
                         }
-                        drop(held);
-                    }
+                    }));
+                    continue;
+                }
+                // Presence keeps its position after preceding deliveries, while
+                // restart still excludes every old-generation database effect.
+                while applying.next().await.is_some() {}
+                let _held = gate.read().await;
+                let gone = current.load(Ordering::SeqCst) != mine;
+                match notice {
                     Notice::Online { .. } if !gone => {
                         set_online(&pool, machine, true).await;
                         let _ = engine.machine_online(machine).await;
@@ -1914,6 +2006,10 @@ impl World {
     }
 
     pub async fn thread_by(&self, person: Id, name: &str) -> Id {
+        self.thread_on_provider(person, self.provider, name).await
+    }
+
+    pub async fn thread_on_provider(&self, person: Id, provider: Id, name: &str) -> Id {
         let created = self
             .engine()
             .create_thread(
@@ -1922,7 +2018,7 @@ impl World {
                     topic: self.topic,
                     name: name.to_owned(),
                     agent: self.agent,
-                    provider: self.provider,
+                    provider,
                     environment: self.environment,
                     directory: "web".to_owned(),
                     arrangement: None,
@@ -1933,6 +2029,46 @@ impl World {
             .await
             .expect("a thread is created");
         created.thread
+    }
+
+    /// Another ordinary API provider with the same scripted model and native machine.
+    pub async fn api_provider(&self, name: &str) -> Id {
+        let mut conn = self.pool.acquire().await.unwrap();
+        let provider = new_id();
+        let now = self.clock.now();
+        insert_api_provider(
+            &mut conn,
+            provider,
+            self.ada,
+            self.root,
+            self.machine_id,
+            "scripted-scale-key-not-a-model-credential",
+            now,
+        )
+        .await;
+        sqlx::query("UPDATE providers SET name=$2 WHERE id=$1")
+            .bind(provider)
+            .bind(name)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by)
+            VALUES($1,$2,$3,'Fake One',$4,true,'manual',$5)")
+            .bind(new_id()).bind(provider).bind(MODEL)
+            .bind(json!({"efforts":["low","high"],"default_effort":"low","input_images":true}))
+            .bind(self.ada).execute(&mut *conn).await.unwrap();
+        access_testing::add_entry(
+            &mut conn,
+            &PageKey::new("provider", provider, "live"),
+            "any",
+            "access.own",
+            ("user", Some(self.ada), None),
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+        provider
     }
 
     /// A person who is a member of the root org and holds nothing else.
@@ -2439,7 +2575,10 @@ impl World {
                             'recovery_cuts',(SELECT count(*) FROM thread_history_cuts WHERE owner_thread_id=$1),
                             'current_turn',(SELECT jsonb_build_object('ordinal',ordinal,'state',state,
                                 'segment_ordinal',(SELECT ordinal FROM segments WHERE id=turns.segment_id))
-                                FROM turns WHERE id=(SELECT current_turn_id FROM threads WHERE node_id=$1)))",
+                                FROM turns WHERE id=(SELECT current_turn_id FROM threads WHERE node_id=$1)),
+                            'latest_turn',(SELECT jsonb_build_object('ordinal',ordinal,'state',state,
+                                'code',error->>'code') FROM turns WHERE thread_id=$1
+                                ORDER BY created_at DESC,id DESC LIMIT 1))",
                     )
                     .bind(thread)
                     .fetch_one(self.pool.pool()),
@@ -2548,6 +2687,29 @@ impl World {
                 .await
                 .unwrap()
         else {
+            // A pipelined input can run before the API has recorded its opening's
+            // result. Reports used as fixture setup must join that actual work,
+            // without opening a second native conversation to supply its metadata.
+            eventually("the actual session preparation is recorded", || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT NOT EXISTS(
+                        SELECT 1 FROM segments s JOIN threads t ON t.node_id=s.thread_id
+                        JOIN turns v ON v.id=t.current_turn_id
+                        JOIN commands c ON c.body->>'segment_id'=s.id::text
+                        WHERE s.id=$2 AND s.thread_id=$1 AND t.current_segment_id=s.id
+                          AND v.state IN ('starting','running') AND v.interrupted_by IS NULL
+                          AND c.kind='session.open' AND c.session_open_capture IS NOT NULL
+                          AND c.state NOT IN ('failed','cancelled','expired')
+                          AND (s.native_session_ref IS NULL OR s.session_hints IS NULL
+                            OR s.session_configuration IS NULL))",
+                )
+                .bind(thread)
+                .bind(segment)
+                .fetch_one(self.pool.pool())
+                .await
+                .unwrap()
+            })
+            .await;
             return;
         };
         let command = Outgoing::new(
@@ -2803,4 +2965,98 @@ fn build_engine(
         orch_provider_contract::builtins::BuiltinSources::default(),
     ));
     engine
+}
+
+/// Atomically make a conversation-copy fixture beside its uncommitted target.
+pub async fn copy_conversation(
+    unit: &mut orch_engine::unit::Unit<'_>,
+    source: Id,
+    target: Id,
+    segment: Id,
+    range: Option<(i32, i32)>,
+    source_segment: Option<Id>,
+) -> Result<(), orch_engine::EngineError> {
+    let started = std::time::Instant::now();
+    if source == target {
+        return Err(orch_engine::EngineError::unreadable(
+            "A full fork cannot copy into its source execution.",
+        ));
+    }
+    // Atomic fixture setup deliberately shares its target birth transaction.
+    // Real requests capture and publish in separate owned transactions.
+    let source_row = orch_db::queries::threads::lock(unit.conn, source)
+        .await?
+        .ok_or_else(|| {
+            orch_engine::EngineError::unreadable("The source conversation is unavailable.")
+        })?;
+    if source_segment.is_some_and(|segment| Some(segment) != source_row.current_segment_id) {
+        return Err(orch_engine::EngineError::unreadable(
+            "The requested source segment is no longer selected.",
+        ));
+    }
+    // An omitted fixture range takes all finished selected turns.
+    let range = match range {
+        Some(range) => Some(range),
+        None => Some((
+            1,
+            orch_db::queries::thread_history_cuts::last_finished(
+                unit.conn,
+                source,
+                source_row.active_continuation_id,
+            )
+            .await?
+            .unwrap_or(0),
+        )),
+    };
+    let at = unit.now();
+    let captured = orch_db::queries::thread_history_cuts::capture(
+        unit.conn,
+        &orch_db::queries::thread_history_cuts::Capture {
+            id: target,
+            thread: source,
+            view: source_row.active_continuation_id,
+            job: None,
+            owner_thread: Some(target),
+            segment: source_row.current_segment_id,
+            execution_revision: source_row.execution_revision,
+            range,
+            at,
+        },
+    )
+    .await?;
+    tracing::debug!(phase = "capture", elapsed = ?started.elapsed(), "Copied conversation phase");
+    orch_engine::fork_history::copy_captured_conversation(unit, &captured, target, segment).await?;
+    tracing::debug!(phase = "publication", elapsed = ?started.elapsed(), "Copied conversation phase");
+    // This temporary cut has no native lineage witness. Release its captured
+    // rows in primary-key order instead of making the header's FK cascade erase
+    // an entire long history under one request statement deadline.
+    let mut after: Option<(String, Id)> = None;
+    loop {
+        let next: Option<(String, Id)> = sqlx::query_as(
+            "WITH page AS MATERIALIZED (
+          SELECT kind,row_id FROM thread_history_cut_rows WHERE cut_id=$1
+            AND (kind,row_id)>=(COALESCE($2::text,''),COALESCE($3::uuid,'00000000-0000-0000-0000-000000000000'::uuid))
+            AND ($2::text IS NULL OR (kind,row_id)>($2,$3::uuid))
+          ORDER BY kind,row_id LIMIT $4
+        ),removed AS (DELETE FROM thread_history_cut_rows r USING page p
+          WHERE r.cut_id=$1 AND r.kind=p.kind AND r.row_id=p.row_id)
+        SELECT kind,row_id FROM page ORDER BY kind DESC,row_id DESC LIMIT 1",
+        )
+        .bind(target)
+        .bind(after.as_ref().map(|(kind, _)| kind.as_str()))
+        .bind(after.as_ref().map(|(_, row)| *row))
+        .bind(orch_db::queries::thread_history_cuts::PAGE)
+        .fetch_optional(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
+    sqlx::query("DELETE FROM thread_history_cuts WHERE id=$1 AND owner_thread_id=$1")
+        .bind(target)
+        .execute(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    tracing::debug!(phase = "release", elapsed = ?started.elapsed(), "Copied conversation phase");
+    Ok(())
 }

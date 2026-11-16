@@ -1,6 +1,6 @@
 //! Thread settlement, committed close commands and retained environment removal references.
 
-use crate::queries::link::CommandRow;
+use crate::queries::link::{CommandRow, command_columns};
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
 use orch_types::{Id, Json};
@@ -84,16 +84,16 @@ pub async fn cancel_delivery(
 
 /// Pending lifecycle controls, with an interrupt before a close made by the same act.
 pub async fn controls(conn: &mut Conn, limit: i64) -> Result<Vec<CommandRow>, DbError> {
-    Ok(sqlx::query_as(
-        "SELECT id,machine_id,kind,body,serial_key,state,result,error,attempts,deadline_at,created_at,updated_at
-         FROM commands c WHERE state IN ('queued','sent','accepted')
+    Ok(sqlx::query_as(concat!(
+        "SELECT ", command_columns!(),
+        " FROM commands c WHERE state IN ('queued','sent','accepted')
           AND (kind IN ('turn.interrupt','lease.close','session.close','session.close.fenced','session.continuation.close','node.runtime.stop','provider.stop','env.detach','mcp.forget')
             OR (kind='approval.resolve' AND EXISTS(SELECT 1 FROM approvals a WHERE a.state='cancelled'
                 AND a.thread_id::text=c.body->>'thread_id' AND a.native_ref=c.body->>'request_ref'))
             )
          ORDER BY created_at, CASE kind WHEN 'turn.interrupt' THEN 0 WHEN 'lease.close' THEN 1 ELSE 2 END, id
          LIMIT $1",
-    ).bind(limit).fetch_all(conn).await?)
+    )).bind(limit).fetch_all(conn).await?)
 }
 
 /// Retryable detach refusals belonging to a registration that remains withdrawn.
@@ -104,11 +104,11 @@ pub async fn busy_registration_detaches(
     now: DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<CommandRow>, DbError> {
-    Ok(sqlx::query_as("SELECT c.id,c.machine_id,c.kind,c.body,c.serial_key,c.state,c.result,c.error,c.attempts,
-        c.deadline_at,c.created_at,c.updated_at FROM commands c JOIN environments e ON e.id::text=c.body->>'environment_id'
+    Ok(sqlx::query_as(concat!("SELECT ",command_columns!("c"),
+        " FROM commands c JOIN environments e ON e.id::text=c.body->>'environment_id'
         WHERE c.kind='env.detach' AND c.state='failed' AND c.error @> '{\"code\":\"busy\",\"retryable\":true}'::jsonb
         AND c.error#>>'{details,retry_command}' IS NULL AND c.updated_at<=$1 AND c.deadline_at>$2
-        AND e.deleted_at IS NOT NULL AND e.machine_id=c.machine_id ORDER BY c.updated_at,c.id LIMIT $3")
+        AND e.deleted_at IS NOT NULL AND e.machine_id=c.machine_id ORDER BY c.updated_at,c.id LIMIT $3"))
         .bind(ready_before).bind(now).bind(limit).fetch_all(conn).await?)
 }
 

@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-db --lib --test commands_in_line
+test -p orch-engine --lib
+test -p orch-engine --test turns --test source --test measurement_jobs --test temporary_environments -- --nocapture
+test -p orch-engine --test failures -- unissued_start
+test -p orch-engine --test forks -- confirmed_source::
+test -p orch-api-core --lib --features test-observers
+test -p orch-api-core --test realtime_environment --test terminals_connector

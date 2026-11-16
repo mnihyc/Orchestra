@@ -317,6 +317,7 @@ impl CommandEvidence {
             return Ok(None);
         }
         let actual = Outgoing {
+            after: None,
             authority: None,
             id: command.id,
             machine: command.machine_id,
@@ -346,6 +347,7 @@ impl CommandEvidence {
             return Ok(None);
         }
         let actual = Outgoing {
+            after: None,
             authority: None,
             id: command.id,
             machine: command.machine_id,
