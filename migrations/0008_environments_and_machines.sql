@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -209,6 +210,7 @@ CREATE TABLE environments (
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     manifest_blob bytea,
     manifest_at timestamp with time zone,
+    manifest_source_facts jsonb,
     env_seq bigint DEFAULT 0 NOT NULL,
     unused_since timestamp with time zone,
     remove_at timestamp with time zone,
@@ -387,7 +389,25 @@ CREATE TABLE machines (
     CONSTRAINT machines_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id)
 );
 
-CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
+CREATE FUNCTION orch_machine_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- An accepted role replacement may claim its revision before the native acknowledgement.
+  IF NEW.revision > OLD.revision
+     OR ROW(NEW.name,NEW.owner_id,NEW.home_id,NEW.home_overridden_at,NEW.org_id,
+            NEW.placement,NEW.host_id,NEW.status,NEW.deleted_at,NEW.lost_at,NEW.lost_by,
+            NULLIF(NEW.facts->'policy','null'::jsonb))
+        IS DISTINCT FROM
+        ROW(OLD.name,OLD.owner_id,OLD.home_id,OLD.home_overridden_at,OLD.org_id,
+            OLD.placement,OLD.host_id,OLD.status,OLD.deleted_at,OLD.lost_at,OLD.lost_by,
+            NULLIF(OLD.facts->'policy','null'::jsonb))
+     OR NOT (NEW.roles @> OLD.roles AND OLD.roles @> NEW.roles) THEN
+    NEW.revision := OLD.revision + 1;
+  ELSE
+    NEW.revision := OLD.revision;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_machine_revision();
 
 CREATE TRIGGER agent_program_reports_write AFTER INSERT OR UPDATE OF facts, status, deleted_at ON machines FOR EACH ROW EXECUTE FUNCTION orch_project_program_reports();
 
@@ -797,3 +817,18 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- One native source transfer per current environment, independent of browser upload sessions.
+CREATE TABLE environment_file_transfers (
+    environment_id uuid PRIMARY KEY REFERENCES environments(id) ON DELETE CASCADE,
+    machine_id uuid NOT NULL,
+    generation bigint NOT NULL,
+    hash bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('transferring', 'interrupted', 'expired')),
+    observed_at timestamp with time zone NOT NULL,
+    last_piece_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    idle_retention_secs bigint,
+    retention_default boolean
+);
+CREATE INDEX environment_file_transfers_content_idx ON environment_file_transfers(machine_id,hash);

@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale --test search_content --test search_names --test search_native_scopes --test holder_search_native_scopes -- --nocapture
