@@ -1,4 +1,5 @@
 /** A lazily read tree grid: safe paths, aligned optional columns, a sticky header and the tree's keyboard. */
+import { PathLink } from '@/shell/TrailLink';
 import { linkTo } from '@/lib/links';
 import { ContainedThreadStateIcon, ThreadStateIcon } from '@/ui/ThreadState';
 import { useInfiniteQuery } from '@tanstack/react-query';
@@ -208,7 +209,7 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
           {!flat && (expandable ? <IconButton size="sm" label={t(open ? 'everything.collapse' : 'everything.expand', { name: label })} icon={open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />} aria-expanded={open} onClick={() => tree.toggle(key, !open)} /> : <span className="size-(--control-sm) shrink-0" aria-hidden />)}
           <span className="flex h-(--control-sm) shrink-0 items-center"><KindIcon row={row} activity={!flat || !tree.columns.includes('state')} /></span>
           <span className={`flex min-w-0 flex-1 flex-col gap-1 ${flat ? '' : 'wrap-anywhere sm:min-w-[12ch] sm:wrap-normal'}`}>
-            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
+            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <PathLink data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</PathLink>}
             {row.place_label !== null && !tree.columns.includes('where') && <RowPlace value={place} />}
           </span>
           {!pathOnly && (row.kind === 'org' || row.kind === 'project' || row.kind === 'topic') && <ContainedThreadStateIcon id={row.id} />}
@@ -254,7 +255,7 @@ function Level({ parent, parentKey, depth }: { parent: string | null; parentKey:
   }, [shown, tree.all, hasNextPage, isFetching, isError, fetchNextPage]);
   const span = tree.columns.length + 1 + (tree.selection === undefined ? 0 : 1);
   if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows read={level} rows={3} /></td></tr>;
-  const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><a href="/everything">{t('everything.openMine')}</a></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
+  const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><PathLink href="/everything">{t('everything.openMine')}</PathLink></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
   if (level.isError && (rows.length === 0 || retired)) return failure;
   if (rows.length === 0) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{t(tree.filter.q !== '' ? 'everything.noMatches' : filtering ? 'everything.noResults' : 'everything.empty')}</td></tr>;
   return <>

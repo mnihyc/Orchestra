@@ -29,6 +29,7 @@ fn at(second: i64) -> Time {
 
 fn event(kind: &str, n: i64, body: serde_json::Value) -> SpoolEvent {
     SpoolEvent {
+        native_opening_id: None,
         at: at(n),
         kind: kind.to_owned(),
         body,
@@ -41,6 +42,43 @@ fn plain(n: i64) -> SpoolEvent {
 
 fn open(dir: &Path, options: SpoolOptions) -> Spool {
     Spool::open(dir, options).unwrap().0
+}
+
+#[test]
+fn a_restart_keeps_each_physical_producer_and_the_continuous_session_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = format!("session:{}:{}", orch_types::new_id(), orch_types::new_id());
+    let original = orch_types::new_id();
+    let replacement = orch_types::new_id();
+    {
+        let mut spool = open(dir.path(), options());
+        for (opening, text) in [
+            (original, "Original output"),
+            (replacement, "Replacement output"),
+        ] {
+            let mut report = event("session.title", 0, json!({"title":text}));
+            report.native_opening_id = Some(opening);
+            spool.append(&session, &report).unwrap();
+        }
+        let numbered = spool.number(&session, 2).unwrap();
+        assert_eq!(
+            numbered.iter().map(|report| report.seq).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        spool.sync().unwrap();
+    }
+    let (mut spool, recovery) = Spool::open(dir.path(), options()).unwrap();
+    assert!(recovery.damaged.is_empty());
+    let again = spool.read(&session, 1, 2).unwrap();
+    assert_eq!(
+        again
+            .iter()
+            .map(|report| report.event.native_opening_id)
+            .collect::<Vec<_>>(),
+        [Some(original), Some(replacement)]
+    );
+    assert_eq!(again[0].event.body["title"], "Original output");
+    assert_eq!(again[1].event.body["title"], "Replacement output");
 }
 
 #[test]
