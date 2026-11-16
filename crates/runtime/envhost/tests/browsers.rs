@@ -185,6 +185,8 @@ impl World {
         let facts = host
             .env_attach(
                 &EnvAttach {
+                    workspace: Default::default(),
+
                     resources: None,
                     data_generation: None,
                     storage: None,
@@ -550,6 +552,8 @@ async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_enviro
     let _ = session;
     world.stop().await;
     let attach = EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -1806,6 +1810,8 @@ async fn a_connected_host_uses_its_private_profiles_only_while_the_machine_owner
     let id = orch_types::new_id();
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

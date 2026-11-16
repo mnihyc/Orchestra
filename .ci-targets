@@ -1,0 +1,3 @@
+# b43y-6: the envhost watch and summaries reds on the tabs merge 8dfacd27f and again on the trial head
+test -p orch-envhost --lib -- environment::directory_watch_tests::
+test -p orch-api-core --test summaries

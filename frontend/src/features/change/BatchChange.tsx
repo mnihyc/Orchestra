@@ -10,11 +10,13 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, CircleX, OctagonAlert, Undo2 } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { reasonWords } from '@/features/change/Result';
 import { StateLine } from '@/ui/StateLine';
 import { BatchDestination } from '@/features/change/BatchDestination';
+import { DetailPages } from '@/features/resources/DetailSections';
+import { Input } from '@/ui/Input';
 
 import { ApiError } from '@/api/client';
 import { resourceImpactQuery } from '@/api/resource-impact';
@@ -24,7 +26,8 @@ import { nodeQuery } from '@/api/nodes';
 import { agentsQuery, providerModelsQuery, providersQuery } from '@/api/resources';
 import { Blockers } from '@/features/change/Blockers';
 import { Frame, type View } from '@/features/change/Frame';
-import { effortLabel, modelLabel } from '@/features/change/modelLabel';
+import { modelLabel } from '@/features/change/modelLabel';
+import { effortDisplayName } from '@/features/models/names';
 import { addedResourcesOf, keptResourcesOf, rangeWords, removedResourcesOf } from '@/features/change/plan';
 import { PlanLists } from '@/features/change/Lists';
 import { useRefreshWhenOver } from '@/features/change/refresh';
@@ -43,7 +46,6 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
 import { JobActivityLine } from '@/features/change/Progress';
-import { Select } from '@/ui/Select';
 import { SkeletonRows, type SkeletonRead } from '@/ui/Skeleton';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import type { ThreadDisplay } from '@/generated/api-types';
@@ -64,6 +66,22 @@ export interface BatchChangeProps {
   batch: string | null;
   open: boolean;
   onClose: () => void;
+}
+
+/** Search and paging affect only the visible rows, never the reviewed selection. */
+function BatchRows<Row>({ label, items, text, children, footer }: { label: string; items: readonly Row[]; text: (row: Row) => string; children: (rows: readonly Row[]) => ReactNode; footer?: ReactNode }) {
+  const { t } = useTranslation();
+  const { locale } = useFormatContext();
+  const [query, setQuery] = useState('');
+  const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase(locale);
+  const wanted = normalize(query.trim());
+  const filtered = wanted === '' ? items : items.filter((item) => normalize(text(item)).includes(wanted));
+  return <div role="group" aria-label={label} className="flex min-h-0 min-w-0 flex-col gap-2">
+    {items.length > 10 && <Input type="search" label={t('change.batch.find')} hideLabel placeholder={t('change.batch.find')} value={query} onChange={(event) => setQuery(event.currentTarget.value)} />}
+    {filtered.length === 0 ? <StateLine compact message={t('change.batch.noMatches')} />
+      : <DetailPages key={wanted} items={filtered}>{(rows) => <div className="max-h-(--list-max-height) overflow-y-auto">{children(rows)}</div>}</DetailPages>}
+    {footer}
+  </div>;
 }
 
 interface Candidate {
@@ -133,7 +151,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
       ? null
       : {
           ...(everything && candidates.all !== null ? candidates.all : { thread_ids: selected }),
-          ...(providerId === null || (everything && destination !== undefined) ? {} : { to: { provider_id: providerId, ...(agentId === null ? {} : { agent_id: agentId }), ...(model === null ? {} : { model }), ...(effortUsed === undefined ? {} : { effort: effortUsed }) } }),
+          ...(providerId === null ? {} : { to: { provider_id: providerId, ...(agentId === null ? {} : { agent_id: agentId }), ...(model === null ? {} : { model }), ...(effortUsed === undefined ? {} : { effort: effortUsed }) } }),
           ...(destination === undefined ? {} : { environment: destination }),
         };
   const asked = JSON.stringify(body);
@@ -272,15 +290,14 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
         {candidates.loading ? (
           <SkeletonRows reads={candidates.reads} rows={3} />
         ) : (
-          <ul className="flex max-h-(--list-max-height) flex-col gap-1 overflow-y-auto rounded-lg border border-border bg-surface p-2">
-            {threads.map((entry) => (
+          <BatchRows label={t('change.batch.threads')} items={threads} text={(entry) => entry.name} footer={candidates.hidden > 0 ? <span className="px-1 text-sm text-text-muted">{t('change.batch.hidden', { count: candidates.hidden })}</span> : undefined}>{(visible) => <ul className="flex flex-col gap-1 rounded-lg border border-border bg-surface p-2">
+            {visible.map((entry) => (
               <li key={entry.id} className="flex items-center gap-2">
                 <Checkbox label={entry.name} checked={!unticked.has(entry.id)} onCheckedChange={(on) => setUnticked((set) => { const next = new Set(set); if (on) next.delete(entry.id); else next.add(entry.id); return next; })} />
                 <ThreadStateIcon display={entry.display} />
               </li>
             ))}
-            {candidates.hidden > 0 && <li className="px-1 text-sm text-text-muted">{t('change.batch.hidden', { count: candidates.hidden })}</li>}
-          </ul>
+          </ul>}</BatchRows>
         )}
       </section>
 
@@ -306,7 +323,8 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
             onValueChange={(next) => setAgentId(next === '' ? null : next)}
             options={[{ value: '', name: t('change.batch.keepOwn') }, ...offered.map((agent) => ({ value: agent.id, name: agent.name, ...resourceChoice({ kind: 'agent', agent, provider, models: listed }) }))]}
           />
-          <Select
+          <ResourcePicker
+            pickerKey="change.batch.model"
             label={t('change.runs.model')}
             value={model ?? ''}
             disabled={providerId === null}
@@ -316,7 +334,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
             }}
             options={[{ value: '', name: t('change.batch.keepOwn') }, ...listed.map((candidate) => ({ value: candidate.model_name, name: modelLabel(candidate.model_name, listed, null, t), ...resourceChoice({ kind: 'model', model: candidate, providerId: providerId ?? '', usage: provider?.choice_usage, effort: effortUsed }) }))]}
           />
-          {model !== null && efforts.length > 0 && <Select label={t('change.runs.effort')} value={effortUsed ?? ''} onValueChange={(next) => setEffort(next)} options={efforts.map((value) => ({ value, name: effortLabel(value, t) ?? '' }))} />}
+          {model !== null && efforts.length > 0 && <ResourcePicker pickerKey="change.batch.effort" label={t('change.runs.effort')} value={effortUsed ?? ''} onValueChange={(next) => setEffort(next)} options={efforts.map((value) => ({ value, name: effortDisplayName(value, t) }))} />}
         </div>
       </section>
 
@@ -352,8 +370,8 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
 function PlanRows({ plans }: { plans: readonly ForkPlan[] }) {
   const { t } = useTranslation();
   return (
-    <ul className="flex flex-col gap-1 rounded-lg border border-border bg-surface p-2" aria-label={t('change.batch.plans')} data-batch-plans>
-      {plans.map((plan) => {
+    <BatchRows label={t('change.batch.plans')} items={plans} text={(plan) => [plan.source.redacted ? '' : plan.source.name ?? '', ...plan.blockers.map((blocker) => blocker.message)].join(' ')}>{(visible) => <ul className="flex flex-col gap-1 rounded-lg border border-border bg-surface p-2" aria-label={t('change.batch.plans')} data-batch-plans>
+      {visible.map((plan) => {
         const blocked = plan.blockers.length > 0;
         return (
           <li key={plan.preflight_id} data-plan-row={plan.source.id} data-blocked={blocked ? 'true' : undefined} className="flex flex-col gap-1 border-b border-border p-2 last:border-b-0">
@@ -369,7 +387,7 @@ function PlanRows({ plans }: { plans: readonly ForkPlan[] }) {
           </li>
         );
       })}
-    </ul>
+    </ul>}</BatchRows>
   );
 }
 
@@ -390,8 +408,8 @@ function BatchProgress({ data, over, reconnecting }: { data: ForkBatch; over: bo
         {t('change.batch.counts', { done: counts.succeeded, running: counts.running, queued: counts.queued, failed: counts.failed, cancelled: counts.cancelled })}
         {data.hidden > 0 && <span className="ml-1">· {t('change.batch.hidden', { count: data.hidden })}</span>}
       </p>
-      <ul aria-label={t('change.batch.jobs')} className="flex flex-col gap-1 rounded-lg border border-border bg-surface p-2">
-        {data.jobs.map(({ job, thread }) => (
+      <BatchRows label={t('change.batch.jobs')} items={data.jobs} text={({ thread, job }) => [thread.name ?? '', t(`change.batch.state.${job.state}`, { phase: t(`change.phase.${job.progress.phase}.short`, { defaultValue: t('source.job.running') }) }), job.state === 'failed' && job.error !== null ? reasonWords(job, t, 10) : ''].join(' ')}>{(visible) => <ul aria-label={t('change.batch.jobs')} className="flex flex-col gap-1 rounded-lg border border-border bg-surface p-2">
+        {visible.map(({ job, thread }) => (
           <li key={job.id} data-batch-job={thread.id} data-job-state={job.state} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b border-border p-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_10rem_auto]">
             <span className="min-w-0 truncate font-medium text-text">{thread.name ?? t('change.batch.hiddenName')}</span>
             <span className="hidden sm:block">
@@ -411,7 +429,7 @@ function BatchProgress({ data, over, reconnecting }: { data: ForkBatch; over: bo
             )}
           </li>
         ))}
-      </ul>
+      </ul>}</BatchRows>
       {reconnecting && (
         <InlineAlert tone="info" title={t('change.progress.reconnecting')}>
           {t('change.progress.reconnectingAbout')}
