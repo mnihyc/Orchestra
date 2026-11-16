@@ -25,3 +25,6 @@ pub mod mount_locations;
 
 /// Exact native Skill creation sources and original command phases.
 pub mod skill_creation;
+
+/// Current human file geometry at the original HTTP command boundary.
+pub mod file_commands;
