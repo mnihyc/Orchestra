@@ -24,10 +24,10 @@ const BRINGING_ASKS = 12;
 export type Brought = { state: 'ready'; hash: string; size: number | null } | { state: 'unavailable'; reason: FetchUnavailable };
 
 /** Obtains the verified version of a workspace file before a viewer or an explicit download reads it. */
-export async function bringFile(door: Door, path: string, signal: AbortSignal): Promise<Brought> {
+export async function bringFile(door: Door, path: string, signal: AbortSignal, mount?: string): Promise<Brought> {
   let last: FetchState | null = null;
   for (let ask = 0; ask < BRINGING_ASKS; ask += 1) {
-    last = await fetchFile(door, path, signal);
+    last = await fetchFile(door, path, signal, mount);
     if (last.state === 'ready' && last.hash !== null) return { state: 'ready', hash: last.hash, size: last.size };
     if (last.state === 'unavailable') return { state: 'unavailable', reason: last.reason ?? 'not_found' };
   }
@@ -42,11 +42,11 @@ export interface FileHead {
 
 export const headKey = (door: Door, path: string) => ['workspace-head', door.environmentId, path] as const;
 
-export const headQuery = (door: Door, path: string) =>
+export const headQuery = (door: Door, path: string, mount?: string) =>
   queryOptions({
-    queryKey: headKey(door, path),
+    queryKey: [...headKey(door, path), ...(mount === undefined ? [] : [mount])],
     queryFn: async ({ signal }): Promise<FileHead> => {
-      const [stat, brought] = await Promise.all([statFile(door, path, signal), bringFile(door, path, signal)]);
+      const [stat, brought] = await Promise.all([statFile(door, path, signal, mount), bringFile(door, path, signal, mount)]);
       return { stat, brought };
     },
     // What is shown is what the directory says: it asks again when it is told that the file changed, and not for being looked at.
