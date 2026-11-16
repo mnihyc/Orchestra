@@ -67,6 +67,38 @@ pub const OUTPUT_INLINE_MAX_BYTES: usize = 16 * 1024;
 /// The longest title a harness may give a thread, in characters.
 pub const TITLE_MAX_CHARS: usize = 120;
 
+fn factual_session_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::ItemStarted(_)
+            | Event::ItemDelta(_)
+            | Event::ItemUpdated(_)
+            | Event::ItemCompleted(_)
+            | Event::UsageUpdated(_)
+            | Event::ModelRequest(_)
+            | Event::RawFrame(_)
+            | Event::SessionLost(_)
+            | Event::TurnCommandCleanup(_)
+    )
+}
+
+fn native_control_turn(event: &Event) -> Option<Id> {
+    match event {
+        Event::TurnStarted(body) => Some(body.turn_id),
+        Event::TurnPhase(body) => Some(body.turn_id),
+        Event::ApprovalRequested(body) => Some(body.turn_id),
+        Event::OrchToolCall(body) => Some(body.turn_id),
+        Event::TurnCommandCleanup(body) => Some(body.turn_id),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeObservation {
+    opening_id: Option<Id>,
+    serving: bool,
+}
+
 // ---------------------------------------------------------------- making items
 
 /// An item to add to a thread's timeline.
@@ -122,6 +154,14 @@ pub async fn add_item(
     unit: &mut Unit<'_>,
     spec: &ItemSpec<'_>,
 ) -> Result<Option<ItemRow>, EngineError> {
+    add_item_observed(unit, spec, None).await
+}
+
+async fn add_item_observed(
+    unit: &mut Unit<'_>,
+    spec: &ItemSpec<'_>,
+    source: Option<NativeObservation>,
+) -> Result<Option<ItemRow>, EngineError> {
     // An item that is there already costs nothing: no number is spent.
     if let Some(native_ref) = spec.native_ref
         && threads::item_by_native_ref(&mut *unit.conn, spec.segment, native_ref)
@@ -131,7 +171,15 @@ pub async fn add_item(
         return Ok(None);
     }
     let observed = if spec.kind == "error" {
-        observations::rerouted(unit, spec.thread, spec.segment, spec.turn, spec.payload).await?
+        observations::rerouted_from(
+            unit,
+            spec.thread,
+            spec.segment,
+            spec.turn,
+            spec.payload,
+            source,
+        )
+        .await?
     } else {
         None
     };
@@ -161,7 +209,14 @@ pub async fn add_item(
     .await?;
     if let Some(row) = &row {
         if spec.status == "completed" {
-            observations::completed_item(unit, row, payload, None).await?;
+            observations::completed_item_from(
+                unit,
+                row,
+                payload,
+                None,
+                source.is_none_or(|source| source.serving),
+            )
+            .await?;
         } else {
             observations::observed_item(unit, row, payload, None).await?;
         }
@@ -504,11 +559,15 @@ pub(crate) fn tail_of(text: &str, max_bytes: usize) -> &str {
 /// A machine joins only what waits in its own queue, which drains as fast as its spool takes it; while the system is
 /// behind, the machine's window of unacknowledged events is full and its next frame is made of everything that
 /// waited in its spool, so the further behind the system is, the fewer pieces it handles.
-fn joined_deltas<R>(events: Vec<(R, Event)>) -> Vec<(R, Event)> {
+fn joined_deltas<R>(
+    events: Vec<(R, Event)>,
+    same_source: impl Fn(&R, &R) -> bool,
+) -> Vec<(R, Event)> {
     let mut joined: Vec<(R, Event)> = Vec::with_capacity(events.len());
     for (raw, event) in events {
-        if let (Some((_, Event::ItemDelta(before))), Event::ItemDelta(delta)) =
+        if let (Some((previous, Event::ItemDelta(before))), Event::ItemDelta(delta)) =
             (joined.last_mut(), &event)
+            && same_source(previous, &raw)
             && before.native_ref == delta.native_ref
             && before.field == delta.field
             && before.offset + before.len == delta.offset
@@ -681,34 +740,122 @@ impl Engine {
             .await?
             .filter(|segment| segment.thread_id == thread_id)
         else {
-            tracing::warn!(%thread_id, %segment_id, "events of a segment the thread does not have");
+            // A real fork/import may lose its prepared native session before history publication.
+            // Its report can close only that original opening and cannot drive the selected thread.
+            for event in events {
+                if let Ok(Event::SessionLost(lost)) = Event::decode(&event.kind, event.body.clone())
+                    && event.native_opening_id == Some(lost.opening_id)
+                {
+                    let observed_at = unit.now();
+                    orch_db::queries::session_dependencies::lost(
+                        unit.conn,
+                        segment_id,
+                        lost.opening_id,
+                        observed_at,
+                    )
+                    .await?;
+                }
+            }
             return Ok(());
         };
-        // Events from the machine of a thread that was blocked as offline are
-        // the machine's return.
-        if thread.current_segment_id == Some(segment.id)
+        let recorded =
+            orch_db::queries::session_dependencies::recorded_opening(unit.conn, segment.id).await?;
+        let current =
+            orch_db::queries::session_dependencies::current_opening(unit.conn, segment.id).await?;
+        let mut decoded = Vec::with_capacity(events.len());
+        for event in events {
+            match Event::decode(&event.kind, event.body.clone()) {
+                Ok(Event::SessionOpened(opened))
+                    if Some(opened.opening_id) != current
+                        || event.native_opening_id != Some(opened.opening_id) => {}
+                Ok(Event::SessionLost(lost))
+                    if Some(lost.opening_id) != recorded
+                        || event.native_opening_id != Some(lost.opening_id) => {}
+                Ok(Event::TurnCompleted(completed)) => {
+                    let original: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE id=$1 AND thread_id=$2 AND segment_id=$3 AND native_opening_id=$4)")
+                        .bind(completed.turn_id).bind(thread_id).bind(segment_id).bind(event.native_opening_id)
+                        .fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                    if !original {
+                        continue;
+                    }
+                    // A terminal report confirms only its own attempt, even when another opening now serves.
+                    sqlx::query("UPDATE turns SET native_end_confirmed=true WHERE id=$1 AND native_opening_id=$2")
+                        .bind(completed.turn_id).bind(event.native_opening_id)
+                        .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                    let latest:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM segments s JOIN threads t ON t.node_id=s.thread_id WHERE s.id=$1 AND (s.delivered_resources#>>'{tool_admission,opening_epoch}')::bigint=t.native_opening_epoch)")
+                        .bind(segment_id).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                    if event.native_opening_id == current
+                        || event.native_opening_id == recorded && latest
+                    {
+                        decoded.push((event, Event::TurnCompleted(completed)));
+                    }
+                }
+                Ok(event_of)
+                    if !factual_session_event(&event_of)
+                        && !matches!(event_of, Event::OrchToolCall(_))
+                        && (event.native_opening_id.is_none()
+                            || event.native_opening_id != current) => {}
+                Ok(event_of) => {
+                    // An original tool request still needs its refusal or retained answer after
+                    // selection changes. Its exact turn/opening is checked here; the tool's
+                    // own source gate remains responsible for refusing every fresh effect.
+                    if let Some(turn) = native_control_turn(&event_of) {
+                        let original:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE id=$1 AND thread_id=$2 AND segment_id=$3 AND native_opening_id=$4)")
+                            .bind(turn).bind(thread_id).bind(segment_id).bind(event.native_opening_id)
+                            .fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                        if !original {
+                            continue;
+                        }
+                    }
+                    decoded.push((event, event_of));
+                }
+                Err(error) => {
+                    tracing::warn!(%error,event=%describe(event),"an event of a session does not read")
+                }
+            }
+        }
+        if decoded.is_empty() {
+            return Ok(());
+        }
+        // A withdrawn opening can finish its physical facts without restoring the current thread.
+        let restores = current.is_some()
+            && decoded
+                .iter()
+                .any(|(raw, _)| raw.native_opening_id == current);
+        if restores
+            && thread.current_segment_id == Some(segment.id)
             && thread.active_continuation_id == segment.continuation_id
         {
             self.restore_in(unit, &thread).await?;
         }
         let mut batch = Batch {
+            source: NativeObservation {
+                opening_id: None,
+                serving: false,
+            },
             machine,
             thread_id,
             frames: crate::raw_events::Keeper::new(&thread, segment.id),
             segment,
         };
-        let mut decoded = Vec::with_capacity(events.len());
-        for event in events {
-            match Event::decode(&event.kind, event.body.clone()) {
-                Ok(event_of) => decoded.push((event, event_of)),
-                Err(error) => {
-                    tracing::warn!(%error, event = %describe(event), "an event of a session does not read");
-                }
-            }
-        }
         // Whatever else the session says reads its items with all the text they were told.
         let mut written = false;
-        for (event, decoded) in joined_deltas(decoded) {
+        let mut serving = current;
+        for (event, decoded) in
+            joined_deltas(decoded, |a, b| a.native_opening_id == b.native_opening_id)
+        {
+            batch.source = NativeObservation {
+                opening_id: event.native_opening_id,
+                serving: serving.is_some() && event.native_opening_id == serving,
+            };
+            if !batch.source.serving
+                && !factual_session_event(&decoded)
+                && !matches!(decoded, Event::TurnCompleted(_) | Event::OrchToolCall(_))
+            {
+                continue;
+            }
+            let ended =
+                matches!(&decoded,Event::SessionLost(lost) if Some(lost.opening_id)==serving);
             if matches!(decoded, Event::ItemDelta(_)) {
                 written = false;
             } else if !written {
@@ -716,6 +863,9 @@ impl Engine {
                 written = true;
             }
             self.apply_one(unit, &mut batch, event, decoded).await?;
+            if ended {
+                serving = None;
+            }
         }
         Ok(())
     }
@@ -846,6 +996,12 @@ impl Engine {
         batch: &Batch,
         opened: &SessionOpened,
     ) -> Result<(), EngineError> {
+        if orch_db::queries::session_dependencies::current_opening(unit.conn, batch.segment.id)
+            .await?
+            != Some(opened.opening_id)
+        {
+            return Ok(());
+        }
         let held = threads::segment(&mut *unit.conn, batch.segment.id)
             .await?
             .and_then(|segment| segment.native_session_ref);
@@ -938,15 +1094,28 @@ impl Engine {
         batch: &Batch,
         lost: &SessionLost,
     ) -> Result<(), EngineError> {
+        let observed = unit.now();
+        let Some(was_live) = orch_db::queries::session_dependencies::lost(
+            unit.conn,
+            batch.segment.id,
+            lost.opening_id,
+            observed,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
         crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
         // A per-conversation CLI can end while its adapter remains able to serve other conversations.
-        sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
+        if was_live && !lost.expected {
+            sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
             .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&lost.reason)
             .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        }
         lock(&self.inner.sessions).closed(batch.segment.id);
         let thread = self.thread_row(unit, batch.thread_id).await?;
         let Some(turn) = threads::active_turn(&mut *unit.conn, batch.thread_id).await? else {
-            if thread.current_segment_id == Some(batch.segment.id) {
+            if was_live && !lost.expected && thread.current_segment_id == Some(batch.segment.id) {
                 add_error_item(
                     unit,
                     batch.thread_id,
@@ -967,7 +1136,7 @@ impl Engine {
         let mut failure = error_json("session_lost", &message, true);
         // An unconfirmed start keeps its existing manual decision: the native process
         // may already have taken that prompt. A confirmed turn uses ordinary recovery.
-        let recovery = if turn.state == turn_state::RUNNING {
+        let recovery = if was_live && turn.state == turn_state::RUNNING {
             self.recover_agent_in(unit, &thread, &turn, &failure)
                 .await?
         } else {
@@ -1115,6 +1284,17 @@ impl Engine {
         }))
     }
 
+    async fn observation_owns_turn(
+        &self,
+        unit: &mut Unit<'_>,
+        batch: &Batch,
+        turn: Id,
+    ) -> Result<bool, EngineError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE id=$1 AND thread_id=$2 AND segment_id=$3 AND native_opening_id=$4)")
+            .bind(turn).bind(batch.thread_id).bind(batch.segment.id).bind(batch.source.opening_id)
+            .fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?)
+    }
+
     async fn on_turn_started(
         &self,
         unit: &mut Unit<'_>,
@@ -1229,6 +1409,9 @@ impl Engine {
         let Some(turn) = self.turn_of(unit, batch, usage.turn_id).await? else {
             return Ok(());
         };
+        if !self.observation_owns_turn(unit, batch, turn.id).await? {
+            return Ok(());
+        }
         // Counter-only rows explicitly assert no token observation. Preserve both existing totals,
         // including unknown totals, while merging their independent quantities through the same reader.
         if usage
@@ -1329,7 +1512,8 @@ impl Engine {
             orch_db::queries::thread_history::selected_turn(unit.conn, batch.thread_id, turn.id)
                 .await?;
         // A program that reports neither tokens nor context leaves the thread's usage as it is: unknown.
-        let thread_changed = selected
+        let thread_changed = batch.source.serving
+            && selected
             && (reports_tokens || reports_context)
             && thread.usage.as_ref() != Some(&whole);
         if turn_changed || thread_changed {
@@ -1464,8 +1648,17 @@ impl Engine {
                 )),
             ),
         };
+        let current_model = batch.source.serving
+            && orch_db::queries::session_dependencies::model_member_matches(
+                unit.conn,
+                batch.segment.id,
+                batch.source.opening_id,
+                Some(turn.id),
+            )
+            .await?;
         if let Some(failure) = completed.error.as_ref()
             && completed.status == TurnOutcome::Failed
+            && current_model
         {
             // What passes (`provider_busy`, `provider_unreachable`) and every failure that no row knows leave
             // the provider as it was. Vendor quota remains an observation attached to this
@@ -1483,7 +1676,7 @@ impl Engine {
                 _ => {}
             }
         }
-        if completed.status == TurnOutcome::Completed {
+        if completed.status == TurnOutcome::Completed && current_model {
             self.accept_provider(unit, batch.segment.provider_id)
                 .await?;
         }
@@ -1566,10 +1759,20 @@ impl Engine {
         started: &ItemStarted,
     ) -> Result<(), EngineError> {
         let turn = self.turn_of(unit, batch, started.turn_id).await?;
-        if let Some(turn) = &turn {
+        if let Some(turn) = &turn
+            && batch.source.serving
+            && self.observation_owns_turn(unit, batch, turn.id).await?
+        {
             // Words of a turn are proof that it runs.
             self.begin_turn(unit, batch.thread_id, turn, None).await?;
             if turn.is_active()
+                && orch_db::queries::session_dependencies::model_member_matches(
+                    unit.conn,
+                    batch.segment.id,
+                    batch.source.opening_id,
+                    Some(turn.id),
+                )
+                .await?
                 && matches!(
                     started.kind,
                     EmittedItemKind::AgentMessage | EmittedItemKind::Reasoning
@@ -1597,7 +1800,7 @@ impl Engine {
         } else {
             "in_progress"
         };
-        add_item(
+        add_item_observed(
             unit,
             &ItemSpec {
                 thread: batch.thread_id,
@@ -1611,6 +1814,7 @@ impl Engine {
                 payload: &payload,
                 native_ref: Some(&started.native_ref),
             },
+            Some(batch.source),
         )
         .await?;
         Ok(())
@@ -1908,8 +2112,12 @@ impl Engine {
         {
             self.record_review_item(
                 unit,
-                batch.thread_id,
-                batch.segment.id,
+                crate::approval_review::ReviewSource {
+                    thread: batch.thread_id,
+                    segment: batch.segment.id,
+                    serving: batch.source.serving,
+                    opening_id: batch.source.opening_id,
+                },
                 &completed.native_ref,
                 existing.as_ref().and_then(|item| item.turn_id),
                 &payload,
@@ -1942,9 +2150,15 @@ impl Engine {
         }
         if kind == "error" {
             let turn = existing.as_ref().and_then(|item| item.turn_id);
-            if let Some(observed) =
-                observations::rerouted(unit, batch.thread_id, batch.segment.id, turn, &payload)
-                    .await?
+            if let Some(observed) = observations::rerouted_from(
+                unit,
+                batch.thread_id,
+                batch.segment.id,
+                turn,
+                &payload,
+                Some(batch.source),
+            )
+            .await?
             {
                 payload = observed;
             }
@@ -1965,10 +2179,12 @@ impl Engine {
                         Some(turn) => self.turn_of(unit, batch, turn).await?,
                         None => None,
                     }
-                } else {
+                } else if batch.source.serving {
                     threads::active_turn(&mut *unit.conn, batch.thread_id)
                         .await?
                         .filter(|turn| turn.segment_id == batch.segment.id)
+                } else {
+                    None
                 };
                 let source_turn = if kind == "tool_call" {
                     orch_db::queries::approvals::content_source_turn(
@@ -1981,7 +2197,19 @@ impl Engine {
                 } else {
                     None
                 };
-                add_item(
+                let turn = match turn {
+                    Some(turn) if self.observation_owns_turn(unit, batch, turn.id).await? => {
+                        Some(turn)
+                    }
+                    _ => None,
+                };
+                let source_turn = match source_turn {
+                    Some(turn) if self.observation_owns_turn(unit, batch, turn).await? => {
+                        Some(turn)
+                    }
+                    _ => None,
+                };
+                add_item_observed(
                     unit,
                     &ItemSpec {
                         thread: batch.thread_id,
@@ -1995,6 +2223,7 @@ impl Engine {
                         payload: &payload,
                         native_ref: Some(&completed.native_ref),
                     },
+                    Some(batch.source),
                 )
                 .await?;
                 Ok(())
@@ -2020,8 +2249,14 @@ impl Engine {
                 )
                 .await?;
                 if status == "completed" {
-                    observations::completed_item(unit, &item, &payload, Some(&item.payload))
-                        .await?;
+                    observations::completed_item_from(
+                        unit,
+                        &item,
+                        &payload,
+                        Some(&item.payload),
+                        batch.source.serving,
+                    )
+                    .await?;
                 } else {
                     observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
                 }
@@ -2060,6 +2295,7 @@ impl Engine {
 /// What the events of one delivery share.
 #[derive(Debug)]
 struct Batch {
+    source: NativeObservation,
     machine: Id,
     thread_id: Id,
     segment: SegmentRow,
@@ -2192,15 +2428,18 @@ mod tests {
                 data: data.to_owned(),
             })
         };
-        let joined = joined_deltas(vec![
-            (1, delta("a", DeltaField::Text, 0, "Hél")),
-            (2, delta("a", DeltaField::Text, 3, "lo")),
-            (3, delta("a", DeltaField::Summary, 0, "s")),
-            (4, delta("b", DeltaField::Text, 0, "x")),
-            (5, delta("b", DeltaField::Text, 1, "y")),
-            (6, delta("b", DeltaField::Text, 5, "z")),
-            (7, delta("a", DeltaField::Text, 5, "!")),
-        ]);
+        let joined = joined_deltas(
+            vec![
+                (1, delta("a", DeltaField::Text, 0, "Hél")),
+                (2, delta("a", DeltaField::Text, 3, "lo")),
+                (3, delta("a", DeltaField::Summary, 0, "s")),
+                (4, delta("b", DeltaField::Text, 0, "x")),
+                (5, delta("b", DeltaField::Text, 1, "y")),
+                (6, delta("b", DeltaField::Text, 5, "z")),
+                (7, delta("a", DeltaField::Text, 5, "!")),
+            ],
+            |_, _| true,
+        );
         let seen: Vec<(i32, String, i64, i64, String)> = joined
             .into_iter()
             .filter_map(|(raw, event)| match event {
