@@ -122,7 +122,6 @@ export const holdingsQuery = (orgId: string, userId: string) =>
     queryFn: ({ signal }): Promise<Holdings> =>
       ok(api.GET('/orgs/{id}/members/{user_id}/holdings', { params: { path: { id: orgId, user_id: userId } }, signal })),
     // What a person owns changes while another screen is open; a dialog about it must not show an old answer.
-    staleTime: 0,
   });
 
 /** Ends the membership of the root org with everything it holds; `fates` say what becomes of each managed resource. */
@@ -248,7 +247,7 @@ export function orgTokenActivityQuery(orgId: string, tokenId: string, query: Api
   return queryOptions<ApiTokenActivityPage>({
     queryKey: ['token-activity', 'org', orgId, tokenId, query.limit ?? null, query.cursor ?? null] as const,
     queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/orgs/{id}/tokens/{token_id}/activity', { params: { path: { id: orgId, token_id: tokenId }, query }, signal })),
-    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
 }
 
