@@ -91,6 +91,7 @@ impl EnvRig {
         let hub = Hub::new(Arc::clone(&clock), pki.certificate());
         let signer = TicketSigner::generate();
         hub.set_ticket_verifier(signer.verifier());
+        hub.admit_test_tool_sessions();
         let machine_id = new_id();
         let controller =
             ScriptedController::attach(&hub, Arc::clone(&clock), machine_id, roles.clone());
@@ -362,8 +363,11 @@ impl EnvRig {
                 .and_then(|role| role.host().environment(self.environment).ok())
                 .map(|environment| environment.generation())
                 .unwrap_or(0);
-            self.signer
-                .issue_for_tool(&request, self.environment, generation)
+            orch_testkit::doubles::link::session_ticket(
+                &self.signer,
+                &request,
+                Some((self.environment, generation)),
+            )
         } else {
             self.signer.issue(&request)
         }

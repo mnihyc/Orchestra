@@ -17,6 +17,7 @@ import { InstallationProgress } from '@/features/admin/InstallationProgress';
 import { useWorkbench } from '@/features/workbench/store';
 import { useSocketStatus } from '@/realtime/live';
 import { Banner } from '@/ui/Banner';
+import { PublicAddressNotice } from '@/shell/PublicAddressNotice';
 import { Button } from '@/ui/Button';
 import { useFrameReady } from '@/shell/FrameReadiness';
 import { AdminExitNotice } from '@/shell/AdminExitNotice';
@@ -54,6 +55,7 @@ export function Banners() {
   return (
     <>
       <AdminExitNotice />
+      <PublicAddressNotice meta={meta} />
       {notice !== null && !dismissed && (
         <Banner tone={notice.level} onDismiss={() => setDismissed(true)}>
           {notice.text}
