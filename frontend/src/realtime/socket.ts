@@ -14,6 +14,7 @@ import { createStore, type StoreApi } from 'zustand/vanilla';
 import type { ClientFrame, ServerFrame } from '@/generated/api-types';
 import { openingId } from '@/lib/opening';
 import { serverClock, type ServerClock } from '@/lib/serverClock';
+import { connectionQualitySettings, LinkHistory } from '@/realtime/connectionQuality';
 
 // ---------------------------------------------------------------- frames, as the protocol names them
 
@@ -66,8 +67,6 @@ const BACKOFF_MOST_MS = 15_000;
 const BACKOFF_SPREAD = 0.2;
 /** A connection that held this long was a good one: the next pause begins small again. */
 const BACKOFF_FORGOTTEN_AFTER_MS = 30_000;
-/** How many round trips the measure is the middle one of, so that one late packet changes nothing. */
-const ROUND_TRIPS_KEPT = 3;
 
 /** The close codes of the protocol that mean more than "connect again". */
 const CLOSE_UNAUTHENTICATED = 4401;
@@ -90,6 +89,10 @@ export interface SocketStatus {
   lostAt: number | null;
   /** The middle one of the last few round trips, in milliseconds; `null` until one was measured. */
   roundTripMs: number | null;
+  /** This reader's calibrated usual from preceding actual ping replies. */
+  usualRoundTripMs: number | null;
+  /** The current measured line exceeds its own usual by the installation's thresholds. */
+  slow: boolean;
   /** The build the server says it is. */
   build: string | null;
   /** True once the server refused the protocol this page speaks: a newer build is deployed. */
@@ -144,6 +147,8 @@ export interface RealtimeOptions {
   random?: () => number;
   /** The same clock as the HTTP admission; isolated transports can supply their own. */
   clock?: ServerClock;
+  /** Current installation defaults; measurement does no settings request of its own. */
+  quality?: () => unknown;
 }
 
 const OPEN = 1;
@@ -181,6 +186,8 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
     phase: 'idle',
     lostAt: null,
     roundTripMs: null,
+    usualRoundTripMs: null,
+    slow: false,
     build: null,
     outdated: false,
   }));
@@ -194,7 +201,7 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
   let lastHeard = 0;
   let pingN = 0;
   const pings = new Map<number, number>();
-  let roundTrips: number[] = [];
+  const quality = new LinkHistory();
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -279,17 +286,18 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
   }
 
   function measured(sentAt: number): void {
-    roundTrips = [...roundTrips, now() - sentAt].slice(-ROUND_TRIPS_KEPT);
-    const sorted = [...roundTrips].sort((one, other) => one - other);
-    status.setState({ roundTripMs: sorted[Math.floor(sorted.length / 2)] ?? null });
+    const elapsed = now() - sentAt;
+    if (!Number.isFinite(elapsed) || elapsed < 0) return;
+    status.setState(quality.observe(elapsed, connectionQualitySettings(options.quality?.())));
   }
 
   function onReady(frame: ReadyFrame, authSentAt: number): void {
     readySince = now();
     (options.clock ?? serverClock).observe(frame.server_time, authSentAt, readySince);
     heartbeatMs = frame.heartbeat_secs > 0 ? frame.heartbeat_secs * 1_000 : HEARTBEAT_MS;
-    measured(authSentAt);
-    status.setState({ phase: 'ready', lostAt: null, build: frame.build });
+    // Authentication includes server-side admission work, not just the live link's response.
+    // A replacement transport starts its own ping samples too.
+    status.setState({ phase: 'ready', lostAt: null, build: frame.build, ...quality.reconnect() });
     clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(heartbeat, heartbeatMs);
     // Every feed that is wanted is subscribed again, from where it had come to.
@@ -427,8 +435,8 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
       const closing = socket;
       socket = null;
       closing?.close(1000);
-      roundTrips = [];
-      status.setState({ phase: 'idle', lostAt: null, roundTripMs: null, build: null });
+      quality.clear();
+      status.setState({ phase: 'idle', lostAt: null, roundTripMs: null, usualRoundTripMs: null, slow: false, build: null });
     },
 
     subscribe(feed, listener) {

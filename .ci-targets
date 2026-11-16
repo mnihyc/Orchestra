@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-db --test released_migrations --test migration_progress
+test -p orch-engine --lib -- context_fill::
+test -p orch-engine --test forks -- history_size::
+test -p orch-engine --test history_scale
