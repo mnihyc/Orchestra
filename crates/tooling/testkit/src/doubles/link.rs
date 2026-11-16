@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use orch_link::controller::{ControllerLink, ControllerOutputs, Notice};
 use orch_link::framing::{
-    Connection, Message, MessageSink, MessageSource, PeerInfo, TransportError,
+    Connection, Message, MessageSink, MessageSource, PeerInfo, Refused, TransportError,
 };
 use orch_link::reconnect::{DialError, Dialer};
 use orch_link::session::{GatewayConfig, SessionAuthority, SessionEvent, SessionSender, accept};
@@ -69,8 +69,8 @@ pub enum Action {
 #[derive(Debug, Clone)]
 struct Rule {
     direction: Direction,
-    /// The `t` of a text frame, or `data` for tunnel data; any frame when
-    /// `None`.
+    /// The `t` of a text frame, `part` for a part of a large message, or `data`
+    /// for tunnel data; any frame when `None`.
     frame: Option<String>,
     /// When set, the frame must carry this event of this durable stream.
     event: Option<(String, Seq)>,
@@ -289,10 +289,15 @@ fn carries_event(message: &Message, stream: &str, seq: Seq) -> bool {
     }
 }
 
-/// The kind of a message, as rules name it: the `t` of a text frame, `data`
-/// for binary.
+/// The kind of a message, as rules name it: the `t` of a text frame, `part`
+/// for a part of a large message, `data` for other binary.
 fn kind_of(message: &Message) -> String {
     match message {
+        Message::Binary(bytes)
+            if bytes.first() == Some(&orch_link_contract::frames::PartFrame::KIND) =>
+        {
+            "part".to_owned()
+        }
         Message::Binary(_) => "data".to_owned(),
         Message::Text(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -563,6 +568,8 @@ struct Slot {
 }
 
 struct HubInner {
+    native_scopes: Mutex<HashMap<Id, orch_link_contract::tool_sessions::ToolSessionUpdate>>,
+    tool_authority: Mutex<Option<ToolAuthority>>,
     advertised: Mutex<Option<Vec<Endpoint>>>,
     clock: Arc<dyn Clock>,
     gateway: GatewayConfig,
@@ -576,7 +583,18 @@ struct HubInner {
 /// The system's end of terminals, as the relay reaches it.
 struct HubApi {
     terminals: TerminalHub,
+    tool_requests: mpsc::UnboundedSender<orch_link_contract::tool_sessions::ToolSessionQuery>,
 }
+
+type ToolAuthority = Arc<
+    dyn Fn(
+            orch_link_contract::tool_sessions::ToolSessionQuery,
+        ) -> futures::future::BoxFuture<
+            'static,
+            orch_link_contract::tool_sessions::ToolSessionReply,
+        > + Send
+        + Sync,
+>;
 
 impl ApiPort for HubApi {
     fn datagram(&self, machine: Id, packet: orch_link::ports::Datagram) {
@@ -587,6 +605,10 @@ impl ApiPort for HubApi {
             });
     }
     fn text(&self, frame: orch_link_contract::backplane::BackplaneFrame) {
+        if let orch_link_contract::backplane::BackplaneFrame::ToolSessionQuery(query) = frame {
+            let _ = self.tool_requests.send(query);
+            return;
+        }
         self.terminals.on_frame(frame);
     }
 
@@ -673,11 +695,16 @@ impl Hub {
     fn assemble(gateway: GatewayConfig, clock: Arc<dyn Clock>) -> Self {
         let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiOut>();
         let terminals = TerminalHub::new(api_tx);
+        let (tool_tx, mut tool_rx) =
+            mpsc::unbounded_channel::<orch_link_contract::tool_sessions::ToolSessionQuery>();
         let mut relay = Relay::new(gateway.limits, Arc::clone(&clock));
         relay.set_api(Arc::new(HubApi {
             terminals: terminals.clone(),
+            tool_requests: tool_tx,
         }));
         let inner = Arc::new(HubInner {
+            native_scopes: Mutex::new(HashMap::new()),
+            tool_authority: Mutex::new(None),
             advertised: Mutex::new(None),
             relay: Mutex::new(relay),
             clock,
@@ -686,6 +713,33 @@ impl Hub {
             faults: Faults::new(),
             api_down: AtomicBool::new(false),
             terminals,
+        });
+        let tooling = Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            while let Some(query) = tool_rx.recv().await {
+                let Some(hub) = tooling.upgrade() else {
+                    return;
+                };
+                if hub.api_down.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let authority = lock(&hub.tool_authority).clone();
+                if let Some(authority) = authority {
+                    let hub = Arc::downgrade(&hub);
+                    tokio::spawn(async move {
+                        let reply = authority(query).await;
+                        if let Some(hub) = hub.upgrade()
+                            && !hub.api_down.load(Ordering::SeqCst)
+                        {
+                            lock(&hub.relay).on_api_frame(
+                                orch_link_contract::backplane::BackplaneFrame::ToolSessionReply(
+                                    reply,
+                                ),
+                            );
+                        }
+                    });
+                }
+            }
         });
         let carrying = Arc::downgrade(&inner);
         tokio::spawn(async move {
@@ -825,6 +879,48 @@ impl Hub {
     pub fn set_api_down(&self, down: bool) {
         self.inner.api_down.store(down, Ordering::SeqCst);
         lock(&self.inner.relay).port_control(!down);
+        lock(&self.inner.relay).tool_control(!down && lock(&self.inner.tool_authority).is_some());
+        if lock(&self.inner.tool_authority).is_some() {
+            let senders = lock(&self.inner.machines)
+                .iter()
+                .filter_map(|(machine, slot)| {
+                    slot.session
+                        .as_ref()
+                        .map(|(_, sender)| (*machine, sender.clone()))
+                })
+                .collect::<Vec<_>>();
+            for (machine, sender) in senders {
+                send_native_control(&self.inner, machine, &sender);
+            }
+        }
+    }
+
+    /// A native fixture explicitly supplies the live control authority; replies never hold the relay lock.
+    pub fn set_tool_authority<F, Fut>(&self, authority: F)
+    where
+        F: Fn(orch_link_contract::tool_sessions::ToolSessionQuery) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = orch_link_contract::tool_sessions::ToolSessionReply>
+            + Send
+            + 'static,
+    {
+        *lock(&self.inner.tool_authority) = Some(Arc::new(move |query| Box::pin(authority(query))));
+        lock(&self.inner.relay).tool_control(!self.inner.api_down.load(Ordering::SeqCst));
+    }
+
+    /// Transport-only worlds explicitly stand for a live API; native permission cases replace this.
+    pub fn admit_test_tool_sessions(&self) {
+        self.set_tool_authority(|query| async move {
+            let revision = query
+                .claims
+                .tool_session
+                .as_ref()
+                .map_or(0, |scope| scope.revision);
+            orch_link_contract::tool_sessions::ToolSessionReply {
+                n: query.n,
+                allowed: revision > 0,
+                revision,
+            }
+        });
     }
 
     /// Changes the authenticated server list received on each subsequent connection.
@@ -945,19 +1041,180 @@ impl Dialer for HubDialer {
     }
 }
 
-/// Carries what the system sends a machine to the machine's session.
+pub(super) fn native_member(
+    binding: &orch_types::Json,
+    member: String,
+    nonce: Id,
+) -> orch_link_contract::tool_sessions::ToolSessionMember {
+    let ticket = binding.get("ticket").and_then(|ticket| {
+        ticket
+            .as_str()
+            .or_else(|| ticket.get("ticket").and_then(orch_types::Json::as_str))
+    });
+    if let Some(scope) = ticket
+        .and_then(|ticket| orch_link_contract::tunnels::Ticket::parse(ticket).ok())
+        .and_then(|ticket| ticket.claims().tool_session.clone())
+    {
+        return orch_link_contract::tool_sessions::ToolSessionMember {
+            member: scope.member,
+            nonce: scope.nonce,
+        };
+    }
+    orch_link_contract::tool_sessions::ToolSessionMember { member, nonce }
+}
+
+/// The transport double publishes the same captured operands as its explicitly supplied live API.
+fn native_scope(
+    hub: &HubInner,
+    machine: Id,
+    cmd: &orch_link_contract::commands::Cmd,
+) -> Option<orch_link_contract::tool_sessions::ToolSessionUpdate> {
+    use orch_link_contract::native_target::{NativeTarget, SessionAction, session_action};
+    let action = session_action(&cmd.kind, &cmd.body)?;
+    let NativeTarget::Session(target) = cmd.native_target.as_ref()?;
+    let (opening, segment, epoch) = (
+        target.opening_id?,
+        target.segment_id?,
+        target.opening_epoch?,
+    );
+    let mut scopes = lock(&hub.native_scopes);
+    let previous = scopes.get(&target.thread_id);
+    if action == SessionAction::Use {
+        return previous
+            .filter(|scope| scope.opening_id == Some(opening))
+            .cloned();
+    }
+    let mut update = orch_link_contract::tool_sessions::ToolSessionUpdate {
+        machine_id: machine,
+        thread_id: target.thread_id,
+        segment_id: segment,
+        opening_id: Some(opening),
+        opening_epoch: epoch,
+        revision: previous.map_or(1, |scope| scope.revision.saturating_add(1)),
+        live: action != SessionAction::Close,
+        members: previous
+            .filter(|scope| scope.opening_id == Some(opening))
+            .map_or_else(Vec::new, |scope| scope.members.clone()),
+    };
+    if let (Some(revision), Some(members)) = (cmd.native_revision, cmd.native_members.as_ref()) {
+        if let Some(previous) = previous
+            && previous.opening_epoch == epoch
+            && previous.revision > revision
+        {
+            return Some(previous.clone());
+        }
+        update.revision = revision;
+        update.members = members.clone();
+        if previous.is_none_or(|scope| scope.opening_epoch <= epoch) {
+            scopes.insert(target.thread_id, update.clone());
+        }
+        return Some(update);
+    }
+    let body = if matches!(
+        cmd.kind.as_str(),
+        "session.open.fenced" | "session.prefix.open" | "session.continuation.resume"
+    ) {
+        cmd.body.get("session")?
+    } else {
+        &cmd.body
+    };
+    if action == SessionAction::Open {
+        update.members.clear();
+    }
+    if matches!(action, SessionAction::Open | SessionAction::Model) {
+        update.members.retain(|member| member.member != "llm");
+        if let Some(provider) = body.get("provider") {
+            update
+                .members
+                .push(native_member(provider, "llm".into(), opening));
+        }
+    }
+    if action == SessionAction::Open
+        && let Some(exec) = body.get("exec")
+    {
+        update
+            .members
+            .push(native_member(exec, "exec".into(), opening));
+    }
+    if matches!(action, SessionAction::Open | SessionAction::Mcp) {
+        update
+            .members
+            .retain(|member| !member.member.starts_with("mcp:"));
+        for binding in body
+            .get("mcp")
+            .and_then(orch_types::Json::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(server) = binding.get("server_id").and_then(orch_types::Json::as_str) else {
+                continue;
+            };
+            update
+                .members
+                .push(native_member(binding, format!("mcp:{server}"), cmd.id));
+        }
+    }
+    if previous.is_none_or(|scope| scope.opening_epoch <= epoch) {
+        scopes.insert(target.thread_id, update.clone());
+    }
+    Some(update)
+}
+
+fn send_native_control(hub: &HubInner, machine: Id, sender: &SessionSender) {
+    let available = !hub.api_down.load(Ordering::SeqCst);
+    if available {
+        for update in lock(&hub.native_scopes)
+            .values()
+            .filter(|scope| scope.machine_id == machine)
+        {
+            let _ = sender.send(Frame::ToolSessionUpdate(update.clone()));
+        }
+    }
+    let _ = sender.send(Frame::ToolSessionControl(
+        orch_link_contract::tool_sessions::ToolSessionControl {
+            refreshing: false,
+            available,
+            admission_timeout_ms: orch_link_contract::tool_sessions::DEFAULT_ADMISSION_TIMEOUT_MS,
+        },
+    ));
+}
+
+/// Carries what the system sends a machine to the machine's session. A command that the session cannot
+/// carry is failed at once with the reason, as a gateway tells the system.
 async fn carry_down(
     hub: Arc<HubInner>,
     machine_id: Id,
     mut down: mpsc::UnboundedReceiver<DownFrame>,
 ) {
     while let Some(frame) = down.recv().await {
-        let sender = lock(&hub.machines)
-            .get(&machine_id)
-            .and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone()));
+        let (sender, controller) = {
+            let machines = lock(&hub.machines);
+            let slot = machines.get(&machine_id);
+            (
+                slot.and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone())),
+                slot.map(|slot| slot.controller.clone()),
+            )
+        };
         if let Some(sender) = sender {
-            let _ = match frame {
-                DownFrame::Cmd(cmd) => sender.send(Frame::Cmd(cmd)),
+            let command = match &frame {
+                DownFrame::Cmd(cmd) => Some(cmd.id),
+                _ => None,
+            };
+            let sent = match frame {
+                DownFrame::Cmd(cmd) => {
+                    if lock(&hub.tool_authority).is_some()
+                        && let Some(update) = native_scope(&hub, machine_id, &cmd)
+                    {
+                        let _ = sender.send(Frame::ToolSessionUpdate(update));
+                    }
+                    sender.send(Frame::Cmd(cmd))
+                }
+                DownFrame::ToolSessionUpdate(update) => {
+                    sender.send(Frame::ToolSessionUpdate(update))
+                }
+                DownFrame::ToolSessionControl(control) => {
+                    sender.send(Frame::ToolSessionControl(control))
+                }
                 DownFrame::CmdCancel(cancel) => sender.send(Frame::CmdCancel(cancel)),
                 DownFrame::Ack(ack) => sender.send(Frame::Ack(ack)),
                 DownFrame::Nak(nak) => sender.send(Frame::Nak(nak)),
@@ -976,6 +1233,13 @@ async fn carry_down(
                 }
                 DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
             };
+            if let (Err(Refused::TooLarge { bytes, limit }), Some(id), Some(controller)) =
+                (sent, command, controller)
+            {
+                controller
+                    .commands()
+                    .refuse_unaccepted(id, &orch_link::commands::command_too_large(bytes, limit));
+            }
         }
     }
 }
@@ -1015,6 +1279,9 @@ async fn serve(hub: Arc<HubInner>, connection: Connection) {
         sender.clone(),
         accepted.auth.capabilities.clone(),
     );
+    if accepted.auth.purpose.is_primary() && lock(&hub.tool_authority).is_some() {
+        send_native_control(&hub, machine_id, &sender);
+    }
     controller.session_up(session_id);
     while let Some(event) = inbox.next().await {
         match event {
@@ -1353,6 +1620,45 @@ impl orch_link::content::BlobEndpoint for ShapedBlobs {
             .copied()
             .collect())
     }
+}
+
+/// A physical tool scope for transport fixtures whose native API is supplied by the hub double.
+/// API integration worlds instead admit their real durable command and use its frozen scope.
+pub fn session_ticket(
+    signer: &orch_pki::tickets::TicketSigner,
+    request: &orch_pki::tickets::TicketRequest,
+    environment: Option<(Id, i64)>,
+) -> Result<String, orch_pki::PkiError> {
+    use orch_link_contract::tunnels::{Service, ToolSessionScope};
+    if matches!(request.src, orch_link_contract::tunnels::TicketSource::Api) {
+        return match environment {
+            Some((id, generation)) => signer.issue_for_tool(request, id, generation),
+            None => signer.issue(request),
+        };
+    }
+    let mut request = request.clone();
+    let thread = *request.thread_id.get_or_insert_with(orch_types::new_id);
+    let member = match request.service {
+        Service::Exec { .. } => "exec".to_owned(),
+        Service::Llm { .. } => "llm".to_owned(),
+        Service::Mcp { ref server } if server == "exec" => "exec".to_owned(),
+        Service::Mcp { .. } => format!("mcp:{}", orch_types::new_id()),
+        _ => return signer.issue(&request),
+    };
+    signer.issue_for_session(
+        &request,
+        environment,
+        None,
+        &ToolSessionScope {
+            opening_epoch: 1,
+            thread_id: thread,
+            segment_id: orch_types::new_id(),
+            opening_id: orch_types::new_id(),
+            member,
+            nonce: orch_types::new_id(),
+            revision: 1,
+        },
+    )
 }
 
 #[cfg(test)]

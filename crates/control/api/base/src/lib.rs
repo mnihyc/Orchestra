@@ -120,6 +120,7 @@ pub mod ports_browser;
 
 #[path = "ports_runtime.rs"]
 pub mod ports_runtime;
+pub mod public_addresses;
 
 #[path = "previews.rs"]
 pub mod previews;
@@ -169,6 +170,7 @@ pub mod thread_engine;
 #[path = "thread_markers.rs"]
 pub mod thread_markers;
 
+pub mod server_host_use;
 #[path = "thread_read_tools.rs"]
 pub mod thread_read_tools;
 

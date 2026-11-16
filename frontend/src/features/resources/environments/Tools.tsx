@@ -9,7 +9,9 @@ import { PathValue } from '@/features/resources/TechnicalValue';
 import type { Environment, EnvironmentMachineProgram, EnvironmentUpdateBody } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { RelativeTime } from '@/ui/RelativeTime';
 import { Switch } from '@/ui/Switch';
+import { UserChip } from '@/ui/UserChip';
 
 const VERSION_OVERRIDES = 'exec.version_overrides';
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -50,12 +52,19 @@ function MachineProgramTools({ environment, program }: { environment: Environmen
       <span className="text-text-muted">{program.version === '' || program.version === 'unknown' ? t('machinePrograms.nativeUnknownVersion') : program.version}</span>
       <PathValue path={program.path} />
     </div>
-    <Switch name={name === null ? t('environmentTools.anyVersion') : t('environmentTools.anyVersionBy', { name })}
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+    <Switch className="flex-1" name={t('environmentTools.anyVersion')}
+      aria-label={name === null ? undefined : t('environmentTools.anyVersionBy', { name })}
       checked={checked} disabled={!manages || !availableConfig} aria-busy={change.isPending}
       onCheckedChange={(allow) => {
         const config = programVersionConfig(environment.config, program, allow);
         if (manages && !change.isPending && config !== null) change.mutate({ body: { expected_revision: environment.revision, config }, kind: program.harness_kind, path: program.path, version: program.version, allow });
       }} />
+    {approval !== null && <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted">
+      <UserChip user={{ ...approval.by, display_name: name ?? t('environmentTools.approverUnavailable') }} size={24} className="max-w-36" />
+      <RelativeTime at={approval.at} compact />
+    </span>}
+    </div>
     {!availableConfig && <p className="text-sm text-text-muted">{t('environmentTools.configUnavailable')}</p>}
     {change.error !== null && <ErrorAlert error={change.error} />}
   </section>;

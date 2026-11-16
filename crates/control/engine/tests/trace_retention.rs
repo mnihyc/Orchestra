@@ -665,6 +665,7 @@ async fn restore_uses_the_acknowledged_private_layout_after_its_command_journal_
     orch_db::queries::link::insert_command(
         &mut conn,
         &orch_db::queries::link::NewCommand {
+            native_target: None,
             id: command,
             machine_id: host.machine,
             kind: K::NodeMountsApply.as_str(),
