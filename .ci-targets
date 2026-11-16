@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib --test provider_keeper --test provider_credit_history --test participation_summaries --test migration_progress --test released_migrations
+test -p orch-authz --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test everything_scale --test realtime_feeds --test realtime_socket -- --nocapture
+test -p orch-api-core --test accounts --test session_others --test transaction_guards --test action_guard_resolver_deadlines --test kfeeds_permissions
+test -p orch-api-core --test machines --test agents --test hosts --test environments --test admin_messages --test machine_program_scopes --test thread_opening_scopes --test threads_read

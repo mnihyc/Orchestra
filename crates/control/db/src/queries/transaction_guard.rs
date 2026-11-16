@@ -424,9 +424,10 @@ async fn identity_in(
     // PostgreSQL's row-lock conflict-table lines:
     // SHARE conflicts with NO KEY UPDATE and UPDATE; SHARE and KEY SHARE coexist.
     // KEY SHARE conflicts only with UPDATE.
-    // Session end, token scopes/end and access-token expiry are non-key updates,
-    // so they require SHARE. Suspension/admin writers explicitly lock users FOR
-    // UPDATE; KEY SHARE also permits inbox counters and foreign-key references.
+    // Session security changes acquire UPDATE through sessions_authority_changed;
+    // KEY SHARE lets independent activity/lifetime extensions proceed. Token
+    // scopes/end and access-token expiry still require SHARE. Suspension/admin
+    // writers explicitly lock users FOR UPDATE.
     // Row locking rechecks tuples changed during a wait; later permission statements
     // obtain new snapshots after that wait.
     let personal = matches!(
@@ -472,7 +473,7 @@ async fn identity_in(
                JOIN access_tokens a ON a.session_id = s.id
               WHERE u.id = $1 AND s.id = $2 AND a.token_hash = $3
                 AND s.revoked_at IS NULL
-              FOR {user_lock} OF u FOR SHARE OF s, a",
+              FOR {user_lock} OF u FOR KEY SHARE OF s FOR SHARE OF a",
             id,
             hash,
         ),
