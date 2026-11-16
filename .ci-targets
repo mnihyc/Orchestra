@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test semantic_admin --test semantic_index
