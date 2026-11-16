@@ -306,6 +306,10 @@ impl Entry {
 pub struct Registry {
     pub(crate) connections: HashMap<u64, Arc<Connection>>,
     pub(crate) sources: HashMap<Source, Entry>,
+    /// Invalidation watermarks only; personalized Stop observations are projected afresh.
+    pub(crate) stop_versions: HashMap<Id, i64>,
+    /// Canonical progress can settle an outstanding native Stop without another acceptance.
+    pub(crate) stop_pending: std::collections::HashSet<Id>,
 }
 
 /// What every part of the server shares.
@@ -661,6 +665,7 @@ pub mod sync;
 #[path = "terminals.rs"]
 pub mod terminals;
 
+pub mod thread_stops;
 #[path = "threads.rs"]
 pub mod threads;
 

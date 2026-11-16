@@ -29,6 +29,7 @@
 //! that a delivery never depends on rows that changed since.
 
 pub mod channels;
+pub mod decisions;
 pub mod events;
 pub mod exceptions;
 pub mod inbox;
