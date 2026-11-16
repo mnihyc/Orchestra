@@ -1755,6 +1755,7 @@ async fn draft_file_put(
 ) -> ApiResult<SkillDraft> {
     let id = ctx.id("id")?;
     let path = draft_path(&body.path)?;
+    let mut _publication = None;
     let content: Option<(Hash, i64)> = match (&body.text, &body.blob) {
         (Some(_), Some(_)) => {
             return Err(invalid(
@@ -1769,7 +1770,9 @@ async fn draft_file_put(
                 .put_bytes(bytes::Bytes::from(text.clone().into_bytes()))
                 .await
                 .map_err(ApiError::internal)?;
-            Some((meta.hash, meta.size))
+            let description = (meta.hash, meta.size);
+            _publication = Some(meta);
+            Some(description)
         }
         (None, Some(blob)) => {
             let mut conn = ctx.app.db.acquire().await?;

@@ -311,7 +311,7 @@ CREATE TABLE usage_events (
     CONSTRAINT usage_events_first_token_ms_check CHECK ((first_token_ms >= 0)),
     CONSTRAINT usage_events_generation_ms_check CHECK ((generation_ms >= 0)),
     CONSTRAINT usage_events_origin_check CHECK ((origin = ANY (ARRAY['harness'::text, 'forwarder'::text, 'orch'::text]))),
-    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text, 'web_search'::text, 'page_fetch'::text, 'image_generation'::text, 'ask'::text]))),
+    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text, 'web_search'::text, 'page_fetch'::text, 'image_generation'::text, 'ask'::text, 'relay'::text]))),
     CONSTRAINT usage_events_rate_source_check CHECK ((rate_source = ANY (ARRAY['provider'::text, 'rate_card'::text, 'catalogue'::text, 'reported'::text]))),
     CONSTRAINT usage_events_request_ms_check CHECK ((request_ms >= 0)),
     CONSTRAINT usage_events_scope_check CHECK ((scope = ANY (ARRAY['turn'::text, 'request'::text]))),
@@ -459,7 +459,7 @@ CREATE TABLE usage_running (
     CONSTRAINT usage_events_first_token_ms_check CHECK ((first_token_ms >= 0)),
     CONSTRAINT usage_events_generation_ms_check CHECK ((generation_ms >= 0)),
     CONSTRAINT usage_events_origin_check CHECK ((origin = ANY (ARRAY['harness'::text, 'forwarder'::text, 'orch'::text]))),
-    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text, 'web_search'::text, 'page_fetch'::text, 'image_generation'::text, 'ask'::text]))),
+    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text, 'web_search'::text, 'page_fetch'::text, 'image_generation'::text, 'ask'::text, 'relay'::text]))),
     CONSTRAINT usage_events_rate_source_check CHECK ((rate_source = ANY (ARRAY['provider'::text, 'rate_card'::text, 'catalogue'::text, 'reported'::text]))),
     CONSTRAINT usage_events_request_ms_check CHECK ((request_ms >= 0)),
     CONSTRAINT usage_events_scope_check CHECK ((scope = ANY (ARRAY['turn'::text, 'request'::text]))),
@@ -569,3 +569,33 @@ INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id
 SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM usage_events e
 CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p WHERE e.turn_id IS NOT NULL
 GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable;
+
+-- Public model-call receipts retain attribution and scope metadata, never model input or response contents.
+CREATE TABLE provider_relay_calls (
+    id uuid PRIMARY KEY,
+    provider_id uuid NOT NULL REFERENCES providers(id),
+    machine_id uuid REFERENCES machines(id),
+    user_id uuid NOT NULL REFERENCES users(id),
+    entry_id uuid,
+    home_id uuid NOT NULL REFERENCES nodes(id),
+    org_id uuid NOT NULL REFERENCES nodes(id),
+    model_name text NOT NULL,
+    effort text,
+    protocol text NOT NULL,
+    path text NOT NULL,
+    relay_id uuid NOT NULL,
+    request_hash text NOT NULL,
+    request_bytes bigint NOT NULL CHECK (request_bytes >= 0),
+    max_request_bytes bigint NOT NULL CHECK (max_request_bytes > 0),
+    idle_secs bigint NOT NULL CHECK (idle_secs > 0),
+    retry_ms bigint NOT NULL CHECK (retry_ms > 0),
+    model_parameters jsonb NOT NULL,
+    headers jsonb NOT NULL,
+    command_body jsonb NOT NULL,
+    source jsonb NOT NULL,
+    created_at timestamptz NOT NULL,
+    deadline timestamptz NOT NULL,
+    finished_at timestamptz,
+    native_done_at timestamptz
+);
+CREATE INDEX provider_relay_calls_active ON provider_relay_calls(provider_id,created_at) WHERE finished_at IS NULL;

@@ -234,6 +234,7 @@ impl Engine {
         );
         let key = command.key.wire();
         let proposed = link::NewCommand {
+            content_transit: false,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -316,6 +317,7 @@ impl Engine {
             let mut tx = self.db().begin().await?;
             let key = command.key.wire();
             let proposed = link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

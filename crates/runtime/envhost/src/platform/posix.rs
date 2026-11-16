@@ -162,6 +162,26 @@ impl Dir {
         Ok(file)
     }
 
+    /// Opens an existing regular temporary file for resuming, without following a link.
+    pub fn open_update(&self, name: &OsStr) -> io::Result<File> {
+        plain(name)?;
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io_error)?;
+        let file = File::from(fd);
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
     /// Makes the file called `name`, which must not exist, and opens it for reading and writing
     /// with the permissions `mode` (as the process's umask lets them through). It is read back to
     /// be hashed before it is put in place.
@@ -254,6 +274,23 @@ impl Dir {
     }
 
     /// Writes this directory's own changes to disk, where the system can.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
+        Ok(Box::new(std::iter::from_fn(move || {
+            loop {
+                let entry = match listing.read()? {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(io_error(error))),
+                };
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    return Some(Ok(OsString::from_vec(name.to_vec())));
+                }
+            }
+        })))
+    }
+
     /// Visits names directly from the directory stream; false stops without collecting or sorting the rest.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;

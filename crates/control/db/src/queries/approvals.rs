@@ -352,6 +352,76 @@ pub async fn decide(
     Ok(done.rows_affected() == 1)
 }
 
+/// Records a person's harness decision without taking the thread or recipients' rows.
+/// The saved binding also makes the remaining thread effects discoverable after a restart.
+pub async fn record_harness_decision(
+    conn: &mut Conn,
+    id: Id,
+    state: &str,
+    by: Id,
+    decision: &Json,
+    binding: &Json,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE approvals SET state=$2, decided_by=$3, decision=$4, decision_settlement=$5,
+                              decided_at=$6, updated_at=$6
+          WHERE id=$1 AND kind='harness' AND state='pending'",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(by)
+    .bind(decision)
+    .bind(binding)
+    .bind(at)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Threads with recorded decisions whose thread effects have not committed yet.
+pub async fn unsettled_threads(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT thread_id FROM approvals WHERE decision_settlement IS NOT NULL
+          AND thread_id IS NOT NULL GROUP BY thread_id ORDER BY min(decided_at),thread_id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Recorded decisions of one thread, including a decision the harness could not receive.
+pub async fn unsettled_of_thread(conn: &mut Conn, thread: Id) -> Result<Vec<ApprovalRow>, DbError> {
+    let sql = format!(
+        "{APPROVAL_SELECT} WHERE thread_id=$1 AND decision_settlement IS NOT NULL ORDER BY decided_at,id"
+    );
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// The binding saved with a decision; none once its remaining effects committed.
+pub async fn decision_settlement(conn: &mut Conn, id: Id) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT decision_settlement FROM approvals WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
+/// Marks the thread effects complete in the same transaction as those effects.
+pub async fn finish_decision_settlement(conn: &mut Conn, id: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE approvals SET decision_settlement=NULL WHERE id=$1")
+        .bind(id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Cancels an approval that is pending (the harness withdrew it, or its turn
 /// ended). The answer says whether this call did.
 pub async fn cancel_pending(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<bool, DbError> {

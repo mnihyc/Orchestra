@@ -957,6 +957,7 @@ async fn an_unscoped_program_status_is_a_provider_audit_fact_without_native_diag
     };
     let before = count().await;
     let event = Event::HarnessStatus(orch_link_contract::events::HarnessStatus {
+        home: None,
         status: "online".into(),
         detail: Some("never-copy-native-startup-words".into()),
         harness_version: None,
@@ -1101,3 +1102,66 @@ async fn retries_publish_each_native_attempt_once_and_clear_on_work_or_completio
 
 #[path = "ingest/claude_audit.rs"]
 mod claude_audit;
+
+#[tokio::test]
+async fn a_new_native_home_report_replaces_the_saved_start_without_borrowing_later_settings() {
+    let world = World::new().await;
+    let thread = world.thread("Native home report").await;
+    world.running_turn(thread, "Go").await;
+    for (sequence, home) in [
+        (
+            1,
+            orch_driver_contract::runtime::HarnessHome {
+                path: Some("/reported-process-home".into()),
+                source: orch_driver_contract::runtime::HarnessHomeSource::Managed,
+            },
+        ),
+        (
+            2,
+            orch_driver_contract::runtime::HarnessHome {
+                path: None,
+                source: orch_driver_contract::runtime::HarnessHomeSource::Native,
+            },
+        ),
+    ] {
+        world
+            .set(
+                world.root,
+                "runtime.home",
+                json!({"kind":"existing_directory","path":"/later-setting"}),
+            )
+            .await;
+        let event = Event::HarnessStatus(orch_link_contract::events::HarnessStatus {
+            home: Some(home.clone()),
+            status: "online".into(),
+            detail: None,
+            harness_version: None,
+            sessions_open: 1,
+        });
+        let mut tx = world.pool.begin().await.unwrap();
+        world
+            .engine()
+            .apply_stream_events(
+                &mut tx,
+                world.machine_id,
+                &Stream::Harness {
+                    provider_id: world.provider,
+                    agent_id: world.agent,
+                },
+                &[delivered(&world, sequence, &event)],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let kept: Json = sqlx::query_scalar(
+            "SELECT home FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3",
+        )
+        .bind(world.provider)
+        .bind(world.agent)
+        .bind(world.machine_id)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(kept, serde_json::to_value(home).unwrap());
+    }
+}

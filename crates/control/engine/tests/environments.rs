@@ -162,7 +162,7 @@ async fn a_unit_is_made_with_the_builds_of_the_harnesses_its_template_lets_run_b
     );
     assert_eq!(
         create.body["roles"],
-        serde_json::json!(["environment", "agent"]),
+        serde_json::json!(["environment", "agent", "provider"]),
         "and its connector hosts harnesses"
     );
 }
@@ -185,7 +185,10 @@ async fn a_unit_whose_template_lets_no_harness_run_there_is_made_with_the_connec
         .find(|call| call.kind == K::NodeRuntimeCreate)
         .unwrap();
     assert_eq!(create.body["tools"], serde_json::json!([]));
-    assert_eq!(create.body["roles"], serde_json::json!(["environment"]));
+    assert_eq!(
+        create.body["roles"],
+        serde_json::json!(["environment", "provider"])
+    );
     assert_eq!(
         host.count(K::NodeToolEnsure),
         1,
@@ -669,6 +672,25 @@ async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_wha
             .await
             .unwrap();
     assert_eq!(plan["warnings"], serde_json::json!(["full", "no_room"]));
+    assert_eq!(plan["calculation"]["thresholds"]["full_percent"], 90);
+    assert_eq!(plan["calculation"]["declared_totals"]["memory_mb"], 1024);
+    assert_eq!(plan["calculation"]["capacities"]["memory_mb"], 1100);
+    assert_eq!(plan["calculation"]["consequence"], "warn");
+    sqlx::query("UPDATE hosts SET capacity='{\"memory_mb\":65536}',when_full='block' WHERE id=$1")
+        .bind(host.id)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let kept: serde_json::Value =
+        sqlx::query_scalar("SELECT plan->'calculation' FROM jobs WHERE id=$1")
+            .bind(made.job.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        kept, plan["calculation"],
+        "a later capacity or policy report cannot rewrite this placement"
+    );
 }
 
 #[tokio::test]
