@@ -42,6 +42,7 @@ async fn only_a_system_admin_reads_where_search_by_meaning_stands_and_an_org_is_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.enabled"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -315,7 +316,23 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
     let c = cast(&world).await;
     places::join(&world, c.acme, c.acme, &c.root, "admin", &c.boss).await;
     let generation = orch_types::new_id();
-    let provider = orch_types::new_id();
+    let mut conn = world.conn().await;
+    let provider = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "provider",
+        Some(c.boss.id()),
+        Some(c.acme),
+        "Embeddings",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE providers SET upstreams=$2,protocols=ARRAY['openai-embeddings'] WHERE id=$1")
+        .bind(provider)
+        .bind(json!([{"protocol":"openai-embeddings","base_url":"https://embeddings.invalid/v1","options":{"auth":"none"}}]))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
     sqlx::query("INSERT INTO search_generations (id,org_id,provider_id,model_name,asked_dimensions,dimensions,query_prefix,document_prefix,chunking,state,created_at)
         VALUES ($1,$2,$3,'old-model',256,256,'query: ','text: ','parts-v1:64','active',$4)")
         .bind(generation).bind(c.acme).bind(provider).bind(world.now()).execute(&world.db.pool).await.unwrap();
@@ -325,6 +342,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
@@ -385,6 +403,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
