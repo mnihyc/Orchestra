@@ -1,8 +1,8 @@
 /** Reading a file of the workspace: what it is, its exact version, and its bytes, in the fewest requests that can tell.
  *
  * A file is read in two steps. First it is described and, in the same breath, the environment is asked
- * to bring that version to the store, which answers with the hash that names it. Then the bytes are read by
- * that hash, which can be kept for as long as one likes since a hash names one content only. So the
+ * to describe that version on its machine, which answers with the hash that names it. Then the bytes are read by
+ * that hash, from the live machine or the selected cache, since a hash names one content only. So the
  * description and the bringing go together, and the reading follows: two requests in a row before
  * a file shows. A file that changes is described again, its hash is another, and its bytes are asked
  * for anew.
@@ -12,26 +12,22 @@ import { useMemo } from 'react';
 
 import { type Door, fetchFile, readFileBytes, statFile } from '@/api/workspace';
 import { useViewShown } from '@/features/workbench/viewOpening';
-import type { FetchState, FetchUnavailable, FileStat } from '@/generated/api-types';
+import type { FetchUnavailable, FileStat } from '@/generated/api-types';
 
 import { PREVIEW_BYTES } from './viewers';
 import { sourceBytes, sourceDownload, sourceQueryAuthority, sourceReaderKey, useFileSource, workspaceSource, type FileSource } from './source';
-
-/** How many times the environment is asked again while it brings a file: each ask holds for up to 25 seconds. */
-const BRINGING_ASKS = 12;
 
 /** Where the environment stands with a file the person asked to see. */
 export type Brought = { state: 'ready'; hash: string; size: number | null } | { state: 'unavailable'; reason: FetchUnavailable };
 
 /** Obtains the verified version of a workspace file before a viewer or an explicit download reads it. */
-export async function bringFile(door: Door, path: string, signal: AbortSignal): Promise<Brought> {
-  let last: FetchState | null = null;
-  for (let ask = 0; ask < BRINGING_ASKS; ask += 1) {
-    last = await fetchFile(door, path, signal);
+export async function bringFile(door: Door, path: string, signal: AbortSignal, mount?: string): Promise<Brought> {
+  for (;;) {
+    signal.throwIfAborted();
+    const last = await fetchFile(door, path, signal, mount);
     if (last.state === 'ready' && last.hash !== null) return { state: 'ready', hash: last.hash, size: last.size };
     if (last.state === 'unavailable') return { state: 'unavailable', reason: last.reason ?? 'not_found' };
   }
-  return { state: 'unavailable', reason: last?.reason ?? 'offline_not_cached' };
 }
 
 /** What a file is, and the version of it that is ready to be read. */
@@ -42,11 +38,11 @@ export interface FileHead {
 
 export const headKey = (door: Door, path: string) => ['workspace-head', door.environmentId, path] as const;
 
-export const headQuery = (door: Door, path: string) =>
+export const headQuery = (door: Door, path: string, mount?: string) =>
   queryOptions({
-    queryKey: headKey(door, path),
+    queryKey: [...headKey(door, path), ...(mount === undefined ? [] : [mount])],
     queryFn: async ({ signal }): Promise<FileHead> => {
-      const [stat, brought] = await Promise.all([statFile(door, path, signal), bringFile(door, path, signal)]);
+      const [stat, brought] = await Promise.all([statFile(door, path, signal, mount), bringFile(door, path, signal, mount)]);
       return { stat, brought };
     },
     // What is shown is what the directory says: it asks again when it is told that the file changed, and not for being looked at.
@@ -147,8 +143,10 @@ export function saveBytes(name: string, bytes: Uint8Array<ArrayBuffer> | Uint8Ar
 }
 
 /** Why a file cannot be had, as a key of the catalogue. */
-export function unavailableKey(reason: FetchUnavailable): 'files.unavailable.offline' | 'files.unavailable.ignored' | 'files.unavailable.tooLarge' | 'files.unavailable.notFound' {
+export function unavailableKey(reason: FetchUnavailable): 'files.unavailable.offline' | 'files.unavailable.relayOffline' | 'files.unavailable.ignored' | 'files.unavailable.tooLarge' | 'files.unavailable.notFound' {
   switch (reason) {
+    case 'offline':
+      return 'files.unavailable.relayOffline';
     case 'offline_not_cached':
       return 'files.unavailable.offline';
     case 'ignored':

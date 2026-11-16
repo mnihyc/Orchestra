@@ -341,6 +341,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -487,6 +495,7 @@ impl ServiceCommand {
         self.checked(
             conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -1075,6 +1084,7 @@ impl Engine {
             let mut tx = self.db().begin().await?;
             let key = command.key.wire();
             let proposed = link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -1182,6 +1192,7 @@ pub(crate) async fn reconcile(engine: &Engine, command: Id) -> Result<(), Engine
         return Ok(());
     };
     if !evidence.matches(&link::NewCommand {
+        content_transit: false,
         id: retained.command.id,
         machine_id: retained.command.machine_id,
         kind: &retained.command.kind,

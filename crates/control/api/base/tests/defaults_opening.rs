@@ -59,7 +59,7 @@ async fn configure(room: &Room) -> Provider {
         .call(ProviderCreate, &[])
         .token(&room.ada.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Selected private provider".into(),
             home_id: home.base.id,
             access: None,

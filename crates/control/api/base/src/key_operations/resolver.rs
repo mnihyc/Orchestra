@@ -414,7 +414,9 @@ impl OperationRequest {
         resolver: OptionalOperationResolver<Q, ()>,
         query: Option<&str>,
     ) -> ApiResult<Self> {
-        if route.method == Method::GET || !matches!(route.body, Shape::Bytes | Shape::Raw) {
+        if route.method == Method::GET
+            || !matches!(route.body, Shape::Bytes | Shape::Raw | Shape::Json(_))
+        {
             return Err(ApiError::internal(
                 "a raw changing query operation requires its actual raw body declaration",
             ));
