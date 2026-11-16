@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-core --test document_convert --test document_import_files -- scopes::
+test -p orch-api-core --test workspace_pages --test schedule_operation_scopes --test recordings
+test -p orch-api-core --test forks -- file_native_scopes::
+test -p orch-api-core --test forks -- switching_away_from_a_disabled_provider_or_environment_keeps_queue_positions_and_checks_each_author
+test -p orchctl --test api --test provider_login
+test -p orch-node --test uploads

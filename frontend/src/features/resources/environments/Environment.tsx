@@ -9,7 +9,8 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
-import { liveIndexReason } from '@/features/files/indexWords';
+import { RecordingNotice, recordingReason } from '@/features/source/RecordingNotice';
+import { exclusionProblem, indexingProgress, liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
@@ -35,6 +36,7 @@ import { UnitCommandFailure } from '@/features/resources/UnitConfiguration';
 import { EnvironmentDoor } from '@/features/resources/environments/Doors';
 import { HarnessTrustSection } from '@/features/resources/environments/HarnessTrust';
 import { AgentReach } from '@/features/resources/environments/AgentReach';
+import { EnvironmentProviderConnections } from './ProviderConnections';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
 import { EnvironmentReadinessNotice } from '@/features/resources/SandboxReadiness';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
@@ -134,6 +136,8 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
   const context = { locale, timeZone };
+  const indexing = indexingProgress(environment.facts);
+  const exclusions = exclusionProblem(t, environment.facts);
   return (
     <div className="flex flex-col gap-6">
       {environment.status_detail !== null && environmentRemovalPhase(environment) === undefined && <InlineAlert tone={environment.status === 'failed' ? 'danger' : 'info'}>{environmentStatusDetail(environment, t)}</InlineAlert>}
@@ -157,10 +161,11 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
-      {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
-        <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
-        <p>{t('largeTree.liveCost')}</p>
-      </InlineAlert>}
+      {indexing !== null && <InlineAlert tone="info">{t('largeTree.indexing', { files: new Intl.NumberFormat().format(indexing.total), percent: indexing.percent })}</InlineAlert>}
+      {exclusions !== null && <p role="alert" className="text-xs text-danger-text">{exclusions}</p>}
+      {exclusions === null && environment.index === 'live' && <p className="text-sm text-text-muted">{liveIndexReason(t, environment.index_reason, environment.facts)} · {t('largeTree.openFolders')}</p>}
+      <RecordingNotice environmentId={environment.id} reason={exclusions === null ? recordingReason(environment.facts) ?? (environment.index === 'live' ? 'live_tree' : null) : null} />
+      <p className="text-xs text-text-muted">{t('source.restore.gitignore')}</p>
       <EnvironmentPrograms id={environment.id} generation={environment.generation} />
       <Section id="environment-about" title={t('environments.overview.about')}>
         <Facts compact
@@ -187,6 +192,7 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
         />
       </Section>
       <ResourceDetails><AgentReach environment={environment} /></ResourceDetails>
+      <ResourceDetails label={t('providerCreation.environmentConnections')}>{()=> <EnvironmentProviderConnections environmentId={environment.id}/>}</ResourceDetails>
     </div>
   );
 }

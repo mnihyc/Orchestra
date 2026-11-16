@@ -17,7 +17,7 @@ use orch_api_contract::machine_programs::MachineProgramsCommand;
 use orch_api_contract::resources::{
     MachineExecutorList, MachineGet, MachinePolicyGet, MachineProgramsChange, MachineProgramsGet,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity::{self, NewApiToken};
@@ -87,7 +87,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

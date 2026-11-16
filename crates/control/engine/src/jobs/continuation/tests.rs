@@ -344,6 +344,7 @@ impl Fixture {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: true,
                     harness_version: "1.0.0".into(),
                     descriptor: serde_json::from_value(described.clone()).map_err(|error| {
