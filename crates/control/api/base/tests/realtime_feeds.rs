@@ -7,6 +7,9 @@
 
 mod realtime_support;
 
+#[path = "realtime_feeds/team_scale.rs"]
+mod team_scale;
+
 use axum::body::Body;
 use http::Request;
 use orch_api_contract::nodes::OrgTreeGetReply;
@@ -92,7 +95,7 @@ async fn a_notification_lost_between_commit_and_fan_out_is_repaired_by_the_next_
     // A row is written and numbered, and the announcement of it is never sent.
     let mut conn = rig.pool.acquire().await.unwrap();
     let seq: i64 = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1 RETURNING inbox_seq",
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1 RETURNING inbox_seq",
     )
     .bind(rig.ada)
     .fetch_one(&mut *conn)

@@ -526,7 +526,7 @@ async fn host_update_keeps_local_policy_refusal_and_rechecks_expiry_after_the_na
     });
     tokio::time::timeout(WAIT,async {loop {
         assert!(!request.is_finished(),"the native physical program lock must be reached");
-        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT id FROM machines%FOR SHARE%')")
+        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT id FROM machines%FOR KEY SHARE%')")
             .bind(pid).fetch_one(&world.db.pool).await.unwrap();if blocked {break;}tokio::task::yield_now().await;
     }}).await.expect("the actual machine source lock is waiting");
     let before = record(&world, machine).await;

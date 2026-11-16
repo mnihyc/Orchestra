@@ -20,6 +20,7 @@
  * where it begins, and opening and closing its rows. Nothing in it folds or moves by itself: going
  * somewhere opens the way to the row once, and a reader who closes it again finds it closed.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 import { ArrowUp, ChevronsDownUp, Ellipsis, Focus, FolderOpen, ListTree, Locate, MessagesSquare } from 'lucide-react';
@@ -956,7 +957,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
           path={beginning === null ? undefined : <Beginning way={beginningWay} onBegin={begin} onUp={up} />}
           action={
               <span className="flex shrink-0 items-center">
-                <ArrangementSwitch value={arrangement} onChange={(value) => { chooseArrangement(value); if (projectsFolded) setFolded('projects', false); }} />
+                <ArrangementSwitch value={arrangement} onChange={carryDeviceChoice((value: NavigationArrangement) => { chooseArrangement(value); if (projectsFolded) setFolded('projects', false); }, chooseArrangement)} />
                 {makeIn !== null && current !== null && <NodeMakeButton place={makeIn} node={beginning === null ? current : undefined} />}
                 <Menu
                   label={t('navigation.view.label')}

@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test everything_scale --test realtime_feeds --test realtime_socket --test realtime_rows_cost --test realtime_fixture_lifecycle -- --nocapture
+test -p orch-api-core --test realtime_origins --test realtime_switches --test realtime_raw_sources --test api_surface_sockets --test account_key_proofs
+test -p orch-api-core --test realtime_threads --test realtime_continuations --test realtime_environment --test realtime_ephemeral --test realtime_machine_views --test realtime_chats --test realtime_presence_processes --test realtime_topic_members --test realtime_usage --test realtime_large_gap
+test -p orch-api-core --test machines --test machine_update_scopes --test machine_role_scopes --test machine_policy_scopes --test machine_program_scopes --test machine_revoke_scopes --test machine_again_scopes --test machine_probe_scopes --test machine_registration --test host_update_scopes
+test -p orch-api-core --test environments --test hosted_environments --test mcp_creation_scopes --test mcp_delete_scopes --test mcp_duplicates --test template_import_scopes --test mount_creation_scopes --test mount_use_scopes
+test -p orch-api-core --test component_updates --test ports_core --test workspace_source_scopes --test workspace_jobs_scopes --test workspace_copy_scopes --test workspace_snapshots --test skills --test exports --test copy_out_exports
