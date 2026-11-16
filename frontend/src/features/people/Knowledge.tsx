@@ -20,7 +20,7 @@ const CONTEXT_PATHS = 5;
 function TreePage({ threadId, path }: { threadId: string; path: string }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const query = useQuery({ ...sharedTreeQuery(threadId, path), retry: false, staleTime: 0 });
+  const query = useQuery({ ...sharedTreeQuery(threadId, path), retry: false });
   if (query.isPending) return <SkeletonRows read={query} rows={3} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const entries = query.data.entries.filter((entry) => !entry.redacted && entry.name !== null);
@@ -36,7 +36,7 @@ function TreePage({ threadId, path }: { threadId: string; path: string }) {
 
 export function ThreadKnowledge({ threadId }: { threadId: string; topicId: string }) {
   const { t } = useTranslation();
-  const query = useQuery({ ...threadSharedQuery(threadId), retry: false, staleTime: 0 });
+  const query = useQuery({ ...threadSharedQuery(threadId), retry: false });
   const [all, setAll] = useState(false);
   if (query.isPending) return <SkeletonRows read={query} rows={3} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
@@ -55,6 +55,6 @@ function ShareList({ shares }: { shares: PriorityShare[] }) {
 }
 export function TopicKnowledge({ topicId }: { topicId: string }) {
   const { t } = useTranslation();
-  const query = useQuery({ ...agentSharesQuery({ kind: 'topic', id: topicId }, 'to'), retry: false, staleTime: 0 });
+  const query = useQuery({ ...agentSharesQuery({ kind: 'topic', id: topicId }, 'to'), retry: false });
   return <div className="flex flex-col gap-4"><AgentKnowledgeNotice />{query.isPending ? <SkeletonRows read={query} rows={2} /> : query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data.length === 0 ? <EmptyState compact title={t('people.noExplicitShares')} /> : <ShareList shares={query.data} />}</div>;
 }
