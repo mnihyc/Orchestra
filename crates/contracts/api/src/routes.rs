@@ -333,6 +333,7 @@ pub fn all() -> Vec<Route> {
         crate::calls::ROUTES,
         crate::goals::ROUTES,
         crate::gateways::ROUTES,
+        crate::public_addresses::ROUTES,
         crate::thread_move::ROUTES,
         crate::background::ROUTES,
         crate::native::ROUTES,

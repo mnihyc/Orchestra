@@ -116,6 +116,7 @@ const NAME_MAX: usize = 32;
 /// Binds all mount resource requests.
 pub fn mount(registry: &mut Registry) {
     read::mount(registry);
+    copy::mount(registry);
     registry
         .on_snapshot_read_with_optional_operation(
             api::MachineMountList,
@@ -134,7 +135,6 @@ pub fn mount(registry: &mut Registry) {
             creation::create,
         )
         .on(api::MountUpdate, update)
-        .on(api::MountDelete, delete)
         .on_with_operation(
             api::MountLocationSet,
             locations::resolve_set,
@@ -351,7 +351,7 @@ async fn prepare_inventory_one(
         );
         let by = refusals::user_refs(conn, &[location.created_by]).await?;
         let sizes: Json = sqlx::query_scalar(
-            "SELECT COALESCE(facts->'mount_sizes','[]'::jsonb) FROM machines WHERE id=$1",
+            "SELECT COALESCE((SELECT mount_sizes FROM hosts WHERE machine_id=$1),'[]'::jsonb)",
         )
         .bind(location.machine_id)
         .fetch_one(&mut *conn)
@@ -526,7 +526,12 @@ async fn seen(
     else {
         return Ok(None);
     };
-    let object = match machine.host_id {
+    // A host's node and a unit that a host runs are named by that host; a person's own machine has a page.
+    let named_by = match machine.host_id {
+        Some(host) => Some(host),
+        None => orch_db::queries::resources::hosting::host_running(conn, machine_id).await?,
+    };
+    let object = match named_by {
         Some(host) => ObjectRef {
             kind: ResourceKind::Host.into(),
             id: host,
@@ -578,6 +583,7 @@ async fn seen(
     };
     Ok(Some((reference, host)))
 }
+orch_api_base::__api_bind_a94d90d474!();
 
 fn kept_ask(data: &rows::KeptRow) -> LocationAsk {
     LocationAsk {
@@ -799,25 +805,6 @@ async fn remove_location(
     .await
 }
 
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    require(
-        &mut tx,
-        &principal,
-        ResourceKind::Mount,
-        id,
-        Permission::MountManage,
-    )
-    .await?;
-    let row = rows::lock(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    delete_native(&ctx, &mut tx, &principal, &row).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
-}
-
 /// The original native uses/volume confirmation rules, before any location is changed.
 pub(crate) async fn deletion_inventory(
     ctx: &Ctx,
@@ -889,6 +876,9 @@ pub(crate) async fn delete_native(
 
 #[path = "mounts/creation.rs"]
 pub mod creation;
+
+#[path = "mounts/copy.rs"]
+mod copy;
 
 #[path = "mounts/locations.rs"]
 pub mod locations;

@@ -118,6 +118,8 @@ pub(crate) async fn local_sign_ins(hosting: &Hosting) -> Vec<ProviderFound> {
 /// What the roles add to the facts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FactsDraft {
+    /// The bundled node's native release updater, never inferred from its name.
+    pub server_update: Option<orch_driver_contract::descriptor::OperationSupport>,
     /// The actual account's independently proved native resource controllers.
     pub process_controls: orch_driver_contract::process_limits::ProcessControls,
     /// Local-only machine isolation declaration, read from the same configuration file.
@@ -180,6 +182,7 @@ pub fn machine_facts(
     clock_offset_ms: i64,
 ) -> MachineFacts {
     MachineFacts {
+        server_update: draft.server_update,
         data_directory: None,
         gateway: None,
         role_management: None,

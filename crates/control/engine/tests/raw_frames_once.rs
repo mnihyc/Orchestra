@@ -45,6 +45,7 @@ async fn a_frame_delivered_twice_is_kept_once_and_a_new_frame_with_the_same_json
         payload: json!({ "method": "frame", "authorization": "private credential" }),
     });
     let first = DeliveredEvent {
+        native_opening_id: None,
         seq: 41,
         at: Time::new(world.clock.now()),
         kind: frame.kind().as_str().to_owned(),
@@ -105,6 +106,7 @@ async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_byte
         payload: json!({"frame": "old"}),
     });
     let event = DeliveredEvent {
+        native_opening_id: None,
         seq: 41,
         at: Time::new(world.clock.now()),
         kind: "raw.frame".to_owned(),
