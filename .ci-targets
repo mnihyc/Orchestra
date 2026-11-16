@@ -1,0 +1,5 @@
+test -p orch-api-core --lib
+test -p orch-api-core --test providers --test provider_harness --test hosted_environments --test blob_housekeeping
+test -p orch-api-core --test provider_crud_scopes --test provider_setup_scopes --test retained_scopes --test workspace_jobs_scopes --test usage_caps --test provider_services
+test -p orch-api-core --test uploads --test threads_bound --test creation_replays --test workspace_files --test workspace_looking --test reference_preview
+test -p orchctl --test provider_login

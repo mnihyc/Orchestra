@@ -75,8 +75,8 @@ impl Fixture {
         })
     }
     async fn current(&self, operation: &str, read: bool, retained: bool) -> Proof<(Ctx, Id)> {
-        let secret = authentication::new_token(authentication::API_TOKEN_PREFIX);
         let id = new_id();
+        let secret = authentication::new_api_token(id);
         let (kind, target, actions) = if read {
             ("mount", self.mount, vec!["read"])
         } else {

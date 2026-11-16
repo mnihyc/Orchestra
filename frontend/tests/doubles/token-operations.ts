@@ -16695,6 +16695,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "EnvironmentFileTransferGet",
+    "method": "GET",
+    "path": "/environments/{id}/files/transfer",
+    "title": "Reads the exact current manifest transfer under the existing Files authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "EnvironmentFileTransferGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "EnvironmentFilesExport",
     "method": "POST",
     "path": "/environments/{id}/files/export",
@@ -26112,7 +26139,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MachineUpdateNow",
     "method": "POST",
     "path": "/machines/{id}/update",
-    "title": "Requests a verified physical connector update, drained under its local update.auto policy.",
+    "title": "Requests an explicit verified physical connector update after its active work drains.",
     "delegation": "business",
     "variants": [
       {
@@ -40623,6 +40650,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderFactsModelsGet",
+    "method": "GET",
+    "path": "/providers/{id}/facts/models",
+    "title": "Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderFactsModelsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderFactsOverridesSet",
     "method": "PUT",
     "path": "/providers/{id}/facts-overrides",
@@ -41348,6 +41406,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderModelDefaultsGet",
+    "method": "GET",
+    "path": "/providers/{id}/models/defaults",
+    "title": "The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderModelDefaultsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderModelDelete",
     "method": "DELETE",
     "path": "/providers/{id}/models/{model_id}",
@@ -41705,6 +41794,276 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "facets": [
           {
             "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayChat",
+    "method": "POST",
+    "path": "/providers/{id}/relay/chat/completions",
+    "title": "Makes a Chat Completions call through the provider's declared interface.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayChat",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayCompact",
+    "method": "POST",
+    "path": "/providers/{id}/relay/responses/compact",
+    "title": "Compacts conversation input through the provider's declared Responses interface.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayCompact",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayEmbeddings",
+    "method": "POST",
+    "path": "/providers/{id}/relay/embeddings",
+    "title": "Makes an Embeddings call through the provider's declared interface.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayEmbeddings",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayInputTokens",
+    "method": "POST",
+    "path": "/providers/{id}/relay/responses/input_tokens",
+    "title": "Counts input tokens through the provider's declared Responses interface.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayInputTokens",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayInteractions",
+    "method": "POST",
+    "path": "/providers/{id}/relay/interactions",
+    "title": "Makes a native Interactions call through the provider's explicitly enabled public relay.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayInteractions",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayMessageCount",
+    "method": "POST",
+    "path": "/providers/{id}/relay/v1/messages/count_tokens",
+    "title": "Counts input tokens through the provider's declared Messages interface.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayMessageCount",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayMessageModels",
+    "method": "GET",
+    "path": "/providers/{id}/relay/v1/models",
+    "title": "Lists only opened and currently usable relay models in Messages format.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayMessageModels",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayMessages",
+    "method": "POST",
+    "path": "/providers/{id}/relay/v1/messages",
+    "title": "Makes a Messages call through the provider's explicitly enabled public relay.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayMessages",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayModels",
+    "method": "GET",
+    "path": "/providers/{id}/relay/models",
+    "title": "Lists only opened and currently usable relay models in Responses format.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayModels",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderRelayResponses",
+    "method": "POST",
+    "path": "/providers/{id}/relay/responses",
+    "title": "Makes a Responses call through the provider's explicitly enabled public relay.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderRelayResponses",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
             "resources": [
               "provider"
             ],
@@ -42662,7 +43021,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server",
+              "mount"
             ],
             "target": {
               "kind": "resolved",
@@ -43315,6 +43676,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "key_scope_threads"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "SettingParameterFormResolve",
+    "method": "POST",
+    "path": "/settings/parameters/form",
+    "title": "Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "SettingParameterFormResolve",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -50984,7 +51372,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "ThreadInterrupt",
     "method": "POST",
     "path": "/threads/{id}/interrupt",
-    "title": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+    "title": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
     "delegation": "business",
     "variants": [
       {
@@ -51184,6 +51572,51 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadItemRawGet",
+    "method": "GET",
+    "path": "/threads/{id}/items/{item_id}/raw",
+    "title": "Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.read",
+        "name": "read",
+        "selector": "inspect_deleted is not true",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.inspect_deleted",
+        "name": "inspect_deleted",
+        "selector": "inspect_deleted is true; apply the stored thread restoration rule",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -52242,6 +52675,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadScreenFactsGet",
+    "method": "GET",
+    "path": "/threads/{id}/screen-facts",
+    "title": "Reads current silence and plan-answer facts under this actual thread's View authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadScreenFactsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -54236,6 +54696,17 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "upload_id"
             },
             "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "upload_environments"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -54261,6 +54732,17 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "current_account"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "upload_environments"
             },
             "usage": "required"
           }
@@ -54317,6 +54799,17 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "upload_id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "upload_environments"
             },
             "usage": "required"
           }

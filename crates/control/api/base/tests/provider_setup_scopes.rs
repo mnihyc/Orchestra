@@ -16,7 +16,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::resources::{ProviderSetupGet, ProviderSetupGetQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -144,7 +144,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -267,6 +267,7 @@ async fn desired_template(s: &Scene, template: Id) {
         .call(orch_api_contract::resources::ProviderUpdate, &[&s.provider])
         .token(&s.company.boss.token)
         .body(&orch_api_contract::resources::ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -543,7 +544,6 @@ async fn root_only_setup_keeps_public_schema_home_values_and_catalogue_without_p
     assert!(!agent_present(&page, private));
     for field in [
         "subscriptions",
-        "subscriptions_unreported",
         "subscriptions_withheld",
         "subscriptions_unshared",
         "machines",
@@ -680,7 +680,6 @@ async fn actual_agent_read_keeps_complete_use_schema_and_intrinsic_machine_witho
     );
     assert_eq!(shown_profile["methods"][0]["id"], "token");
     assert!(!agent_present(&page, private) && !agent_present(&page, disabled));
-    assert!(contains(&page["subscriptions_unreported"], "id", unknown));
     assert!(
         page["subscriptions_unavailable"]
             .as_array()

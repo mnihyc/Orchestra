@@ -15,7 +15,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::directory::{GroupMemberAdd, OrgGroupCreate, OrgGroupCreateBody};
 use orch_api_contract::resources::{AgentList, AgentListQuery, MachineGet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity::{self, NewApiToken};
@@ -126,7 +126,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -1182,7 +1182,7 @@ impl tracing::Subscriber for AgentBoundaryErrors {
 const AGENT_READ_CHECKPOINT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // The current native snapshot's actual HTTP identity read:
-// - identity::api_token_by_hash uses NO KEY UPDATE SKIP LOCKED and an ordinary SELECT fallback;
+// - identity::api_token_by_identity uses NO KEY UPDATE SKIP LOCKED and an ordinary SELECT fallback;
 //   holding this token row does not hold authentication at the update bookkeeping step.
 // - AgentList registers an optional operation without an initial callback. Registry's
 //   prepare_registered_operation no-initial branch loads ordinary principal facts, and

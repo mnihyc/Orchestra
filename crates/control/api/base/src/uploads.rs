@@ -97,10 +97,6 @@ fn creation_replay(
     })
 }
 
-/// How long an upload in pieces has to be finished in: a day, as the design says; the collection of
-/// content removes a session that ran out together with the file of its pieces.
-pub const SESSION_LIFE: Duration = Duration::hours(24);
-
 /// The most characters of the name of an upload.
 pub const NAME_MAX_CHARS: usize = 255;
 
@@ -173,55 +169,13 @@ pub async fn begin(
     ctx: &Ctx,
     body: &UploadSessionCreateBody,
 ) -> ApiResult<UploadSessionCreateReply> {
-    let name = clean_name("name", &body.name)?;
-    if body.size < 0 {
-        return Err(ApiError::invalid("size", "a size is not negative"));
-    }
-    let max = max_blob_bytes(&ctx.app).await?;
-    if body.size > max {
-        return Err(too_large(max));
-    }
-    let media_type = match &body.media_type {
-        Some(text) => {
-            let text = text.trim();
-            let looks_right = text.len() <= MEDIA_TYPE_MAX_CHARS
-                && text.split_once('/').is_some_and(|(kind, subtype)| {
-                    !kind.is_empty()
-                        && !subtype.is_empty()
-                        && !text.chars().any(|c| c.is_control() || c.is_whitespace())
-                });
-            if !looks_right {
-                return Err(ApiError::invalid(
-                    "media_type",
-                    "this is a type and a subtype",
-                ));
-            }
-            Some(text.to_owned())
-        }
-        None => None,
-    };
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    let now = guard.now().get();
-    let session = SessionRow {
-        id: new_id(),
-        user_id: guard.user().id(),
-        name,
-        media_type,
-        size: body.size,
-        received: 0,
-        created_at: now,
-        updated_at: now,
-        expires_at: now + SESSION_LIFE,
-    };
-    storage::begin_session(&mut tx, &session).await?;
-    orch_db::idempotency::creation::observe_with(&mut tx,Some(session.user_id),"upload_session",session.id,
-        serde_json::json!({"chunk":chunk_bytes(),"expires":orch_types::Time::new(session.expires_at)})).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(UploadSessionCreateReply {
-        upload_id: session.id,
-        chunk_bytes: chunk_bytes(),
-        expires_at: orch_types::Time::new(session.expires_at),
-    })
+    let _ = body;
+    let tx = ctx.app.db.begin().await?;
+    Ok(
+        crate::key_operations::native::effects::apply_owned::<creation::Begin>(ctx, tx)
+            .await?
+            .output,
+    )
 }
 
 /// The session `id` of `user`, locked, if it is theirs and has not run out.
@@ -250,7 +204,7 @@ pub(crate) fn check_session(session: &SessionRow, user: Id, now: DateTime<Utc>) 
 }
 
 /// Expiry ends completion and append authority; the same owner may still cancel the partial file.
-pub(crate) fn check_session_for(
+pub fn check_session_for(
     ctx: &Ctx,
     session: &SessionRow,
     user: Id,
@@ -289,6 +243,16 @@ fn check_locked_session(
 
 /// Cancels a person's session after any in-flight piece, then discards its temporary file.
 pub async fn cancel(ctx: &Ctx, id: Id) -> ApiResult<()> {
+    let _session = ctx.app.blobs.relays().session(id).await;
+    let native = {
+        let mut conn = ctx.app.db.acquire().await?;
+        references::targets::of(&mut conn, id)
+            .await?
+            .is_some_and(|target| target.destination.relayed)
+    };
+    if native {
+        return self::native::cancel(ctx, id).await;
+    }
     let (mut tx, initial) = transaction_guard::begin(ctx).await?;
     let locked = storage::lock_session(&mut tx, id)
         .await?
@@ -344,9 +308,16 @@ pub async fn put_piece(
     let (current, guard) = transaction_guard::after_wait(&current, &mut tx).await?;
     check_locked_session(&current, &guard, &session)?;
     file.write(piece).await.map_err(ApiError::internal)?;
-    storage::advance_session(&mut tx, id, end, current.app.clock.now()).await?;
+    let at = current.app.clock.now();
+    let expires = at
+        .checked_add_signed(Duration::seconds(session.idle_secs))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
+    references::targets::progress(&mut tx, id, end, at, expires).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(UploadSessionPutReply { received: end })
+    Ok(UploadSessionPutReply {
+        received: end,
+        expires_at: orch_types::Time::new(expires),
+    })
 }
 
 /// Ends an upload in pieces: the whole is hashed, put in the store and recorded, and the upload is
@@ -378,7 +349,8 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
             session.size
         )));
     }
-    app.blobs
+    let _publication = app
+        .blobs
         .put_file(&part, hash, size)
         .await
         .map_err(stored_badly)?;
@@ -388,7 +360,7 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
     check_locked_session(&ctx, &guard, &session)?;
     let now = guard.now().get();
     app.blobs
-        .register(&mut tx, BlobMeta { hash, size }, now)
+        .register(&mut tx, &BlobMeta { hash, size }, now)
         .await?;
     // The rollbackable blob catalogue stage also takes the hash's native writer
     // lock (including a concurrent first insertion). Every custody writer takes
@@ -409,7 +381,10 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
     sqlx::query("UPDATE upload_sessions SET completed_at=$2,expires_at=$3 WHERE id=$1")
         .bind(id)
         .bind(now)
-        .bind(now + SESSION_LIFE)
+        .bind(
+            now.checked_add_signed(Duration::seconds(session.idle_secs))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
+        )
         .execute(&mut *tx)
         .await
         .map_err(DbError::from)?;
@@ -420,6 +395,7 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
         .clone()
         .unwrap_or_else(|| crate::media::media_type(&session.name, &[]).to_owned());
     Ok(UploadedBlob {
+        relay: None,
         blob: hash,
         size,
         media_type,
@@ -428,14 +404,14 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
 }
 
 /// Retains a whole upload and its uploader's authority in one guarded action.
-pub async fn register_whole(ctx: &Ctx, meta: BlobMeta) -> ApiResult<()> {
+pub async fn register_whole(ctx: &Ctx, meta: &BlobMeta) -> ApiResult<()> {
     register_named(ctx, meta, None, None).await
 }
 
 /// A complete direct upload retains only its actual supplied safe metadata.
 pub async fn register_named(
     ctx: &Ctx,
-    meta: BlobMeta,
+    meta: &BlobMeta,
     name: Option<&str>,
     media_type: Option<&str>,
 ) -> ApiResult<()> {
@@ -473,3 +449,63 @@ pub async fn register_named(
 
 #[path = "uploads/session_operation.rs"]
 pub mod session_operation;
+
+#[path = "uploads/creation.rs"]
+mod creation;
+pub use creation::Begin;
+
+#[path = "uploads/native.rs"]
+mod native;
+#[path = "uploads/native_command.rs"]
+mod native_command;
+
+/// Takes a browser body after the session's current scope was prepared, with one reader at a time.
+pub async fn put_body(
+    ctx: &Ctx,
+    id: Id,
+    offset: i64,
+    body: axum::body::Body,
+) -> ApiResult<UploadSessionPutReply> {
+    let _session = ctx.app.blobs.relays().session(id).await;
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let state = references::targets::state(&mut tx, id, false)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let target = references::targets::of(&mut tx, id).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    if target.is_some_and(|target| target.destination.relayed) {
+        return native::put(ctx, id, offset, body, state.session.size).await;
+    }
+    let bytes = axum::body::to_bytes(
+        body,
+        usize::try_from(chunk_bytes()).unwrap_or(usize::MAX) + 1,
+    )
+    .await
+    .map_err(|_| too_large(chunk_bytes()))?;
+    put_piece(ctx, id, offset, &bytes).await
+}
+
+/// Reads the actual carrier once; pending native verification does not hold a browser request open.
+pub async fn complete_session(
+    ctx: &Ctx,
+    id: Id,
+) -> ApiResult<orch_api_contract::threads::UploadSessionCompletion> {
+    let _session = ctx.app.blobs.relays().session(id).await;
+    let native = {
+        let mut conn = ctx.app.db.acquire().await?;
+        references::targets::of(&mut conn, id)
+            .await?
+            .is_some_and(|target| target.destination.relayed)
+    };
+    if native {
+        self::native::complete(ctx, id).await
+    } else {
+        complete(ctx, id)
+            .await
+            .map(|file| orch_api_contract::threads::UploadSessionCompletion::Ready { file })
+    }
+}
+
+#[path = "uploads/editor.rs"]
+mod editor;
+pub use editor::save as save_editor;

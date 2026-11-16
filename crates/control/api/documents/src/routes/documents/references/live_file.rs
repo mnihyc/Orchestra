@@ -89,11 +89,25 @@ impl Opening {
         machine: Id,
         body: &B,
     ) -> ApiResult<Result<B::Result, crate::routes::workspace::problems::Failure>> {
-        let mut command = Outgoing::new(orch_types::new_id(), machine, SerialKey::None, body)
-            .map_err(ApiError::internal)?;
-        command.deadline = Some(Time::new(
-            ctx.app.clock.now() + chrono::Duration::seconds(i64::from(B::KIND.deadline_secs())),
-        ));
+        self.run_as(ctx, orch_types::new_id(), machine, body, None)
+            .await
+    }
+    /// A memory relay owns its command identity so a dropped reader can cancel that exact source.
+    pub async fn run_as<B: CommandBody>(
+        &mut self,
+        ctx: &Ctx,
+        id: Id,
+        machine: Id,
+        body: &B,
+        deadline: Option<Time>,
+    ) -> ApiResult<Result<B::Result, crate::routes::workspace::problems::Failure>> {
+        let mut command =
+            Outgoing::new(id, machine, SerialKey::None, body).map_err(ApiError::internal)?;
+        command.deadline = Some(deadline.unwrap_or_else(|| {
+            Time::new(
+                ctx.app.clock.now() + chrono::Duration::seconds(i64::from(B::KIND.deadline_secs())),
+            )
+        }));
         let mut tx = ctx.app.db.begin().await?;
         let frame = self.current(ctx, &mut tx).await?;
         self.raw = frame
@@ -110,6 +124,7 @@ impl Opening {
         let queued = dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
                     id: Some(command.id),
                     machine: command.machine,
                     kind: command.kind.as_str().into(),

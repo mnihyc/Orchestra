@@ -438,7 +438,10 @@ impl Context {
                 "the vendor client is unavailable",
             )
         })?;
-        let source = (entry.make)(Arc::new(client), Arc::clone(&self.services.clock));
+        let source = (entry.make)(
+            Arc::new(crate::key_facts::Client(client)),
+            Arc::clone(&self.services.clock),
+        );
         Ok(Some(Facts {
             source,
             native: false,

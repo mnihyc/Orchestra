@@ -25,7 +25,7 @@ vi.mock('@/api/resource-tools', async (load) => ({
 }));
 vi.mock('@/api/storage', () => ({ planCleanup: calls.plan, startCleanup: calls.start }));
 vi.mock('@/api/exports', async (load) => ({ ...await load<object>(), readJob: calls.read }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn(), useRouter: () => ({ state: { location: { pathname: '/resources/mounts' } }, history: { push: vi.fn() } }), Link: ({ children }: { children: ReactNode }) => <a href="#machine">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn(), useRouter: () => ({ state: { location: { pathname: '/resources/mounts' } }, history: { push: vi.fn() } }), Link: ({ children }: { children: ReactNode }) => <a href="#machine">{children}</a> }));
 
 const LOCATION: MountLocation = {
   machine: { id: '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6d', name: 'build-1', online: true, platform_os: 'linux', placement: 'managed' },

@@ -190,6 +190,7 @@ fn isolation_of(
     let metered = path.map(|path| metering(path, usage_tokens));
     let enforced = path.map(model_enforcement);
     Isolation {
+        translation: None,
         kind: parts.arrangement,
         harness_runs_in,
         executor: parts.executor.clone(),
@@ -281,6 +282,7 @@ async fn input_access(
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: principal.user(),
                     node: thread,
                     provider,
@@ -341,7 +343,7 @@ async fn input_access(
 /// rows of its four doors, which are the environment's and on no thread's page. Nothing for a
 /// thread that has no environment, or whose environment is gone. Whether the caller manages it,
 /// which is what deciding where the thread runs takes, is among them.
-async fn held_on_environment(
+pub(super) async fn held_on_environment(
     conn: &mut Conn,
     principal: &Principal,
     environment: Option<Id>,
@@ -633,6 +635,9 @@ pub(crate) async fn thread_with_name_sources(
         sides,
         side_reading: facts.side_reading,
         starting_step: facts.starting_step,
+        starting_since: facts.starting_since,
+        starting_work: facts.starting_work,
+        stopping_since: facts.stopping_since,
         blocked: facts.blocked,
         queue: facts.queue,
         binding,
