@@ -40,7 +40,7 @@ use orch_model_contract::endpoint::{EndpointOptions, check_base_url};
 use orch_model_contract::protocol::SecretHeaders;
 use orch_pki::certificates::LeafKey;
 use orch_plugin_contract::Secret;
-use orch_types::{Clock, Id, Json, Time};
+use orch_types::{Clock, Id, Json};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -70,15 +70,17 @@ const TAKES: &[CommandKind] = &[
     CommandKind::ProviderDiscoverModels,
     CommandKind::ProviderComplete,
     CommandKind::ProviderGenerate,
+    CommandKind::ProviderRelay,
     CommandKind::ProviderService,
     CommandKind::ProviderEmbed,
 ];
 
-/// Keeps the longest canonical prefix of factual groups that fits the existing command frame.
-/// The journal retains every group; aggregate tokens remain exact, and the host can recognize any
-/// omitted usage as uncovered. Sorting is O(groups log groups), then each group is serialized once:
-/// an empty-array CmdRes frame supplies the exact fixed overhead, and commas cost one byte each.
-/// A role handler cannot read a lower negotiated session limit, so this uses the shipped frame budget.
+/// Keeps the longest canonical prefix of factual groups that fits one message of the link, whose size the
+/// session states; groups are carried in parts when they do not fit a frame, so this cuts only what could
+/// not be sent at all. The journal retains every group; aggregate tokens remain exact, and the host can
+/// recognize any omitted usage as uncovered. Sorting is O(groups log groups), then each group is
+/// serialized once: an empty-array CmdRes frame supplies the exact fixed overhead, and commas cost one
+/// byte each.
 fn fitting_close_groups(
     command: Id,
     mut answer: LeaseCloseResult,
@@ -109,6 +111,7 @@ fn fitting_close_groups(
 
 mod owner_copy;
 mod owner_handover;
+mod public_relay;
 
 /// One endpoint of an API provider's upstream, as it was checked when the provider was started.
 #[derive(Debug, Clone)]
@@ -150,6 +153,8 @@ impl EndpointEntry {
 
 /// An API provider started on this machine.
 pub struct ProviderEntry {
+    upstream_policy: orch_provider_contract::models::UpstreamPolicy,
+    translation_output_tokens: i64,
     id: Id,
     endpoints: Vec<EndpointEntry>,
     credential: Option<Credential>,
@@ -168,6 +173,16 @@ impl std::fmt::Debug for ProviderEntry {
 }
 
 impl ProviderEntry {
+    /// The actual model exchange policy frozen by this provider start.
+    pub const fn upstream_policy(&self) -> orch_provider_contract::models::UpstreamPolicy {
+        self.upstream_policy
+    }
+
+    /// The policy frozen by this provider start.
+    pub const fn translation_output_tokens(&self) -> i64 {
+        self.translation_output_tokens
+    }
+
     /// The provider.
     #[must_use]
     pub const fn id(&self) -> Id {
@@ -280,6 +295,8 @@ impl Providers {
 /// and the key and the secret headers opened.
 #[derive(Debug, Serialize, Deserialize)]
 struct Stored {
+    upstream_policy: orch_provider_contract::models::UpstreamPolicy,
+    translation_output_tokens: i64,
     upstreams: Vec<StoredUpstream>,
     credential: Option<String>,
     secrets: BTreeMap<String, String>,
@@ -373,6 +390,8 @@ impl Stored {
             ))
         });
         Ok(ProviderEntry {
+            upstream_policy: self.upstream_policy,
+            translation_output_tokens: self.translation_output_tokens,
             id,
             endpoints,
             credential: self.credential.map(Credential::new),
@@ -542,11 +561,11 @@ impl ProviderRole {
         }
     }
 
-    async fn start(
+    fn prepared_provider(
         &self,
         call: &Call,
-        body: orch_link_contract::commands::ProviderStart,
-    ) -> Result<(), CommandError> {
+        body: &orch_link_contract::commands::ProviderStart,
+    ) -> Result<Stored, CommandError> {
         let credential = body
             .credential
             .as_ref()
@@ -562,7 +581,23 @@ impl ProviderRole {
             &body.upstreams,
             &mut secrets,
         )?;
-        let stored = Stored {
+        if body.upstream_policy.head_secs == 0
+            || body.upstream_policy.idle_secs == 0
+            || body.upstream_policy.whole_bytes == 0
+        {
+            return Err(unsupported(
+                "the captured upstream deadlines and whole-reply size must be positive",
+            ));
+        }
+        if body.translation_output_tokens <= 0 {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "The captured translated-output allowance must be positive.",
+            ));
+        }
+        Ok(Stored {
+            upstream_policy: body.upstream_policy,
+            translation_output_tokens: body.translation_output_tokens,
             presenter: crate::sources::presenter::Selection::open(
                 &self.services,
                 call.context.id,
@@ -582,7 +617,15 @@ impl ProviderRole {
                 .collect::<Result<_, CommandError>>()?,
             credential,
             secrets,
-        };
+        })
+    }
+
+    async fn start(
+        &self,
+        call: &Call,
+        body: orch_link_contract::commands::ProviderStart,
+    ) -> Result<(), CommandError> {
+        let stored = self.prepared_provider(call, &body)?;
         let record = serde_json::to_string(&stored).map_err(|error| internal(error.to_string()))?;
         let entry =
             stored.into_entry(body.provider_id, self.forwarder.protocols(), &self.services)?;
@@ -734,7 +777,7 @@ impl ProviderRole {
                 .into_iter()
                 .find(|form| form.form == body.form)
                 .ok_or_else(|| unsupported("the form is not issued"))?;
-            check_issue(&lease, &declared, &body.recipient, now)?;
+            check_issue(&lease, &declared, &body.recipient)?;
             protocol
                 .protocol()
                 .issue_credential(&body.form, &credential, endpoint.base_url())
@@ -746,7 +789,7 @@ impl ProviderRole {
                     other => internal(other.to_string()).retryable(),
                 })?
         } else {
-            self.issue_from_login(&lease, &body, now).await?
+            self.issue_from_login(&lease, &body).await?
         };
         let sealed = seal_issued(
             &self.services.keys,
@@ -765,7 +808,6 @@ impl ProviderRole {
         &self,
         lease: &Lease,
         body: &orch_link_contract::commands::ProviderCredentialIssue,
-        now: Time,
     ) -> Result<IssuedCredential, CommandError> {
         let known = self
             .store()
@@ -803,7 +845,7 @@ impl ProviderRole {
                 .ok_or_else(|| {
                     unsupported(format!("the harness issues no form {:?}", body.form))
                 })?;
-            check_issue(lease, &declared, &body.recipient, now)?;
+            check_issue(lease, &declared, &body.recipient)?;
             // Write the destination before a login can move away. A failed store must never
             // leave a credential in transit with no durable route home.
             let name = provider_custodian_name(body.provider_id);
@@ -923,11 +965,15 @@ pub(crate) fn refusal_of(status: u16) -> CommandError {
 }
 
 pub(crate) fn failure_of(error: &UpstreamError) -> CommandError {
-    match error {
-        UpstreamError::TimedOut(_) => {
+    let failure = match error {
+        UpstreamError::TimedOut { .. } => {
             CommandError::new(ErrorCode::Timeout, error.to_string()).retryable()
         }
         _ => internal(error.to_string()).retryable(),
+    };
+    match error.evidence() {
+        Some(upstream) => failure.with_details(serde_json::json!({"upstream":upstream})),
+        None => failure,
     }
 }
 
@@ -935,6 +981,17 @@ pub(crate) fn failure_of(error: &UpstreamError) -> CommandError {
 impl RoleHandler for ProviderRole {
     fn role(&self) -> Role {
         Role::Provider
+    }
+
+    fn contribute(&self, facts: &mut crate::facts::FactsDraft) {
+        if facts.provider_home_storage.is_none() {
+            facts.provider_home_storage =
+                Some(orch_driver_contract::descriptor::EnvironmentDataStorage {
+                    made_by_orch: Some(orch_driver_contract::descriptor::MadeDataKind::Directory),
+                    existing_directory: false,
+                    reason: None,
+                });
+        }
     }
 
     fn takes(&self) -> &'static [CommandKind] {
@@ -953,6 +1010,7 @@ impl RoleHandler for ProviderRole {
             Command::ProviderDiscoverModels(body) => self.providers.contains(body.provider_id),
             Command::ProviderComplete(body) => self.providers.contains(body.provider_id),
             Command::ProviderGenerate(body) => self.providers.contains(body.provider_id),
+            Command::ProviderRelay(_) => true,
             Command::ProviderService(body) => self.providers.contains(body.provider_id),
             Command::ProviderEmbed(body) => self.providers.contains(body.provider_id),
             _ => true,
@@ -1011,7 +1069,7 @@ impl RoleHandler for ProviderRole {
                             usage: totals.reported(),
                             usage_groups: totals.usage_groups,
                         },
-                        orch_link_contract::version::MAX_FRAME_BYTES as usize,
+                        self.services.link.message_bytes(),
                     )
                     .map_err(|error| internal(error.to_string()))?,
                 )
@@ -1068,7 +1126,7 @@ impl RoleHandler for ProviderRole {
                 })?;
                 CommandResult::ProviderDiscoverModels(
                     self.source_context(call.context.id, provider)
-                        .discover(body.models.as_ref())
+                        .discover(body.models.as_ref(), body.max_report_bytes)
                         .await,
                 )
             }
@@ -1077,6 +1135,9 @@ impl RoleHandler for ProviderRole {
                     CommandError::new(ErrorCode::NotFound, "that API provider is not started here")
                 })?;
                 CommandResult::ProviderComplete(self.forwarder.complete(&provider, &body).await?)
+            }
+            Command::ProviderRelay(body) => {
+                CommandResult::ProviderRelay(self.relay_call(&call, body).await?)
             }
             Command::ProviderGenerate(body) => {
                 let provider = self.providers.get(body.provider_id).ok_or_else(|| {
@@ -1324,7 +1385,7 @@ mod close_group_tests {
     }
 
     #[test]
-    fn close_groups_fit_the_shipped_frame_limit_without_an_arbitrary_group_cap() {
+    fn close_groups_fit_the_message_limit_without_an_arbitrary_group_cap() {
         let command = new_id();
         let full = answer(
             (0..400)
@@ -1337,7 +1398,7 @@ mod close_group_tests {
                 })
                 .collect(),
         );
-        let max = orch_link_contract::version::MAX_FRAME_BYTES as usize;
+        let max = 256 * 1024;
         assert!(frame(command, &full).len() > max);
         let fitted = fitting_close_groups(command, full.clone(), max).unwrap();
         let count = fitted.usage_groups.as_ref().unwrap().len();
@@ -1351,7 +1412,7 @@ mod close_group_tests {
     #[test]
     fn oversized_first_group_leaves_an_aware_empty_reply_with_exact_aggregate_usage() {
         let command = new_id();
-        let max = orch_link_contract::version::MAX_FRAME_BYTES as usize;
+        let max = 256 * 1024;
         let full = answer(vec![group("a".to_owned(), "x".repeat(max))]);
         let fitted = fitting_close_groups(command, full.clone(), max).unwrap();
         assert_eq!(fitted.usage_groups, Some(Vec::new()));

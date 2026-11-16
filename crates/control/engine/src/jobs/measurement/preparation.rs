@@ -758,6 +758,7 @@ pub(crate) fn build_command(
         )
     };
     Ok(Outgoing {
+        content_transit: false,
         authority: None,
         id,
         machine,
@@ -845,6 +846,7 @@ impl CommandEvidence {
         } else {
             let serial = command.key.wire();
             let proposed = NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -908,6 +910,7 @@ impl CommandEvidence {
         access: &dyn ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let actual = Outgoing {
+            content_transit: false,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,
@@ -942,6 +945,7 @@ impl CommandEvidence {
         access: &dyn ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let actual = Outgoing {
+            content_transit: false,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,

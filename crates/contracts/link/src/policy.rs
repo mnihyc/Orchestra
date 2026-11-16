@@ -201,6 +201,36 @@ impl std::fmt::Display for PolicyKey {
     }
 }
 
+/// A listed origin permits its path and descendants, never a neighbouring host or path segment.
+#[must_use]
+pub fn upstream_matches(allowed: &str, address: &str) -> bool {
+    if allowed == ALL_KEYS {
+        return true;
+    }
+    let (Ok(allowed), Ok(address)) = (url::Url::parse(allowed), url::Url::parse(address)) else {
+        return false;
+    };
+    if !matches!(allowed.scheme(), "http" | "https")
+        || allowed.host_str().is_none()
+        || allowed.origin() != address.origin()
+        || !allowed.username().is_empty()
+        || allowed.password().is_some()
+        || !address.username().is_empty()
+        || address.password().is_some()
+        || allowed.query().is_some()
+        || allowed.fragment().is_some()
+    {
+        return false;
+    }
+    let prefix = allowed.path().trim_end_matches('/');
+    let path = address.path();
+    prefix.is_empty()
+        || path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
 #[cfg(test)]
 mod role_policy_tests {
     use super::*;
@@ -1082,13 +1112,12 @@ impl LocalPolicy {
         Ok(())
     }
 
-    /// Whether the machine may forward model calls to `base_url`: the
-    /// address has to be listed exactly.
+    /// Whether the machine may forward model calls within a listed origin and path boundary.
     pub fn check_upstream(&self, base_url: &str) -> Result<(), ErrorCode> {
         if !self
             .provider_upstreams
             .iter()
-            .any(|allowed| allowed == ALL_KEYS || allowed == base_url)
+            .any(|allowed| upstream_matches(allowed, base_url))
         {
             return Err(ErrorCode::PolicyUpstreamNotAllowed);
         }
@@ -1601,6 +1630,56 @@ mod tests {
         assert_eq!(policy.check_upstream("https://api.example.com/v1"), Ok(()));
         assert_eq!(
             policy.check_upstream("https://api.example.com/v2"),
+            Err(ErrorCode::PolicyUpstreamNotAllowed)
+        );
+    }
+
+    #[test]
+    fn an_allowed_origin_includes_its_api_paths_without_allowing_a_neighbouring_origin_or_path() {
+        let mut policy = LocalPolicy {
+            provider_upstreams: vec!["https://openrouter.ai".into()],
+            ..LocalPolicy::default()
+        };
+        for url in [
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai:443/api/v1/models",
+        ] {
+            assert_eq!(policy.check_upstream(url), Ok(()), "{url}");
+        }
+        for url in [
+            "https://openrouter.ai.example/api/v1",
+            "https://openrouter.ai:444/api/v1",
+            "http://openrouter.ai/api/v1",
+        ] {
+            assert_eq!(
+                policy.check_upstream(url),
+                Err(ErrorCode::PolicyUpstreamNotAllowed),
+                "{url}"
+            );
+        }
+        policy.provider_upstreams = vec!["https://openrouter.ai/api/v1/".into()];
+        for url in [
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/models?cursor=next",
+        ] {
+            assert_eq!(policy.check_upstream(url), Ok(()), "{url}");
+        }
+        for url in [
+            "https://openrouter.ai/api/v10",
+            "https://openrouter.ai/api/v1-other",
+            "https://openrouter.ai/api/v1/../private",
+            "https://openrouter.ai/api/v1%2fprivate",
+            "https://other.example/api/v1",
+        ] {
+            assert_eq!(
+                policy.check_upstream(url),
+                Err(ErrorCode::PolicyUpstreamNotAllowed),
+                "{url}"
+            );
+        }
+        policy.provider_upstreams = vec!["https://owner:password@openrouter.ai/api/v1".into()];
+        assert_eq!(
+            policy.check_upstream("https://openrouter.ai/api/v1"),
             Err(ErrorCode::PolicyUpstreamNotAllowed)
         );
     }

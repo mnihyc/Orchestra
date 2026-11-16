@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- binding::
+test -p orch-engine --lib -- harnesses::
+test -p orch-engine --lib -- provider_setup::
+test -p orch-engine --lib -- provider_runtime::
+test -p orch-connector-core --test source_reports --test source_dispatch --test provider_role --test harness_program
+test -p orch-api-core --test providers

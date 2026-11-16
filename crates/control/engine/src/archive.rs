@@ -110,8 +110,6 @@ pub struct ThreadRemoval {
 
 /// Every state a lifecycle action may settle while holding the thread row.
 const THREAD_STATES: [&str; 5] = ["idle", "starting", "running", "waiting_approval", "blocked"];
-/// The serial-key member used by the shared command journal.
-const COMMAND_KEY: &str = "$key";
 /// Seconds in the restoration window's complete UTC days.
 const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -664,7 +662,7 @@ impl Engine {
                         Outgoing::new(
                             ids::turn_interrupt(turn.id),
                             machine,
-                            SerialKey::Thread(*id),
+                            SerialKey::None,
                             &TurnInterrupt {
                                 thread_id: *id,
                                 turn_id: turn.id,
@@ -821,7 +819,7 @@ impl Engine {
                     .map_err(orch_db::DbError::from)?;
                 }
             }
-            let mut body = row.body.clone();
+            let body = row.body.clone();
             let key = if row.serial_key() == Some("machine") {
                 SerialKey::Machine
             } else {
@@ -834,9 +832,6 @@ impl Engine {
                         _ => SerialKey::Thread(id),
                     })
             };
-            if let Some(object) = body.as_object_mut() {
-                object.remove(COMMAND_KEY);
-            }
             let kind = row.kind.parse().map_err(EngineError::unreadable)?;
             if matches!(
                 row.kind.as_str(),
@@ -863,6 +858,7 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    content_transit: row.content_transit,
                     authority: None,
                     id: row.id,
                     machine: row.machine_id,
@@ -915,6 +911,7 @@ impl Engine {
                 link::insert_command(
                     &mut tx,
                     &link::NewCommand {
+                        content_transit: previous.content_transit,
                         id,
                         machine_id: previous.machine_id,
                         kind: &previous.kind,
@@ -943,6 +940,7 @@ pub(crate) async fn persist(
     link::insert_command(
         conn,
         &link::NewCommand {
+            content_transit: command.content_transit,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),

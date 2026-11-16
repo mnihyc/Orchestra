@@ -206,6 +206,23 @@ impl Dir {
         Ok(file)
     }
 
+    /// Opens an existing regular temporary file for resuming, without following a link.
+    pub fn open_update(&self, name: &OsStr) -> io::Result<File> {
+        plain(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name))?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
     /// Makes the file called `name`, which must not exist, and opens it for reading and writing.
     /// Windows takes no permission bits at creation, so `mode` is not used.
     pub fn create_new(&self, name: &OsStr, _mode: u32) -> io::Result<File> {
@@ -292,6 +309,13 @@ impl Dir {
     }
 
     /// Windows cannot flush a directory by itself: what is written to its files is flushed with them.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        Ok(Box::new(
+            std::fs::read_dir(&self.path)?.map(|entry| entry.map(|entry| entry.file_name())),
+        ))
+    }
+
     /// Visits names without collecting a large directory; false stops the read immediately.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         for entry in std::fs::read_dir(&self.path)? {
