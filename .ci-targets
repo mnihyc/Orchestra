@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-api-core --test thread_opening_scopes --test thread_child_windows
