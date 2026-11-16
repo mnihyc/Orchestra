@@ -394,7 +394,7 @@ async fn registration_rechecks_the_original_deadline_after_actual_machine_and_ho
             &world,
             pid,
             if on_machine {
-                "%FROM machines%FOR SHARE%"
+                "%FROM machines%FOR KEY SHARE%"
             } else {
                 "%FROM nodes%FOR SHARE%"
             },

@@ -88,7 +88,7 @@ impl Engine {
             return Ok(None);
         }
         let online: Option<bool> =
-            sqlx::query_scalar("SELECT online FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query_scalar("SELECT online FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(episode.machine)
                 .fetch_optional(&mut *unit.conn)
                 .await
