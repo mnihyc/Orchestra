@@ -1,6 +1,6 @@
 /** Nonvisual directory pages: a whole selected window, its source proof and explicit backpressure. */
 import type { Door } from '@/api/workspace';
-import type { DirEntry, DirectoryWatchError, FilesSource } from '@/generated/api-types';
+import type { DirEntry, DirectoryWatchError, FilesSource, FileSourceFacts } from '@/generated/api-types';
 import type { DirectoryTotals } from './directoryBudget';
 
 export type DirectoryCapacityReason = 'directories' | 'rows' | 'bytes' | 'records' | 'metadata' | 'reads' | 'binding' | 'parent';
@@ -11,8 +11,10 @@ export interface DirectoryState {
   status: 'loading' | 'ready' | 'failed';
   entries: readonly DirEntry[];
   source: FilesSource | null;
+  mount?: string | null;
   asOf: string | null;
   observedFrom?: string | null;
+  facts?: FileSourceFacts | null;
   truncated: boolean;
   offline: boolean;
   watch?: 'waiting' | 'connecting' | 'live' | 'offline' | 'refused' | 'failed' | 'stale' | undefined;

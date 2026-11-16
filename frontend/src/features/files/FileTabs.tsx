@@ -16,7 +16,6 @@ import { openContent, type ContentHistory } from '@/features/workbench/contentNa
 import type { ViewProps } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { writeViewChoice } from '@/lib/viewChoices';
-import { useViewportShape } from '@/features/workbench/Narrow';
 import { Button } from '@/ui/Button';
 import { CopyButton } from '@/ui/CopyButton';
 import { EmptyState } from '@/ui/EmptyState';
@@ -52,7 +51,14 @@ export function fileOf(tab: Tab): FileTabOf | null {
 }
 
 export const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
-export const parentOf = (path: string): string => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
+export const parentOf = (path: string): string => {
+  path = path.replaceAll('\\', '/');
+  const slash = path.lastIndexOf('/');
+  if (slash < 0) return '';
+  if (slash === 0) return '/';
+  if (slash === 2 && path[1] === ':') return path.slice(0, 3);
+  return path.slice(0, slash);
+};
 
 // ---------------------------------------------------------------- where a line is asked for
 
@@ -185,7 +191,6 @@ export function FileTab({ tab }: ViewProps) {
 function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId: string | null; access: EnvironmentWorkspaceAccess }) {
   const { t } = useTranslation();
   const shown = useViewShown();
-  const small = useViewportShape() === 'small';
   const queryClient = useQueryClient();
   const { door } = access;
   const { head, error, loading, reload } = useFileHead(door, of.path);
@@ -240,7 +245,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
   if (loading || head === undefined || viewer === null) return <SkeletonRows rows={8} />;
 
   const facts = factsOf(head.stat);
-  const reason: ReadOnlyReason | null = small ? { kind: 'small_screen' } : whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
+  const reason = whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
   const props: ViewerProps = { door, path: of.path, head, line: jump?.line ?? null, endLine: fileLine(of.endLine), lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
   const choices = viewersFor(facts);
   const updatesPaused = capacity !== null || directory?.capacity !== undefined && directory.capacity !== null

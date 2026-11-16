@@ -290,6 +290,27 @@ pub(crate) async fn prepare_inventory(
     principal: &Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<PreparedInventory> {
+    prepare_inventory_with(conn, principal, seen, true).await
+}
+orch_api_base::__api_bind_4c32840a49!();
+
+/// Prepare the list's native authority and references without mounts or defaults from unopened panels.
+pub(crate) async fn prepare_inventory_rows(
+    _ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedInventory> {
+    prepare_inventory_with(conn, principal, seen, false).await
+}
+orch_api_base::__api_bind_environment_row_preparation!();
+
+async fn prepare_inventory_with(
+    conn: &mut Conn,
+    principal: &Principal,
+    seen: &[resources::Seen],
+    details: bool,
+) -> ApiResult<PreparedInventory> {
     let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
     let rows = queries::environments(conn, &ids).await?;
     let standing = seen
@@ -309,9 +330,8 @@ pub(crate) async fn prepare_inventory(
             )
         })
         .collect();
-    prepare_environment_views(conn, rows, standing, principal.now()).await
+    prepare_environment_projection(conn, rows, standing, principal.now(), details).await
 }
-orch_api_base::__api_bind_4c32840a49!();
 
 fn inventory_holdings<'a>(
     rows: &'a [EnvironmentFull],
@@ -339,13 +359,27 @@ async fn prepare_environment_views(
     standing: HashMap<Id, Standing>,
     now: Time,
 ) -> ApiResult<PreparedInventory> {
+    prepare_environment_projection(conn, rows, standing, now, true).await
+}
+
+async fn prepare_environment_projection(
+    conn: &mut Conn,
+    rows: Vec<EnvironmentFull>,
+    standing: HashMap<Id, Standing>,
+    now: Time,
+    details: bool,
+) -> ApiResult<PreparedInventory> {
     let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
     let machine_facts: HashMap<_, _> = orch_db::queries::environment_facts::of_many(conn, &ids)
         .await?
         .into_iter()
         .collect();
     let hosted = hosting::hosts_of(conn, &ids).await?;
-    let defaults = queries::default_for(conn, &ids).await?;
+    let defaults = if details {
+        queries::default_for(conn, &ids).await?
+    } else {
+        Vec::new()
+    };
     let threads = env_rows::threads_in(conn, &ids).await?;
     let runtime_rows = hosting::live_runtimes_of(conn, &ids, &[]).await?;
     let access = prepare_accesses(conn, &inventory_holdings(&rows, &standing)).await?;
@@ -386,7 +420,14 @@ async fn prepare_environment_views(
             .filter_map(|facts| facts.machine_id)
             .collect(),
     );
-    let display_settings = list_settings::load(conn, &rows).await?;
+    let display_settings = if details {
+        list_settings::load(conn, &rows).await?
+    } else {
+        list_settings::DisplaySettings {
+            mounts: Default::default(),
+            idle_minutes: Default::default(),
+        }
+    };
     let mut mounts = HashMap::new();
     for row in &rows {
         if standing.get(&row.id).is_some_and(Standing::holds_something)
@@ -428,6 +469,240 @@ async fn prepare_environment_views(
 }
 
 /// Render the native prepared rows, preserving whole and through-thread cuts.
+pub(crate) async fn show_inventory_rows_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<orch_api_contract::resource_rows::EnvironmentListRow>> {
+    use orch_api_contract::resource_rows::EnvironmentListRow;
+    let rows = &prepared.rows;
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let bounds = prepared.bounds.limited.then_some(&prepared.bounds);
+    let activity = crate::routes::resources::view::environment_activity(conn, &ids).await?;
+    let exposed = crate::routes::ports::exposures(conn, &ids, Time::new(ctx.now)).await?;
+    let addresses =
+        crate::routes::resources::view::addresses_with_names(conn, &ids, bounds).await?;
+    let people = refusals::user_refs(
+        conn,
+        &rows.iter().map(|row| row.owner_id).collect::<Vec<_>>(),
+    )
+    .await?;
+    let machine_ids: Vec<_> = prepared
+        .machine_facts
+        .values()
+        .filter_map(|machine| machine.machine_id)
+        .chain(rows.iter().filter_map(|row| row.machine_id))
+        .collect();
+    let machines = machine_refs(&ctx.app, conn, &machine_ids).await?;
+    let connector_updates =
+        crate::component_updates::views(&ctx.app.link, conn, &machine_ids).await?;
+    let versions: HashMap<_, _> = env_rows::changes::connector_versions(conn, &machine_ids)
+        .await?
+        .into_iter()
+        .collect();
+    let lifetimes: HashMap<_, _> = orch_db::queries::environments::temporary::among(conn, &ids)
+        .await?
+        .into_iter()
+        .map(|row| (row.environment_id, row))
+        .collect();
+    let loss_eligible: BTreeSet<_> = orch_db::queries::loss::eligible_environments(conn, &ids)
+        .await?
+        .into_iter()
+        .collect();
+    let host_ids: Vec<_> = prepared.hosted.iter().map(|(_, host, _)| *host).collect();
+    let host_addresses =
+        crate::routes::resources::view::addresses_with_names(conn, &host_ids, bounds).await?;
+    let jobs = job_rows::open_for(conn, &ids, &job_rows::kind::ONE_AT_A_TIME).await?;
+    let attached: BTreeSet<_> = prepared
+        .machine_facts
+        .iter()
+        .filter(|(_, facts)| facts.attaches())
+        .map(|(id, _)| *id)
+        .collect();
+    let start_allowed = network::start_allowed(conn, &ids, &attached).await?;
+    let nodes: Vec<_> = rows
+        .iter()
+        .map(|row| row.home_node_id)
+        .chain(
+            prepared
+                .threads
+                .iter()
+                .flat_map(|thread| [thread.thread_id, thread.topic_id]),
+        )
+        .collect();
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &nodes).await?,
+        None => node_view::refs(conn, principal, &nodes, Policy::default()).await?,
+    };
+    let known: BTreeSet<_> = refs
+        .iter()
+        .filter(|(_, node)| !node.redacted)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut counts: HashMap<Id, (i64, BTreeSet<Id>, i64)> = HashMap::new();
+    for thread in &prepared.threads {
+        let (visible, topics, hidden) = counts.entry(thread.environment_id).or_default();
+        if bound_thread_visible(thread, &known) {
+            *visible += 1;
+            topics.insert(thread.topic_id);
+        } else {
+            *hidden += 1;
+        }
+    }
+    let access = accesses_prepared(
+        conn,
+        principal,
+        &inventory_holdings(rows, &prepared.standing),
+        &prepared.access,
+        bounds,
+    )
+    .await?;
+    let mut updates = ctx
+        .app
+        .engine
+        .pending_runtime_updates(
+            conn,
+            &prepared
+                .runtime_rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        let whole = prepared
+            .standing
+            .get(&row.id)
+            .is_some_and(Standing::holds_something);
+        let manages = prepared
+            .standing
+            .get(&row.id)
+            .is_some_and(Standing::manages);
+        let (threads, topics, hidden) = counts.remove(&row.id).unwrap_or_default();
+        result.push(EnvironmentListRow {
+            list_row: true,
+            org_id: row.org_id,
+            base: EnvironmentRef {
+                id: row.id,
+                name: row.name.clone(),
+                owner: people.get(&row.owner_id).cloned().ok_or_else(|| {
+                    ApiError::internal("the owner of an environment is not there")
+                })?,
+                address: addresses.get(&row.id).cloned().unwrap_or_default(),
+                placement: parse(&row.placement)?,
+                status: parse(&row.status)?,
+                activity: activity.get(&row.id).cloned(),
+                ports_exposed: exposed.contains(&row.id),
+            },
+            machine: whole
+                .then(|| {
+                    prepared
+                        .machine_facts
+                        .get(&row.id)
+                        .and_then(|facts| facts.machine_id)
+                        .and_then(|id| machines.get(&id).cloned())
+                })
+                .flatten(),
+            home: refs.get(&row.home_node_id).cloned().unwrap_or(NodeRef {
+                thread_display: None,
+                id: row.home_node_id,
+                kind: NodeKind::Org,
+                name: None,
+                redacted: true,
+            }),
+            threads_count: threads,
+            topics_count: i64::try_from(topics.len()).unwrap_or(i64::MAX),
+            threads_hidden: hidden,
+            workspace_root: if whole {
+                row.workspace_root.clone()
+            } else {
+                String::new()
+            },
+            template: row.template_id.filter(|_| whole).and_then(|template| {
+                prepared
+                    .template_names
+                    .iter()
+                    .find(|(id, _, _)| *id == template)
+                    .map(|(id, name, driver)| EnvironmentTemplate {
+                        id: *id,
+                        name: name.clone(),
+                        driver: driver.clone(),
+                    })
+            }),
+            host: whole
+                .then(|| {
+                    prepared
+                        .hosted
+                        .iter()
+                        .find(|(environment, _, _)| *environment == row.id)
+                        .map(|(_, id, name)| HostRef {
+                            id: *id,
+                            name: name.clone(),
+                            address: host_addresses.get(id).cloned().unwrap_or_default(),
+                        })
+                })
+                .flatten(),
+            updates: if whole {
+                prepared
+                    .runtime_rows
+                    .iter()
+                    .find(|runtime| runtime.environment_id == Some(row.id))
+                    .and_then(|runtime| updates.remove(&runtime.id))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            update_required: whole
+                && orch_engine::updates::update_required(
+                    row.machine_id
+                        .and_then(|id| versions.get(&id))
+                        .map(String::as_str),
+                    ctx.app.link.connector_minimum(),
+                ),
+            status_detail: row.status_detail.clone().filter(|_| whole),
+            job: jobs
+                .iter()
+                .find(|job| job.environment_id == Some(row.id))
+                .map(job_ref),
+            temporary: lifetimes.get(&row.id).filter(|_| whole).map(|lifetime| {
+                api::EnvironmentTemporary {
+                    expires_at: if lifetime.active {
+                        None
+                    } else {
+                        Some(Time::new(lifetime.expires_at))
+                    },
+                    idle_hours: lifetime.idle_hours,
+                    on_archive: orch_db::queries::environments::temporary::mode(&row.config)
+                        == Some(true),
+                }
+            }),
+            connector_update: row
+                .machine_id
+                .filter(|_| whole)
+                .and_then(|id| connector_updates.get(&id).cloned()),
+            removal: if whole && (row.remove_at.is_some() || row.status == "removed") {
+                retained::present(ctx, conn, principal, row.id).await?
+            } else {
+                None
+            },
+            remove_at: row.remove_at.filter(|_| whole).map(Time::new),
+            last_activity_at: row.last_activity_at.filter(|_| whole).map(Time::new),
+            can_declare_lost: whole && manages && loss_eligible.contains(&row.id),
+            access: access.get(&row.id).cloned().ok_or_else(|| {
+                ApiError::internal("what the caller holds on an environment was not read")
+            })?,
+            revision: row.revision,
+            start_allowed: start_allowed.get(&row.id).copied().unwrap_or(true),
+        });
+    }
+    Ok(result)
+}
+orch_api_base::__api_bind_environment_list_rows!();
+
+/// Render the native detail, including its independently opened panels.
 pub(crate) async fn show_inventory_prepared(
     ctx: &Ctx,
     conn: &mut Conn,
@@ -616,6 +891,7 @@ pub(crate) async fn show_inventory_prepared(
             Some(row.vnc),
         );
         let view = Environment {
+            file_reach: None,
             provenance: orch_api_contract::resource_groups::ResourceProvenance {
                 origin_machine: machine_facts
                     .get(&row.id)
@@ -761,7 +1037,7 @@ pub(crate) async fn show_inventory_prepared(
                 row.machine_id
                     .and_then(|machine| connector_versions.get(&machine))
                     .map(String::as_str),
-                orch_engine::updates::CONNECTOR_MINIMUM,
+                ctx.app.link.connector_minimum(),
             ),
             remote_write: switches.remote_write,
             terminal: switches.terminal,
@@ -904,6 +1180,10 @@ pub(crate) async fn finish_shown(
     mut view: Environment,
 ) -> ApiResult<Environment> {
     if reading::decide(conn, principal, id).await? == reading::Reading::Whole {
+        view.file_reach = Some(
+            orch_authz::file_reach::effective(conn, principal, id, orch_authz::Policy::default())
+                .await?,
+        );
         view.sandbox_readiness = Some(
             crate::sandbox_readiness::environment(
                 conn,

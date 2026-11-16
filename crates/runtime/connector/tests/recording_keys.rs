@@ -161,9 +161,11 @@ fn fixture() -> (EnvRig, Arc<Endpoint>) {
 #[cfg(target_os = "linux")]
 fn request(environment: Id) -> FsRecord {
     FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: environment,
         snapshot_id: new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 1,
         max_bytes: 1024 * 1024,
@@ -187,7 +189,7 @@ fn command_state(rig: &EnvRig, id: Id) -> String {
         None => "absent".to_owned(),
         Some(Progress::Queued) => "queued".to_owned(),
         Some(Progress::Sent) => "sent".to_owned(),
-        Some(Progress::Accepted) => "accepted".to_owned(),
+        Some(Progress::Accepted | Progress::Running | Progress::Released) => "accepted".to_owned(),
         Some(Progress::Succeeded(_)) => "succeeded".to_owned(),
         Some(Progress::Failed(error)) => format!("failed({})", error.code),
         Some(Progress::Expired) => "expired".to_owned(),
@@ -357,6 +359,8 @@ async fn slow_manifest_publication_allows_ordered_mutation_and_another_complete_
     succeed(
         &rig,
         &FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: String::new(),
@@ -399,6 +403,7 @@ async fn slow_manifest_publication_allows_ordered_mutation_and_another_complete_
         write,
         rig.environment,
         &FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             path: "code.bin".to_owned(),
@@ -475,6 +480,7 @@ async fn slow_manifest_publication_allows_ordered_mutation_and_another_complete_
     let (code, _) = failure(
         &rig,
         &FsDataImport {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             job_id: new_id(),
@@ -500,6 +506,7 @@ async fn slow_manifest_publication_allows_ordered_mutation_and_another_complete_
     let saved = succeed(
         &rig,
         &FsRecordRead {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             snapshot_id: request.snapshot_id,
             path: Some("code.bin".to_owned()),
