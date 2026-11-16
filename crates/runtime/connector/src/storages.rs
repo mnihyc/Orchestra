@@ -7,6 +7,7 @@ use orch_link_contract::events::NodeStorage;
 use orch_link_contract::policy::LocalPolicy;
 use orch_types::Id;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -16,10 +17,27 @@ struct Storage {
     default: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StorageUse {
+    Environment,
+    Mount { name: String },
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Kept {
     storage: String,
     directory: DirectoryBinding,
+    labels: BTreeMap<String, String>,
+    usage: StorageUse,
+}
+
+struct Allocation<'a> {
+    environment: Id,
+    role: &'a str,
+    generation: i64,
+    labels: BTreeMap<String, String>,
+    usage: StorageUse,
 }
 
 /// A directory made by the owned-data factory, with its existing proof retained for purge.
@@ -189,6 +207,194 @@ pub fn directory_generation(
     requested: Option<&str>,
     generation: i64,
 ) -> Result<PathBuf, CommandError> {
+    let labels = if role == "mount" {
+        BTreeMap::from([("orch.mount_id".into(), environment.to_string())])
+    } else {
+        BTreeMap::new()
+    };
+    allocate(
+        data_dir,
+        config,
+        policy,
+        requested,
+        Allocation {
+            environment,
+            role,
+            generation,
+            labels,
+            usage: if role == "mount" {
+                StorageUse::Mount {
+                    name: format!("orch-mount-{environment}"),
+                }
+            } else {
+                StorageUse::Environment
+            },
+        },
+    )
+}
+
+/// The full native name remains in its record; a derived UUID is only its filesystem key.
+fn mount_key(mount: Id, name: &str) -> Result<Id, CommandError> {
+    if !orch_link_contract::commands::is_mount_volume(mount, name) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native directory name belongs to another mount",
+        ));
+    }
+    if name == format!("orch-mount-{mount}") {
+        return Ok(mount);
+    }
+    let digest = orch_types::Hash::of(format!("directory-mount-volume:{mount}:{name}").as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Ok(Id::from_bytes(bytes))
+}
+
+/// Resolves the exact owned native location, independently of other locations of that mount.
+fn mount_record(
+    data_dir: &Path,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<(Id, Kept)>, CommandError> {
+    let key = mount_key(mount, name)?;
+    let record = data_dir
+        .join("storage-bindings")
+        .join(format!("{key}-mount.json"));
+    let kept: Kept = match std::fs::read(record) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| refused("the owned-data record cannot be read"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(refused("the owned-data record cannot be opened")),
+    };
+    if requested.is_some_and(|name| name != kept.storage) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native directory keeps its recorded storage",
+        ));
+    }
+    if kept.usage != (StorageUse::Mount { name: name.into() })
+        || kept.labels.get("orch.mount_id") != Some(&mount.to_string())
+    {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native data record names another mount location",
+        ));
+    }
+    Ok(Some((key, kept)))
+}
+
+/// The original owned directory identity survives a moved or missing path while native consumers drain.
+pub fn recorded_mount_identity(
+    data_dir: &Path,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<(u64, u64)>, CommandError> {
+    let Some((_, kept)) = mount_record(data_dir, mount, name, requested)? else {
+        return Ok(None);
+    };
+    kept.directory
+        .device
+        .zip(kept.directory.inode)
+        .map(Some)
+        .ok_or_else(|| refused("the owned mount directory has no native identity"))
+}
+
+/// Validates the exact cleanup owner before any data bytes are removed.
+pub fn mount_removal_binding(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<Option<DirectoryBinding>, CommandError> {
+    let Some((key, kept)) = mount_record(data_dir, mount, name, requested)? else {
+        return Ok(None);
+    };
+    if &kept.labels != labels {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the existing directory belongs to another native data owner",
+        ));
+    }
+    if Path::new(&kept.directory.path).exists() {
+        recorded_directory(data_dir, policy, key, "mount")?;
+    }
+    Ok(Some(kept.directory))
+}
+
+/// Resolves the exact current owned native location and its original opened identity.
+pub fn recorded_mount_binding(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<DirectoryBinding>, CommandError> {
+    let Some((key, kept)) = mount_record(data_dir, mount, name, requested)? else {
+        return Ok(None);
+    };
+    if recorded_directory(data_dir, policy, key, "mount")?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(kept.directory))
+}
+
+/// The checked native location used by cleanup and transfer callers.
+pub fn recorded_mount_directory(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<PathBuf>, CommandError> {
+    Ok(
+        recorded_mount_binding(data_dir, policy, mount, name, requested)?
+            .map(|binding| PathBuf::from(binding.path)),
+    )
+}
+
+/// A mount copy can reuse only the exact native ownership it originally created.
+pub fn mount_directory(
+    data_dir: &Path,
+    config: &ConnectorConfig,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<PathBuf, CommandError> {
+    allocate(
+        data_dir,
+        config,
+        policy,
+        requested,
+        Allocation {
+            environment: mount_key(mount, name)?,
+            role: "mount",
+            generation: 0,
+            labels: labels.clone(),
+            usage: StorageUse::Mount { name: name.into() },
+        },
+    )
+}
+
+fn allocate(
+    data_dir: &Path,
+    config: &ConnectorConfig,
+    policy: &LocalPolicy,
+    requested: Option<&str>,
+    allocation: Allocation<'_>,
+) -> Result<PathBuf, CommandError> {
+    let Allocation {
+        environment,
+        role,
+        generation,
+        labels,
+        usage,
+    } = allocation;
     if generation < 0 {
         return Err(refused("an owned-data generation is not negative"));
     }
@@ -207,6 +413,12 @@ pub fn directory_generation(
         Ok(bytes) => {
             let kept: Kept = serde_json::from_slice(&bytes)
                 .map_err(|_| refused("the kept data storage record cannot be read"))?;
+            if kept.labels != labels || kept.usage != usage {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the existing directory belongs to another native data owner",
+                ));
+            }
             if requested.is_some_and(|name| name != kept.storage) {
                 return Err(refused(
                     "existing data keeps its recorded storage; use an explicit move before choosing another",
@@ -239,6 +451,8 @@ pub fn directory_generation(
     let kept = Kept {
         storage: storage.name.clone(),
         directory,
+        labels,
+        usage,
     };
     std::fs::create_dir_all(&records)
         .map_err(|_| refused("the connector cannot create its storage records"))?;
@@ -345,6 +559,40 @@ pub fn remove_directory(
     role: &str,
 ) -> Result<(), CommandError> {
     remove_generation(data_dir, policy, id, role, 0)
+}
+
+/// A failed copy may remove only data with its exact original native labels.
+pub fn remove_mount_directory(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), CommandError> {
+    let key = mount_key(mount, name)?;
+    let record = data_dir
+        .join("storage-bindings")
+        .join(format!("{key}-mount.json"));
+    let kept: Kept = match std::fs::read(record) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| refused("the owned-data record cannot be read"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(refused("the owned-data record cannot be opened")),
+    };
+    if requested.is_some_and(|name| name != kept.storage) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native directory keeps its recorded storage",
+        ));
+    }
+    if &kept.labels != labels || kept.usage != (StorageUse::Mount { name: name.into() }) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the existing directory belongs to another native data owner",
+        ));
+    }
+    remove_directory(data_dir, policy, key, "mount")
 }
 
 /// Removes only a recorded generation; missing records mean no owned data, never a guessed path.

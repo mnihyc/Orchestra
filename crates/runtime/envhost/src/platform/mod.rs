@@ -8,8 +8,8 @@
 //! has the same functions on top of the standard library, and says in its own documentation
 //! which of the guarantees it cannot give.
 //!
-//! The package contains no `unsafe` code: the system calls are made through `rustix`, whose
-//! interface is safe.
+//! POSIX calls use the safe `rustix` interface. Windows relative opens have one private
+//! native boundary; the rest of the host uses only its safe handle-based functions.
 
 pub mod linux;
 pub mod macos;

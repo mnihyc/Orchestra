@@ -670,6 +670,61 @@ async fn discovery_follows_the_second_models_page_and_returns_every_model_once()
 }
 
 #[tokio::test]
+async fn a_models_list_larger_than_a_frame_of_the_link_reaches_the_system_whole() {
+    use orch_provider_contract::limits::TEXT_MAX_CHARS;
+    use orch_testkit::doubles::model::MockModel;
+    // A real account's list ran to some 440 000 bytes, which the link threw away, and the system waited out
+    // the command's thirty seconds and said that the keeping machine could not finish. A routing name is at
+    // most `TEXT_MAX_CHARS` characters long, and the suggestion carries it twice (as the name and as the
+    // name to show), so a list of this many longest names is larger than a frame of the link.
+    const MODELS: usize = 1_000;
+    let name = |number: usize| {
+        let head = format!("model-{number:05}-");
+        format!("{head}{}", "x".repeat(TEXT_MAX_CHARS - 8 - head.len()))
+    };
+    let p = ProviderRig::with(|_, mock| {
+        mock.set_models(
+            (0..MODELS)
+                .map(|number| MockModel::named(&name(number)))
+                .collect(),
+        );
+    })
+    .await;
+    let started = p
+        .start_provider(&[(MESSAGES, p.mock.messages_base_url(), json!({}))])
+        .await;
+    assert!(matches!(started, Progress::Succeeded(_)), "{started:?}");
+    let listed = p
+        .rig
+        .succeed(
+            &p.provider_key(),
+            &ProviderDiscoverModels {
+                provider_id: p.rig.provider,
+                models: None,
+            },
+        )
+        .await;
+    assert!(
+        serde_json::to_vec(&listed).unwrap().len() > 262_144,
+        "the answer is larger than a frame: {}",
+        listed["source"]
+    );
+    assert!(
+        listed["source"]["error"].is_null(),
+        "and nothing was left out of it: {}",
+        listed["source"]
+    );
+    let names: std::collections::BTreeSet<_> = listed["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|suggestion| suggestion["model_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), MODELS, "every model, once");
+    assert!(names.contains(name(MODELS - 1).as_str()));
+}
+
+#[tokio::test]
 async fn discovery_refuses_cycles_foreign_next_links_and_catalogues_beyond_its_page_or_model_bound()
 {
     use axum::extract::State;

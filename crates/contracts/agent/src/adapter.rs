@@ -378,6 +378,8 @@ pub enum AdapterEvent {
     ModelRequest(Box<crate::requests::ModelRequestReport>),
     /// Something a session did: stream `session:<thread id>:<segment id>`.
     Session {
+        /// The physical opening captured by the producer, absent for unscoped history.
+        native_opening_id: Option<Id>,
         /// The thread.
         thread_id: ThreadId,
         /// The segment of the thread.
@@ -401,8 +403,8 @@ pub enum WireError {
     /// The name is not one of an adapter's events.
     #[error("{0:?} is not an event of an adapter")]
     UnknownEvent(String),
-    /// A session event lacks the thread and the segment it belongs to.
-    #[error("a session event names its thread and its segment")]
+    /// A session event lacks its logical address or physical producer.
+    #[error("a session event names its thread, segment and physical opening")]
     NoStream,
     /// The parameters are not the shape of that event.
     #[error("the parameters of {event:?} are not its shape: {source}")]
@@ -415,6 +417,18 @@ pub enum WireError {
 }
 
 impl AdapterEvent {
+    /// The original physical session, without consulting a current thread mapping.
+    #[must_use]
+    pub fn native_opening_id(&self) -> Option<Id> {
+        match self {
+            Self::Session {
+                native_opening_id, ..
+            } => *native_opening_id,
+            Self::ModelRequest(report) => report.native_opening_id,
+            _ => None,
+        }
+    }
+
     /// The name of the event on the plugin transport: the kind for a session event, and otherwise
     /// `provider.login`, `provider.facts`, `harness.descriptor` or `harness.status`.
     #[must_use]
@@ -435,6 +449,7 @@ impl AdapterEvent {
         let params = match self {
             Self::ModelRequest(report) => serde_json::to_value(report)?,
             Self::Session {
+                native_opening_id,
                 thread_id,
                 segment_id,
                 event,
@@ -446,6 +461,10 @@ impl AdapterEvent {
                 };
                 params.insert("thread_id".into(), serde_json::to_value(thread_id)?);
                 params.insert("segment_id".into(), serde_json::to_value(segment_id)?);
+                params.insert(
+                    "native_opening_id".into(),
+                    serde_json::to_value(native_opening_id)?,
+                );
                 Json::Object(params)
             }
             Self::Login(state) => serde_json::to_value(state)?,
@@ -489,10 +508,16 @@ impl AdapterEvent {
                 };
                 let thread_id = take_id("thread_id")?;
                 let segment_id = take_id("segment_id")?;
+                let native_opening_id = serde_json::from_value(
+                    body.remove("native_opening_id")
+                        .ok_or(WireError::NoStream)?,
+                )
+                .map_err(shape)?;
                 let event =
                     serde_json::from_value(serde_json::json!({ "kind": kind, "body": body }))
                         .map_err(shape)?;
                 Ok(Self::Session {
+                    native_opening_id,
                     thread_id,
                     segment_id,
                     event,
@@ -541,6 +566,7 @@ impl EventSink {
     ) -> Result<(), SinkClosed> {
         self.emit(AdapterEvent::ModelRequest(Box::new(
             crate::requests::ModelRequestReport {
+                native_opening_id: None,
                 thread_id,
                 segment_id,
                 turn_id,
@@ -588,6 +614,25 @@ impl EventSink {
         }
     }
 
+    /// Captures one physical producer before its output can wait or its session can be replaced.
+    #[must_use]
+    pub fn for_opening(&self, opening_id: Id) -> Self {
+        self.map_events(move |mut event| {
+            match &mut event {
+                AdapterEvent::Session {
+                    native_opening_id, ..
+                } => {
+                    *native_opening_id = Some(opening_id);
+                }
+                AdapterEvent::ModelRequest(report) => {
+                    report.native_opening_id = Some(opening_id);
+                }
+                _ => {}
+            }
+            event
+        })
+    }
+
     /// Reports an event, waiting for capacity instead of discarding a full-queue item.
     pub async fn emit(&self, event: AdapterEvent) -> Result<(), SinkClosed> {
         let event = match &self.transform {
@@ -616,6 +661,7 @@ impl EventSink {
         event: SessionEvent,
     ) -> Result<(), SinkClosed> {
         self.emit(AdapterEvent::Session {
+            native_opening_id: None,
             thread_id,
             segment_id,
             event,
@@ -1027,6 +1073,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn session_reports_keep_the_original_opening_across_the_plugin_transport() {
+        let params = json!({"thread_id":id(1),"segment_id":id(2),"native_opening_id":id(3),
+            "title":"The original physical conversation"});
+        let event = AdapterEvent::from_wire("session.title", params.clone()).unwrap();
+        let (name, written) = event.to_wire().unwrap();
+        assert_eq!(name, "session.title");
+        assert_eq!(written, params);
+        let report = json!({"thread_id":id(1),"segment_id":id(2),"native_opening_id":id(3),
+            "turn_id":id(4),"request":{"id":"original-request"}});
+        let event = AdapterEvent::from_wire(crate::requests::MODEL_REQUEST_EVENT, report).unwrap();
+        let (_, written) = event.to_wire().unwrap();
+        assert_eq!(written["native_opening_id"], json!(id(3)));
+    }
+
+    #[test]
     fn startup_account_kind_is_optional_and_has_no_credential_payload()
     -> Result<(), Box<dyn std::error::Error>> {
         let old = json!({
@@ -1188,6 +1249,7 @@ mod tests {
         .unwrap();
         clone
             .emit(AdapterEvent::Session {
+                native_opening_id: None,
                 thread_id: id(1),
                 segment_id: id(3),
                 event: SessionEvent::TurnCompleted(TurnCompleted {
@@ -1218,6 +1280,7 @@ mod tests {
     #[test]
     fn a_session_event_goes_over_the_plugin_transport_with_its_thread_and_segment() {
         let event = AdapterEvent::Session {
+            native_opening_id: None,
             thread_id: id(1),
             segment_id: id(3),
             event: SessionEvent::ItemDelta(ItemDelta {
@@ -1233,7 +1296,7 @@ mod tests {
         assert_eq!(
             params,
             json!({ "native_ref": "item_3", "field": "text", "offset": 0, "len": 5, "data": "Hello",
-                    "thread_id": id(1), "segment_id": id(3) })
+                    "thread_id": id(1), "segment_id": id(3), "native_opening_id": null })
         );
         assert_eq!(AdapterEvent::from_wire(name, params).unwrap(), event);
     }
@@ -1264,7 +1327,7 @@ mod tests {
         assert!(matches!(
             AdapterEvent::from_wire(
                 "item.delta",
-                json!({ "thread_id": id(1), "segment_id": id(2), "native_ref": 4 })
+                json!({ "thread_id": id(1), "segment_id": id(2), "native_opening_id":null, "native_ref": 4 })
             ),
             Err(WireError::Shape { .. })
         ));
@@ -1410,6 +1473,7 @@ mod mapped_sink_tests {
             thread_id,
             segment_id,
             event,
+            ..
         }) = events.recv().await
         else {
             return Err("mapped session was not delivered".into());
