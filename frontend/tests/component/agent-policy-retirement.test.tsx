@@ -26,7 +26,7 @@ vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(),
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), pageQuery: () => ({ queryKey: ['retirement-agent-page'], queryFn: () => Promise.resolve(pageFor('topic')) }) }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<object>(), meQuery: { queryKey: ['retirement-reader'], queryFn: () => Promise.resolve(ADA) } }));
 vi.mock('@/features/access/KnownToAgents', () => ({ KnownToAgents: () => <p>Explicit contributions remain separate</p> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 it.each(['thread', 'topic'] as const)('shows actual %s knowledge without an obsolete document-policy reader', async (kind) => {
   retired.settings.mockClear();
