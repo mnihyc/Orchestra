@@ -1,0 +1,6 @@
+test -p orch-envhost --lib
+test -p orch-connector-core --test mount_data
+test -p orch-node --test existing_directories
+test -p orch-node-core --test mount_fingerprints
+test -p orch-driver-docker --test existing_directories --test volume_moves
+test -p orch-driver-host --lib

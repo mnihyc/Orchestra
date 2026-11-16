@@ -18,7 +18,11 @@ Accepted summary and embedding requests stop too. A stopped request cannot start
 
 The provider, profile and model dialogs accept one optional note. It appears in waiting threads and the stop history.
 
+Provider and model dialogs also offer Notify people. The choice starts from Operation notices and remains yours to change. For a model, its thread owners and provider managers are the affected people. Each person gets at most one Inbox item, updated as the stop finishes.
+
 Open a count to see the affected threads. Names you cannot see stay a count.
+
+Mount Edit offers the same Notify choice when Enabled changes. A normal label or attachment-setting edit sends no notice. The current affected environment holders and mount managers receive one grouped item; the person saving receives none. Repeating the enabled value creates no new notice.
 
 ## Enable
 
@@ -43,5 +47,7 @@ A source that is switched off can still be left. A target provider, model, profi
 Deleting a provider or profile stops its turns and keeps its history and usage. Threads can stay bound and wait for a switch. The stored server key is erased and native sign-out is requested. A machine that cannot sign out still needs cleanup there. A pasted vendor credential can still need revocation at its vendor.
 
 The provider dialog counts the affected work and asks for its name. Switch its threads first opens the separate switch. Delete makes no thread choices.
+
+Deleting a model ends that model’s membership and keeps its threads, history and usage. The model dialog offers the same explicit Notify choice for that model’s affected people.
 
 For kept files and other leftovers, use [Storage cleanup](storage-cleanup.md#clean-up-kept-items).

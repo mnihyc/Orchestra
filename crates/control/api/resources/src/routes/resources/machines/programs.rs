@@ -260,6 +260,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    native_target: command.native_target.clone(),
                     id: Some(command.id),
                     machine: id,
                     kind: command.kind.as_str().into(),

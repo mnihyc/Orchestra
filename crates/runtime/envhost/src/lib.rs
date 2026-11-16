@@ -19,9 +19,9 @@
 //!
 //! The package never fetches or sends file content itself. Tool servers listen on loopback;
 //! [`ports_sockets`] connects only to the currently owned local program selected by [`ports`].
-//! It contains no `unsafe` code.
+//! Native Windows file calls are isolated behind one private platform boundary.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 /// Whether this build's environment runtime has the native containment and process proof required for release.
 /// Linux is currently declared; the macOS and Windows implementations await their actual target runners.
@@ -58,6 +58,7 @@ pub mod mcp;
 pub mod mcp_host;
 pub mod measure;
 pub mod media;
+pub mod mount_transfer;
 pub mod mounts;
 pub mod paths;
 pub mod platform;
@@ -70,6 +71,7 @@ pub mod restore;
 pub mod search;
 pub mod snapshot;
 pub mod state_store;
+pub mod storage_locks;
 pub mod terminal;
 pub mod walk;
 pub mod watch;
