@@ -84,25 +84,35 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The runtimes a command is being carried out for. The reconciliation leaves these alone: the command
-/// tells the system what became of them when it ends.
+/// In-flight changes suppress transient observations; a stop still permits a terminal observation.
 #[derive(Debug, Default)]
 pub struct Busy {
-    running: Mutex<BTreeMap<Id, usize>>,
+    running: Mutex<BTreeMap<Id, InFlight>>,
+}
+
+#[derive(Debug, Default)]
+struct InFlight {
+    changing: usize,
+    stopping: usize,
 }
 
 /// A runtime counts as busy until this is dropped.
 pub struct BusyGuard {
     busy: Arc<Busy>,
     runtime_id: Id,
+    stopping: bool,
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         let mut running = lock(&self.busy.running);
         if let Some(count) = running.get_mut(&self.runtime_id) {
-            *count -= 1;
-            if *count == 0 {
+            if self.stopping {
+                count.stopping -= 1;
+            } else {
+                count.changing -= 1;
+            }
+            if count.stopping == 0 && count.changing == 0 {
                 running.remove(&self.runtime_id);
             }
         }
@@ -119,11 +129,32 @@ impl Busy {
     /// Counts the runtime as busy until the guard is dropped.
     #[must_use]
     pub fn enter(self: &Arc<Self>, runtime_id: Id) -> BusyGuard {
-        *lock(&self.running).entry(runtime_id).or_default() += 1;
+        self.enter_kind(runtime_id, false)
+    }
+
+    fn enter_stopping(self: &Arc<Self>, runtime_id: Id) -> BusyGuard {
+        self.enter_kind(runtime_id, true)
+    }
+
+    fn enter_kind(self: &Arc<Self>, runtime_id: Id, stopping: bool) -> BusyGuard {
+        let mut running = lock(&self.running);
+        let count = running.entry(runtime_id).or_default();
+        if stopping {
+            count.stopping += 1;
+        } else {
+            count.changing += 1;
+        }
         BusyGuard {
             busy: Arc::clone(self),
             runtime_id,
+            stopping,
         }
+    }
+
+    pub(crate) fn blocks_observation(&self, runtime: Id, terminal: bool) -> bool {
+        lock(&self.running)
+            .get(&runtime)
+            .is_some_and(|count| count.changing > 0 || !terminal)
     }
 
     /// The runtimes that are busy now.
@@ -1185,7 +1216,7 @@ impl Runtimes {
         reason: Option<UnitReason>,
     ) -> Result<(), CommandError> {
         let _resources = self.inner.resource_changes.read().await;
-        let _busy = self.inner.busy.enter(runtime_id);
+        let _busy = self.inner.busy.enter_stopping(runtime_id);
         let serial = self.lock_of(runtime_id);
         let _one_at_a_time = serial.lock().await;
         let (host, record) = self.require(runtime_id).await?;
@@ -1206,16 +1237,27 @@ impl Runtimes {
                 .hook(HookEvent::PreDown, reason, false, &host, &record)
                 .await;
         }
-        host.contract()
-            .stop(&record.unit, self.inner.settings.stop_grace)
+        let before = host
+            .contract()
+            .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
+        let attempt = if before.state == UnitStateKind::Running {
+            host.contract()
+                .stop(&record.unit, self.inner.settings.stop_grace)
+                .await
+        } else {
+            Ok(())
+        };
         let actual = host
             .contract()
             .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
-        if actual.state != UnitStateKind::Stopped {
+        if actual.state == UnitStateKind::Running {
+            if let Err(error) = attempt {
+                return Err(failure(&error));
+            }
             return Err(CommandError::new(
                 ErrorCode::Conflict,
                 "the host did not confirm that the unit stopped",

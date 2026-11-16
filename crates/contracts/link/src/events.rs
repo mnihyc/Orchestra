@@ -45,6 +45,17 @@ pub struct MachineUpdateFailed {
     pub detail: String,
 }
 
+/// A durable report from the exact bundled node that owns this update job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeServerUpdate {
+    /// The exact native command whose prepared helper supplied this observation.
+    pub command_id: Id,
+    /// The admitted job, independent of a connector or API process lifetime.
+    pub job_id: Id,
+    /// The existing updater's safe factual phase and outcome.
+    pub observation: orch_api_contract::admin::ServerUpdateObservation,
+}
+
 // ---------------------------------------------------------------- catalogue
 
 /// Whether an event is kept until the system has taken it in.
@@ -174,7 +185,7 @@ event_kinds! {
     /// A new list of an environment's whole tree.
     EnvManifest = "env.manifest", Durable, [Env];
     /// How far a job is.
-    JobProgress = "job.progress", Durable, [Env, Node];
+    JobProgress = "job.progress", Durable, [Env, Node, Machine];
     /// A known browser changed its state or tab count.
     BrowserState = "browser.state", Durable, [Env];
     /// A known display changed its lifecycle state.
@@ -187,6 +198,8 @@ event_kinds! {
     NodeNetwork = "node.network", Durable, [Node];
     /// What a host has and can make.
     NodeFacts = "node.facts", Durable, [Node];
+    /// Progress of the one release updater on the bundled server node.
+    NodeServerUpdate = "node.server.update", Durable, [Node];
     /// The owned kept-image inventory at one node-local epoch, including archived files.
     NodeKeptImages = "node.kept-images", Durable, [Node];
     /// What a host uses.
@@ -349,6 +362,7 @@ payloads! {
         NodeNetwork(NodeNetwork) = "node.network";
         /// What a host has and can make.
         NodeFacts(NodeFacts) = "node.facts";
+        NodeServerUpdate(NodeServerUpdate) = "node.server.update";
         /// Owned images and the epoch of the complete inventory.
         NodeKeptImages(NodeKeptImages) = "node.kept-images";
         /// What a host uses.
@@ -408,6 +422,7 @@ impl Ev {
         event: &Event,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self {
+            native_opening_id: None,
             stream: stream.to_string(),
             seq,
             at,
@@ -446,6 +461,8 @@ impl Eph {
 /// The body of `session.opened`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpened {
+    /// The physical opening that produced this report.
+    pub opening_id: Id,
     /// The harness's own name for the conversation.
     pub native_session_ref: String,
     /// Whether it is a conversation the harness already held.
@@ -462,6 +479,10 @@ pub struct SessionTitle {
 /// The body of `session.lost`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// A planned idle retirement keeps the conversation without recording an error.
+    pub expected: bool,
+    /// The physical opening that produced this report.
+    pub opening_id: Id,
     /// Why.
     pub reason: String,
 }
@@ -1531,12 +1552,12 @@ mod tests {
     fn what_a_session_does_reads_and_writes_as_the_catalogue_has_it() {
         event(
             "session.opened",
-            json!({ "native_session_ref": "sess_1", "resumed": false }),
+            json!({ "opening_id":A,"native_session_ref": "sess_1", "resumed": false }),
         );
         event("session.title", json!({ "title": "Fix the login" }));
         event(
             "session.lost",
-            json!({ "reason": "the harness was restarted" }),
+            json!({ "expected":false,"opening_id":A,"reason": "the harness was restarted" }),
         );
         event(
             "turn.started",
@@ -1879,6 +1900,11 @@ mod tests {
     }
 
     #[test]
+    fn standalone_machine_file_work_can_report_its_job_without_a_host_or_an_attached_environment() {
+        assert!(EventKind::JobProgress.travels_on(&Stream::Machine));
+    }
+
+    #[test]
     fn each_kind_travels_on_the_streams_of_what_it_reports_about() {
         let session = Stream::Session {
             thread_id: id(A),
@@ -1891,7 +1917,7 @@ mod tests {
         assert!(!EventKind::ItemDelta.travels_on(&environment));
         assert!(EventKind::JobProgress.travels_on(&environment));
         assert!(EventKind::JobProgress.travels_on(&Stream::Node));
-        assert!(!EventKind::JobProgress.travels_on(&Stream::Machine));
+        assert!(EventKind::JobProgress.travels_on(&Stream::Machine));
         assert!(EventKind::ProviderFound.travels_on(&Stream::Machine));
         assert!(EventKind::PtyExited.travels_on(&environment));
     }
