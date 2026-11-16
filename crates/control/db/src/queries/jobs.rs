@@ -120,12 +120,16 @@ pub struct JobRow {
     /// Where it stands.
     pub state: String,
     /// What it was asked to do, and what its runner keeps in it: the lease and a request to cancel.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub plan: Json,
     /// How far it has come.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub progress: Json,
     /// What it produced.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub result: Option<Json>,
     /// Why it failed.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub error: Option<Json>,
     /// Who made it.
     pub created_by: Option<Id>,
@@ -254,8 +258,8 @@ pub async fn insert(
     .bind(job.node_id)
     .bind(job.environment_id)
     .bind(job.provider_id)
-    .bind(job.plan)
-    .bind(job.progress)
+    .bind(orch_types::storable::encode_exact(job.plan))
+    .bind(orch_types::storable::encode_exact(job.progress))
     .bind(job.created_by)
     .bind(topic_seq)
     .bind(env_seq)
@@ -556,7 +560,7 @@ pub async fn merge_plan(
 ) -> Result<(), DbError> {
     sqlx::query("UPDATE jobs SET plan = plan || $2, updated_at = $3 WHERE id = $1")
         .bind(id)
-        .bind(members)
+        .bind(orch_types::storable::encode_exact(members))
         .bind(at)
         .execute(conn)
         .await?;
@@ -576,7 +580,9 @@ pub async fn initial_files_request(
     )
     .bind(environment)
     .fetch_optional(conn)
-    .await?)
+    .await?
+    .map(orch_types::storable::decode_exact)
+    .transpose()?)
 }
 
 /// Writes how far a job has come, published on its thread, topic and environment feeds. A job that is over is
@@ -592,7 +598,7 @@ pub async fn save_progress(
           WHERE id = $1 AND state IN ('queued', 'running') RETURNING environment_id, node_id",
     )
     .bind(id)
-    .bind(progress)
+    .bind(orch_types::storable::encode_exact(progress))
     .bind(at)
     .fetch_optional(&mut *conn)
     .await?;
@@ -651,9 +657,9 @@ pub async fn finish(
     )
     .bind(id)
     .bind(to)
-    .bind(progress)
-    .bind(result)
-    .bind(error)
+    .bind(orch_types::storable::encode_exact(progress))
+    .bind(result.map(orch_types::storable::encode_exact))
+    .bind(error.map(orch_types::storable::encode_exact))
     .bind(at)
     .fetch_optional(&mut *conn)
     .await?;
@@ -872,8 +878,8 @@ pub mod forks {
         .bind(job.thread)
         .bind(job.environment)
         .bind(job.batch)
-        .bind(job.plan)
-        .bind(job.progress)
+        .bind(orch_types::storable::encode_exact(job.plan))
+        .bind(orch_types::storable::encode_exact(job.progress))
         .bind(job.created_by)
         .bind(topic_seq)
         .bind(env_seq)
@@ -1041,6 +1047,7 @@ pub mod forks {
         /// Who asked for it.
         pub created_by: Id,
         /// The request, the plan as it was answered, and what carrying it out needs.
+        #[sqlx(try_from = "crate::storage::ExactJson")]
         pub plan: Json,
         /// When it goes out of date.
         pub expires_at: DateTime<Utc>,
@@ -1059,7 +1066,7 @@ pub mod forks {
         .bind(row.node_id)
         .bind(row.environment_id)
         .bind(row.created_by)
-        .bind(&row.plan)
+        .bind(orch_types::storable::encode_exact(&row.plan))
         .bind(row.expires_at)
         .bind(row.created_at)
         .execute(conn)
@@ -1892,13 +1899,13 @@ pub mod changes {
             };
         if let Some(spec)=saved.as_mut()
             && let Some(resources)=sqlx::query_scalar::<_,Json>("SELECT body->'resources' FROM commands WHERE kind='node.resources.apply' AND body->>'runtime_id'=$1::text AND state='succeeded' ORDER BY created_at DESC,id DESC LIMIT 1").bind(runtime).fetch_optional(&mut *conn).await? {spec["resources"]=resources;}
-        Ok(saved)
+        Ok(saved.map(orch_types::storable::decode_exact).transpose()?)
     }
 
     /// Builds recorded by the job that created this unit, including its connector.
     pub async fn tools_of(conn: &mut Conn, runtime: Id) -> Result<Option<Json>, DbError> {
         Ok(sqlx::query_scalar("SELECT plan -> 'tools' FROM jobs WHERE plan ->> 'runtime' = $1::text AND plan -> 'tools' IS NOT NULL AND state IN ('running','succeeded') ORDER BY created_at DESC,id DESC LIMIT 1")
-            .bind(runtime).fetch_optional(conn).await?)
+            .bind(runtime).fetch_optional(conn).await?.map(orch_types::storable::decode_exact).transpose()?)
     }
 
     /// Gives a queued replacement the move's phases and destination in the same transaction.
@@ -1910,7 +1917,7 @@ pub mod changes {
         now: DateTime<Utc>,
     ) -> Result<JobRow, DbError> {
         Ok(sqlx::query_as("UPDATE jobs SET kind = 'environment_move', plan = $2, progress = $3, updated_at = $4 WHERE id = $1 AND state = 'queued' RETURNING *")
-            .bind(id).bind(plan).bind(progress).bind(now).fetch_one(conn).await?)
+            .bind(id).bind(orch_types::storable::encode_exact(plan)).bind(orch_types::storable::encode_exact(progress)).bind(now).fetch_one(conn).await?)
     }
 
     /// The stored definitions of several runtime units, read together for fleet views.
@@ -1918,14 +1925,22 @@ pub mod changes {
         conn: &mut Conn,
         runtimes: &[Id],
     ) -> Result<Vec<(Id, Option<Json>)>, DbError> {
-        Ok(sqlx::query_as("SELECT r.id, frozen.spec || CASE WHEN live.resources IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('resources',live.resources) END
+        let rows:Vec<(Id,Option<Json>)> = sqlx::query_as("SELECT r.id, frozen.spec || CASE WHEN live.resources IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('resources',live.resources) END
           FROM runtimes r CROSS JOIN LATERAL (SELECT COALESCE(
             (SELECT c.body FROM commands c WHERE c.kind = 'node.runtime.create' AND c.body ->> 'runtime_id' = r.id::text AND c.state IN ('queued','sent','accepted','succeeded') ORDER BY c.created_at DESC,c.id DESC LIMIT 1),
             (SELECT j.plan -> 'created_spec' FROM jobs j WHERE j.plan ->> 'runtime' = r.id::text AND j.plan -> 'created_spec' IS NOT NULL ORDER BY j.created_at DESC,j.id DESC LIMIT 1))
           AS spec) frozen
           LEFT JOIN LATERAL (SELECT c.body->'resources' AS resources FROM commands c WHERE c.kind='node.resources.apply' AND c.body->>'runtime_id'=r.id::text AND c.state='succeeded' ORDER BY c.created_at DESC,c.id DESC LIMIT 1) live ON true
           WHERE r.id = ANY($1)")
-            .bind(runtimes).fetch_all(conn).await?)
+            .bind(runtimes).fetch_all(conn).await?;
+        rows.into_iter()
+            .map(|(id, value)| {
+                Ok((
+                    id,
+                    value.map(orch_types::storable::decode_exact).transpose()?,
+                ))
+            })
+            .collect()
     }
 
     /// Every unit's frozen build list, using the same successful or running producer as a single read.
@@ -1933,7 +1948,7 @@ pub mod changes {
         conn: &mut Conn,
         runtimes: &[Id],
     ) -> Result<Vec<(Id, Option<Json>)>, DbError> {
-        Ok(sqlx::query_as(
+        let rows: Vec<(Id, Option<Json>)> = sqlx::query_as(
             "SELECT r.id,
             (SELECT j.plan->'tools' FROM jobs j WHERE j.plan->>'runtime'=r.id::text
                 AND j.plan->'tools' IS NOT NULL AND j.state IN ('running','succeeded')
@@ -1942,7 +1957,15 @@ pub mod changes {
         )
         .bind(runtimes)
         .fetch_all(conn)
-        .await?)
+        .await?;
+        rows.into_iter()
+            .map(|(id, value)| {
+                Ok((
+                    id,
+                    value.map(orch_types::storable::decode_exact).transpose()?,
+                ))
+            })
+            .collect()
     }
 }
 

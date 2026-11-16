@@ -1,0 +1,9 @@
+test -p orch-types --lib
+test -p orch-settings-contract --lib
+test -p orch-adapter-codex --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-acp --lib
+test -p orch-engine --test forks -- confirmed_source::
+test -p orch-engine --test background --test agent_history
+test -p orch-api-core --test threads_adopt
+test -p orch-engine --test usage_rows --test usage_ledger

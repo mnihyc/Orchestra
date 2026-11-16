@@ -46,6 +46,9 @@ pub(crate) const BUSY_RETRY_PAUSE: std::time::Duration = std::time::Duration::fr
 /// Why a command could not be sent, or its end not learned.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandsError {
+    /// Preserve the storage failure's class through queued command work.
+    #[error("the command's storage failed: {0}")]
+    Database(#[source] orch_db::DbError),
     /// The actual issuing writer's check failed immediately before its first queue insert.
     #[error("the command's current issuing boundary has ended: {0}")]
     BeforeEffect(Box<dyn std::error::Error + Send + Sync>),

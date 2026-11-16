@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({ declare: vi.fn(), recovery: vi.fn<(body: Envir
 const loss = { admin_grants: [], notification: { people: 0, default_on: false }, provider_threads: [], provider_threads_hidden: 0, preflight_id: 'loss-plan', name: 'host-2', environments: [{ environment: { id: 'env', name: 'Main' }, threads: [{ id: 'thread', name: 'Visible work' }], threads_hidden: 2, kept_bytes: 4096 }], providers: [], mounts: [], jobs: 1, kept_bytes: 4096 } as unknown as LossPlan;
 const environment = { id: 'destination', name: 'Available', address: 'team/Available', status: 'running', access: { permissions: ['environment.manage'] } };
 const query = (key: string, value: unknown) => ({ queryKey: [key], queryFn: () => Promise.resolve(value) });
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.help }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.help }));
 vi.mock('@/api/loss', () => ({ lossPlanQuery: () => query('loss-plan', loss), declareLost: calls.declare, recoverableQuery: () => query('recoverable', { environments: [], others: 0 }), recoveryBatchQuery: () => query('recovery-batch', null), planRecovery: calls.recovery, startRecovery: calls.start }));
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentsQuery: () => query('environments', [environment]), startEnvironment: calls.startEnvironment }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), hostsQuery: () => query('hosts', []), providersQuery: () => query('providers', []), agentsQuery: () => query('agents', []) }));

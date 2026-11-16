@@ -36,6 +36,50 @@ fn text(words: &str) -> Vec<ContentPart> {
 }
 
 #[tokio::test]
+async fn a_creation_key_with_a_zero_does_not_reuse_a_literal_glyph_key() {
+    let s = Scene::new().await;
+    let thread = stuck(&s).await;
+    let first = s
+        .say(&s.ada, thread, "First", Delivery::Queue, "same\0key")
+        .await
+        .ok()
+        .input;
+    let second = s
+        .say(&s.ada, thread, "Second", Delivery::Queue, "same�key")
+        .await
+        .ok()
+        .input;
+    let replay = s
+        .say(&s.ada, thread, "First", Delivery::Queue, "same\0key")
+        .await
+        .ok()
+        .input;
+    assert_ne!(first.id, second.id);
+    assert_eq!(first.id, replay.id);
+    assert_eq!(first.client_id.as_deref(), Some("same\0key"));
+    assert_eq!(second.client_id.as_deref(), Some("same�key"));
+}
+
+#[tokio::test]
+async fn words_with_an_embedded_zero_reach_the_agent_and_keep_their_repair_receipt() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    running(&s, thread, 0, "Before\0after").await;
+    let view = synced(&s, thread, None).await;
+    let items = serde_json::to_value(&view.items).unwrap();
+    let message = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["kind"] == "user_message" && item["payload"]["parts"][0]["text"] == "Before�after"
+        })
+        .expect("the safe words remain in the conversation");
+    assert_eq!(message["text_replacements"], 1);
+    assert!(!s.rig.seen.of_kind(CommandKind::TurnStart).is_empty());
+}
+
+#[tokio::test]
 async fn an_unaccepted_steer_can_go_back_to_its_place_but_a_taken_steer_cannot() {
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
@@ -959,7 +1003,7 @@ async fn stopped_inputs_keep_the_hold_through_edits_delivery_changes_and_reorder
         .call(ThreadInterrupt, &[&thread])
         .token(&s.dan.token)
         .body(&ThreadInterruptBody {
-            turn_id: start.turn_id,
+            turn_id: Some(start.turn_id),
         })
         .send()
         .await
@@ -1068,7 +1112,7 @@ async fn messages_sent_after_stop_join_the_held_queue_and_edit_reorder_remove_re
         .call(ThreadInterrupt, &[&thread])
         .token(&s.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: first.turn_id,
+            turn_id: Some(first.turn_id),
         })
         .send()
         .await
@@ -1463,18 +1507,34 @@ async fn a_turn_is_stopped_while_it_runs_and_cannot_be_once_it_is_over() {
             .app
             .call(ThreadInterrupt, &[&id])
             .token(&s.dan.token)
-            .body(&ThreadInterruptBody { turn_id: turn });
+            .body(&ThreadInterruptBody {
+                turn_id: Some(turn),
+            });
         async move { call.send().await }
     };
     let stopped = stop(start.turn_id).await.ok();
+    assert_eq!(
+        stopped.state,
+        orch_api_contract::threads::StopState::Stopping,
+        "a turn that runs is stopping until the program has stopped"
+    );
+    let stopped = stopped.turn.expect("the answer is the turn it names");
     assert_eq!(stopped.id, start.turn_id);
     assert!(stopped.interrupted_by.is_some());
+    assert!(
+        stopped.interrupted_at.is_some(),
+        "and says when the Stop was asked for"
+    );
     s.rig
         .say(id, turn_ended(start.turn_id, TurnOutcome::Interrupted))
         .await;
     s.rig.wait_turn(start.turn_id, "interrupted").await;
     // A Stop that arrives as its turn ends, with nothing newer begun, answers the turn as it ended.
-    let late = stop(start.turn_id).await.ok();
+    let late = stop(start.turn_id)
+        .await
+        .ok()
+        .turn
+        .expect("the Stop answer names the ended turn");
     assert_eq!(late.id, start.turn_id);
     assert_eq!(late.state, TurnState::Interrupted);
     // Once a newer turn runs, a Stop of the old one changes nothing and names the turn that stands.
@@ -1997,7 +2057,9 @@ async fn every_driving_request_is_refused_to_a_viewer_and_to_a_stranger() {
                 .problem(),
             app.call(ThreadInterrupt, &[&id])
                 .token(token)
-                .body(&ThreadInterruptBody { turn_id: new_id() })
+                .body(&ThreadInterruptBody {
+                    turn_id: Some(new_id()),
+                })
                 .send()
                 .await
                 .problem(),

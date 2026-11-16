@@ -277,6 +277,7 @@ impl Request {
             request_hash: String,
             kind: String,
             created_by: Option<Id>,
+            #[sqlx(try_from = "orch_db::storage::OptionalJson")]
             origin: Option<Json>,
             planned_export: Option<String>,
             planned_node: Option<String>,

@@ -41,6 +41,8 @@ const WHOLE: u32 = 100;
 const PHASE_RETRIES: u32 = 2;
 /// The code of a failure that is the system's own and not the host's or the person's.
 pub const INTERNAL: &str = "internal";
+
+tokio::task_local! {static PHASE_ATTEMPT: u32;}
 /// How many jobs one sweep takes up at most.
 const RUN_BATCH: i64 = 50;
 /// How many jobs of one batch of forks and switches run at once when the setting is not there.
@@ -173,6 +175,11 @@ impl From<Failure> for Stop {
 
 impl From<EngineError> for Stop {
     fn from(error: EngineError) -> Self {
+        if let Some(code) = error.data_code() {
+            return Self::from(orch_db::DbError::Data {
+                code: code.to_owned(),
+            });
+        }
         match error {
             EngineError::Db(error) => Self::from(error),
             other => Self::Failed(Failure::new(INTERNAL, other.to_string())),
@@ -183,16 +190,25 @@ impl From<EngineError> for Stop {
 impl From<orch_db::DbError> for Stop {
     fn from(error: orch_db::DbError) -> Self {
         let facts = persistence_facts(&error);
-        tracing::error!(
-            phase = "job_persistence",
-            category = facts.category,
-            sqlstate = facts.sqlstate.as_deref().unwrap_or("unknown"),
-            constraint = facts.constraint.as_deref().unwrap_or("unknown"),
-            column = facts.column.unwrap_or("unknown"),
-            "a job could not persist its change"
-        );
+        if PHASE_ATTEMPT
+            .try_with(|attempt| *attempt == 0)
+            .unwrap_or(true)
+        {
+            tracing::error!(
+                phase = "job_persistence",
+                category = facts.category,
+                sqlstate = facts.sqlstate.as_deref().unwrap_or("unknown"),
+                constraint = facts.constraint.as_deref().unwrap_or("unknown"),
+                column = facts.column.unwrap_or("unknown"),
+                "a job could not persist its change"
+            );
+        }
         Self::Failed(Failure::new(
-            INTERNAL,
+            if error.data_code().is_some() {
+                "storage.data"
+            } else {
+                INTERNAL
+            },
             "The change could not be saved. Try again.",
         ))
     }
@@ -254,7 +270,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -338,6 +353,7 @@ fn persistence_facts(error: &orch_db::DbError) -> PersistenceFacts {
         column: None,
     };
     let (state, constraint) = match error {
+        DbError::Data { code } => (Some(code.clone()), None),
         DbError::Unique { constraint } => (Some("23505".to_owned()), Some(constraint.as_str())),
         DbError::Reference { constraint } => (Some("23503".to_owned()), Some(constraint.as_str())),
         DbError::Check { constraint, .. } => (Some("23514".to_owned()), Some(constraint.as_str())),
@@ -1862,6 +1878,7 @@ impl Engine {
 
     /// Asks that jobs be looked at at once, instead of at the next sweep.
     pub fn kick(&self) {
+        self.fresh_database_work();
         self.inner.signal.notify_one();
     }
 
@@ -2096,7 +2113,7 @@ impl Engine {
             let mut attempts = 0;
             let result = loop {
                 let step = tokio::select! {
-                    done = crate::notifications::operation_scope(row.plan.get("notification_operation").and_then(Json::as_str).and_then(|id|id.parse().ok()),orch_db::queries::transaction_guard::request_scope(phase_scope(&row.kind), phased.run(job, &name))) => done,
+                    done = PHASE_ATTEMPT.scope(attempts,crate::notifications::operation_scope(row.plan.get("notification_operation").and_then(Json::as_str).and_then(|id|id.parse().ok()),orch_db::queries::transaction_guard::request_scope(phase_scope(&row.kind), phased.run(job, &name)))) => done,
                     () = job.gone() => Err(Stop::Lost),
                 };
                 match step {
@@ -2106,7 +2123,6 @@ impl Engine {
                             && !(failure.answered && phased.answers_are_final()) =>
                     {
                         attempts += 1;
-                        tracing::warn!(job = %job.id, phase = %name, message = %failure.message, "a phase failed on the system's side; it is asked again");
                         tokio::time::sleep(self.inner.config.hosting.phase_retry_pause).await;
                     }
                     other => break other,

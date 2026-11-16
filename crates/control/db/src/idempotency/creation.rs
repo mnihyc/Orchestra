@@ -34,7 +34,7 @@ pub async fn unlock(conn: &mut Conn, account: Id, key: &str) -> Result<bool, DbE
 pub struct Created {
     pub kind: String,
     pub id: Id,
-    #[serde(default)]
+    #[serde(default, with = "orch_types::storable::stored_json")]
     pub data: Json,
 }
 /// A versioned outcome in the existing idempotency row; older native uses keep their own records.
@@ -323,6 +323,55 @@ async fn observe_outcome(
 mod tests {
     use super::*;
     use orch_testkit::{clock, database::TestDb};
+    #[tokio::test]
+    async fn native_creation_progress_keeps_exact_selectors_without_poisoning_its_replay_record()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let db = TestDb::fresh().await;
+        let account = orch_types::new_id();
+        let key = orch_types::new_id().to_string();
+        let at = clock::start();
+        let record = Record::pending(
+            Hash::of(b"native progress"),
+            "documents",
+            orch_types::new_id(),
+        );
+        let mut conn = db.pool.acquire().await?;
+        sqlx::query("INSERT INTO users(id,username,display_name,avatar_color) VALUES($1,'progress-owner','Owner',0)").bind(account).execute(&mut *conn).await?;
+        super::super::keep(
+            &mut conn,
+            account,
+            &key,
+            &Replay {
+                method: "POST".into(),
+                path: "/native-progress".into(),
+                status: 202,
+                response: serde_json::to_value(&record)?,
+            },
+            at,
+        )
+        .await?;
+        let data = serde_json::json!({"client_id":"source\0id","literal":"~orch.exact:original","key\0":"first","key�":"second"});
+        let expected = data.clone();
+        scope(
+            Some(Capture {
+                account,
+                key: key.clone(),
+                record,
+            }),
+            async { observe_with(&mut conn, Some(account), "documents", account, data).await },
+        )
+        .await?;
+        let replay = super::super::find(&mut conn, account, &key, at - chrono::Duration::hours(1))
+            .await?
+            .ok_or("replay missing")?;
+        let created = Record::read(replay.response)?
+            .outcome
+            .ok_or("progress missing")?;
+        assert_eq!(created.id, account);
+        assert_eq!(created.data, expected);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn native_status_and_reservation_replacement_preserve_the_exact_owner_and_root()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
@@ -40,6 +40,14 @@ pub struct RecordPolicy {
 struct RecordedReply {
     request_hash: Hash,
     reply: FsRecordResult,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingCursor {
+    attachment: Id,
+    directory: String,
+    cursor: Option<u64>,
 }
 
 /// A recorded root protected while one bounded operation reads or applies it.
@@ -72,7 +80,13 @@ struct Operations {
 }
 
 #[derive(Debug, Default)]
-struct LiveOperations(Mutex<Operations>);
+struct DeferredObjects {
+    files: BTreeSet<PathBuf>,
+    directories: BTreeMap<PathBuf, platform::Dir>,
+}
+
+#[derive(Debug, Default)]
+struct LiveOperations(Mutex<Operations>, Mutex<DeferredObjects>);
 
 fn store_busy() -> HostError {
     HostError::Busy("This environment is publishing, reading or replacing recorded files. Retry after the operation finishes.".to_owned())
@@ -197,6 +211,8 @@ impl StateRoot {
     #[must_use]
     pub fn result(&self) -> FsRecordResult {
         FsRecordResult {
+            indexing: None,
+
             state: RecordState::Complete,
             tree_ref: Some(self.tree_ref.clone()),
             repository_head: self.repository_head.clone(),
@@ -209,6 +225,16 @@ impl StateRoot {
     }
 }
 
+/// Prepared immutable coverage. The potentially large object map is stored once by its hash;
+/// turn roots contain only this small metadata and their own identity and keeping deadline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedState {
+    pub(crate) metadata: StateRoot,
+    pub(crate) objects_blob: Hash,
+    manifest_size: u64,
+}
+
 /// One environment's private loose-object repository, always outside its workspace.
 #[derive(Debug, Clone)]
 pub struct ObjectStore {
@@ -218,6 +244,9 @@ pub struct ObjectStore {
     // the physical store's pin/exclusive gate. Retiring one attachment never revives its clones.
     retired: Arc<AtomicBool>,
     durability: DirectoryDurability,
+    /// How many objects were written without an immediate flush, and how many batches were flushed.
+    written: Arc<AtomicU64>,
+    flushes: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,11 +298,17 @@ impl DirectoryDurability {
     }
 
     fn ensure(&self, path: &Path) -> Result<()> {
+        self.ensure_with(path, true)
+    }
+
+    /// Makes the directory exist. With `durable` each edge is flushed at once; without it the
+    /// caller flushes the whole store later (see `ObjectStore::make_durable`).
+    fn ensure_with(&self, path: &Path, durable: bool) -> Result<()> {
         match std::fs::symlink_metadata(path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = directory_parent(path) {
-                    self.ensure(parent)?;
+                    self.ensure_with(parent, durable)?;
                 }
                 match std::fs::create_dir(path) {
                     Ok(()) =>
@@ -300,7 +335,7 @@ impl DirectoryDurability {
         }
         // A failed parent barrier may leave the directory visible. Retrying an existing name
         // must flush that edge too, before creating a child or publishing a file inside it.
-        if let Some(parent) = directory_parent(path) {
+        if durable && let Some(parent) = directory_parent(path) {
             self.sync(parent)?;
         }
         Ok(())
@@ -314,6 +349,7 @@ enum DirectoryEvent {
     Sync(PathBuf),
     Synced(PathBuf),
     Published(PathBuf),
+    FileSynced(PathBuf),
 }
 
 #[cfg(test)]
@@ -421,6 +457,7 @@ impl ObjectStore {
             "git/refs/snapshots",
             "roots",
             "manifests",
+            "object-maps",
             "journals",
             "results",
             "policies",
@@ -434,6 +471,8 @@ impl ObjectStore {
             live,
             retired: Arc::new(AtomicBool::new(false)),
             durability,
+            written: Arc::new(AtomicU64::new(0)),
+            flushes: Arc::new(AtomicU64::new(0)),
         };
         if !store.root.join("git/HEAD").exists() {
             store.write_metadata(
@@ -557,11 +596,7 @@ impl ObjectStore {
                     "a carried root is a link or non-file".into(),
                 ));
             }
-            let root: StateRoot = serde_json::from_slice(&read_bounded(
-                &entry.path(),
-                manifest::MANIFEST_MAX_EXPANDED_BYTES,
-            )?)
-            .map_err(|_| HostError::Unsupported("carried root metadata is invalid".into()))?;
+            let root = self.read_prepared(id, None)?.metadata;
             if root.snapshot_id != id {
                 return Err(HostError::Unsupported(
                     "a carried root changed its immutable identity".into(),
@@ -635,6 +670,56 @@ impl ObjectStore {
             .join("roots")
             .join(format!("{snapshot}.json"))
             .exists()
+    }
+
+    /// Keeps the first watcher cursor even when this directory cannot be recorded as a whole.
+    /// A retry never moves the start past changes that already belong to this turn.
+    pub(crate) fn remember_changes(
+        &self,
+        snapshot: Id,
+        directory: &str,
+        attachment: Id,
+        cursor: Option<u64>,
+    ) -> Result<()> {
+        let path = self
+            .root
+            .join("results")
+            .join(format!("{snapshot}.changes"));
+        if path.exists() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&RecordingCursor {
+            attachment,
+            directory: directory.to_owned(),
+            cursor,
+        })
+        .map_err(|error| HostError::Internal(error.to_string()))?;
+        self.write_metadata(&path, &bytes)
+    }
+
+    /// An attachment's journal can never stand in for one lost on detach or restart.
+    pub(crate) fn changes_cursor(
+        &self,
+        snapshot: Id,
+        directory: &str,
+        attachment: Id,
+    ) -> Result<Option<u64>> {
+        let path = self
+            .root
+            .join("results")
+            .join(format!("{snapshot}.changes"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = read_bounded(&path, manifest::MANIFEST_MAX_EXPANDED_BYTES)?;
+        let saved: RecordingCursor = serde_json::from_slice(&bytes).map_err(|error| {
+            HostError::Unsupported(format!("recording cursor is invalid: {error}"))
+        })?;
+        Ok(
+            (saved.attachment == attachment && saved.directory == directory)
+                .then_some(saved.cursor)
+                .flatten(),
+        )
     }
 
     /// The first durable recording reply for an identity, including a reasoned fallback.
@@ -712,9 +797,8 @@ impl ObjectStore {
         until: Time,
     ) -> Result<(ManifestInput, StatePin)> {
         let pin = self.pin(request.snapshot_id, operation, until)?;
-        // Preserve the existing root/manifest/tree verification. Its bounded parse is local to
-        // capture and dropped here; waiting publications retain only the open file below.
-        let (root, _) = self.load(request.snapshot_id, now)?;
+        let kept = self.read_prepared(request.snapshot_id, Some(now))?;
+        let root = &kept.metadata;
         let asked =
             serde_json::to_vec(request).map_err(|error| HostError::Internal(error.to_string()))?;
         if root.request_hash != Some(Hash::of(&asked))
@@ -735,7 +819,7 @@ impl ObjectStore {
             .metadata()
             .map_err(|error| HostError::io("reading captured manifest size", error))?
             .len();
-        if size > manifest::MANIFEST_MAX_EXPANDED_BYTES {
+        if size != kept.manifest_size || size > manifest::MANIFEST_MAX_EXPANDED_BYTES {
             return Err(HostError::Unsupported(
                 "the captured manifest exceeds the recording limit".to_owned(),
             ));
@@ -867,7 +951,7 @@ impl ObjectStore {
         Ok(false)
     }
 
-    fn protect_tree(&self, root: &str, protected: &mut BTreeSet<String>) -> Result<()> {
+    pub(crate) fn protect_tree(&self, root: &str, protected: &mut BTreeSet<String>) -> Result<()> {
         let mut pending = vec![root.to_owned()];
         while let Some(oid) = pending.pop() {
             if !protected.insert(oid.clone()) {
@@ -913,11 +997,16 @@ impl ObjectStore {
 
     /// Removes only expired unpinned roots, then objects unreachable from roots, journals or cache.
     /// Root metadata remains as an explanation of expiry; collection never touches a project Git.
-    pub fn prune(
+    pub fn prune(&self, _expired: &[Id], now: Time, protected: BTreeSet<String>) -> Result<i64> {
+        self.prune_with_maps(_expired, now, protected, BTreeSet::new())
+    }
+
+    pub(crate) fn prune_with_maps(
         &self,
         _expired: &[Id],
         now: Time,
         mut protected: BTreeSet<String>,
+        mut maps: BTreeSet<Hash>,
     ) -> Result<i64> {
         let mut journal_roots = BTreeSet::new();
         for entry in std::fs::read_dir(self.root.join("journals"))
@@ -1002,12 +1091,8 @@ impl ObjectStore {
             else {
                 continue;
             };
-            let bytes = read_bounded(&entry.path(), manifest::MANIFEST_MAX_EXPANDED_BYTES)?;
-            let root: StateRoot = serde_json::from_slice(&bytes).map_err(|_| {
-                HostError::Unsupported(
-                    "a recorded root is invalid; collection waits for recovery".to_owned(),
-                )
-            })?;
+            let kept = self.read_prepared(id, None)?;
+            let root = kept.metadata;
             if root.snapshot_id != id {
                 return Err(HostError::Unsupported(
                     "a recorded root identity is invalid".to_owned(),
@@ -1016,6 +1101,7 @@ impl ObjectStore {
             let keep =
                 root.expires_at > now || self.pinned(id, now)? || journal_roots.contains(&id);
             if keep {
+                maps.insert(kept.objects_blob);
                 self.protect_tree(&root.tree_ref, &mut protected)?;
             } else {
                 releasing.push(id);
@@ -1046,6 +1132,23 @@ impl ObjectStore {
                 let bytes = serde_json::to_vec(&saved)
                     .map_err(|error| HostError::Internal(error.to_string()))?;
                 self.write_metadata(&reply_path, &bytes)?;
+            }
+        }
+        for entry in std::fs::read_dir(self.root.join("object-maps"))
+            .map_err(|error| HostError::io("reading prepared object maps", error))?
+        {
+            let entry =
+                entry.map_err(|error| HostError::io("reading a prepared object map", error))?;
+            let Some(hash) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<Hash>().ok())
+            else {
+                continue;
+            };
+            if !maps.contains(&hash) {
+                std::fs::remove_file(entry.path())
+                    .map_err(|error| HostError::io("collecting a prepared object map", error))?;
             }
         }
         for directory in std::fs::read_dir(self.root.join("git/objects"))
@@ -1102,30 +1205,179 @@ impl ObjectStore {
             .join(&oid[2..]))
     }
 
-    fn publish_object(&self, staged: tempfile::NamedTempFile, oid: &str) -> Result<()> {
+    /// Publishes immutable objects without replacing a verified copy that a root already names.
+    /// Deferred objects share one pending set across every handle of this physical store.
+    fn publish_object(
+        &self,
+        staged: tempfile::NamedTempFile,
+        oid: &str,
+        durable: bool,
+        kind: &str,
+        size: i64,
+        expected: Hash,
+    ) -> Result<()> {
         let path = self.object_path(oid)?;
         let parent = path
             .parent()
             .ok_or_else(|| HostError::Internal("a Git object has no directory".to_owned()))?;
-        self.durability.ensure(parent)?;
-        staged
-            .as_file()
-            .sync_all()
-            .map_err(|error| HostError::io("syncing a recorded object", error))?;
-        // Replacing this name publishes the same verified object content, and also repairs an
-        // existing corrupt copy instead of declaring a newly recorded blob complete over it.
-        staged
-            .persist(&path)
-            .map_err(|error| HostError::io("publishing a recorded object", error.error))?;
-        #[cfg(test)]
-        if let Some(control) = &self.durability.control {
-            control.record(DirectoryEvent::Published(path.clone()));
+        let mut pending = self.live.1.lock().unwrap_or_else(PoisonError::into_inner);
+        self.durability.ensure_with(parent, durable)?;
+        let existing = path.exists()
+            && self
+                .verify_object_into(oid, kind, Some(size), Some(expected), &mut std::io::sink())
+                .is_ok();
+        if existing {
+            // Replacing identical bytes could put a new, unflushed inode under an already durable
+            // root. Keep the verified inode; a newly opened store still includes it in its barrier.
+            if durable {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| HostError::io("syncing a recorded object", error))?;
+            }
+        } else {
+            if durable {
+                staged
+                    .as_file()
+                    .sync_all()
+                    .map_err(|error| HostError::io("syncing a recorded object", error))?;
+            }
+            staged
+                .persist(&path)
+                .map_err(|error| HostError::io("publishing a recorded object", error.error))?;
+            #[cfg(test)]
+            if let Some(control) = &self.durability.control {
+                control.record(DirectoryEvent::Published(path.clone()));
+            }
         }
-        self.durability.sync(parent)
+        if durable {
+            self.durability.sync(parent)?;
+            pending.files.remove(&path);
+        } else {
+            // There are only 256 fanouts in the two-hex-digit object representation. Keep their
+            // directory handles, rather than opening a handle for every pending file.
+            for directory in [parent.to_owned(), self.root.join("git/objects")] {
+                if let std::collections::btree_map::Entry::Vacant(slot) =
+                    pending.directories.entry(directory)
+                {
+                    let handle = platform::Dir::open_path(slot.key()).map_err(|error| {
+                        HostError::io("opening recorded object directories", error)
+                    })?;
+                    slot.insert(handle);
+                }
+            }
+            pending.files.insert(path);
+            self.written.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Distinct object files still awaiting the store's own barrier.
+    #[must_use]
+    pub fn unsynced_objects(&self) -> u64 {
+        self.live
+            .1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .files
+            .len() as u64
+    }
+
+    /// How many objects were ever written without their own flush: what the baselines have read.
+    #[must_use]
+    pub fn deferred_written(&self) -> u64 {
+        self.written.load(Ordering::SeqCst)
+    }
+
+    /// How many batches of recorded files were made durable.
+    #[must_use]
+    pub fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// Flushes only recorded objects and their directory handles. Files are batched across the
+    /// CPU concurrency available to this process, so their writes can settle together. No barrier
+    /// includes unrelated dirty files on the filesystem. Failed batches remain pending for retry.
+    pub fn make_durable(&self) -> Result<()> {
+        let mut pending = self.live.1.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.files.is_empty() && pending.directories.is_empty() {
+            return Ok(());
+        }
+        if !pending.files.is_empty() {
+            let files: Vec<_> = pending.files.iter().collect();
+            let workers = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(files.len());
+            std::thread::scope(|scope| -> Result<()> {
+                let mut joins = Vec::new();
+                for batch in files.chunks(files.len().div_ceil(workers)) {
+                    joins.push(scope.spawn(move || -> Result<()> {
+                        for path in batch {
+                            #[cfg(test)]
+                            if let Some(control) = &self.durability.control {
+                                control.before_sync(path)?;
+                            }
+                            OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(path)
+                                .and_then(|file| file.sync_all())
+                                .map_err(|error| {
+                                    HostError::io("flushing a recorded object", error)
+                                })?;
+                            #[cfg(test)]
+                            if let Some(control) = &self.durability.control {
+                                control.record(DirectoryEvent::FileSynced((*path).clone()));
+                            }
+                        }
+                        Ok(())
+                    }));
+                }
+                for join in joins {
+                    join.join().map_err(|_| {
+                        HostError::Internal(
+                            "flushing recorded files stopped unexpectedly".to_owned(),
+                        )
+                    })??;
+                }
+                Ok(())
+            })?;
+        }
+        // Children before their parent: fanout entries, then the names of new fanouts and removal
+        // of staging names in git/objects. Every file barrier has completed before either step.
+        for directory in pending.directories.values().rev() {
+            #[cfg(test)]
+            if let Some(control) = &self.durability.control {
+                control.before_sync(directory.path())?;
+            }
+            directory
+                .sync()
+                .map_err(|error| HostError::io("flushing a recorded object directory", error))?;
+            #[cfg(test)]
+            if let Some(control) = &self.durability.control {
+                control.record(DirectoryEvent::Synced(directory.path().to_owned()));
+            }
+        }
+        pending.files.clear();
+        pending.directories.clear();
+        self.flushes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Stores raw file bytes as an owned Git blob and returns its Git and BLAKE3 identifiers.
     pub fn write_blob(&self, file: &mut File, size: u64) -> Result<(String, Hash)> {
+        self.write_blob_with(file, size, true)
+    }
+
+    /// Stores raw file bytes like [`ObjectStore::write_blob`], without flushing the object: for a
+    /// baseline, whose objects are flushed together by [`ObjectStore::make_durable`].
+    pub fn write_blob_deferred(&self, file: &mut File, size: u64) -> Result<(String, Hash)> {
+        self.write_blob_with(file, size, false)
+    }
+
+    fn write_blob_with(&self, file: &mut File, size: u64, durable: bool) -> Result<(String, Hash)> {
         let before = platform::file_meta(file)
             .map_err(|error| HostError::io("checking a recorded file", error))?;
         if !before.is_file() || before.size != size {
@@ -1177,12 +1429,31 @@ impl ObjectStore {
         let staged = encoder
             .finish()
             .map_err(|error| HostError::io("finishing a recorded blob", error))?;
-        self.publish_object(staged, &oid)?;
-        Ok((oid, Hash::finish(&hash)))
+        let hash = Hash::finish(&hash);
+        self.publish_object(
+            staged,
+            &oid,
+            durable,
+            "blob",
+            i64::try_from(size)
+                .map_err(|_| HostError::Unsupported("a recorded object is too large".to_owned()))?,
+            hash,
+        )?;
+        Ok((oid, hash))
     }
 
     /// Stores an owned Git blob or tree without any project attribute or filter processing.
     pub fn write_object(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.write_object_with(kind, bytes, true)
+    }
+
+    /// Stores an object like [`ObjectStore::write_object`], without flushing it: for the trees of a
+    /// state and the link text of a baseline, flushed together by [`ObjectStore::make_durable`].
+    pub fn write_object_deferred(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.write_object_with(kind, bytes, false)
+    }
+
+    fn write_object_with(&self, kind: &str, bytes: &[u8], durable: bool) -> Result<String> {
         if !matches!(kind, "blob" | "tree") {
             return Err(HostError::Unsupported(
                 "only recorded blobs and trees are stored".to_owned(),
@@ -1205,6 +1476,11 @@ impl ObjectStore {
                 .finish()
                 .map_err(|error| HostError::io("finishing a recorded object", error))?,
             &oid,
+            durable,
+            kind,
+            i64::try_from(bytes.len())
+                .map_err(|_| HostError::Unsupported("a recorded object is too large".to_owned()))?,
+            Hash::of(bytes),
         )?;
         Ok(oid)
     }
@@ -1307,7 +1583,7 @@ impl ObjectStore {
                 self.verify_object(&oid, "tree", Some(body.len() as i64), Some(Hash::of(&body)))?;
                 oid
             } else {
-                self.write_object("tree", &body)?
+                self.write_object_deferred("tree", &body)?
             };
             let path = RelPath::parse(&directory, PathStyle::Posix)?;
             if let Some(parent) = path.parent() {
@@ -1324,8 +1600,9 @@ impl ObjectStore {
             .ok_or_else(|| HostError::Internal("the recorded root tree was not built".to_owned()))
     }
 
-    /// Publishes a complete root only after its manifest and every owned object are durable.
-    pub fn keep(&self, state: &StateRoot, manifest: &[u8]) -> Result<()> {
+    /// Builds the immutable large metadata off the turn's capture path.
+    pub(crate) fn prepare(&self, state: &StateRoot, manifest: &[u8]) -> Result<PreparedState> {
+        self.make_durable()?;
         RelPath::parse(&state.directory, PathStyle::Posix)?;
         if Hash::of(manifest) != state.manifest_blob {
             return Err(HostError::Unsupported(
@@ -1340,13 +1617,42 @@ impl ObjectStore {
                 .join(state.manifest_blob.to_string()),
             manifest,
         )?;
-        self.keep_root_metadata(state)
+        self.prepare_metadata(state)
     }
 
-    /// Reestablishes the same root/reference after a visible rename whose durability failed.
-    pub(crate) fn keep_root_metadata(&self, state: &StateRoot) -> Result<()> {
+    fn prepare_metadata(&self, state: &StateRoot) -> Result<PreparedState> {
+        let objects = serde_json::to_vec(&state.objects)
+            .map_err(|error| HostError::Internal(error.to_string()))?;
+        if objects.len() as u64 > manifest::MANIFEST_MAX_EXPANDED_BYTES {
+            return Err(HostError::Unsupported(
+                "the recorded object map is too large".to_owned(),
+            ));
+        }
+        let objects_blob = Hash::of(&objects);
+        self.write_metadata(
+            &self.root.join("object-maps").join(objects_blob.to_string()),
+            &objects,
+        )?;
+        let mut metadata = state.clone();
+        metadata.objects.clear();
+        let manifest_size = std::fs::metadata(
+            self.root
+                .join("manifests")
+                .join(state.manifest_blob.to_string()),
+        )
+        .map_err(|error| HostError::io("checking the prepared manifest", error))?
+        .len();
+        Ok(PreparedState {
+            metadata,
+            objects_blob,
+            manifest_size,
+        })
+    }
+
+    fn keep_prepared_metadata(&self, kept: &PreparedState) -> Result<()> {
+        let state = &kept.metadata;
         let bytes =
-            serde_json::to_vec(state).map_err(|error| HostError::Internal(error.to_string()))?;
+            serde_json::to_vec(kept).map_err(|error| HostError::Internal(error.to_string()))?;
         self.write_metadata(
             &self
                 .root
@@ -1361,6 +1667,89 @@ impl ObjectStore {
                 .join(state.snapshot_id.to_string()),
             format!("{}\n", state.tree_ref).as_bytes(),
         )
+    }
+
+    /// Explicit restores prepare their coverage as part of their guarded write.
+    pub fn keep(&self, state: &StateRoot, manifest: &[u8]) -> Result<()> {
+        let kept = self.prepare(state, manifest)?;
+        self.keep_prepared_metadata(&kept)
+    }
+
+    /// Reestablishes an explicit restore root after a visible rename whose durability failed.
+    pub(crate) fn keep_root_metadata(&self, state: &StateRoot) -> Result<()> {
+        let kept = self.prepare_metadata(state)?;
+        self.keep_prepared_metadata(&kept)
+    }
+
+    /// A turn seals only its identity and deadline over already durable prepared coverage.
+    pub(crate) fn keep_turn(
+        &self,
+        prepared: &PreparedState,
+        request: &orch_link_contract::source::FsRecord,
+        directory: &RelPath,
+        generation: i64,
+        now: Time,
+    ) -> Result<FsRecordResult> {
+        if prepared.metadata.generation != generation
+            || prepared.metadata.directory != directory.as_str()
+        {
+            return Err(HostError::Changed(
+                "prepared recording belongs to another directory or attachment".to_owned(),
+            ));
+        }
+        let days = chrono::Duration::try_days(request.record_days)
+            .ok_or_else(|| HostError::Unsupported("recording days are too large".to_owned()))?;
+        let expires = now
+            .get()
+            .checked_add_signed(days)
+            .ok_or_else(|| HostError::Unsupported("recording expiry is too large".to_owned()))?;
+        let mut kept = prepared.clone();
+        kept.metadata.snapshot_id = request.snapshot_id;
+        kept.metadata.request_hash = Some(Hash::of(
+            &serde_json::to_vec(request).map_err(|error| HostError::Internal(error.to_string()))?,
+        ));
+        kept.metadata.kind = request.kind;
+        kept.metadata.created_at = now;
+        kept.metadata.expires_at = Time::new(expires);
+        self.keep_prepared_metadata(&kept)?;
+        Ok(kept.metadata.result())
+    }
+
+    fn read_prepared(&self, snapshot: Id, now: Option<Time>) -> Result<PreparedState> {
+        let bytes = read_bounded(
+            &self.root.join("roots").join(format!("{snapshot}.json")),
+            manifest::MANIFEST_MAX_EXPANDED_BYTES,
+        )?;
+        let kept: PreparedState = serde_json::from_slice(&bytes).map_err(|error| {
+            HostError::Unsupported(format!("recorded root metadata is invalid: {error}"))
+        })?;
+        if kept.metadata.snapshot_id != snapshot || !kept.metadata.objects.is_empty() {
+            return Err(HostError::Unsupported(
+                "recorded root identity or prepared coverage is invalid".to_owned(),
+            ));
+        }
+        if now.is_some_and(|now| kept.metadata.expires_at <= now) {
+            return Err(HostError::Unsupported("expired".to_owned()));
+        }
+        RelPath::parse(&kept.metadata.directory, PathStyle::Posix)?;
+        Ok(kept)
+    }
+
+    pub(crate) fn recover_reply(
+        &self,
+        request: &orch_link_contract::source::FsRecord,
+        now: Time,
+    ) -> Result<FsRecordResult> {
+        let kept = self.read_prepared(request.snapshot_id, Some(now))?;
+        let asked =
+            serde_json::to_vec(request).map_err(|error| HostError::Internal(error.to_string()))?;
+        if kept.metadata.request_hash != Some(Hash::of(&asked)) {
+            return Err(HostError::Changed(
+                "the published recording belongs to another frozen choice".to_owned(),
+            ));
+        }
+        self.keep_prepared_metadata(&kept)?;
+        Ok(kept.metadata.result())
     }
 
     /// Loads the exact root and verifies its manifest and expiry; it never substitutes live files.
@@ -1378,22 +1767,23 @@ impl ObjectStore {
         snapshot: Id,
         now: Option<Time>,
     ) -> Result<(StateRoot, manifest::Parsed)> {
+        let kept = self.read_prepared(snapshot, now)?;
+        let mut state = kept.metadata;
         let bytes = read_bounded(
-            &self.root.join("roots").join(format!("{snapshot}.json")),
+            &self
+                .root
+                .join("object-maps")
+                .join(kept.objects_blob.to_string()),
             manifest::MANIFEST_MAX_EXPANDED_BYTES,
         )?;
-        let state: StateRoot = serde_json::from_slice(&bytes).map_err(|error| {
-            HostError::Unsupported(format!("recorded root metadata is invalid: {error}"))
-        })?;
-        if state.snapshot_id != snapshot {
+        if Hash::of(&bytes) != kept.objects_blob {
             return Err(HostError::Unsupported(
-                "recorded root identity does not match".to_owned(),
+                "recorded object map failed hash verification".to_owned(),
             ));
         }
-        if now.is_some_and(|now| state.expires_at <= now) {
-            return Err(HostError::Unsupported("expired".to_owned()));
-        }
-        RelPath::parse(&state.directory, PathStyle::Posix)?;
+        state.objects = serde_json::from_slice(&bytes).map_err(|error| {
+            HostError::Unsupported(format!("recorded object map is invalid: {error}"))
+        })?;
         self.verify_object(&state.tree_ref, "tree", None, None)?;
         let bytes = read_bounded(
             &self
@@ -1423,6 +1813,20 @@ impl ObjectStore {
         wanted_size: Option<i64>,
         wanted_hash: Option<Hash>,
     ) -> Result<tempfile::NamedTempFile> {
+        let mut out = tempfile::NamedTempFile::new_in(&self.root)
+            .map_err(|error| HostError::io("staging verified recorded bytes", error))?;
+        self.verify_object_into(oid, wanted_kind, wanted_size, wanted_hash, &mut out)?;
+        Ok(out)
+    }
+
+    fn verify_object_into(
+        &self,
+        oid: &str,
+        wanted_kind: &str,
+        wanted_size: Option<i64>,
+        wanted_hash: Option<Hash>,
+        out: &mut impl Write,
+    ) -> Result<()> {
         let file = File::open(self.object_path(oid)?)
             .map_err(|error| HostError::io("opening a recorded object", error))?;
         let mut source = BufReader::new(ZlibDecoder::new(file));
@@ -1457,8 +1861,6 @@ impl ObjectStore {
                 "a recorded object has the wrong type or size".to_owned(),
             ));
         }
-        let mut out = tempfile::NamedTempFile::new_in(&self.root)
-            .map_err(|error| HostError::io("staging verified recorded bytes", error))?;
         let mut object_hash = Sha1::new();
         object_hash.update(&header);
         let mut content_hash = Hash::hasher();
@@ -1492,7 +1894,7 @@ impl ObjectStore {
                 "a recorded object failed hash verification".to_owned(),
             ));
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Reads one verified file or raw link, including its BLAKE3 and Git object checks.

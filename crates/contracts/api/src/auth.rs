@@ -158,6 +158,17 @@ pub enum OrgCreation {
     Invited,
 }
 
+/// Installation defaults for a person's reading experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InterfaceDefaults {
+    /// Extra recently closed views to retain; open views always retain their state.
+    pub kept_closed_tabs: i64,
+    /// Milliseconds before a read shows a loading indication.
+    pub progress_delay_ms: i64,
+    /// Freshness in milliseconds for directory, lookup, report and status reads.
+    pub read_freshness_ms: std::collections::BTreeMap<String, i64>,
+}
+
 /// What a client may know before anybody has signed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Meta {
@@ -202,6 +213,8 @@ pub struct Meta {
     pub link_endpoints: Vec<MetaLinkEndpoint>,
     /// The sizes the system accepts.
     pub limits: MetaLimits,
+    /// Installation defaults for choices each person may override in Interface.
+    pub interface_defaults: InterfaceDefaults,
 }
 
 /// What a sign-in, a registration or a refresh answers with.
@@ -346,6 +359,7 @@ pub struct ApiTokenInfo {
 pub struct TokenCreated {
     /// The secret, in the first answer only; `null` when the same creation is asked again with its key,
     /// since no secret is kept to be given twice.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: Option<String>,
     /// The token as it is listed.
     pub info: ApiTokenInfo,
@@ -361,6 +375,7 @@ pub struct TokenCreateReceipt {
     /// The credential that was made.
     pub token_id: Id,
     /// The newly generated secret, once; null on an idempotent replay.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: Option<String>,
     /// When the credential was created.
     pub created_at: Time,
@@ -408,6 +423,7 @@ impl TokenCreateResponse {
 pub struct SensitiveProof {
     /// The caller's password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// The one-use proof their identity provider gave for this act, where they have no password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,13 +518,16 @@ pub struct OrgToken {
 #[serde(deny_unknown_fields)]
 pub struct SetupCreateBody {
     /// The username to sign in with.
+    #[schemars(extend("x-storage-exact" = true))]
     pub username: String,
     /// The name to show.
     pub display_name: String,
     /// The password, at least [`PASSWORD_MIN_CHARS`] characters.
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: String,
     /// Their address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: Option<String>,
     /// The browser's time zone, an IANA name: their zone follows their device from the start, and is
     /// UTC until a browser reports one where none is given.
@@ -524,16 +543,20 @@ pub struct AuthRegisterBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_terms_hash: Option<String>,
     /// The username to sign in with.
+    #[schemars(extend("x-storage-exact" = true))]
     pub username: String,
     /// The name to show.
     pub display_name: String,
     /// The password, at least [`PASSWORD_MIN_CHARS`] characters.
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: String,
     /// Their address; a personal invitation requires the address it was made for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: Option<String>,
     /// The secret of an invitation, where registration needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub invitation: Option<String>,
     /// Explicitly accept the invitation's target as part of this registration/sign-in.
     /// Standalone registration uses a system admission link and joins no team.
@@ -671,6 +694,7 @@ pub struct AuthLoginBody {
     pub login: String,
     /// Their password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// A code that was mailed to them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,6 +716,7 @@ pub struct AuthEmailCodeSendBody {
     pub login: String,
     /// Their password, which makes a code a second step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
 }
 
@@ -700,6 +725,7 @@ pub struct AuthEmailCodeSendBody {
 #[serde(deny_unknown_fields)]
 pub struct AuthRecoveryStartBody {
     /// The address of the user.
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: String,
 }
 
@@ -708,8 +734,10 @@ pub struct AuthRecoveryStartBody {
 #[serde(deny_unknown_fields)]
 pub struct AuthRecoveryConfirmBody {
     /// The secret of the link.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: String,
     /// The new password.
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: String,
 }
 
@@ -718,6 +746,7 @@ pub struct AuthRecoveryConfirmBody {
 #[serde(deny_unknown_fields)]
 pub struct AuthEmailVerifyBody {
     /// The secret of the link.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: String,
 }
 
@@ -773,6 +802,7 @@ pub struct MeUpdateBody {
         skip_serializing_if = "Option::is_none"
     )]
     #[schemars(with = "Option<String>")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: Option<Option<String>>,
     /// The password, when a new address is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,6 +821,7 @@ pub struct AuthOidcStartQuery {
     pub redirect: Option<String>,
     /// The secret of an invitation, where registration needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub invitation: Option<String>,
     /// Explicitly accept the invitation's target as part of this registration/sign-in.
     /// Standalone registration uses a system admission link and joins no team.
@@ -841,6 +872,7 @@ pub struct MePasswordChangeBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_password: Option<String>,
     /// The password to have.
+    #[schemars(extend("x-storage-exact" = true))]
     pub new_password: String,
 }
 
@@ -851,6 +883,7 @@ pub struct MePasswordChangeBody {
 pub struct MeTotpSetupBody {
     /// Their password, where they have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// The one-use proof of their identity provider, where they have no password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -890,6 +923,7 @@ pub enum SensitivePurpose {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MeTotpSetupReply {
     /// The secret.
+    #[schemars(extend("x-storage-exact" = true))]
     pub secret: String,
     /// The same as an address an app can read from a picture.
     pub otpauth_url: String,
@@ -959,6 +993,7 @@ pub struct MeRecoveryCodesRegenerateBody {
 pub struct MeTotpDisableBody {
     /// Their password for a browser or legacy credential; unnecessary for an admitted explicit key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// A code of the app, or one unused saved recovery code.
     pub code: String,
@@ -972,6 +1007,7 @@ pub struct MeTotpDisableBody {
 pub struct MeEmailCodeSendBody {
     /// Their password, where they have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// The one-use proof of their identity provider, where they have no password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -992,6 +1028,7 @@ pub struct MeEmailCodeEnableBody {
 pub struct MeEmailCodeDisableBody {
     /// Their password for a browser or legacy credential; unnecessary for an admitted explicit key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// A mailed code, or one of their authenticator.
     pub code: String,

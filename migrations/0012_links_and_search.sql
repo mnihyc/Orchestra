@@ -1,5 +1,14 @@
 -- References between things, related items, and search with its optional pieces.
 
+CREATE TABLE machine_event_storage_gaps (
+    machine_id uuid NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+    stream text NOT NULL,
+    event_seq bigint NOT NULL,
+    sqlstate text NOT NULL,
+    recorded_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (machine_id, stream, event_seq)
+);
+
 CREATE TABLE link_cursors (
     machine_id uuid NOT NULL,
     stream text NOT NULL,
