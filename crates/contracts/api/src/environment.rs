@@ -831,6 +831,8 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that
@@ -838,6 +840,9 @@ pub enum EnvironmentIndexReason {
 /// directory of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Environment {
+    /// Current caller file reach and its native machine bound, on an environment only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_reach: Option<orch_access_contract::permissions::FileReachFacts>,
     /// Protected origin and native contextual availability, beside home and owner.
     #[serde(default, flatten)]
     pub provenance: crate::resource_groups::ResourceProvenance,

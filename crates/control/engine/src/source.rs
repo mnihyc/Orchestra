@@ -63,6 +63,24 @@ fn identity(
     )
 }
 
+/// A cancelled preparation keeps its receipt and advances only to the next retry-stable identity.
+async fn recording_identity(
+    conn: &mut orch_db::Conn,
+    thread: &ThreadRow,
+    input: Id,
+    environment: &environments::EnvironmentRow,
+    ordinal: i32,
+) -> Result<Id, EngineError> {
+    let mut snapshot = identity(thread, input, environment, ordinal);
+    while storage::snapshot(&mut *conn, snapshot)
+        .await?
+        .is_some_and(|state| state.unavailable_reason.as_deref() == Some("cancelled"))
+    {
+        snapshot = crate::ids::derived("source.resumed-before-state", &[snapshot.as_bytes()]);
+    }
+    Ok(snapshot)
+}
+
 /// Whether this next turn already has either a complete state or a reasoned fallback.
 pub(crate) async fn before_ready(
     unit: &mut Unit<'_>,
@@ -72,9 +90,9 @@ pub(crate) async fn before_ready(
     if !ready(thread)? {
         return Ok(false);
     }
-    // The end of the thread's last turn is observed before another turn begins: after that turn's
-    // commit, so its observation may still be due here.
-    if rows::end_due_turn(&mut *unit.conn, thread.node_id)
+    // Only the small immutable native seal precedes another turn. Publication and complete
+    // namespace comparison remain independently due in the background.
+    if rows::unsealed_end_turn(&mut *unit.conn, thread.node_id)
         .await?
         .is_some()
     {
@@ -87,11 +105,9 @@ pub(crate) async fn before_ready(
         return Ok(false);
     };
     let ordinal = rows::next_turn_ordinal(&mut *unit.conn, thread.node_id).await?;
-    let state = storage::snapshot(
-        &mut *unit.conn,
-        identity(thread, input.id, &environment, ordinal),
-    )
-    .await?;
+    let snapshot =
+        recording_identity(&mut *unit.conn, thread, input.id, &environment, ordinal).await?;
+    let state = storage::snapshot(&mut *unit.conn, snapshot).await?;
     Ok(state.is_some_and(|state| {
         matches!(state.state.as_str(), "complete" | "unavailable" | "expired")
     }))
@@ -99,6 +115,8 @@ pub(crate) async fn before_ready(
 
 fn unavailable(reason: &str) -> FsRecordResult {
     FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -267,6 +285,8 @@ impl Engine {
         input: &InputRow,
         environment: &environments::EnvironmentRow,
     ) -> Result<(), EngineError> {
+        // How long the turn waits for its recording, from the setting read with the other two below.
+        let wait_secs;
         let (snapshot, request) = {
             let mut tx = self.inner.db.begin().await?;
             let Some(current) = threads::lock(&mut tx, thread.node_id).await? else {
@@ -279,7 +299,8 @@ impl Engine {
                 return Ok(());
             }
             let ordinal = rows::next_turn_ordinal(&mut tx, thread.node_id).await?;
-            let snapshot = identity(&current, input.id, environment, ordinal);
+            let snapshot =
+                recording_identity(&mut tx, &current, input.id, environment, ordinal).await?;
             if storage::snapshot(&mut tx, snapshot)
                 .await?
                 .is_some_and(|state| state.state != "running")
@@ -290,10 +311,12 @@ impl Engine {
                 .ok_or_else(|| EngineError::unreadable("recording days are not registered"))?;
             let bytes = registry::get(keys::WORKSPACE_RECORD_MAX_BYTES)
                 .ok_or_else(|| EngineError::unreadable("recording bytes are not registered"))?;
+            let wait = registry::get(keys::WORKSPACE_RECORD_WAIT_SECS)
+                .ok_or_else(|| EngineError::unreadable("the recording wait is not registered"))?;
             let settings = Snapshot::load(
                 &mut tx,
                 Place::Environment(environment.id),
-                Wanted::Keys(&[days, bytes]),
+                Wanted::Keys(&[days, bytes, wait]),
             )
             .await?;
             let record_days = settings
@@ -306,6 +329,14 @@ impl Engine {
                 .value
                 .and_then(|value| value.as_i64())
                 .ok_or_else(|| EngineError::unreadable("recording bytes are invalid"))?;
+            let chosen_wait = settings.resolve(wait);
+            let wait_for_indexing =
+                chosen_wait.source.scope != orch_settings_contract::SourceScope::Default;
+            wait_secs = chosen_wait
+                .value
+                .and_then(|value| value.as_i64())
+                .filter(|secs| *secs > 0)
+                .ok_or_else(|| EngineError::unreadable("the recording wait is invalid"))?;
             rows::begin_recorded(
                 &mut tx,
                 &storage::NewSnapshot {
@@ -326,9 +357,11 @@ impl Engine {
             (
                 snapshot,
                 FsRecord {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: environment.id,
                     snapshot_id: snapshot,
                     directory: thread.workspace_dir.clone(),
+                    wait_for_indexing,
                     kind: RecordKind::Turn,
                     record_days,
                     max_bytes,
@@ -337,40 +370,86 @@ impl Engine {
         };
         let command_id = crate::ids::derived("fs.record.before-turn", &[snapshot.as_bytes()]);
         let mut result = if let Some(machine) = environment.machine_id {
+            // The command's own time is how long the machine may wait for the files to be ready;
+            // the engine itself gives up on the answer after twice that (the files, then their
+            // upload), not counting any time the command stands in the machine's line behind other
+            // work, which is told to the thread.
             let command = Outgoing::new(
                 command_id,
                 machine,
                 SerialKey::Environment(environment.id),
                 &request,
-            )?;
-            let outcome = if self.inner.commands.status(command_id).await?.is_some() {
-                self.inner.commands.wait(command_id).await
+            )?
+            .by(orch_types::Time::new(
+                self.inner.clock.now() + chrono::Duration::seconds(wait_secs),
+            ));
+            if request.record_days == 0 {
+                // Recording is off: the machine is told so (it stops keeping the directory's files up to
+                // date for a recording), and the turn does not wait for its answer, which is known.
+                if self.inner.commands.status(command_id).await?.is_none() {
+                    match self.inner.commands.issue(command).await {
+                        Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
+                        Err(error) => {
+                            tracing::warn!(%error, command=%command_id, environment=%environment.id,
+                                "the machine could not be told that recording is off");
+                        }
+                        Ok(()) => {}
+                    }
+                }
+                unavailable("off")
             } else {
-                crate::commands::run(self.inner.commands.as_ref(), command).await
-            };
-            match outcome {
-                Ok(Outcome::Succeeded(value)) => {
-                    serde_json::from_value(value).unwrap_or_else(|error| {
-                        tracing::warn!(%error, command=%command_id, environment=%environment.id,
+                let patience = std::time::Duration::from_secs(
+                    u64::try_from(wait_secs).unwrap_or(1).saturating_mul(2),
+                );
+                let asking = async {
+                    if self.inner.commands.status(command_id).await?.is_none() {
+                        self.inner.commands.issue(command).await?;
+                    }
+                    self.inner.commands.wait(command_id).await
+                };
+                let outcome = match self
+                    .waiting_noted(
+                        thread.node_id,
+                        command_id,
+                        orch_link_contract::commands::CommandKind::FsRecord,
+                        Some(patience),
+                        asking,
+                    )
+                    .await
+                {
+                    crate::start_wait::Waited::Done(outcome) => outcome,
+                    crate::start_wait::Waited::Tired => {
+                        tracing::warn!(command=%command_id, environment=%environment.id, wait_secs,
+                        "the files were not recorded in time, so the turn goes on without a whole-state recording");
+                        let _ = self.inner.commands.cancel(command_id).await;
+                        Ok(Outcome::Succeeded(
+                            serde_json::to_value(unavailable("timeout"))
+                                .map_err(|error| CommandsError::Body(error.to_string()))?,
+                        ))
+                    }
+                };
+                match outcome {
+                    Ok(Outcome::Succeeded(value)) => {
+                        serde_json::from_value(value).unwrap_or_else(|error| {
+                            tracing::warn!(%error, command=%command_id, environment=%environment.id,
                         "the file recording reply could not be read");
-                        unavailable("store_unavailable")
-                    })
-                }
-                Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
-                Ok(Outcome::Failed(error)) => {
-                    tracing::warn!(code=%error.code, reason=%error.detail, command=%command_id, environment=%environment.id,
+                            unavailable("store_unavailable")
+                        })
+                    }
+                    Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
+                    Ok(Outcome::Failed(error)) if error.code == "busy" => unavailable("not_ready"),
+                    Ok(Outcome::Failed(error)) => {
+                        tracing::warn!(code=%error.code, reason=%error.detail, command=%command_id, environment=%environment.id,
                         "the machine could not record the files before a turn");
-                    unavailable("store_unavailable")
-                }
-                Ok(outcome @ (Outcome::Expired | Outcome::Cancelled)) => {
-                    tracing::warn!(?outcome, command=%command_id, environment=%environment.id,
-                        "the recording command ended before a complete answer");
-                    unavailable("store_unavailable")
-                }
-                Err(error) => {
-                    tracing::warn!(%error, command=%command_id, environment=%environment.id,
+                        unavailable("store_unavailable")
+                    }
+                    Ok(Outcome::Cancelled) => unavailable("cancelled"),
+                    Ok(Outcome::Expired) => unavailable("timeout"),
+                    Err(error) => {
+                        tracing::warn!(%error, command=%command_id, environment=%environment.id,
                         "the recording command could not complete");
-                    unavailable("store_unavailable")
+                        unavailable("store_unavailable")
+                    }
                 }
             }
         } else {
@@ -444,7 +523,9 @@ impl Engine {
             result = unavailable("store_unavailable");
         }
         if result.state == RecordState::Unavailable {
+            let indexing = result.indexing.take();
             result = unavailable(result.reason.as_deref().unwrap_or("store_unavailable"));
+            result.indexing = indexing;
         }
         let mut tx = self.inner.db.begin().await?;
         let mut unit = Unit::new(&mut tx, self.inner.clock.now());
@@ -510,7 +591,9 @@ impl Engine {
         environment: &environments::EnvironmentRow,
         turn: &TurnRow,
     ) -> Result<(), EngineError> {
-        let snapshot = identity(thread, input.id, environment, turn.ordinal);
+        let snapshot =
+            recording_identity(&mut *unit.conn, thread, input.id, environment, turn.ordinal)
+                .await?;
         if let Some(row) = storage::snapshot(&mut *unit.conn, snapshot).await?
             && row.state != "running"
         {
@@ -523,6 +606,20 @@ impl Engine {
                 storage::unpin_blobs(&mut *unit.conn, &[manifest], now).await?;
             }
             rows::set_before_state(&mut *unit.conn, turn.id, snapshot).await?;
+            if row.state == "unavailable"
+                && matches!(
+                    row.unavailable_reason.as_deref(),
+                    Some("too_large" | "live_tree" | "indexing")
+                )
+            {
+                sqlx::query("UPDATE turns SET recording_notice = $2,
+                    recording_indexing = (SELECT recording_indexing FROM snapshots WHERE id = $4) WHERE id = $1
+                    AND NOT EXISTS (SELECT 1 FROM turns prior WHERE prior.thread_id = $3 AND
+                        (($2 IN ('too_large','live_tree') AND prior.recording_notice IN ('too_large','live_tree'))
+                         OR ($2 = 'indexing' AND prior.recording_notice = 'indexing')))")
+                    .bind(turn.id).bind(&row.unavailable_reason).bind(thread.node_id).bind(snapshot)
+                    .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+            }
         }
         Ok(())
     }
@@ -531,9 +628,8 @@ impl Engine {
     /// a machine or the content store). With nothing to ask (no segment, no environment of the turn's
     /// generation on a machine, no directory) the coverage is explicitly unknown at once; otherwise the
     /// observation is due, and [`Engine::drive_end_observation`] takes it once this transaction has
-    /// committed. The thread's next turn waits for it ([`before_ready`]), so watcher end hashes are still
-    /// stored before another turn, and a restart takes the same durable observation (the command's
-    /// identifier is the turn's) rather than newer live files.
+    /// committed. Only its small immutable seal precedes the next turn; background publication and
+    /// comparison consume that same durable command receipt after restart, never newer live files.
     pub(crate) async fn observe_turn_end(
         &self,
         unit: &mut Unit<'_>,
@@ -546,7 +642,6 @@ impl Engine {
             EndPlan::Ask(_) => rows::end_due(&mut *unit.conn, turn.id).await?,
             EndPlan::Unknown => {
                 // Unknown coverage invalidates old observations conservatively.
-                rows::set_end_manifest(&mut *unit.conn, turn.id, None, None).await?;
                 rows::work_pending(&mut *unit.conn, turn.id, true).await?;
             }
         }
@@ -590,15 +685,17 @@ impl Engine {
         // writes nothing, so it never waits behind another thread's recording or change of the
         // environment (C-turns: the end observations of a whole environment queued behind its
         // recordings, and the next turns behind them). This thread's own order is the engine's: its
-        // next turn waits for this observation ([`before_ready`]).
+        // next turn waits only for this observation's small seal ([`before_ready`]).
         let command = Outgoing::new(
             crate::ids::derived("workspace.observe.end-turn", &[turn.id.as_bytes()]),
             machine,
             SerialKey::None,
             &WorkspaceObserve {
+                sealed: None,
                 environment_id: environment,
                 thread_id: thread.node_id,
                 turn_id: Some(turn.id),
+                before_snapshot_id: turn.before_snapshot_id,
                 directory,
             },
         )?;
@@ -610,24 +707,98 @@ impl Engine {
         })))
     }
 
-    /// Takes the end observation that a committed turn of `thread_id` left due ([`Engine::observe_turn_end`]):
-    /// the machine is asked and the content store read with no transaction open, and what they said is
-    /// written once, in a short transaction of its own under the thread's lock.
+    /// Seals only prepared metadata/changed paths before another turn; publishing never owns the start.
     pub(crate) async fn drive_end_observation(&self, thread_id: Id) -> Result<(), EngineError> {
-        let (turn, plan) = {
+        let pending = {
             let mut conn = self.inner.db.acquire().await?;
-            let Some(turn) = rows::end_due_turn(&mut conn, thread_id).await? else {
-                return Ok(());
-            };
-            let Some(turn) = threads::turn(&mut conn, turn).await? else {
-                return Ok(());
-            };
-            let Some(thread) = threads::thread(&mut conn, thread_id).await? else {
-                return Ok(());
-            };
-            let plan = self.end_plan(&mut conn, &thread, &turn).await?;
-            (turn, plan)
+            match rows::unsealed_end_turn(&mut conn, thread_id).await? {
+                Some(id) => {
+                    let turn = threads::turn(&mut conn, id).await?;
+                    let thread = threads::thread(&mut conn, thread_id).await?;
+                    match (turn, thread) {
+                        (Some(turn), Some(thread)) => {
+                            Some((id, self.end_plan(&mut conn, &thread, &turn).await?))
+                        }
+                        _ => None,
+                    }
+                }
+                None => None,
+            }
         };
+        if let Some((id, plan)) = pending {
+            // The command journal and control-plane result retain the immutable seal across restart.
+            self.read_end_observation(plan).await?;
+            let mut conn = self.inner.db.acquire().await?;
+            rows::seal_end(&mut conn, id).await?;
+        }
+        {
+            let mut conn = self.inner.db.acquire().await?;
+            if rows::end_due_turn(&mut conn, thread_id).await?.is_none() {
+                return Ok(());
+            }
+        }
+        if !crate::engine::lock(&self.inner.end_publications).insert(thread_id) {
+            return Ok(());
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            struct Owner {
+                engine: Engine,
+                thread: Id,
+            }
+            impl Drop for Owner {
+                fn drop(&mut self) {
+                    crate::engine::lock(&self.engine.inner.end_publications).remove(&self.thread);
+                }
+            }
+            let _owner = Owner {
+                engine: engine.clone(),
+                thread: thread_id,
+            };
+            let outcome = engine.publish_end_observation(thread_id).await;
+            drop(_owner);
+            match outcome {
+                Ok(()) => engine.wake(thread_id),
+                Err(error) => {
+                    tracing::debug!(%error, %thread_id, "the sealed end publication will be tried again")
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn publication_plan(&self, plan: EndPlan) -> Result<EndPlan, EngineError> {
+        let EndPlan::Ask(mut observation) = plan else {
+            return Ok(plan);
+        };
+        let known = self.inner.commands.status(observation.command.id).await?;
+        let sealed = match known.and_then(|info| info.outcome) {
+            Some(Outcome::Succeeded(value)) => {
+                serde_json::from_value::<WorkspaceObserveResult>(value).ok()
+            }
+            _ => None,
+        }
+        .unwrap_or(WorkspaceObserveResult {
+            end_patch_blob: None,
+            end_manifest_blob: None,
+            changed_paths: None,
+            changed_paths_complete: false,
+        });
+        let mut body: WorkspaceObserve = serde_json::from_value(observation.command.body.clone())?;
+        body.sealed = Some(sealed);
+        let turn = body
+            .turn_id
+            .ok_or_else(|| EngineError::unreadable("an end publication has no turn"))?;
+        observation.command = Outgoing::new(
+            crate::ids::derived("workspace.observe.publish", &[turn.as_bytes()]),
+            observation.machine,
+            SerialKey::None,
+            &body,
+        )?;
+        Ok(EndPlan::Ask(observation))
+    }
+
+    async fn read_end_observation(&self, plan: EndPlan) -> Result<ObservedEnd, EngineError> {
         let (environment, before, observed) = match plan {
             EndPlan::Ask(observation) => {
                 let EndObservation {
@@ -636,6 +807,14 @@ impl Engine {
                     environment,
                     before,
                 } = *observation;
+                let fallback = serde_json::from_value::<WorkspaceObserve>(command.body.clone())
+                    .ok()
+                    .and_then(|body| body.sealed)
+                    .map(|mut sealed| {
+                        sealed.end_manifest_blob = None;
+                        sealed.end_patch_blob = None;
+                        sealed
+                    });
                 let known = self.inner.commands.status(command.id).await?;
                 let outcome = match known.and_then(|info| info.outcome) {
                     Some(outcome) => Ok(outcome),
@@ -659,16 +838,63 @@ impl Engine {
                     Ok(Outcome::Succeeded(value)) => {
                         serde_json::from_value::<WorkspaceObserveResult>(value)
                             .ok()
-                            .and_then(|value| value.end_manifest_blob)
+                            .or_else(|| fallback.clone())
                     }
                     Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
-                    _ => None,
+                    _ => fallback,
                 };
                 (Some(environment), before, observed)
             }
             EndPlan::Nothing | EndPlan::Unknown => (None, None, None),
         };
-        let mut end = match observed {
+        Ok(ObservedEnd {
+            environment,
+            before,
+            observed,
+        })
+    }
+
+    /// Takes the end observation that a committed turn of `thread_id` left due ([`Engine::observe_turn_end`]):
+    /// the machine is asked and the content store read with no transaction open, and what they said is
+    /// written once, in a short transaction of its own under the thread's lock.
+    async fn publish_end_observation(&self, thread_id: Id) -> Result<(), EngineError> {
+        let (turn, plan) = {
+            let mut conn = self.inner.db.acquire().await?;
+            let Some(turn) = rows::end_due_turn(&mut conn, thread_id).await? else {
+                return Ok(());
+            };
+            let Some(turn) = threads::turn(&mut conn, turn).await? else {
+                return Ok(());
+            };
+            let Some(thread) = threads::thread(&mut conn, thread_id).await? else {
+                return Ok(());
+            };
+            let plan = self.end_plan(&mut conn, &thread, &turn).await?;
+            (turn, plan)
+        };
+        let plan = self.publication_plan(plan).await?;
+        let ObservedEnd {
+            environment,
+            before,
+            observed,
+        } = self.read_end_observation(plan).await?;
+        let journal = observed
+            .as_ref()
+            .and_then(|value| value.changed_paths.as_ref())
+            .map(|paths| Changes {
+                complete: observed
+                    .as_ref()
+                    .is_some_and(|value| value.changed_paths_complete),
+                paths: paths
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                added: None,
+                removed: None,
+            });
+        let mut end = match observed.and_then(|value| value.end_manifest_blob) {
             Some(hash) => self
                 .read_manifest_checked(hash)
                 .await
@@ -701,6 +927,40 @@ impl Engine {
             (Some(_), Some(hash)) => self.read_manifest_checked(hash).await.ok(),
             _ => None,
         };
+        // Compare large namespaces off the async worker. The journal supplies paths when whole
+        // recording is unavailable; no directory-sized value is written into the turn row.
+        let has_environment = environment.is_some();
+        let (changes, changed_names, changed_count, complete) =
+            tokio::task::spawn_blocking(move || {
+                let changes = match (&before, &end) {
+                    (Some(before), Some((_, end)))
+                        if has_environment
+                            && before.header().root == end.header().root
+                            && before.header().generation == end.header().generation =>
+                    {
+                        Some(changed_paths(before, end))
+                    }
+                    _ => journal,
+                };
+                let names = changes.as_ref().map(|changes| json!(changes.paths));
+                let count = changes
+                    .as_ref()
+                    .and_then(|changes| i32::try_from(changes.paths.len()).ok());
+                let complete = changes.as_ref().map(|changes| changes.complete);
+                (changes, names, count, complete)
+            })
+            .await
+            .map_err(EngineError::unreadable)?;
+        if let Some((hash, size)) = retained {
+            // Metadata is kept independently of the restore bytes and before taking the thread row.
+            let observed_at = turn.completed_at.unwrap_or_else(|| self.inner.clock.now());
+            let mut tx = self.inner.db.begin().await?;
+            storage::register_blob(&mut tx, &hash, size, observed_at).await?;
+            if rows::retain_end_manifest(&mut tx, turn.id, &hash).await? {
+                storage::pin_blobs(&mut tx, &[hash]).await?;
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+        }
         let mut tx = self.inner.db.begin().await?;
         let mut unit = Unit::new(&mut tx, self.inner.clock.now());
         let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? else {
@@ -712,29 +972,18 @@ impl Engine {
         // The turn's own moment, as when this was written in the transaction that ended it.
         let now = turn.completed_at.unwrap_or_else(|| unit.now());
         let seq = unit.stamp(thread_id).await?;
-        if let Some((hash, size)) = retained {
-            storage::register_blob(&mut *unit.conn, &hash, size, now).await?;
-            storage::pin_blobs(&mut *unit.conn, &[hash]).await?;
-        }
-        let namespace = end.as_ref().map(|(_, manifest)| end_namespace(manifest));
-        rows::set_end_manifest(
-            &mut *unit.conn,
-            turn.id,
-            namespace.as_ref(),
-            end.as_ref().map(|(hash, _)| hash),
-        )
-        .await?;
         // Unknown coverage also invalidates old observations conservatively. Only a complete,
         // equal before/end comparison can prove that no included change occurred.
         rows::work_pending(&mut *unit.conn, turn.id, true).await?;
-        if let Some((_, end)) = end
-            && let Some(before) = before
+        if let Some(changes) = changes
             && let Some(environment) = environment
-            && before.header().root == end.header().root
-            && before.header().generation == end.header().generation
         {
-            let changes = changed_paths(&before, &end);
-            rows::work_pending(&mut *unit.conn, turn.id, !changes.paths.is_empty()).await?;
+            rows::work_pending(
+                &mut *unit.conn,
+                turn.id,
+                !changes.complete || !changes.paths.is_empty(),
+            )
+            .await?;
             if !changes.paths.is_empty() {
                 rows::stale_work(&mut *unit.conn, thread.node_id, now, seq).await?;
                 // The thread is the row's object, so its place is the thread's: the audit takes an
@@ -769,9 +1018,29 @@ impl Engine {
                 .await?;
             }
         }
+        rows::set_end_changes(
+            &mut *unit.conn,
+            turn.id,
+            changed_count,
+            changed_names.as_ref(),
+            complete,
+        )
+        .await?;
         let finished = unit.finish().await?;
         self.commit(tx, finished).await?;
         Ok(())
+    }
+
+    /// Reads semantic end facts only for an explicit restore or fork. Turn completion stores the
+    /// already retained manifest reference and never writes a directory-sized JSON value.
+    pub async fn read_end_namespace(&self, hash: Hash) -> Result<orch_types::Json, EngineError> {
+        let manifest = self.read_manifest_checked(hash).await?;
+        if !manifest.entries().iter().all(complete_entry) {
+            return Err(EngineError::unreadable(
+                "the saved end manifest is incomplete",
+            ));
+        }
+        Ok(end_namespace(&manifest))
     }
 
     pub(crate) async fn read_manifest_checked(&self, hash: Hash) -> Result<Manifest, EngineError> {
@@ -808,9 +1077,10 @@ impl Engine {
 }
 
 struct Changes {
+    complete: bool,
     paths: Vec<String>,
-    added: usize,
-    removed: usize,
+    added: Option<usize>,
+    removed: Option<usize>,
 }
 
 /// How the end of a turn is observed.
@@ -821,6 +1091,12 @@ enum EndPlan {
     Unknown,
     /// By asking the machine, after the commit of the transaction that ended the turn.
     Ask(Box<EndObservation>),
+}
+
+struct ObservedEnd {
+    environment: Option<Id>,
+    before: Option<storage::SnapshotRow>,
+    observed: Option<WorkspaceObserveResult>,
 }
 
 struct EndObservation {
@@ -881,14 +1157,15 @@ fn changed_paths(before: &Manifest, end: &Manifest) -> Changes {
         .collect();
     let names: BTreeSet<&str> = before.keys().chain(end.keys()).copied().collect();
     let mut changes = Changes {
+        complete: true,
         paths: Vec::new(),
-        added: 0,
-        removed: 0,
+        added: Some(0),
+        removed: Some(0),
     };
     for path in names {
         match (before.get(path), end.get(path)) {
-            (None, Some(_)) => changes.added += 1,
-            (Some(_), None) => changes.removed += 1,
+            (None, Some(_)) => changes.added = changes.added.map(|count| count + 1),
+            (Some(_), None) => changes.removed = changes.removed.map(|count| count + 1),
             (Some(before), Some(end)) if same(before, end) => continue,
             (Some(_), Some(_)) => {}
             (None, None) => continue,

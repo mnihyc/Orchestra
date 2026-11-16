@@ -55,6 +55,8 @@ struct Rig {
 
 fn body(env: Id, root: &Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -67,6 +69,316 @@ fn body(env: Id, root: &Path) -> EnvAttach {
         variables: BTreeMap::new(),
         secrets: BTreeMap::new(),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_live_tree_searches_all_names_in_replayable_continuation_pages() {
+    use orch_api_contract::workspace::FileSearchIn;
+    use orch_link_contract::commands::FsSearch;
+    let rig = rig_with(
+        &[
+            ("one/needle-a", "a"),
+            ("two/needle-b", "b"),
+            ("two/needle-c", "c"),
+            ("skip/needle-secret", "hidden"),
+        ],
+        |_, body| {
+            body.workspace.index_entries = 1;
+            body.ignore = vec!["skip/".to_owned()];
+        },
+    )
+    .await;
+    assert_eq!(rig.facts.index, IndexMode::Live);
+    let mut request = FsSearch {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        path: String::new(),
+        query: "needle".to_owned(),
+        scope: FileSearchIn::Names,
+        cursor: None,
+        regex: false,
+        case: false,
+        glob: None,
+        limit: 1,
+    };
+    let mut paths = Vec::new();
+    loop {
+        let page = rig.host.fs_search(&request).await.unwrap();
+        if request.cursor.is_some() {
+            let replay = rig.host.fs_search(&request).await.unwrap();
+            assert_eq!(page, replay);
+        }
+        paths.extend(page.names.unwrap().into_iter().map(|entry| entry.path));
+        request.cursor = page.next_cursor;
+        if request.cursor.is_none() {
+            break;
+        }
+    }
+    paths.sort();
+    assert_eq!(paths, ["one/needle-a", "two/needle-b", "two/needle-c"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn content_search_continuation_reaches_matches_beyond_the_first_window() {
+    use orch_api_contract::workspace::FileSearchIn;
+    use orch_link_contract::commands::FsSearch;
+    let rig = rig(&[("code.txt", "needle one\nneedle two\nneedle three\n")]).await;
+    let mut request = FsSearch {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        path: String::new(),
+        query: "needle".to_owned(),
+        scope: FileSearchIn::Content,
+        cursor: None,
+        regex: false,
+        case: false,
+        glob: None,
+        limit: 1,
+    };
+    let mut lines = Vec::new();
+    loop {
+        let page = rig.host.fs_search(&request).await.unwrap();
+        lines.extend(page.matches.into_iter().map(|entry| entry.line));
+        request.cursor = page.next_cursor;
+        if request.cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(lines, [1, 2, 3]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_archive_member_remains_reachable_beyond_the_first_listing_window() {
+    let rig = rig(&[]).await;
+    let file = std::fs::File::create(rig.root.join("packed.zip")).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    for n in 0..37 {
+        zip.start_file(
+            format!("member-{n:02}"),
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    }
+    zip.finish().unwrap();
+    let mut request = orch_link_contract::commands::FsArchiveList {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        query: None,
+        environment_id: rig.env,
+        path: "packed.zip".to_owned(),
+        inside: None,
+        limit: 3,
+        cursor: None,
+    };
+    let mut paths = std::collections::BTreeSet::new();
+    loop {
+        let page = rig.host.fs_archive_list(&request).await.unwrap();
+        assert!(page.entries.len() <= 3);
+        paths.extend(page.entries.into_iter().map(|entry| entry.path));
+        request.cursor = page.next_cursor;
+        if request.cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(paths.len(), 37);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_zip_finds_its_last_member_without_retaining_a_whole_archive_index() {
+    let rig = rig(&[]).await;
+    let file = std::fs::File::create(rig.root.join("packed.zip")).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    for n in 0..100_001 {
+        zip.start_file(
+            format!("member-{n:06}"),
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    }
+    zip.finish().unwrap();
+    let page = rig
+        .host
+        .fs_archive_list(&orch_link_contract::commands::FsArchiveList {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            query: Some("member-100000".to_owned()),
+            environment_id: rig.env,
+            path: "packed.zip".to_owned(),
+            inside: None,
+            limit: 2,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].path, "member-100000");
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recently_opened_names_arrive_before_another_walk_of_a_large_tree() {
+    use orch_api_contract::workspace::FileSearchIn;
+    use orch_link_contract::commands::FsSearch;
+    let rig = rig_with(
+        &[("cold/needle", "cold"), ("recent/needle", "recent")],
+        |_, body| body.workspace.index_entries = 1,
+    )
+    .await;
+    assert_eq!(rig.facts.index, IndexMode::Live);
+    assert_eq!(rig.names("recent").await, ["needle"]);
+    let page = rig
+        .host
+        .fs_search(&FsSearch {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.env,
+            scope: FileSearchIn::Names,
+            cursor: None,
+            path: String::new(),
+            query: "needle".to_owned(),
+            regex: false,
+            case: false,
+            glob: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.names.unwrap()[0].path, "recent/needle");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_searches_do_not_take_the_next_readers_only_slot() {
+    use orch_api_contract::workspace::FileSearchIn;
+    use orch_link_contract::commands::FsSearch;
+    let rig = rig_with(&[("one", "one"), ("two", "two")], |_, body| {
+        body.index = IndexMode::Live;
+        body.workspace.directory_slots = 1;
+    })
+    .await;
+    let request = FsSearch {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        scope: FileSearchIn::Names,
+        cursor: None,
+        path: String::new(),
+        query: "one".to_owned(),
+        regex: false,
+        case: false,
+        glob: None,
+        limit: 100,
+    };
+    let first = rig.host.fs_search(&request).await.unwrap();
+    assert!(first.next_cursor.is_none());
+    let second = rig
+        .host
+        .fs_search(&FsSearch {
+            query: "two".to_owned(),
+            ..request
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.names.unwrap()[0].path, "two");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_keeps_its_observed_rule_sources_and_actual_watch_interval() {
+    let mut rig = rig_with(
+        &[
+            (".orch_ignore", "*.log\n"),
+            ("sub/.orch_ignore", "!kept.log\n"),
+            ("sub/kept.log", "keep"),
+        ],
+        |settings, attach| {
+            settings.limits.rescan = Duration::from_secs(97);
+            attach.index = IndexMode::Live;
+            attach.ignore = vec!["*.tmp".into()];
+        },
+    )
+    .await;
+    let request = FsList {
+        prefix: None,
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        mount: None,
+        path: "sub".into(),
+        watch_id: Some(orch_types::new_id()),
+        watch_instance: None,
+        page: None,
+    };
+    let first = rig.host.fs_list(&request).await.unwrap();
+    rig.report(
+        "the initial directory observation",
+        |report| matches!(report, Report::FsChanged(changed) if changed.reset),
+    )
+    .await;
+    let facts = first.facts.unwrap();
+    let inclusion = facts.inclusion.as_ref().unwrap();
+    assert_eq!(inclusion.governing_rule_sources.len(), 3);
+    assert_eq!(
+        inclusion.governing_rule_sources[2].path.as_deref(),
+        Some("sub/.orch_ignore")
+    );
+    assert!(inclusion.internal_rules_applied);
+    assert!(!inclusion.parent_excluded);
+    assert_eq!(facts.watch.as_ref().unwrap().fallback_interval_secs, 97);
+    assert!(first.entries.iter().any(|entry| entry.name == "kept.log"));
+    std::fs::write(rig.root.join("sub/.orch_ignore"), "*.log\n").unwrap();
+    rig.report("the exclusion change", |report| matches!(report, Report::FsChanged(changed) if changed.invalidated || changed.removed.iter().any(|path| path.ends_with("kept.log")))).await;
+    let later = rig.host.fs_list(&request).await.unwrap();
+    assert!(!later.entries.iter().any(|entry| entry.name == "kept.log"));
+    assert_eq!(
+        facts
+            .inclusion
+            .as_ref()
+            .unwrap()
+            .governing_rule_sources
+            .len(),
+        3
+    );
+    assert_eq!(facts.watch.as_ref().unwrap().fallback_interval_secs, 97);
+    assert!(later.facts.unwrap().observed_at >= facts.observed_at);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_excluded_rule_name_is_redacted_without_crawling_the_omitted_directory() {
+    let rig = rig_with(
+        &[
+            (".orch_ignore", "private/\n"),
+            ("sub/.orch_ignore", "*.log\n"),
+            ("sub/visible", "keep"),
+            ("private/.orch_ignore", "invalid[\n"),
+        ],
+        |_, attach| {
+            attach.ignore = vec!["sub/.orch_ignore".into()];
+            attach.index = IndexMode::Live;
+        },
+    )
+    .await;
+    let listing = rig
+        .host
+        .fs_list(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.env,
+            mount: None,
+            path: "sub".into(),
+            watch_id: None,
+            watch_instance: None,
+            page: None,
+        })
+        .await
+        .unwrap();
+    let sources = listing
+        .facts
+        .unwrap()
+        .inclusion
+        .unwrap()
+        .governing_rule_sources;
+    assert!(sources.iter().any(|source| source.kind
+        == orch_api_contract::workspace::FileRuleKind::Local
+        && source.path.is_none()));
+    assert!(
+        sources
+            .iter()
+            .all(|source| source.path.as_deref() != Some("private/.orch_ignore"))
+    );
 }
 
 fn write_tree(root: &Path, files: &[(&str, &str)]) {
@@ -166,9 +478,11 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
     })
     .await?;
     let request = FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         snapshot_id: orch_types::new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
         max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -184,6 +498,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
         .fs_record_capture(
             &request,
             orch_types::new_id(),
+            until,
             until,
             tokio_util::sync::CancellationToken::new(),
         )
@@ -216,6 +531,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
             .host
             .fs_data_import(
                 &FsDataImport {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: rig.env,
                     job_id: orch_types::new_id(),
@@ -252,9 +568,11 @@ async fn recorded_exports_send_saved_bytes_and_the_original_manifest_after_live_
         .host
         .fs_record(
             &FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: rig.env,
                 snapshot_id: snapshot,
                 directory: String::new(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -273,6 +591,7 @@ async fn recorded_exports_send_saved_bytes_and_the_original_manifest_after_live_
         .host
         .fs_record_read(
             &FsRecordRead {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: rig.env,
                 snapshot_id: snapshot,
                 path: None,
@@ -299,6 +618,7 @@ async fn recorded_exports_send_saved_bytes_and_the_original_manifest_after_live_
         .host
         .fs_record_read(
             &FsRecordRead {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: rig.env,
                 snapshot_id: snapshot,
                 path: Some("code.txt".to_owned()),
@@ -322,9 +642,11 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
         .host
         .fs_record(
             &FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: rig.env,
                 snapshot_id: snapshot,
                 directory: String::new(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -341,6 +663,7 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
     std::fs::write(rig.root.join("code.txt"), "current").unwrap();
     std::fs::write(rig.root.join("later.txt"), "made later").unwrap();
     let make_plan = FsRestorePlan {
+        access: orch_link_contract::commands::FsAccess::roots(),
         touched: None,
         environment_id: rig.env,
         snapshot_id: snapshot,
@@ -360,6 +683,7 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
         "the private plan must reach control-plane content storage"
     );
     let apply = FsRestore {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         recovery_only: None,
         environment_id: rig.env,
@@ -432,9 +756,11 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
         orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES
     );
     let request = FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         snapshot_id: orch_types::new_id(),
         directory: "web/feature".into(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days,
         max_bytes,
@@ -491,6 +817,7 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
         .host
         .fs_restore_plan(
             &FsRestorePlan {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 touched: None,
                 environment_id: rig.env,
                 snapshot_id: request.snapshot_id,
@@ -507,6 +834,7 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
     rig.host
         .fs_restore(
             &FsRestore {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 recovery_only: None,
                 environment_id: rig.env,
@@ -536,9 +864,11 @@ async fn re_enabling_the_shipped_recording_policy_prepares_the_next_identity_bef
     use orch_link_contract::source::{FsRecord, RecordKind, RecordState};
     let rig = rig(&[("code.txt", "before")]).await;
     let off = FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         snapshot_id: orch_types::new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 0,
         max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -551,15 +881,240 @@ async fn re_enabling_the_shipped_recording_policy_prepares_the_next_identity_bef
         record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
         ..off.clone()
     };
-    assert_eq!(
-        rig.host.fs_record(&on, &rig.store).await.unwrap().state,
-        RecordState::Complete
-    );
+    let enabled = rig.host.fs_record(&on, &rig.store).await.unwrap();
+    assert_eq!(enabled.state, RecordState::Complete, "{enabled:?}");
     assert_eq!(
         rig.host.fs_record(&off, &rig.store).await.unwrap(),
         disabled,
         "the previous disabled result stays immutable"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_of_new_files_reaches_the_next_recording_by_their_own_paths() {
+    use orch_link_contract::source::{FsRecord, RecordKind, RecordState};
+    let rig = rig(&[("seed.txt", "seed")]).await;
+    let ask = || FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: String::new(),
+        wait_for_indexing: true,
+        kind: RecordKind::Turn,
+        record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
+        max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
+    };
+    let first = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+    assert_eq!((first.state, first.files), (RecordState::Complete, 1));
+    for number in 0..300 {
+        std::fs::write(
+            rig.root.join(format!("burst-{number}.txt")),
+            format!("burst {number}"),
+        )
+        .unwrap();
+    }
+    let began = std::time::Instant::now();
+    loop {
+        let recorded = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+        if recorded.state == RecordState::Complete && recorded.files == 301 {
+            break;
+        }
+        assert!(
+            began.elapsed() < PATIENCE,
+            "the burst did not reach a recording in time: {recorded:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_beyond_whole_recording_still_names_the_paths_that_changed() {
+    use orch_link_contract::source::{FsRecord, RecordKind, WorkspaceObserve};
+    let rig = rig(&[("project/code.txt", "before"), ("other.txt", "outside")]).await;
+    let environment = rig.host.environment(rig.env).unwrap();
+    let request = FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: "project".into(),
+        wait_for_indexing: true,
+        kind: RecordKind::Turn,
+        record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
+        max_bytes: 1,
+    };
+    let recorded = rig.host.fs_record(&request, &rig.store).await.unwrap();
+    assert_eq!(recorded.reason.as_deref(), Some("too_large"));
+    std::fs::write(rig.root.join("project/code.txt"), "after").unwrap();
+    let changed = environment.files().parse("project/code.txt").unwrap();
+    environment.index().observe(&[
+        changed.clone(),
+        changed,
+        environment.files().parse("other.txt").unwrap(),
+    ]);
+    assert_eq!(
+        rig.host.fs_record(&request, &rig.store).await.unwrap(),
+        recorded,
+        "a replay cannot move the starting journal cursor"
+    );
+    let observe = WorkspaceObserve {
+        sealed: None,
+        environment_id: rig.env,
+        thread_id: orch_types::new_id(),
+        turn_id: Some(orch_types::new_id()),
+        before_snapshot_id: Some(request.snapshot_id),
+        directory: request.directory,
+    };
+    let result = rig
+        .host
+        .workspace_observe(&observe, &rig.store)
+        .await
+        .unwrap();
+    assert_eq!(result.changed_paths, Some(vec!["code.txt".to_owned()]));
+    assert!(
+        result.end_manifest_blob.is_none(),
+        "a journal never claims whole coverage"
+    );
+    environment.index().lost_events();
+    let lost = rig
+        .host
+        .workspace_observe(&observe, &rig.store)
+        .await
+        .unwrap();
+    assert!(
+        lost.changed_paths.is_none(),
+        "lost notices never claim an empty change list"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_degraded_index_keeps_native_shell_edit_observations_with_scoped_coverage() {
+    use orch_link_contract::source::{FsRecord, RecordKind, WorkspaceObserve};
+    let rig = rig_with(&[("code", "before"), ("another", "kept")], |_, body| {
+        body.workspace.index_entries = 1;
+    })
+    .await;
+    let environment = rig.host.environment(rig.env).unwrap();
+    assert!(!environment.index().state().is_full());
+    let request = FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: String::new(),
+        wait_for_indexing: false,
+        kind: RecordKind::Turn,
+        record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
+        max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
+    };
+    let recorded = rig.host.fs_record(&request, &rig.store).await.unwrap();
+    assert_eq!(recorded.reason.as_deref(), Some("live_tree"));
+    let watch_id = orch_types::new_id();
+    rig.host
+        .fs_list(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.env,
+            mount: None,
+            path: String::new(),
+            watch_id: Some(watch_id),
+            watch_instance: None,
+            page: None,
+        })
+        .await
+        .unwrap();
+    rig.host.fs_unwatch(&FsUnwatch { watch_id }).unwrap();
+    let before = environment
+        .file_changes_cursor()
+        .expect("a scoped observer still has a starting cursor");
+    std::fs::write(rig.root.join("code"), "a native shell edit").unwrap();
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            if environment
+                .file_changes_since(before)
+                .is_some_and(|paths| paths.iter().any(|path| path.as_str() == "code"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the native notice is kept after metadata coverage degrades");
+    let result = rig
+        .host
+        .workspace_observe(
+            &WorkspaceObserve {
+                sealed: None,
+                environment_id: rig.env,
+                thread_id: orch_types::new_id(),
+                turn_id: Some(orch_types::new_id()),
+                before_snapshot_id: Some(request.snapshot_id),
+                directory: String::new(),
+            },
+            &rig.store,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result
+            .changed_paths
+            .as_ref()
+            .is_some_and(|paths| paths.iter().any(|path| path == "code"))
+    );
+    assert!(
+        !result.changed_paths_complete,
+        "scoped native observations never promise whole-tree coverage"
+    );
+    assert!(result.end_manifest_blob.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealing_a_warm_one_path_turn_uses_prepared_metadata_without_uploading_a_namespace() {
+    struct NoPublication;
+    #[async_trait::async_trait]
+    impl orch_envhost::blobs::BlobSink for NoPublication {
+        async fn missing(&self, _: &[Hash]) -> Result<Vec<Hash>, BlobError> {
+            panic!("sealing cannot inspect remote content")
+        }
+        async fn put(
+            &self,
+            _: Hash,
+            _: i64,
+            _: &mut dyn orch_envhost::blobs::BlobReader,
+        ) -> Result<(), BlobError> {
+            panic!("sealing cannot upload a directory-sized namespace")
+        }
+    }
+    use orch_link_contract::source::{FsRecord, RecordKind, RecordState, WorkspaceObserve};
+    let rig = rig(&[("code", "before")]).await;
+    let ask = || FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: String::new(),
+        wait_for_indexing: true,
+        kind: RecordKind::Turn,
+        record_days: 7,
+        max_bytes: 1_048_576,
+    };
+    let first = ask();
+    assert_eq!(
+        rig.host.fs_record(&first, &rig.store).await.unwrap().state,
+        RecordState::Complete
+    );
+    std::fs::write(rig.root.join("code"), "one changed path").unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let prepared = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+    assert_eq!(prepared.state, RecordState::Complete);
+    let body: WorkspaceObserve = serde_json::from_value(serde_json::json!({
+        "environment_id": rig.env, "thread_id": orch_types::new_id(), "turn_id": orch_types::new_id(),
+        "before_snapshot_id": first.snapshot_id, "directory": ""
+    })).unwrap();
+    let sealed = rig
+        .host
+        .workspace_observe(&body, &NoPublication)
+        .await
+        .unwrap();
+    assert_eq!(sealed.end_manifest_blob, prepared.manifest_blob);
 }
 
 impl Drop for Rig {
@@ -578,6 +1133,8 @@ impl Drop for Rig {
 impl Rig {
     fn list(&self, path: &str) -> FsList {
         FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.env,
             mount: None,
             path: path.to_owned(),
@@ -721,6 +1278,7 @@ async fn a_managed_units_manifest_and_live_facts_use_the_generation_sent_when_at
         .host
         .fs_manifest(
             &FsManifest {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: rig.env,
                 selection: Selection::default(),
             },
@@ -780,9 +1338,11 @@ async fn a_capture_after_managed_reattachment_keeps_generation_two_and_its_actua
         .host
         .fs_record(
             &FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: rig.env,
                 snapshot_id: orch_types::new_id(),
                 directory: String::new(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -854,14 +1414,17 @@ async fn a_tree_above_the_entry_limit_is_listed_live_and_not_indexed() {
         .iter()
         .map(|(path, text)| (path.as_str(), *text))
         .collect();
-    let mut rig = rig_with(&refs, |settings, _| settings.limits.index_max_entries = 10).await;
+    let mut rig = rig_with(&refs, |_, attach| attach.workspace.index_entries = 10).await;
     assert_eq!(
         rig.facts.index,
         IndexMode::Live,
         "thirty-three entries do not fit in ten"
     );
     let environment = rig.host.environment(rig.env).unwrap();
-    assert!(environment.index().is_empty(), "nothing is kept");
+    assert!(
+        !environment.index().is_empty(),
+        "bounded partial metadata survives"
+    );
 
     assert_eq!(
         rig.names("d2").await.len(),
@@ -869,6 +1432,7 @@ async fn a_tree_above_the_entry_limit_is_listed_live_and_not_indexed() {
         "it is listed from the file system as it is now"
     );
     let whole = FsManifest {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         selection: Selection::default(),
     };
@@ -878,6 +1442,7 @@ async fn a_tree_above_the_entry_limit_is_listed_live_and_not_indexed() {
         "the whole of it is not listed in one go"
     );
     let part = FsManifest {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         selection: Selection {
             include: vec!["d1".into()],
@@ -900,8 +1465,8 @@ async fn a_tree_above_the_entry_limit_is_listed_live_and_not_indexed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_says_so() {
-    let mut rig = rig_with(&[("a.txt", "1")], |settings, _| {
-        settings.limits.index_max_entries = 5
+    let mut rig = rig_with(&[("a.txt", "1")], |_, attach| {
+        attach.workspace.index_entries = 5
     })
     .await;
     assert_eq!(rig.facts.index, IndexMode::Full);
@@ -914,9 +1479,10 @@ async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_s
         std::fs::write(rig.root.join(format!("more{n}.txt")), "x").unwrap();
     }
     let report = rig
-        .report("the facts of a tree that is live now", |report| {
-            matches!(report, Report::Facts(_))
-        })
+        .report(
+            "the facts of a tree that is live now",
+            |report| matches!(report, Report::Facts(facts) if facts.index == IndexMode::Live),
+        )
         .await;
     let Report::Facts(facts) = report else {
         unreachable!()
@@ -925,6 +1491,46 @@ async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_s
     assert_eq!(
         rig.host.environment(rig.env).unwrap().facts().index,
         IndexMode::Live
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broken_exclusions_leave_the_environment_available_and_explain_why_its_files_are_not_served()
+ {
+    let rig = rig(&[
+        (".orch_ignore", "[z-a]\n"),
+        ("hidden.txt", "do not return this"),
+    ])
+    .await;
+    let problem = rig
+        .facts
+        .exclusion_problem
+        .as_ref()
+        .expect("the rules problem is reported");
+    assert_eq!(problem.path, ".orch_ignore");
+    assert_eq!(problem.line, Some(1));
+    let error = rig
+        .host
+        .fs_stat(&FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.env,
+            mount: None,
+            path: "hidden.txt".to_owned(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(".orch_ignore"));
+    assert!(
+        rig.host
+            .fs_stat(&FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
+                environment_id: rig.env,
+                mount: None,
+                path: ".orch_ignore".to_owned()
+            })
+            .await
+            .is_ok(),
+        "the environment and its broken control file remain available for correction"
     );
 }
 
@@ -942,6 +1548,7 @@ async fn a_file_is_listed_described_and_fetched_into_the_store_once() {
     let stat = rig
         .host
         .fs_stat(&FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.env,
             mount: None,
             path: "src/main.rs".into(),
@@ -952,6 +1559,7 @@ async fn a_file_is_listed_described_and_fetched_into_the_store_once() {
     assert!(stat.is_text);
 
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         mount: None,
         path: "src/main.rs".into(),
@@ -1006,6 +1614,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
         let stat = rig
             .host
             .fs_stat(&FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: env,
                 mount: None,
                 path: path.into(),
@@ -1015,6 +1624,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
             .host
             .fs_fetch(
                 &FsFetch {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env,
                     mount: None,
                     path: path.into(),
@@ -1028,6 +1638,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
             .host
             .fs_write(
                 &FsWrite {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: env,
                     path: path.into(),
@@ -1041,6 +1652,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
         let remove = rig
             .host
             .fs_remove(&FsRemove {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: env,
                 path: path.into(),
                 recursive: true,
@@ -1049,6 +1661,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
         let rename = rig
             .host
             .fs_rename(&FsRename {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: env,
                 from: "inside.txt".into(),
                 to: path.into(),
@@ -1057,6 +1670,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
         let copy = rig
             .host
             .fs_copy(&FsCopy {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: env,
                 from: path.into(),
                 to: "copy.txt".into(),
@@ -1065,6 +1679,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
         let mkdir = rig
             .host
             .fs_mkdir(&FsMkdir {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: env,
                 path: format!("{path}/dir"),
             })
@@ -1094,6 +1709,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
     let described = rig
         .host
         .fs_stat(&FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             mount: None,
             path: "escape.txt".into(),
@@ -1109,6 +1725,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
             rig.host
                 .fs_fetch(
                     &FsFetch {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         environment_id: env,
                         mount: None,
                         path: "escape.txt".into(),
@@ -1122,6 +1739,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
         ErrorCode::NotFound
     );
     let write = FsWrite {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: env,
         path: "escape.txt".into(),
@@ -1140,6 +1758,7 @@ async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command()
     // Removing it removes the link, not the file it points to.
     rig.host
         .fs_remove(&FsRemove {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             path: "escape.txt".into(),
             recursive: false,
@@ -1158,6 +1777,7 @@ async fn a_write_over_a_newer_version_is_refused_and_leaves_the_file_as_it_was()
     let rig = rig(&[("notes.txt", "version one")]).await;
     let env = rig.env;
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: env,
         mount: None,
         path: "notes.txt".into(),
@@ -1170,6 +1790,7 @@ async fn a_write_over_a_newer_version_is_refused_and_leaves_the_file_as_it_was()
     let blob = rig.store_text("version three");
 
     let write = |expected| FsWrite {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: env,
         path: "notes.txt".into(),
@@ -1246,6 +1867,7 @@ impl BlobSource for CutOff {
 async fn a_write_that_is_cut_off_leaves_the_old_file_whole() {
     let rig = rig(&[("notes.txt", "the old content, whole")]).await;
     let write = FsWrite {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: rig.env,
         path: "notes.txt".into(),
@@ -1293,6 +1915,7 @@ async fn an_ignored_file_is_neither_listed_nor_fetched_nor_snapshotted() {
         code_of(
             rig.host
                 .fs_stat(&FsStat {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: rig.env,
                     mount: None,
                     path: "secret.env".into()
@@ -1302,6 +1925,7 @@ async fn an_ignored_file_is_neither_listed_nor_fetched_nor_snapshotted() {
         ErrorCode::Ignored
     );
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.env,
         mount: None,
         path: "target/debug/big.o".into(),
@@ -1314,6 +1938,7 @@ async fn an_ignored_file_is_neither_listed_nor_fetched_nor_snapshotted() {
     );
 
     let snapshot = FsSnapshot {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: rig.env,
         job_id: orch_types::new_id(),
@@ -1352,6 +1977,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
             rig.host
                 .fs_write(
                     &FsWrite {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: env,
                         path: "b.txt".into(),
@@ -1366,6 +1992,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
         code_of(
             rig.host
                 .fs_mkdir(&FsMkdir {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env,
                     path: "dir".into(),
                 })
@@ -1374,6 +2001,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
         code_of(
             rig.host
                 .fs_rename(&FsRename {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env,
                     from: "a.txt".into(),
                     to: "c.txt".into(),
@@ -1383,6 +2011,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
         code_of(
             rig.host
                 .fs_copy(&FsCopy {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env,
                     from: "a.txt".into(),
                     to: "d.txt".into(),
@@ -1392,6 +2021,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
         code_of(
             rig.host
                 .fs_remove(&FsRemove {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env,
                     path: "a.txt".into(),
                     recursive: false,
@@ -1422,6 +2052,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
     // The machine's owner changes the gates while the host runs.
     rig.host.set_policy(
         Gates {
+            files_reach: orch_link_contract::policy::FileReach::Machine,
             remote_write: true,
             deliver_files: false,
             terminal: false,
@@ -1437,6 +2068,7 @@ async fn the_gates_decide_whether_a_remote_may_change_files_and_open_shells() {
     );
     rig.host
         .fs_mkdir(&FsMkdir {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             path: "dir".into(),
         })
@@ -1495,6 +2127,7 @@ async fn files_are_made_moved_copied_and_removed_inside_the_workspace() {
     let env = rig.env;
     rig.host
         .fs_mkdir(&FsMkdir {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             path: "b/c".into(),
         })
@@ -1502,6 +2135,7 @@ async fn files_are_made_moved_copied_and_removed_inside_the_workspace() {
         .unwrap();
     rig.host
         .fs_copy(&FsCopy {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             from: "a".into(),
             to: "b/c/a2".into(),
@@ -1510,6 +2144,7 @@ async fn files_are_made_moved_copied_and_removed_inside_the_workspace() {
         .unwrap();
     rig.host
         .fs_rename(&FsRename {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             from: "a/one.txt".into(),
             to: "b/one.txt".into(),
@@ -1522,6 +2157,7 @@ async fn files_are_made_moved_copied_and_removed_inside_the_workspace() {
         code_of(
             rig.host
                 .fs_remove(&FsRemove {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: env,
                     path: "b".into(),
                     recursive: false
@@ -1533,6 +2169,7 @@ async fn files_are_made_moved_copied_and_removed_inside_the_workspace() {
     );
     rig.host
         .fs_remove(&FsRemove {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             path: "b".into(),
             recursive: true,
@@ -1620,6 +2257,7 @@ async fn a_snapshot_uploads_only_what_the_store_lacks_and_materializes_to_an_equ
 
     let progress = ProgressLog::new();
     let snapshot = FsSnapshot {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: rig.env,
         job_id: orch_types::new_id(),
@@ -1678,6 +2316,7 @@ async fn a_snapshot_uploads_only_what_the_store_lacks_and_materializes_to_an_equ
         .await
         .unwrap();
     let materialize = FsMaterialize {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: other,
         job_id: None,
@@ -1703,6 +2342,7 @@ async fn a_list_of_files_from_the_store_that_is_not_what_it_claims_to_be_writes_
     let rig = rig(&[]).await;
     let junk = rig.store_text("this is no list of files");
     let materialize = FsMaterialize {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: rig.env,
         job_id: None,
@@ -1740,6 +2380,8 @@ async fn a_directory_that_is_watched_reports_what_appears_changes_and_goes() {
     let listing = rig
         .host
         .fs_list(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.env,
             mount: None,
             path: "a".into(),
@@ -2049,6 +2691,7 @@ async fn a_git_view_gets_its_initial_state_and_native_changes_and_unwatch_stops_
     let current = rig
         .host
         .git_status(&orch_link_contract::commands::GitStatus {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.env,
             path: None,
             watch_id: Some(watch_id),
@@ -2088,6 +2731,83 @@ async fn a_git_view_gets_its_initial_state_and_native_changes_and_unwatch_stops_
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reattaching_during_a_git_watch_cooldown_keeps_its_subscriber_refreshing() {
+    if !git_exists() {
+        return;
+    }
+    let mut rig = rig(&[("tracked.txt", "one\n")]).await;
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["add", "tracked.txt"],
+        vec!["commit", "-q", "-m", "first"],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&rig.root)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", rig.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let watch_id = orch_types::new_id();
+    rig.host
+        .git_status(&orch_link_contract::commands::GitStatus {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.env,
+            path: None,
+            watch_id: Some(watch_id),
+        })
+        .await
+        .unwrap();
+    rig.report("the initial Git observation", |report| {
+        matches!(report,
+        Report::GitChanged(data) if data.watch_id == watch_id)
+    })
+    .await;
+    std::fs::write(rig.root.join("tracked.txt"), "changed\n").unwrap();
+    rig.report("the old worker entering its cooldown", |report| {
+        matches!(report,
+        Report::GitChanged(data) if data.watch_id == watch_id && !data.status.changes.is_empty())
+    })
+    .await;
+    let mut replacement = body(rig.env, &rig.root);
+    replacement.ignore = vec!["*.tmp".into()];
+    rig.host
+        .env_attach(&replacement, &BTreeMap::new())
+        .await
+        .unwrap();
+    rig.report(
+        "the replacement observes for the same subscriber",
+        |report| {
+            matches!(report,
+        Report::GitChanged(data) if data.watch_id == watch_id)
+        },
+    )
+    .await;
+    std::fs::write(rig.root.join("tracked.txt"), "one\n").unwrap();
+    rig.report(
+        "a later edit is observed without subscribing again",
+        |report| {
+            matches!(report,
+        Report::GitChanged(data) if data.watch_id == watch_id && data.status.changes.is_empty())
+        },
+    )
+    .await;
+    rig.host.fs_unwatch(&FsUnwatch { watch_id }).unwrap();
+}
+
 // ---------------------------------------------------------------------------------------------
 // Updating and detaching
 
@@ -2107,6 +2827,8 @@ async fn attaching_again_takes_the_new_ignore_rules_and_keeps_what_runs_in_the_e
     let watch_id = orch_types::new_id();
     rig.host
         .fs_list(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.env,
             mount: None,
             path: String::new(),
@@ -2630,6 +3352,8 @@ async fn a_mount_that_is_attached_in_place_is_listed_and_read_by_name_and_stays_
 
     let listed = host
         .fs_list(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: env,
             mount: Some("data".into()),
             path: String::new(),
@@ -2642,6 +3366,7 @@ async fn a_mount_that_is_attached_in_place_is_listed_and_read_by_name_and_stays_
     assert_eq!(listed.entries.len(), 1);
     let store = MemoryBlobs::new();
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: env,
         mount: Some("data".into()),
         path: "table.csv".into(),
@@ -2887,7 +3612,10 @@ async fn the_state_of_a_repository_is_read_through_the_host() {
         eprintln!("git is not installed here; skipped");
         return;
     }
-    let rig = rig(&[("tracked.txt", "one\n")]).await;
+    let rig = rig_with(&[("tracked.txt", "one\n")], |_, body| {
+        body.workspace.git_diff_bytes = 256
+    })
+    .await;
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .args(args)
@@ -2916,6 +3644,7 @@ async fn the_state_of_a_repository_is_read_through_the_host() {
     let status = rig
         .host
         .git_status(&orch_link_contract::commands::GitStatus {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.env,
             path: None,
             watch_id: None,
@@ -2928,6 +3657,9 @@ async fn the_state_of_a_repository_is_read_through_the_host() {
     let diff = rig
         .host
         .git_diff(&orch_link_contract::commands::GitDiff {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            cursor: None,
+            max_bytes: None,
             environment_id: rig.env,
             path: None,
             staged: None,
@@ -2936,4 +3668,321 @@ async fn the_state_of_a_repository_is_read_through_the_host() {
         .unwrap();
     assert!(diff.text.contains("+two"), "{}", diff.text);
     assert!(!diff.truncated);
+    let text = (0..300)
+        .map(|n| format!("line-{n:03}-界🦀\n"))
+        .collect::<String>();
+    std::fs::write(rig.root.join("tracked.txt"), text).unwrap();
+    let mut request = orch_link_contract::commands::GitDiff {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        max_bytes: None,
+        environment_id: rig.env,
+        path: None,
+        staged: None,
+        cursor: None,
+    };
+    let mut all = String::new();
+    let mut pages = 0;
+    loop {
+        let page = rig.host.git_diff(&request).await.unwrap();
+        assert!(page.text.len() <= 256);
+        all.push_str(&page.text);
+        pages += 1;
+        request.cursor = page.next_cursor;
+        if request.cursor.is_none() {
+            break;
+        }
+    }
+    assert!(pages > 1);
+    assert!(
+        all.contains("+line-299-界🦀"),
+        "the tail of the same native difference remains reachable"
+    );
+    assert!(!all.contains('�'), "page boundaries preserve UTF-8");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_machine_reads_do_not_create_outside_write_authority() {
+    use orch_link_contract::commands::FsAccess;
+    use orch_link_contract::policy::FileReach;
+    let rig = rig(&[("inside.txt", "inside")]).await;
+    let outside = rig.dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside").unwrap();
+    let path = outside.to_string_lossy().into_owned();
+    let roots = FsStat {
+        access: FsAccess::roots(),
+        environment_id: rig.env,
+        mount: None,
+        path: path.clone(),
+    };
+    assert!(matches!(
+        rig.host.fs_stat(&roots).await,
+        Err(HostError::FileReachDenied)
+    ));
+    let access = FsAccess {
+        view: Some(FileReach::Machine),
+        manage: Some(FileReach::Roots),
+    };
+    let described = rig.host.fs_stat(&FsStat { access, ..roots }).await.unwrap();
+    assert_eq!(described.entry.size, 7);
+    rig.host
+        .fs_copy(&FsCopy {
+            access,
+            environment_id: rig.env,
+            from: path.clone(),
+            to: "copied.txt".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(rig.root.join("copied.txt")).unwrap(),
+        "outside"
+    );
+    assert!(matches!(
+        rig.host
+            .fs_remove(&FsRemove {
+                access,
+                environment_id: rig.env,
+                path: path.clone(),
+                recursive: false
+            })
+            .await,
+        Err(HostError::FileReachDenied)
+    ));
+    assert!(outside.exists());
+    let machine = FsAccess {
+        view: Some(FileReach::Machine),
+        manage: Some(FileReach::Machine),
+    };
+    rig.host
+        .fs_remove(&FsRemove {
+            access: machine,
+            environment_id: rig.env,
+            path,
+            recursive: false,
+        })
+        .await
+        .unwrap();
+    assert!(!outside.exists());
+    assert!(matches!(
+        rig.host
+            .fs_stat(&FsStat {
+                access: FsAccess::default(),
+                environment_id: rig.env,
+                mount: None,
+                path: "inside.txt".to_owned()
+            })
+            .await,
+        Err(HostError::FileReachDenied)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_machine_ceiling_still_bounds_an_explicit_machine_file_command() {
+    use orch_link_contract::commands::FsAccess;
+    use orch_link_contract::policy::FileReach;
+    let rig = rig_with(&[], |settings, _| {
+        settings.gates.files_reach = FileReach::Roots
+    })
+    .await;
+    let outside = rig.dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside").unwrap();
+    assert!(matches!(
+        rig.host
+            .fs_stat(&FsStat {
+                access: FsAccess {
+                    view: Some(FileReach::Machine),
+                    manage: Some(FileReach::Machine)
+                },
+                environment_id: rig.env,
+                mount: None,
+                path: outside.to_string_lossy().into_owned()
+            })
+            .await,
+        Err(HostError::FileReachDenied)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_machine_path_follows_a_read_link_but_removes_only_the_link_entry() {
+    use orch_link_contract::commands::FsAccess;
+    use orch_link_contract::policy::FileReach;
+    let rig = rig(&[]).await;
+    let outside = rig.dir.path().join("outside.txt");
+    std::fs::write(&outside, "kept").unwrap();
+    std::os::unix::fs::symlink(&outside, rig.root.join("outside-link")).unwrap();
+    let access = FsAccess {
+        view: Some(FileReach::Machine),
+        manage: Some(FileReach::Machine),
+    };
+    let stat = rig
+        .host
+        .fs_stat(&FsStat {
+            access,
+            environment_id: rig.env,
+            mount: None,
+            path: "outside-link".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(stat.entry.path, "outside-link");
+    rig.host
+        .fs_remove(&FsRemove {
+            access,
+            environment_id: rig.env,
+            path: "outside-link".to_owned(),
+            recursive: false,
+        })
+        .await
+        .unwrap();
+    assert!(!rig.root.join("outside-link").exists());
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "kept");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absolute_workspace_path_keeps_the_root_grant_and_its_native_exclusions() {
+    use orch_link_contract::commands::FsAccess;
+    let rig = rig(&[("inside.txt", "inside")]).await;
+    let stat = rig
+        .host
+        .fs_stat(&FsStat {
+            access: FsAccess::roots(),
+            environment_id: rig.env,
+            mount: None,
+            path: rig.root.join("inside.txt").to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(stat.entry.size, 6);
+    assert!(matches!(
+        rig.host
+            .fs_stat(&FsStat {
+                access: FsAccess::roots(),
+                environment_id: rig.env,
+                mount: None,
+                path: rig
+                    .root
+                    .join("../outside.txt")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .await,
+        Err(HostError::FileReachDenied)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_machine_directory_continuation_cannot_outlive_its_machine_bound() {
+    use orch_link_contract::commands::{FsAccess, FsListPage};
+    use orch_link_contract::policy::FileReach;
+    let rig = rig(&[]).await;
+    let outside = rig.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(outside.join(name), name).unwrap();
+    }
+    let access = FsAccess {
+        view: Some(FileReach::Machine),
+        manage: None,
+    };
+    let mut request = FsList {
+        prefix: None,
+        access,
+        environment_id: rig.env,
+        mount: None,
+        path: outside.to_string_lossy().into_owned(),
+        watch_id: None,
+        watch_instance: None,
+        page: Some(FsListPage {
+            cursor: None,
+            limit: Some(1),
+            generation: Some(rig.facts.generation),
+        }),
+    };
+    let first = rig.host.fs_list(&request).await.unwrap();
+    assert_eq!(first.entries.len(), 1);
+    assert!(first.entries[0].path.starts_with(&request.path));
+    assert_eq!(
+        first.facts.unwrap().policy.kind,
+        orch_api_contract::workspace::FileSourceKind::Machine
+    );
+    request.page.as_mut().unwrap().cursor = first.page.unwrap().next_cursor;
+    assert!(request.page.as_ref().unwrap().cursor.is_some());
+    rig.host.set_policy(
+        Gates {
+            files_reach: FileReach::Roots,
+            ..Gates::OPEN
+        },
+        None,
+        None,
+        orch_envhost::mcp::McpGates {
+            import: true,
+            add: true,
+        },
+    );
+    assert!(matches!(
+        rig.host.fs_list(&request).await,
+        Err(HostError::FileReachDenied)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_roots_machine_bound_does_not_claim_to_confine_an_unconfined_human_shell() {
+    let rig = rig_with(&[], |settings, _| {
+        settings.gates.files_reach = orch_link_contract::policy::FileReach::Roots
+    })
+    .await;
+    assert!(matches!(
+        rig.host
+            .pty_open(&orch_link_contract::commands::PtyOpen {
+                environment_id: rig.env,
+                terminal_id: orch_types::new_id(),
+                cols: 80,
+                rows: 24,
+                cwd: String::new(),
+                record: false
+            })
+            .await,
+        Err(HostError::FileReachDenied)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn folder_completion_filters_child_names_before_its_first_page() {
+    use orch_link_contract::commands::{FsAccess, FsListPage};
+    let rig = rig(&[
+        ("cold-a", "a"),
+        ("cold-b", "b"),
+        ("Needle-one", "one"),
+        ("needle-two", "two"),
+    ])
+    .await;
+    let mut request = FsList {
+        access: FsAccess::roots(),
+        prefix: Some("needle".to_owned()),
+        environment_id: rig.env,
+        mount: None,
+        path: String::new(),
+        watch_id: None,
+        watch_instance: None,
+        page: Some(FsListPage {
+            cursor: None,
+            limit: Some(1),
+            generation: Some(rig.facts.generation),
+        }),
+    };
+    let first = rig.host.fs_list(&request).await.unwrap();
+    assert_eq!(first.entries.len(), 1);
+    assert!(first.entries[0].name.to_lowercase().starts_with("needle"));
+    let first_name = first.entries[0].name.clone();
+    request.page.as_mut().unwrap().cursor = first.page.unwrap().next_cursor;
+    assert!(request.page.as_ref().unwrap().cursor.is_some());
+    let second = rig.host.fs_list(&request).await.unwrap();
+    let mut names = vec![first_name, second.entries[0].name.clone()];
+    names.sort();
+    assert_eq!(names, ["Needle-one", "needle-two"]);
+    request.prefix = Some("cold".to_owned());
+    assert!(matches!(
+        rig.host.fs_list(&request).await,
+        Err(HostError::Stale { .. })
+    ));
 }

@@ -36,6 +36,10 @@ use orch_api_contract::threads::ThreadOpeningGet;
 
 use orch_api_contract::threads::ThreadOpeningGetQuery;
 
+use orch_api_contract::threads::ThreadOutlineGet;
+
+use orch_api_contract::threads::ThreadOutlineGetQuery;
+
 use orch_api_contract::threads::ThreadState;
 
 use orch_api_contract::threads::ThreadSync;
@@ -1378,7 +1382,7 @@ pub fn __api_run_http_incremental_budget_and_rows_use_the_same_snapshot_as_its_h
 }
 
 #[cfg(any(test, feature = "test-support"))]
-async fn opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends() -> Proof {
+async fn opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends() -> Proof {
     let (scene, thread, start) = running().await;
     let read = async {
         scene
@@ -1398,24 +1402,38 @@ async fn opening_outline_and_conversation_keep_the_same_cut_while_the_native_tur
     let (opening, terminal) =
         interleave(Cut::HttpHead, read, complete(&scene, thread, &start)).await?;
     bounded(&opening.sync);
-    assert_eq!(opening.outline.seq, opening.sync.seq);
-    assert!(
-        opening
-            .outline
-            .entries
-            .iter()
-            .all(|entry| entry.seq <= opening.sync.seq)
-    );
+    let wire = serde_json::to_value(&opening)?;
+    assert!(wire.get("outline").is_none() && wire.get("settings").is_none());
+    let outline = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.ada.token)
+        .query(&ThreadOutlineGetQuery {
+            continuation_id: opening
+                .sync
+                .projection
+                .as_ref()
+                .map(|projection| projection.viewed_continuation_id),
+            limit: Some(5),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(outline.seq >= terminal);
+    assert!(outline.entries.iter().all(|entry| entry.seq <= outline.seq));
     assert!(opening.sync.seq < terminal);
     assert_eq!(opening.sync.thread.current_turn_id, Some(start.turn_id));
     Ok(())
 }
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub fn __api_run_opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends()
+pub fn __api_run_opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends()
 -> ::futures::future::LocalBoxFuture<'static, crate::realtime::history_read_tests::Proof> {
     ::std::boxed::Box::pin(
-        self::opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends(),
+        self::opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends(),
     )
 }
 
