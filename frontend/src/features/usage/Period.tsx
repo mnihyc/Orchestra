@@ -4,6 +4,7 @@
  * Days are counted in UTC, which is what the ledger is kept by, and the row says what
  * span it is in words so that the end of "this year" or of a span of one's own is never a guess.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { CalendarRange } from 'lucide-react';
 import { type ReactNode, type SyntheticEvent, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -93,7 +94,7 @@ export function Period({ span, onSearch, now,actions }: PeriodProps) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const zoneId = useId();
-  const pick = (range: Range) => onSearch({ range });
+  const pick = carryDeviceChoice((range: Range) => onSearch({ range }), onSearch, 'range');
   return (
     <div className="@container/usage-period min-w-0 flex-1 basis-[min(100%,20rem)]" data-usage-period><div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
       <div className="hidden shrink-0 @min-[36rem]/usage-period:block"><SegmentedControl
@@ -109,7 +110,7 @@ export function Period({ span, onSearch, now,actions }: PeriodProps) {
       <div className="w-40 max-w-full @min-[36rem]/usage-period:hidden"><Select
         size="sm" label={t('usage.period.label')} hideLabel
         value={span.range === 'custom' ? '' : span.range} placeholder={t('usage.period.custom')}
-        onValueChange={(next) => { if (next !== '') pick(next); }}
+        onValueChange={carryDeviceChoice((next: Range | '') => { if (next !== '') pick(next); }, pick)}
         options={RANGES.map((range) => ({ value: range, name: t(`usagePerf.periodNames.${range}`) }))}
       /></div>
       <CustomSpan span={span} onSearch={onSearch} now={now} zoneId={zoneId} />
