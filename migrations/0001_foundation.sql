@@ -937,6 +937,41 @@ BEGIN
 END
 $$;
 
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
+END
+$$;
+
 CREATE FUNCTION public.orch_item_internal_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1098,7 +1133,7 @@ $$;
 CREATE FUNCTION public.orch_participation_objects_changed() RETURNS trigger
     LANGUAGE plpgsql
     AS $_$
-DECLARE kind text; home_column text; live_sql text; joins text:=''; keys_sql text;
+DECLARE kind text; home_column text; live_sql text; joins text:=''; keys_sql text; changed boolean;
 BEGIN
  keys_sql:=CASE TG_OP WHEN 'INSERT' THEN 'SELECT id FROM participation_new_objects'
   WHEN 'DELETE' THEN 'SELECT id FROM participation_old_objects'
@@ -1116,6 +1151,19 @@ BEGIN
   ('mounts','mount','home_id','o.deleted_at IS NULL'),
   ('skills','skill','home_id','o.deleted_at IS NULL')
  ) x(table_name,kind,home_column,live_sql) WHERE x.table_name=TG_TABLE_NAME;
+ IF TG_OP='UPDATE' THEN
+  -- Only placement and liveness feed these projections. Content, clocks and factual reports
+  -- must not lock assignment rows or re-plan their maintenance for every streaming update.
+  keys_sql:=format('SELECT COALESCE(n.id,o.id) id FROM participation_new_objects n
+   FULL JOIN participation_old_objects o USING(id) WHERE n.id IS NULL OR o.id IS NULL OR %s',
+   CASE kind
+    WHEN 'node' THEN '(n.path,n.org_id,n.deleted_at) IS DISTINCT FROM (o.path,o.org_id,o.deleted_at)'
+    WHEN 'host' THEN '(n.home_id,n.org_id,n.machine_id) IS DISTINCT FROM (o.home_id,o.org_id,o.machine_id)'
+    ELSE format('(n.%1$I,n.org_id,n.deleted_at) IS DISTINCT FROM (o.%1$I,o.org_id,o.deleted_at)',home_column)
+   END);
+  EXECUTE 'SELECT EXISTS('||keys_sql||')' INTO changed;
+  IF NOT changed THEN RETURN NULL; END IF;
+ END IF;
  IF kind='host' THEN joins:=' LEFT JOIN machines m ON m.id=o.machine_id '; END IF;
  EXECUTE format('WITH changed AS (%s) SELECT f.object_id FROM participation_object_facts f
   WHERE f.object_kind=%L AND f.object_id IN(SELECT id FROM changed) ORDER BY f.object_id FOR UPDATE OF f',keys_sql,kind);
@@ -2537,6 +2585,44 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+
+CREATE FUNCTION public.orch_provider_source_choices(sources jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$
+SELECT jsonb_build_object(
+    'facts', '{"by":"default"}'::jsonb || (COALESCE(NULLIF(sources->'facts','null'::jsonb),'{}'::jsonb)
+        - ARRAY['descriptor','described_at','last_error']),
+    'models', '{"by":"default"}'::jsonb || (COALESCE(NULLIF(sources->'models','null'::jsonb),'{}'::jsonb)
+        - ARRAY['descriptor','described_at','last_error']),
+    'presenter', sources->'presenter')
+$$;
+
+CREATE FUNCTION public.orch_provider_revision() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    -- The form's revision follows editable configuration. Runtime placement, custody, status,
+    -- sign-in reports and learned source metadata advance only the observation counter.
+    IF (NEW.id,NEW.name,NEW.owner_id,NEW.org_id,NEW.home_id,NEW.home_overridden_at,
+        NEW.kind,NEW.harness_kind,NEW.agent_id,NEW.upstreams,NEW.model_group_options,NEW.service_offerings,
+        NEW.config,NEW.protocols,NEW.key_machine_id,NEW.arrangements,NEW.runtime_config,NEW.credential_home,
+        NEW.facts_overrides,NEW.deleted_at,
+        NEW.status='disabled',CASE WHEN NEW.status='disabled' THEN NEW.status_detail END,
+        orch_provider_source_choices(NEW.sources))
+       IS DISTINCT FROM
+       (OLD.id,OLD.name,OLD.owner_id,OLD.org_id,OLD.home_id,OLD.home_overridden_at,
+        OLD.kind,OLD.harness_kind,OLD.agent_id,OLD.upstreams,OLD.model_group_options,OLD.service_offerings,
+        OLD.config,OLD.protocols,OLD.key_machine_id,OLD.arrangements,OLD.runtime_config,OLD.credential_home,
+        OLD.facts_overrides,OLD.deleted_at,
+        OLD.status='disabled',CASE WHEN OLD.status='disabled' THEN OLD.status_detail END,
+        orch_provider_source_choices(OLD.sources)) THEN
+        NEW.revision := OLD.revision+1;
+        NEW.observation_revision := OLD.observation_revision;
+    ELSE
+        NEW.revision := OLD.revision;
+        NEW.observation_revision := OLD.observation_revision + CASE WHEN NEW IS DISTINCT FROM OLD THEN 1 ELSE 0 END;
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 CREATE FUNCTION public.orch_group_holder_revision() RETURNS trigger
     LANGUAGE plpgsql

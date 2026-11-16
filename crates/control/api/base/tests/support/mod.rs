@@ -1087,6 +1087,15 @@ thread_local! {
 
 tokio::task_local! {
     static MEASURED_COUNT: std::cell::Cell<usize>;
+    static MEASURED_READS: std::cell::RefCell<StatementReads>;
+}
+
+/// Database result rows returned while a request is polled, alongside its round trips.
+/// This measures rows crossing the database boundary, not tuples visited inside an execution plan.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StatementReads {
+    pub statements: usize,
+    pub rows: u64,
 }
 
 impl Statements {
@@ -1108,6 +1117,17 @@ impl Statements {
             .scope(std::cell::Cell::new(0), async {
                 let output = future.await;
                 (output, MEASURED_COUNT.with(std::cell::Cell::get))
+            })
+            .await
+    }
+
+    /// Measures the database work delivered to one request, excluding detached background tasks.
+    pub async fn reads<F: std::future::Future>(future: F) -> (F::Output, StatementReads) {
+        Self::now();
+        MEASURED_READS
+            .scope(std::cell::RefCell::default(), async {
+                let output = future.await;
+                (output, MEASURED_READS.with(|reads| *reads.borrow()))
             })
             .await
     }
@@ -1174,6 +1194,24 @@ impl tracing::Subscriber for Statements {
         if event.metadata().target() == "sqlx::query" {
             COUNT.with(|count| count.set(count.get() + 1));
             let _ = MEASURED_COUNT.try_with(|count| count.set(count.get() + 1));
+            let _ = MEASURED_READS.try_with(|reads| {
+                struct Rows(u64);
+                impl tracing::field::Visit for Rows {
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        if field.name() == "rows_returned" {
+                            self.0 = value;
+                        }
+                    }
+
+                    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                    }
+                }
+                let mut rows = Rows(0);
+                event.record(&mut rows);
+                let mut reads = reads.borrow_mut();
+                reads.statements += 1;
+                reads.rows += rows.0;
+            });
             static TIMINGS: OnceLock<bool> = OnceLock::new();
             if *TIMINGS.get_or_init(|| std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some()) {
                 // SQL summaries and durations identify a slow read without logging bound values.

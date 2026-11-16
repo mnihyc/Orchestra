@@ -1863,10 +1863,12 @@ async fn a_provider_move_cannot_end_its_source_after_raw_closure_or_changed_revi
                     .await?;
             }
             "source" => {
-                sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
-                    .bind(source)
-                    .execute(s.world.pool.pool())
-                    .await?;
+                sqlx::query(
+                    "UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1",
+                )
+                .bind(source)
+                .execute(s.world.pool.pool())
+                .await?;
             }
             "scope" => {
                 let mut scope = s.policy.clone();

@@ -96,8 +96,6 @@ pub struct UserRow {
     pub density: String,
     /// The org that is its own.
     pub personal_org_id: Option<Id>,
-    /// The sequence of its own feed.
-    pub inbox_seq: i64,
     /// Who created it, where somebody did.
     pub created_by: Option<Id>,
     /// When it was created.
@@ -541,7 +539,9 @@ pub async fn confirm_current_email(
 
 /// Notes that `user` was seen at `at`.
 pub async fn touch_last_seen(conn: &mut Conn, user: Id, at: DateTime<Utc>) -> Result<(), DbError> {
-    sqlx::query("UPDATE users SET last_seen_at = $2 WHERE id = $1")
+    // Presence never waits on a person's own credential/profile write. Their next use records it.
+    sqlx::query("WITH available AS (SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE SKIP LOCKED)
+                 UPDATE users SET last_seen_at=GREATEST(last_seen_at,$2) WHERE id IN(SELECT id FROM available)")
         .bind(user)
         .bind(at)
         .execute(conn)
@@ -910,6 +910,36 @@ pub async fn slide_session(
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Renews one still-live session, ordered against that session's revocation and expiry.
+/// Account eligibility is sampled in the same statement without locking profile or Inbox writes.
+pub async fn renew_session(
+    conn: &mut Conn,
+    session: Id,
+    now: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let renewed = sqlx::query(
+        "UPDATE sessions s SET last_used_at=$2,expires_at=$3
+          FROM users u WHERE s.id=$1 AND u.id=s.user_id AND u.status='active'
+            AND s.revoked_at IS NULL AND s.expires_at>$2",
+    )
+    .bind(session)
+    .bind(now)
+    .bind(expires_at)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        == 1;
+    if renewed {
+        sqlx::query("DELETE FROM access_tokens WHERE session_id=$1 AND expires_at<=$2")
+            .bind(session)
+            .bind(now)
+            .execute(conn)
+            .await?;
+    }
+    Ok(renewed)
 }
 
 /// The sessions of `user` that are neither ended nor past their end at
@@ -2054,8 +2084,8 @@ pub struct NewInboxRow<'a> {
 /// was given in their feed.
 pub async fn add_inbox_row(conn: &mut Conn, row: &NewInboxRow<'_>) -> Result<Option<i64>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
       RETURNING inbox_seq",
     )
     .bind(row.user_id)
@@ -4591,7 +4621,7 @@ mod tests {
         };
         assert_eq!(add_inbox_row(&mut conn, &row).await.unwrap(), Some(1));
         assert_eq!(add_inbox_row(&mut conn, &row).await.unwrap(), None);
-        let seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id = $1")
+        let seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id = $1")
             .bind(ada)
             .fetch_one(&mut *conn)
             .await
