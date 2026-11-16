@@ -230,24 +230,38 @@ pub async fn put_items(
     }
     let ids: Vec<Id> = items.iter().map(|item| item.id).collect();
     let parents: Vec<Option<Id>> = items.iter().map(|item| item.parent).collect();
-    let streams: Vec<&str> = items.iter().map(|item| item.stream).collect();
+    let streams: Vec<_> = items
+        .iter()
+        .map(|item| super::threads::storable_item_text(item.stream))
+        .collect();
     let kinds: Vec<&str> = items.iter().map(|item| item.kind).collect();
     let statuses: Vec<&str> = items.iter().map(|item| item.status).collect();
     let authors: Vec<Option<Id>> = items.iter().map(|item| item.author).collect();
-    let payloads: Vec<&Json> = items.iter().map(|item| item.payload).collect();
-    let refs: Vec<&str> = items.iter().map(|item| item.native_ref).collect();
-    let texts: Vec<Option<&str>> = items.iter().map(|item| item.search_text).collect();
+    let storable: Vec<_> = items
+        .iter()
+        .map(|item| super::threads::storable_item_payload(item.payload))
+        .collect();
+    let payloads: Vec<_> = storable.iter().map(|(payload, _, _)| payload).collect();
+    let replacements: Vec<_> = storable.iter().map(|(_, count, _)| *count).collect();
+    let refs: Vec<_> = items
+        .iter()
+        .map(|item| super::threads::storable_item_text(item.native_ref))
+        .collect();
+    let texts: Vec<_> = items
+        .iter()
+        .map(|item| item.search_text.map(super::threads::storable_item_text))
+        .collect();
     let seqs: Vec<Seq> = items.iter().map(|item| item.seq).collect();
     let created: Vec<DateTime<Utc>> = items.iter().map(|item| item.created_at).collect();
     let updated: Vec<DateTime<Utc>> = items.iter().map(|item| item.updated_at).collect();
     Ok(sqlx::query_scalar(
         "INSERT INTO items (id, thread_id, segment_id, turn_id, stream, parent_item_id, kind, status, author_id,
-                            payload, native_ref, before_orch, search_text, seq_created, seq_updated, created_at, updated_at)
+                            payload, native_ref, before_orch, search_text, seq_created, seq_updated, created_at, updated_at, text_replacements)
          SELECT x.id, $1::uuid, $2::uuid, NULL::uuid, x.stream, x.parent, x.kind, x.status, x.author,
-                x.payload, x.native_ref, true, x.search_text, x.seq, x.seq, x.created_at, x.updated_at
+                x.payload, x.native_ref, true, x.search_text, x.seq, x.seq, x.created_at, x.updated_at, x.text_replacements
            FROM UNNEST($3::uuid[], $4::uuid[], $5::text[], $6::text[], $7::text[], $8::uuid[], $9::jsonb[],
-                       $10::text[], $11::text[], $12::bigint[], $13::timestamptz[], $14::timestamptz[])
-                AS x(id, parent, stream, kind, status, author, payload, native_ref, search_text, seq, created_at, updated_at)
+                       $10::text[], $11::text[], $12::bigint[], $13::timestamptz[], $14::timestamptz[], $15::bigint[])
+                AS x(id, parent, stream, kind, status, author, payload, native_ref, search_text, seq, created_at, updated_at, text_replacements)
          ON CONFLICT DO NOTHING
          RETURNING id",
     )
@@ -265,6 +279,7 @@ pub async fn put_items(
     .bind(&seqs)
     .bind(&created)
     .bind(&updated)
+    .bind(&replacements)
     .fetch_all(conn)
     .await?)
 }

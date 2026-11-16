@@ -31,6 +31,36 @@ fn delivered(world: &World, seq: i64, event: &Event) -> DeliveredEvent {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_terminal_event_refused_by_storage_keeps_a_gap_and_releases_the_next_turn() {
+    let world = World::new().await;
+    let thread = world.thread("An unstorable terminal explanation").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    let segment = world.segment_of(thread).await;
+    sqlx::raw_sql("CREATE FUNCTION reject_terminal_data() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.error->>'message' = 'refused terminal value' THEN
+          RAISE EXCEPTION 'synthetic terminal refusal' USING ERRCODE='22P05';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER reject_terminal_data BEFORE UPDATE ON turns FOR EACH ROW EXECUTE FUNCTION reject_terminal_data();")
+        .execute(world.pool.pool()).await.unwrap();
+    let terminal=Event::decode("turn.completed",json!({"turn_id":start.turn_id,"status":"failed","error":{"code":"harness_error","message":"refused terminal value","retryable":false}})).unwrap();
+    apply(&world, thread, segment, &[delivered(&world, 77, &terminal)]).await;
+    world.wait_turn(start.turn_id, "failed").await;
+    let count: i64 = world
+        .count(
+            "SELECT count(*) FROM items WHERE thread_id=$1 AND storage_gap->>'sqlstate'='22P05'",
+            thread,
+        )
+        .await;
+    assert_eq!(count, 1);
+    world
+        .running_turn(thread, "The next turn still starts")
+        .await;
+    world.shutdown().await;
+}
+
 /// Applies events as the link would hand them over, in a transaction of their own.
 async fn apply(world: &World, thread: Id, segment: Id, events: &[DeliveredEvent]) {
     world.open_session_for_reports(thread, segment).await;
@@ -250,6 +280,208 @@ async fn the_same_events_delivered_twice_change_nothing_the_second_time() {
         "words of a turn that is over leave the next alone"
     );
     assert_eq!(world.turn_state(second.turn_id).await, "starting");
+}
+
+#[tokio::test]
+async fn a_recorded_sandbox_decision_keeps_its_applied_policy_after_later_machine_facts_change() {
+    let world = World::new().await;
+    let thread = world.thread("Recorded sandbox").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Please do it"))
+        .await
+        .unwrap();
+    let turn = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    let before = world.sync(thread).await;
+    assert!(before.turns[0].sandbox_resolution.is_none());
+    let expected = json!({
+        "requested":"open", "applied":"workspace", "governing_policy":"machine_policy",
+        "command_id":orch_types::new_id(), "at":world.clock.time(),
+    });
+    let mut body = expected.clone();
+    body["turn_id"] = json!(turn.turn_id);
+    let event = DeliveredEvent {
+        seq: 1,
+        at: world.clock.time(),
+        kind: "session.sandbox".into(),
+        body,
+    };
+    apply(&world, thread, segment, std::slice::from_ref(&event)).await;
+    sqlx::query("UPDATE machines SET facts=facts || $2 WHERE id=$1")
+        .bind(world.machine_id)
+        .bind(json!({"policy":{"agent.max_sandbox":"read_only"}}))
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    apply(&world, thread, segment, std::slice::from_ref(&event)).await;
+    let after = world.sync(thread).await;
+    assert_eq!(
+        after.turns[0].sandbox_resolution,
+        Some(serde_json::from_value(expected).unwrap())
+    );
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn embedded_zeroes_in_native_text_and_tool_keys_do_not_stall_the_next_turn() {
+    let world = World::new().await;
+    let thread = world.thread("Storable native output").await;
+    let (turn, _) = world.running_turn(thread, "Read the output").await;
+    world
+        .say(thread, message_began(turn.turn_id, "zero-message"))
+        .await;
+    world
+        .say(thread, message_done("zero-message", "Hello\0world"))
+        .await;
+    for (reference, tool, expected) in [
+        (
+            "zero-command",
+            json!({"kind":"command","command":"cat binary","cwd":"/work","exit_code":0,"process_id":null,"background":false,"actions":[],
+            "output":{"inline":"one\0two","total_len":7,"truncated":false,"blob":null}}),
+            1,
+        ),
+        (
+            "zero-terminal",
+            json!({"kind":"other","name":"use_terminal","arguments":null,
+            "result":{"field\0":"left\0right","field\u{fffd}":"unchanged"}}),
+            2,
+        ),
+    ] {
+        let payload = json!({"tool":tool,"title":"Read output","started_at":world.clock.time(),"duration_ms":null,"raw":null});
+        world.say(thread, Event::decode("item.started",json!({"turn_id":turn.turn_id,"native_ref":reference,"stream":"main","parent_native_ref":null,"kind":"tool_call","payload":{"tool":{"kind":"other","name":"starting","arguments":null,"result":null},"title":"Starting","started_at":world.clock.time(),"duration_ms":null,"raw":null}})).unwrap()).await;
+        world
+            .say(
+                thread,
+                Event::decode(
+                    "item.completed",
+                    json!({"native_ref":reference,"status":"completed","payload":payload.clone()}),
+                )
+                .unwrap(),
+            )
+            .await;
+        eventually("the repaired native item to complete",||async {
+            sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM items WHERE thread_id=$1 AND native_ref=$2 AND status='completed')")
+                .bind(thread).bind(reference).fetch_one(world.pool.pool()).await.unwrap()
+        }).await;
+        let row: Json = sqlx::query_scalar(
+            "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 AND native_ref=$2",
+        )
+        .bind(thread)
+        .bind(reference)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(row["text_replacements"], expected);
+        let completed = Event::decode(
+            "item.completed",
+            json!({"native_ref":reference,"status":"completed","payload":payload}),
+        )
+        .unwrap();
+        apply(
+            &world,
+            thread,
+            world.segment_of(thread).await,
+            &[delivered(&world, 880, &completed)],
+        )
+        .await;
+        let replayed: Json = sqlx::query_scalar(
+            "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 AND native_ref=$2",
+        )
+        .bind(thread)
+        .bind(reference)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            replayed, row,
+            "a repeated native completion preserves the repair receipt and item sequence"
+        );
+    }
+    world
+        .say(thread, turn_ended(turn.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(turn.turn_id, "completed").await;
+    let snapshot = world.sync(thread).await;
+    let items = serde_json::to_value(&snapshot.items).unwrap();
+    let message = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["payload"]["text"] == "Hello\u{fffd}world")
+        .unwrap();
+    assert_eq!(message["text_replacements"], 1);
+    let command = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["payload"]["tool"]["kind"] == "command")
+        .unwrap();
+    assert_eq!(
+        command["payload"]["tool"]["output"]["inline"],
+        "one\u{fffd}two"
+    );
+    assert_eq!(command["payload"]["tool"]["output"]["total_len"], 7);
+    let terminal = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["payload"]["tool"]["name"] == "use_terminal")
+        .unwrap();
+    assert_eq!(
+        terminal["payload"]["tool"]["result"]["field\u{fffd}"],
+        "unchanged"
+    );
+    assert_eq!(
+        terminal["payload"]["tool"]["result"]["field\u{fffd} (2)"],
+        "left\u{fffd}right"
+    );
+    let (next, _) = world
+        .running_turn(thread, "Continue after the output")
+        .await;
+    assert_ne!(next.turn_id, turn.turn_id);
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn one_database_data_refusal_keeps_the_other_native_events_and_an_explicit_item_gap() {
+    let world = World::new().await;
+    let thread = world.thread("Continue past rejected data").await;
+    let (turn, _) = world.running_turn(thread, "Keep the good events").await;
+    let segment = world.segment_of(thread).await;
+    sqlx::raw_sql("CREATE FUNCTION reject_native_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.payload->>'text' = 'rejected native value' THEN RAISE EXCEPTION 'fixture data refusal' USING ERRCODE='22P05'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_native_fixture BEFORE INSERT OR UPDATE OF payload ON items FOR EACH ROW EXECUTE FUNCTION reject_native_fixture();")
+        .execute(world.pool.pool()).await.unwrap();
+    let events = [
+        message_began(turn.turn_id, "before-refusal"),
+        message_done("before-refusal", "Before"),
+        message_began(turn.turn_id, "refused-item"),
+        message_done("refused-item", "rejected native value"),
+        message_began(turn.turn_id, "after-refusal"),
+        message_done("after-refusal", "After"),
+        turn_ended(turn.turn_id, TurnOutcome::Completed),
+    ];
+    let events: Vec<_> = events
+        .iter()
+        .enumerate()
+        .map(|(at, event)| delivered(&world, i64::try_from(at + 1).unwrap(), event))
+        .collect();
+    apply(&world, thread, segment, &events).await;
+    world.wait_turn(turn.turn_id, "completed").await;
+    let snapshot = world.sync(thread).await;
+    let items = serde_json::to_value(&snapshot.items).unwrap();
+    let items = items.as_array().unwrap();
+    assert!(items.iter().any(|item| item["payload"]["text"] == "Before"));
+    assert!(items.iter().any(|item| item["payload"]["text"] == "After"));
+    assert!(
+        items
+            .iter()
+            .any(|item| item["storage_gap"]["sqlstate"] == "22P05")
+    );
+    let (next, _) = world
+        .running_turn(thread, "Continue after refused data")
+        .await;
+    assert_ne!(next.turn_id, turn.turn_id);
+    world.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -68,7 +68,7 @@ pub mod turn_state {
 /// The columns of a thread and of its node that the engine reads.
 const THREAD_SELECT: &str = "SELECT t.node_id, t.topic_id, t.environment_id, t.workspace_dir, t.state, t.blocked_reason,
         t.source, t.links, t.work_observed,
-        t.blocked_detail, t.starting_step, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
+        t.blocked_detail, t.starting_step, t.starting_step_at, t.starting_command, t.starting_behind, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
         t.current_segment_id, t.current_turn_id, t.active_continuation_id, t.execution_revision, t.next_seq, t.seq_state, t.activity_seq,
         COALESCE((SELECT jsonb_agg(notice ORDER BY position) FROM
           (SELECT notice,position FROM thread_pending_notices WHERE thread_id=t.node_id ORDER BY position LIMIT 64) head),'[]'::jsonb) AS pending_notices,
@@ -102,6 +102,12 @@ pub struct ThreadRow {
     pub blocked_detail: Option<String>,
     /// What a starting thread waits for.
     pub starting_step: Option<String>,
+    /// When that step began.
+    pub starting_step_at: Option<DateTime<Utc>>,
+    /// The kind of command the step waits for, while one is out.
+    pub starting_command: Option<String>,
+    /// The kind of command, of other work in the same line on the machine, that command waits behind.
+    pub starting_behind: Option<String>,
     /// Its agent profile.
     pub agent_id: Option<Id>,
     /// Its provider.
@@ -294,6 +300,30 @@ pub async fn set_starting_step(
     )
     .bind(thread)
     .bind(step)
+    .bind(seq)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Says which command a `starting` thread's step waits for and which other work, in the same line on the
+/// machine, holds it up (both none for none); nothing is done to a thread in another state or without a
+/// step. The answer says whether anything changed, so that a number is spent only on a change.
+pub async fn set_starting_work(
+    conn: &mut Conn,
+    thread: Id,
+    command: Option<&str>,
+    behind: Option<&str>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    let done = sqlx::query(
+        "UPDATE threads SET starting_command = $2, starting_behind = $3, seq_state = $4
+          WHERE node_id = $1 AND state = 'starting' AND starting_step IS NOT NULL
+            AND (starting_command IS DISTINCT FROM $2 OR starting_behind IS DISTINCT FROM $3)",
+    )
+    .bind(thread)
+    .bind(command)
+    .bind(behind)
     .bind(seq)
     .execute(conn)
     .await?;
@@ -684,12 +714,15 @@ pub async fn offline_threads_with_a_turn(conn: &mut Conn) -> Result<Vec<Id>, DbE
 
 pub(crate) const SEGMENT_SELECT: &str = "SELECT id, thread_id, continuation_id, ordinal, agent_id, provider_id, environment_id, machine_id, env_generation,
         arrangement, executor, tool_set, credential_path, native_session_ref, started_by, started_at, ended_at,
-        end_reason, import_fidelity, import_report, seq_updated
+        end_reason, import_fidelity, import_report, sandbox_resolution, seq_updated
    FROM segments";
 
 /// One segment with required execution bindings, or optional historical bindings.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct SegmentRow<Binding = Id> {
+    /// The connector's captured sandbox decision for the current native session.
+    #[sqlx(default)]
+    pub sandbox_resolution: Option<Json>,
     /// Its identifier.
     pub id: Id,
     /// The thread.
@@ -948,12 +981,15 @@ pub async fn end_segment(
 
 pub(crate) const INPUT_SELECT: &str = "SELECT id, thread_id, continuation_id, author_id, source, content, native_action, delivery, state, state_detail, limit_bypass,
         position::text AS position, turn_id, client_id, created_at, delivered_at, cancelled_by, seq_updated,
-        attachment_issues, queue_held, run_as, plan, submission_authority, run_as_authority, approval_id
+        attachment_issues, queue_held, run_as, plan, submission_authority, run_as_authority, approval_id, text_replacements
    FROM thread_inputs";
 
 /// What a person said to an agent, queued for it.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct InputRow {
+    /// Replacement operations applied when the input entered storage.
+    #[sqlx(default)]
+    pub text_replacements: i64,
     /// Its identifier.
     pub id: Id,
     /// The thread.
@@ -1245,6 +1281,10 @@ pub async fn insert_input_in(
     continuation: Option<Id>,
     seq: Seq,
 ) -> Result<Option<InputRow>, DbError> {
+    let mut content = new.content.clone();
+    let replacements = orch_types::storable::normalize_json(&mut content)
+        .saturating_add(crate::pool::source_text_replacements());
+    let client_id = new.client_id.map(storable_item_text);
     let end_position = "(SELECT COALESCE(MAX(position), 0) + 1 FROM thread_inputs WHERE thread_id = $2 AND continuation_id=c.id AND (state = 'pending' OR (state = 'delivering' AND delivery = 'steer')))";
     let position = match new.place {
         Place::End => end_position,
@@ -1254,10 +1294,10 @@ pub async fn insert_input_in(
     };
     let sql = format!(
         "INSERT INTO thread_inputs (id, thread_id, author_id, source, content, delivery, state, limit_bypass, position,
-                                    turn_id, client_id, created_at, seq_created, seq_updated, queue_held,continuation_id, plan, submission_authority, run_as, run_as_authority)
+                                    turn_id, client_id, created_at, seq_created, seq_updated, queue_held,continuation_id, plan, submission_authority, run_as, run_as_authority, text_replacements)
          SELECT $1, $2, $3, $4, $5, $6, CASE WHEN c.queue_held THEN 'pending' ELSE $7::text END, $8,
                 CASE WHEN c.queue_held THEN {end_position} ELSE {position} END,
-                CASE WHEN c.queue_held THEN NULL ELSE $9::uuid END, $10, $11, $12, $12, c.queue_held,c.id, $14, $15, $16, $17
+                CASE WHEN c.queue_held THEN NULL ELSE $9::uuid END, $10, $11, $12, $12, c.queue_held,c.id, $14, $15, $16, $17, $18
            FROM threads t JOIN thread_continuations c ON c.thread_id=t.node_id AND c.id=COALESCE($13,t.active_continuation_id) WHERE t.node_id = $2
          ON CONFLICT (thread_id, author_id, client_id) DO NOTHING
          RETURNING id"
@@ -1267,12 +1307,12 @@ pub async fn insert_input_in(
         .bind(new.thread_id)
         .bind(new.author_id)
         .bind(new.source)
-        .bind(new.content)
+        .bind(content)
         .bind(new.delivery)
         .bind(new.state)
         .bind(new.limit_bypass)
         .bind(new.turn_id)
-        .bind(new.client_id)
+        .bind(client_id)
         .bind(new.at)
         .bind(seq)
         .bind(continuation)
@@ -1280,6 +1320,7 @@ pub async fn insert_input_in(
         .bind(new.submission_authority)
         .bind(new.run_as)
         .bind(new.run_as_authority)
+        .bind(i64::try_from(replacements).unwrap_or(i64::MAX))
         .fetch_optional(&mut *conn)
         .await?;
     match inserted {
@@ -1581,6 +1622,29 @@ pub async fn set_side_reading(conn: &mut Conn, thread: Id, mode: &str) -> Result
     Ok(())
 }
 
+/// A Stop protects later arrivals while the active turn is stopping, even when the queue is empty.
+/// Ordinary interrupt-and-send still holds only the inputs already waiting.
+pub async fn hold_stop_queue(
+    conn: &mut Conn,
+    thread: Id,
+    by: Id,
+    at: DateTime<Utc>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE threads SET queue_held=true,queue_held_by=$2,queue_held_at=$3,
+          queue_revision=queue_revision+1,seq_state=$4 WHERE node_id=$1 AND NOT queue_held",
+    )
+    .bind(thread)
+    .bind(by)
+    .bind(at)
+    .bind(seq)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
 /// Resumes what a person's Stop held: the inputs that wait keep their places and are eligible again, every
 /// other hold of theirs stays, and the thread's queue is no longer held, with a new revision. The thread's row
 /// must be locked. The answer is how many inputs this let go and the revision after.
@@ -1628,6 +1692,8 @@ pub async fn clear_empty_queue_hold(
         "UPDATE threads SET queue_held = false, queue_held_by = NULL, queue_held_at = NULL,
                             queue_revision = queue_revision + 1, seq_state = $2
           WHERE node_id = $1 AND queue_held
+            AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.id=threads.current_turn_id
+                              AND u.state IN ('starting','running') AND u.interrupted_by IS NOT NULL)
             AND NOT EXISTS (SELECT 1 FROM thread_inputs
                              WHERE thread_id = $1 AND continuation_id=threads.active_continuation_id
                                AND state = 'pending' AND queue_held)",
@@ -1699,12 +1765,16 @@ pub async fn update_input_content(
     content: &Json,
     seq: Seq,
 ) -> Result<bool, DbError> {
+    let mut content = content.clone();
+    let replacements = orch_types::storable::normalize_json(&mut content)
+        .saturating_add(crate::pool::source_text_replacements());
     let done = sqlx::query(
-        "UPDATE thread_inputs SET content = $2, seq_updated = $3 WHERE id = $1 AND state = 'pending'",
+        "UPDATE thread_inputs SET content = $2, seq_updated = $3, text_replacements=text_replacements+$4 WHERE id = $1 AND state = 'pending'",
     )
     .bind(id)
     .bind(content)
     .bind(seq)
+    .bind(i64::try_from(replacements).unwrap_or(i64::MAX))
     .execute(&mut *conn)
     .await?;
     if done.rows_affected() == 1 {
@@ -1836,14 +1906,17 @@ pub async fn count_delivering_authors(conn: &mut Conn, thread: Id) -> Result<i64
 // ---------------------------------------------------------------- turns
 
 pub(crate) const TURN_SELECT: &str = "SELECT id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
-        before_snapshot_id, end_manifest_blob, files_end_manifest,
-        native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup,
+        before_snapshot_id, end_manifest_blob, files_changed, files_changed_paths, recording_notice, recording_indexing,
+        native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, interrupted_at, command_cleanup, sandbox_resolution,
         waiting_since, waited_ms, started_at, completed_at, created_at, seq_updated, plan
    FROM turns";
 
 /// One turn of the agent: its answer to one input.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct TurnRow {
+    /// The connector's captured sandbox decision for this turn.
+    #[sqlx(default)]
+    pub sandbox_resolution: Option<Json>,
     /// Its identifier.
     pub id: Id,
     /// The thread.
@@ -1860,8 +1933,19 @@ pub struct TurnRow {
     pub before_snapshot_id: Option<Id>,
     /// The turn's verified end manifest blob, or unknown coverage.
     pub end_manifest_blob: Option<Vec<u8>>,
-    /// Included end hashes/types/executable bits, or unknown watcher coverage.
-    pub files_end_manifest: Option<Json>,
+    /// How many paths changed, from a complete before/end comparison or the index journal.
+    /// Unknown when neither has complete change coverage.
+    #[sqlx(default)]
+    pub files_changed: Option<i32>,
+    /// Directory-relative paths observed during this turn, independent of file-tool patches.
+    #[sqlx(default)]
+    pub files_changed_paths: Option<Json>,
+    /// Whole-recording coverage explained on this thread's first affected turn only.
+    #[sqlx(default)]
+    pub recording_notice: Option<String>,
+    /// The indexing progress that explains a turn's first recording fallback.
+    #[sqlx(default)]
+    pub recording_indexing: Option<Json>,
     /// The model it ran with.
     pub model: String,
     /// The effort it ran with.
@@ -1896,6 +1980,9 @@ pub struct TurnRow {
     pub waited_ms: i64,
     /// Who stopped it.
     pub interrupted_by: Option<Id>,
+    /// When the stop was asked for.
+    #[sqlx(default)]
+    pub interrupted_at: Option<DateTime<Utc>>,
     /// Actual stopped-turn command outcomes, including a native report after its completion.
     #[sqlx(default)]
     pub command_cleanup: Option<Json>,
@@ -1955,7 +2042,7 @@ pub async fn insert_turn(conn: &mut Conn, new: &NewTurn<'_>, seq: Seq) -> Result
                        COALESCE((SELECT COALESCE(run_as, author_id) FROM thread_inputs WHERE id=$4), (SELECT owner_id FROM nodes WHERE id=$2)),
                        COALESCE((SELECT plan FROM thread_inputs WHERE id=$4), false))
                RETURNING id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
-                    before_snapshot_id, end_manifest_blob, files_end_manifest,
+                    before_snapshot_id, end_manifest_blob,
                     native_turn_ref, error, usage, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup, started_at,
                     completed_at, created_at, seq_updated, waiting_since, waited_ms, plan";
     Ok(sqlx::query_as(sql)
@@ -2098,7 +2185,7 @@ pub async fn mark_interrupted_by(
     seq: Seq,
 ) -> Result<bool, DbError> {
     let done = sqlx::query(
-        "UPDATE turns SET interrupted_by = $2, seq_updated = $3
+        "UPDATE turns SET interrupted_by = $2, interrupted_at = now(), seq_updated = $3
           WHERE id = $1 AND state IN ('starting', 'running') AND interrupted_by IS NULL",
     )
     .bind(turn)
@@ -2121,6 +2208,144 @@ pub async fn set_interrupt_cause(conn: &mut Conn, turn: Id, cause: &str) -> Resu
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Says when the Stop of a turn was asked for, where the turn was marked later than that because the Stop waited
+/// for the thread's row: the earlier of the two stands.
+pub async fn set_interrupted_at(
+    conn: &mut Conn,
+    turn: Id,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE turns SET interrupted_at = LEAST(interrupted_at, $2) WHERE id = $1 AND interrupted_by IS NOT NULL",
+    )
+    .bind(turn)
+    .bind(at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// A person's Stop that was asked for and is not carried out yet.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct StopRow {
+    /// Its identifier.
+    pub id: Id,
+    /// The thread.
+    pub thread_id: Id,
+    /// The turn it names; none for the Stop of the thread's start, before any turn exists.
+    pub turn_id: Option<Id>,
+    /// Who asked.
+    pub requested_by: Id,
+    /// When it was asked.
+    pub requested_at: DateTime<Utc>,
+}
+
+const STOP_SELECT: &str = "SELECT id, thread_id, NULLIF(turn_id, '00000000-0000-0000-0000-000000000000'::uuid) AS turn_id,
+        requested_by, requested_at FROM thread_stops";
+
+/// Records a person's Stop of `thread`, of the turn `turn` or, with none, of its start, and answers the open Stop
+/// that stands for it: this one, or the one asked before it for the same. It takes no lock on the thread, and
+/// waits for nobody but a Stop of the same thread being written at the same moment. Answers nothing where
+/// the thread's own change carried that Stop out between the two statements, which is as good as done.
+pub async fn record_stop(
+    conn: &mut Conn,
+    id: Id,
+    thread: Id,
+    turn: Option<Id>,
+    by: Id,
+    at: DateTime<Utc>,
+) -> Result<Option<StopRow>, DbError> {
+    sqlx::query(
+        "INSERT INTO thread_stops (id, thread_id, turn_id, requested_by, requested_at)
+         VALUES ($1, $2, COALESCE($3, '00000000-0000-0000-0000-000000000000'::uuid), $4, $5)
+         ON CONFLICT (thread_id, turn_id) DO NOTHING",
+    )
+    .bind(id)
+    .bind(thread)
+    .bind(turn)
+    .bind(by)
+    .bind(at)
+    .execute(&mut *conn)
+    .await?;
+    let sql = format!(
+        "{STOP_SELECT} WHERE thread_id = $1 AND turn_id = COALESCE($2, '00000000-0000-0000-0000-000000000000'::uuid)"
+    );
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .bind(turn)
+        .fetch_optional(conn)
+        .await?)
+}
+
+/// The Stops of `thread` that are not carried out yet, in the order they were asked.
+pub async fn open_stops(conn: &mut Conn, thread: Id) -> Result<Vec<StopRow>, DbError> {
+    let sql = format!("{STOP_SELECT} WHERE thread_id = $1 ORDER BY requested_at, id");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// Forgets the Stops that were carried out.
+pub async fn close_stops(conn: &mut Conn, ids: &[Id]) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM thread_stops WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// The threads that have a Stop not carried out yet, the oldest asked first, for the engine to look at.
+pub async fn threads_with_open_stops(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT thread_id FROM thread_stops GROUP BY thread_id ORDER BY MIN(requested_at) LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// When the oldest Stop of `thread` that is not carried out yet was asked for.
+pub async fn open_stop_since(
+    conn: &mut Conn,
+    thread: Id,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT MIN(requested_at) FROM thread_stops WHERE thread_id = $1",
+    )
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// Since when `thread` is being stopped: the oldest Stop that is open, and the turn under way that was asked to stop.
+pub async fn stopping_since(conn: &mut Conn, thread: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT MIN(at) FROM (
+            SELECT requested_at AS at FROM thread_stops WHERE thread_id = $1
+            UNION ALL
+            SELECT interrupted_at FROM turns
+             WHERE id = (SELECT current_turn_id FROM threads WHERE node_id = $1)
+               AND interrupted_by IS NOT NULL AND state IN ('starting', 'running')
+         ) stopping",
+    )
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// Takes the row of `thread` if no other transaction holds it, and says whether it did: a change that must not
+/// wait for the row asks again after a short pause, and a row that is not there is one that is not held.
+pub async fn lock_if_free(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar::<_, Id>(
+        "SELECT node_id FROM threads WHERE node_id = $1 FOR UPDATE SKIP LOCKED",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await?
+    .is_some())
 }
 
 /// A cut the next input has not been told of: the turn before `ordinal`, where it was cut with a recorded cause and
@@ -2326,7 +2551,7 @@ pub async fn keep_turn_end_work(conn: &mut Conn, turn: Id, work: &Json) -> Resul
     Ok(())
 }
 
-/// The oldest pending follow-up; its owner must hold the thread lock through completion.
+/// The oldest pending follow-up; applying its final state requires the thread lock.
 pub async fn turn_end_work(conn: &mut Conn, thread: Id) -> Result<Option<(Id, Json)>, DbError> {
     Ok(sqlx::query_as("SELECT id,end_work FROM turns WHERE thread_id=$1 AND end_work IS NOT NULL ORDER BY ordinal LIMIT 1")
         .bind(thread).fetch_optional(conn).await?)
@@ -2369,6 +2594,37 @@ pub async fn turn_end_work_attempted(
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Serializes only the effects of one terminal turn, without taking its thread row.
+pub async fn lock_turn_end_effects(conn: &mut Conn, turn: Id) -> Result<(), DbError> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('turn_end_effects:' || $1::uuid::text,0))",
+    )
+    .bind(turn)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Effects and their receipt commit together. A failed-at timestamp does not change the immutable snapshot.
+pub async fn keep_turn_end_effects(
+    conn: &mut Conn,
+    turn: Id,
+    snapshot: &Json,
+    effects: &Json,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE turns SET end_work=end_work || jsonb_build_object('effects',$3::jsonb)
+         WHERE id=$1 AND end_work->'snapshot'=$2 AND NOT (end_work ? 'effects')",
+    )
+    .bind(turn)
+    .bind(snapshot)
+    .bind(effects)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Deletes only the exact work successfully applied by this thread-locked transaction.
@@ -2466,12 +2722,20 @@ pub async fn set_turn_lease(
 // ---------------------------------------------------------------- items
 
 const ITEM_SELECT: &str = "SELECT id, thread_id, continuation_id, segment_id, turn_id, model_input_id, stream, parent_item_id, kind, status, author_id,
-        payload, native_ref, before_orch, search_text, pinned_at, pinned_by, chat_refs, seq_created, seq_updated, created_at, updated_at
+        payload, native_ref, before_orch, search_text, pinned_at, pinned_by, chat_refs, seq_created, seq_updated, created_at, updated_at, text_replacements, storage_gap
    FROM items";
 
 /// An entry of a thread's timeline.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct ItemRow {
+    /// Metadata of the last rejected native event, never its original contents.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub storage_gap: Option<Json>,
+    /// Visible source-character replacements across received updates.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub text_replacements: i64,
     /// Its identifier.
     pub id: Id,
     /// The thread.
@@ -2558,13 +2822,15 @@ pub async fn insert_item(
     new: &NewItem<'_>,
     seq: Seq,
 ) -> Result<Option<ItemRow>, DbError> {
+    let (payload, replacements, output_source) = storable_item_payload(new.payload);
+    let search_text = new.search_text.map(storable_item_text);
     let sql = "INSERT INTO items (id, thread_id, segment_id, turn_id, stream, parent_item_id, kind, status, author_id,
-                    payload, native_ref, search_text, seq_created, seq_updated, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $14)
+                    payload, native_ref, search_text, seq_created, seq_updated, created_at, updated_at, text_replacements)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $14, $15)
                ON CONFLICT (segment_id, native_ref) WHERE native_ref IS NOT NULL DO NOTHING
                RETURNING id, thread_id, continuation_id, segment_id, turn_id, model_input_id, stream, parent_item_id, kind, status, author_id,
                     payload, native_ref, before_orch, search_text, pinned_at, pinned_by, chat_refs, seq_created, seq_updated,
-                    created_at, updated_at";
+                    created_at, updated_at, text_replacements, storage_gap";
     let row: Option<ItemRow> = sqlx::query_as(sql)
         .bind(new.id)
         .bind(new.thread_id)
@@ -2575,13 +2841,17 @@ pub async fn insert_item(
         .bind(new.kind)
         .bind(new.status)
         .bind(new.author_id)
-        .bind(new.payload)
+        .bind(&payload)
         .bind(new.native_ref)
-        .bind(new.search_text)
+        .bind(search_text)
         .bind(seq)
         .bind(new.at)
+        .bind(replacements)
         .fetch_optional(&mut *conn)
         .await?;
+    if row.is_some() {
+        keep_output_inline_source(conn, new.id, &payload, output_source.as_deref()).await?;
+    }
     if let Some(row) = &row
         && row.kind == "tool_call"
         && let (Some(turn), Some(reference)) = (row.turn_id, row.native_ref.as_deref())
@@ -2635,6 +2905,43 @@ pub async fn user_message_kept(
         .await?)
 }
 
+/// Stream delivery needs identity and the durable cursor, not a copy of the growing payload.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StreamItemRow {
+    /// Previously recorded visible source repairs.
+    pub text_replacements: i64,
+    /// Item identity.
+    pub id: Id,
+    /// Owning thread.
+    pub thread_id: Id,
+    /// Owning turn.
+    pub turn_id: Option<Id>,
+    /// Timeline stream.
+    pub stream: String,
+    /// Current item state.
+    pub status: String,
+    /// Committed presentation cursor, including pending durable pieces.
+    pub visible_len: i64,
+}
+
+/// Pending pieces supply the cursor; only the first piece after coalescing reads the full field.
+pub async fn stream_item(
+    conn: &mut Conn,
+    segment: Id,
+    native_ref: &str,
+    field: &str,
+) -> Result<Option<StreamItemRow>, DbError> {
+    Ok(sqlx::query_as("SELECT i.id,i.thread_id,i.turn_id,i.stream,i.status,i.text_replacements,
+        COALESCE((SELECT p.part_offset+p.part_len FROM item_stream_parts p WHERE p.item_id=i.id AND p.field=$3 ORDER BY p.part_offset DESC LIMIT 1),
+          CASE $3 WHEN 'text' THEN char_length(COALESCE(i.payload->>'text',''))::bigint
+          WHEN 'summary' THEN char_length(COALESCE(i.payload->>'summary',''))::bigint
+          ELSE COALESCE((i.payload #>> '{tool,output,total_len}')::bigint,0) END) AS visible_len
+        FROM items i WHERE (i.segment_id=$1 AND i.native_ref=$2) OR
+          (i.thread_id=(SELECT thread_id FROM segments WHERE id=$1) AND i.native_ref='fork-history:' || $1::uuid::text || ':' || $2)
+        ORDER BY (i.segment_id=$1) DESC LIMIT 1")
+        .bind(segment).bind(native_ref).bind(field).fetch_optional(conn).await?)
+}
+
 /// What an item is changed to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemChange<'a> {
@@ -2656,25 +2963,115 @@ pub async fn change_item(
     change: &ItemChange<'_>,
     seq: Seq,
 ) -> Result<bool, DbError> {
+    change_item_counting(conn, id, change, seq, true).await
+}
+
+/// Publishes streamed parts whose replacement count was already recorded at receipt.
+pub async fn change_streamed_item(
+    conn: &mut Conn,
+    id: Id,
+    change: &ItemChange<'_>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    change_item_counting(conn, id, change, seq, false).await
+}
+
+async fn change_item_counting(
+    conn: &mut Conn,
+    id: Id,
+    change: &ItemChange<'_>,
+    seq: Seq,
+    count: bool,
+) -> Result<bool, DbError> {
+    let (payload, replacements, output_source) = storable_item_payload(change.payload);
+    let search_text = change.search_text.map(storable_item_text);
     let changed: Option<(String,Option<Id>,Id,Option<String>)> = sqlx::query_as(
         "UPDATE items SET status = COALESCE($2, status), payload = $3, search_text = COALESCE($4, search_text),
-                seq_updated = $5, updated_at = $6
+                seq_updated = $5, updated_at = $6, text_replacements=text_replacements+$7
           WHERE id = $1 RETURNING kind,turn_id,segment_id,native_ref",
     )
     .bind(id)
     .bind(change.status)
-    .bind(change.payload)
-    .bind(change.search_text)
+    .bind(&payload)
+    .bind(search_text)
     .bind(seq)
     .bind(change.at)
+    .bind(if count {replacements} else {0})
     .fetch_optional(&mut *conn)
     .await?;
+    if changed.is_some() {
+        keep_output_inline_source(conn, id, &payload, output_source.as_deref()).await?;
+    }
     if let Some((kind, Some(turn), segment, Some(reference))) = &changed
         && kind == "tool_call"
     {
         crate::usage::ledger::tools::item_changed(conn, *turn, *segment, reference).await?;
     }
     Ok(changed.is_some())
+}
+
+pub(crate) fn storable_item_text(text: &str) -> String {
+    let mut text = text.to_owned();
+    orch_types::storable::normalize_text(&mut text);
+    text
+}
+
+/// One canonical public item shape, its repair count and its masked original output byte tail.
+pub fn storable_item_payload(original: &Json) -> (Json, i64, Option<Vec<u8>>) {
+    let mut payload = original.clone();
+    // This is the already-masked source tail. Bytes retain native offsets while its display is repaired.
+    let source = payload
+        .pointer("/tool/output/inline")
+        .and_then(Json::as_str)
+        .filter(|text| text.contains('\0'))
+        .map(|text| text.as_bytes().to_vec());
+    // These are the typed OutputRef positions of ToolCallPayload, including its raw-call form.
+    let repaired_ranges: Vec<_> = ["/tool/output", "/tool/content", "/raw/input", "/raw/output"]
+        .into_iter()
+        .filter_map(|path| {
+            payload
+                .pointer(path)
+                .and_then(|output| output.get("inline"))
+                .and_then(Json::as_str)
+                .filter(|text| text.contains('\0'))
+                .map(|text| (path, text.len()))
+        })
+        .collect();
+    let count = orch_types::storable::normalize_json(&mut payload);
+    for (path, len) in repaired_ranges {
+        if let Some(output) = payload.pointer_mut(path).and_then(Json::as_object_mut) {
+            output.insert("inline_source_len".to_owned(), Json::from(len));
+        }
+    }
+    (payload, i64::try_from(count).unwrap_or(i64::MAX), source)
+}
+
+async fn keep_output_inline_source(
+    conn: &mut Conn,
+    item: Id,
+    payload: &Json,
+    source: Option<&[u8]>,
+) -> Result<(), DbError> {
+    if let Some(source) = source {
+        sqlx::query("INSERT INTO item_output_inline_source(item_id,data) VALUES($1,$2) ON CONFLICT(item_id) DO UPDATE SET data=EXCLUDED.data")
+            .bind(item).bind(source).execute(conn).await?;
+    } else if payload.pointer("/tool/output/inline_source_len").is_none() {
+        sqlx::query("DELETE FROM item_output_inline_source WHERE item_id=$1")
+            .bind(item)
+            .execute(conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// The already-masked original tail needed for native byte accounting after a visible replacement.
+pub async fn output_inline_source(conn: &mut Conn, item: Id) -> Result<Option<Vec<u8>>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT data FROM item_output_inline_source WHERE item_id=$1")
+            .bind(item)
+            .fetch_optional(conn)
+            .await?,
+    )
 }
 
 /// Sets the status of an item whose status is one of `from`. The answer says
