@@ -16,17 +16,22 @@ it('renders stored text and stored output without replacing the same thread’s 
   threadWriter.reset(id, { ...live, items: [answer('live', 'The live route stays here', A)] }, false);
   const before = threadViewOf(id);
   const stored = snapshot(projection(B, A, 1, false));
-  const tool = command('stored-command', { command: 'pwd', output: 'Stored tail', exit: 0 });
+  const tool = command('stored-command', { command: 'pwd', output: 'output', exit: 0 });
   if (tool.kind !== 'tool_call' || tool.payload.tool.kind !== 'command') throw new Error('Expected stored command');
-  tool.payload.tool.output.total_len = 200;
+  const complete = 'Stored complete output';
+  const retained = 'b'.repeat(64);
+  tool.payload.tool.output.total_len = complete.length;
+  tool.payload.tool.output.blob = retained;
+  tool.payload.tool.output.retained = { offset: 0, len: complete.length };
+  tool.payload.tool.output.truncated = true;
   const reads: string[] = [];
   vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : new Request(input);
     reads.push(request.url);
     if (new URL(request.url).pathname === '/api/v1/me/state') {
-      return Promise.resolve(Response.json({ timeline: { work_detail: 'steps', diff_layout: 'one' } }));
+      return Promise.resolve(Response.json({ timeline: { work_detail: 'normal', diff_layout: 'one' } }));
     }
-    return Promise.resolve(new Response('Stored complete output', { status: 200, headers: { 'content-type': 'text/plain' } }));
+    return Promise.resolve(new Response(complete, { status: 200, headers: { 'content-type': 'text/plain' } }));
   });
   const shown = show(<StoredTimeline snapshot={{ ...stored, items: [answer('stored', 'Frozen retained message', A), tool] }} />);
   expect(await screen.findByText('Frozen retained message')).toBeVisible();
@@ -41,6 +46,7 @@ it('renders stored text and stored output without replacing the same thread’s 
   expect(path.pathname).toBe(`/api/v1/threads/${id}/items/stored-command/output`);
   expect(path.searchParams.get('inspect_deleted')).toBe('true');
   expect(path.searchParams.get('continuation_id')).toBe(B);
+  expect(path.searchParams.get('expected_blob')).toBe(retained);
   expect(threadViewOf(id)).toBe(before);
   shown.unmount(); expect(threadViewOf(id)).toBe(before);
 });

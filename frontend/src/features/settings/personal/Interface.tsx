@@ -6,7 +6,11 @@
  * places of panes, the tabs that were open) is listed with what it comes to and can be forgotten,
  * which changes nothing for the person on any other device.
  */
-import { forgetViewChoiceDeviceData, viewChoiceKeyDetails } from '@/lib/viewChoices';
+import { forgetViewChoiceDeviceData, forgetViewChoiceKind, useDeviceChoiceFailures, viewChoiceKeyDetails } from '@/lib/viewChoices';
+import { deviceChoiceKind, VIEW_CHOICE_FIELDS as CHOICE_FIELDS, VIEW_CHOICE_KINDS as CHOICE_KINDS, type DeviceChoiceFailure } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceFailureFacts } from '@/ui/DeviceChoiceFacts';
+import { StateLine } from '@/ui/StateLine';
+import { ScrollArea } from '@/ui/ScrollArea';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { GraduationCap, HardDrive, Keyboard, RotateCcw } from 'lucide-react';
 import { useState } from 'react';
@@ -20,6 +24,7 @@ import { meStateKey, meStateQuery, setMeState } from '@/api/personal';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import { readHelpState } from '@/features/help/Dismissed';
 import { forgetCommentDraftDeviceData } from '@/features/documents/commentDrafts';
+import { forgetViewerChoices } from '@/features/files/viewers';
 import { TUTORIALS as SHIPPED_TUTORIALS, tutorialOf } from '@/help/tutorials';
 import { useSaveKeys } from '@/features/help/KeyList';
 import { PersonalFrame } from '@/features/settings/PersonalFrame';
@@ -33,7 +38,11 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
+import { Input } from '@/ui/Input';
+import { READING_STATE_KEY, useInterfaceReading } from '@/lib/interfaceReading';
 import { linkSharingPreference } from '@/features/sharing/preference';
+import { Select } from '@/ui/Select';
+import { LINK_OPENINGS, useSidebarPreferences } from '@/features/navigation/preferences';
 
 /** The tutorials that ship, by the name each is kept under when it is finished. */
 export const TUTORIALS = [
@@ -54,8 +63,6 @@ export type Tutorial = (typeof TUTORIALS)[number];
 
 /** The kinds of screen whose layout a device keeps. */
 /** Known storage fields are translated through these catalogue keys, never shown as implementation names. */
-const CHOICE_KINDS = ['global', 'org', 'project', 'topic', 'thread', 'document', 'page', 'resource-providers', 'resource-agents', 'resource-environments', 'resource-hosts', 'resource-machines', 'resource-templates', 'provider-endpoints', 'chat', 'help', 'search', 'approvals', 'ports', 'storage', 'trace', 'navigation', 'onboarding', 'links', 'import-review', 'import-report', 'usage'] as const;
-const CHOICE_FIELDS = ['tab', 'view', 'rightOpen', 'rightSize', 'mobileView', 'mobileTab', 'listOrigin', 'scope', 'advanced', 'endpointAdvanced', 'part', 'setup', 'filters'] as const;
 
 const SCREEN_KINDS: readonly ScreenKind[] = ['org', 'project', 'topic', 'thread', 'document', 'page'];
 
@@ -123,6 +130,45 @@ function useStateKey(key: string) {
     },
     onSettled: (_data, error) => { if (error !== null) void queryClient.invalidateQueries({ queryKey: meStateKey }); },
   });
+}
+
+/** Whether a hidden bar peeks over the page when the pointer rests at its edge: off unless the person turns it on, and kept with the other choices of the bars. */
+function OpenLinks() {
+  const { t } = useTranslation();
+  const choices = useSidebarPreferences();
+  return <Section id="interface-opening" title={t('workbench.openLinks.label')}>
+    <Select size="sm" label={t('workbench.openLinks.label')} value={choices.openLinks ?? 'automatic'} onValueChange={choices.setOpenLinks}
+      options={LINK_OPENINGS.map((value) => ({ value, name: t(`workbench.openLinks.${value}`) }))} />
+  </Section>;
+}
+
+function HiddenBars() {
+  const { t } = useTranslation();
+  const preferences = useSidebarPreferences();
+  return <Section id="interface-bars" title={t('workbench.bars.peek.title')}>
+    <Switch label={t('workbench.bars.peek.label', { state: t(preferences.peek === true ? 'common.on' : 'common.off') })} checked={preferences.peek === true} onCheckedChange={preferences.setPeek} />
+  </Section>;
+}
+
+function Reading() {
+  const { t } = useTranslation();
+  const reading = useInterfaceReading();
+  const write = useStateKey(READING_STATE_KEY);
+  const [recent, setRecent] = useState(String(reading.kept_closed_tabs));
+  const [delay, setDelay] = useState(String(reading.progress_delay_ms));
+  const save = () => {
+    const kept_closed_tabs = Number(recent), progress_delay_ms = Number(delay);
+    if (recent.trim() === '' || delay.trim() === '' || ![kept_closed_tabs, progress_delay_ms].every((value) => Number.isSafeInteger(value) && value >= 0)) return;
+    write.mutate((held) => ({ ...(isRecord(held) ? held : {}), kept_closed_tabs, progress_delay_ms }));
+  };
+  return <Section id="interface-reading" title={t('settings.interface.reading.title')}>
+    <div className="flex flex-wrap items-end gap-3">
+      <Input label={t('settings.interface.reading.recent')} type="number" min={0} step={1} value={recent} onChange={(event) => setRecent(event.target.value)} fieldClassName="w-44" />
+      <Input label={t('settings.interface.reading.delay')} type="number" min={0} step={1} value={delay} onChange={(event) => setDelay(event.target.value)} fieldClassName="w-44" />
+      <Button size="sm" pending={write.isPending} onClick={save}>{t('common.save')}</Button>
+    </div>
+    {write.error !== null && <ErrorAlert error={write.error} />}
+  </Section>;
 }
 
 function LinkSharing({ state }: { state: Record<string, unknown> }) {
@@ -270,7 +316,8 @@ export function deviceKeptGroups(userId: string | null, items: readonly KeptItem
   const groups = new Map<string, KeptGroup>();
   for (const item of items) {
     if (!item.key.startsWith(`orch.${userId}.`)) continue;
-    const choice = viewChoiceKeyDetails(userId, item.key);
+    const parsed = item.key === `orch.${userId}.viewers` ? { kind: 'file-viewers', key: 'viewer' } : viewChoiceKeyDetails(userId, item.key);
+    const choice = parsed === null ? null : { ...parsed, kind: deviceChoiceKind(parsed.kind) };
     const known = CHOICE_KINDS.some((kind) => kind === choice?.kind);
     const id = choice === null ? item.key : known ? `choices:${choice.kind}` : 'choices:other';
     const before = groups.get(id);
@@ -314,11 +361,11 @@ export function knownKept(name: string): (typeof KNOWN_KEPT)[number] | null {
 }
 
 /** What this browser keeps for the person, or nothing where the browser keeps nothing for the page. */
-function readKept(userId: string | null): KeptItem[] {
+function readKept(userId: string | null): { items: KeptItem[]; readable: boolean } {
   try {
-    return userId === null ? [] : keptOnDevice(userId, localStorage);
+    return { items: userId === null ? [] : keptOnDevice(userId, localStorage), readable: true };
   } catch {
-    return [];
+    return { items: [], readable: false };
   }
 }
 
@@ -328,7 +375,32 @@ function ThisDevice() {
 }
 function ThisPersonDevice({ userId }: { userId: string | null }) {
   const { t } = useTranslation();
-  const [items, setItems] = useState<KeptItem[]>(() => readKept(userId));
+  const [inventory, setInventory] = useState(() => readKept(userId));
+  const items = inventory.items, failures = useDeviceChoiceFailures();
+  const groups: (Omit<KeptGroup, 'bytes'> & { failure?: DeviceChoiceFailure })[] = deviceKeptGroups(userId, items).map((item) => ({ ...item,
+    failure: failures.find((failure) => failure.kind === (item.choice === null ? null : deviceChoiceKind(item.choice.kind))),
+  }));
+  for (const failure of failures) {
+    if (groups.some((group) => group.failure?.kind === failure.kind)) continue;
+    groups.push({ id: `volatile:${failure.kind}`, key: '', keys: [], choice: { kind: failure.kind, key: null }, failure });
+  }
+  const [query, setQuery] = useState('');
+  const records = groups.map((item) => {
+    const what = userId === null ? null : kindOfKept(userId, item.key);
+    const known = what?.kind === 'other' ? knownKept(what.name) : null;
+    const choice = item.choice;
+    const scope = CHOICE_KINDS.find((kind) => kind === choice?.kind);
+    const key = CHOICE_FIELDS.find((key) => key === choice?.key);
+    const choiceName = choice === null ? null : scope === undefined ? t('craftChoiceNames.unknown')
+      : scope === 'page' || key === undefined ? t(`craftChoiceNames.kinds.${scope}`)
+      : t('craftChoiceNames.scope', { kind: t(`craftChoiceNames.kinds.${scope}`), choice: t(`craftChoiceNames.keys.${key}`) });
+    const itemName = what?.kind === 'comments' ? t('settings.interface.device.commentDrafts') : t('settings.interface.device.otherData');
+    const name = choiceName ?? (what?.kind === 'comments' ? itemName : what?.kind === 'layout' && isScreenKind(what.screen)
+      ? t('settings.interface.device.layout', { screen: t(`settings.interface.device.screens.${what.screen}`) })
+      : known !== null ? t(`settings.interface.device.names.${known}`) : itemName);
+    return { ...item, what, known, choiceName, itemName, name };
+  });
+  const visible = records.filter((item) => item.name.normalize('NFKC').toLocaleLowerCase().includes(query.normalize('NFKC').toLocaleLowerCase().trim()));
   const [forgetting, setForgetting] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const forget = (keys: readonly string[], all = false): boolean => {
@@ -348,51 +420,49 @@ function ThisPersonDevice({ userId }: { userId: string | null }) {
     }
     forgetCommentDraftDeviceData(userId, all && !failed ? null : removed);
     forgetViewChoiceDeviceData(userId, all && !failed ? null : removed);
-    setItems(readKept(userId));
+    if (all && !failed || removed.includes(`orch.${userId}.viewers`)) forgetViewerChoices(userId);
+    setInventory(readKept(userId));
     return !failed;
   };
   return (
     <Section id="interface-device" title={t('settings.interface.device.title')} lead={t('settings.interface.device.lead')}>
-      {items.length === 0 ? (
+      {!inventory.readable && <StateLine compact message={t('clientFacts.device.unavailableRead')} />}
+      {groups.length === 0 ? (inventory.readable ? (
         <p className="flex items-center gap-3 text-sm text-text-muted">
           <HardDrive className="size-4 shrink-0 text-text-subtle" aria-hidden />
           {t('settings.interface.device.none')}
         </p>
-      ) : (
+      ) : null) : (
         <>
-          <ul className={`${boxClasses} divide-y divide-border`}>
-            {deviceKeptGroups(userId, items).map((item) => {
-              const what = userId === null ? null : kindOfKept(userId, item.key);
-              const known = what?.kind === 'other' ? knownKept(what.name) : null;
-              const choice = item.choice;
-              const scope = CHOICE_KINDS.find((kind) => kind === choice?.kind);
-              const key = CHOICE_FIELDS.find((key) => key === choice?.key);
-              const choiceName = choice === null ? null : scope === undefined ? t('craftChoiceNames.unknown')
-                : scope === 'page' || key === undefined ? t(`craftChoiceNames.kinds.${scope}`)
-                : t('craftChoiceNames.scope', { kind: t(`craftChoiceNames.kinds.${scope}`), choice: t(`craftChoiceNames.keys.${key}`) });
-              const itemName = what?.kind === 'comments' ? t('settings.interface.device.commentDrafts') : what?.kind === 'other' ? what.name : item.key;
+          {groups.length > 10 && <Input type="search" label={t('settings.interface.device.find')} hideLabel placeholder={t('settings.interface.device.find')} value={query} onChange={(event) => setQuery(event.target.value)} />}
+          {visible.length === 0 && <StateLine compact message={t('ui.combobox.empty')} />}
+          <ScrollArea className="max-h-80"><ul className={`${boxClasses} divide-y divide-border`}>
+            {visible.map((item) => {
+              const { what, known, choiceName, itemName } = item;
               return (
                 <li key={item.id} className="flex items-center gap-3 px-4 py-2">
                   <HardDrive className="size-4 shrink-0 text-text-subtle" aria-hidden />
-                  <span className="min-w-0 flex-1 text-base text-text">
-                    {choiceName ?? (what?.kind === 'comments' ? itemName : what?.kind === 'layout'
-                      ? t('settings.interface.device.layout', { screen: isScreenKind(what.screen) ? t(`settings.interface.device.screens.${what.screen}`) : what.screen })
-                      : known !== null
-                        ? t(`settings.interface.device.names.${known}`)
-                        : t('settings.interface.device.other', { name: itemName }))}
-                  </span>
-                  <Button action={what?.kind === 'layout' ? 'resetLayout' : known === 'org' ? 'clearOrg' : 'clearChoices'} aria-label={what?.kind === 'layout' ? actionName('resetLayout', what.screen) : known === 'org' ? actionName('clearOrg') : actionName('clearChoices', choiceName ?? itemName)} size="sm" variant="ghost" onClick={() => { forget(item.keys); }}>
+                  <div className="min-w-0 flex-1 text-base text-text">
+                    <span>{item.name}</span>
+                    {item.failure !== undefined && <DeviceChoiceFailureFacts failure={item.failure} />}
+                  </div>
+                  <Button action={what?.kind === 'layout' ? 'resetLayout' : known === 'org' ? 'clearOrg' : 'clearChoices'} aria-label={what?.kind === 'layout' ? actionName('resetLayout', what.screen) : known === 'org' ? actionName('clearOrg') : actionName('clearChoices', choiceName ?? itemName)} size="sm" variant="ghost" onClick={() => {
+                    if (forget(item.keys) && userId !== null && item.choice !== null) {
+                      if (item.choice.kind === 'file-viewers') forgetViewerChoices(userId);
+                      forgetViewChoiceKind(userId, deviceChoiceKind(item.choice.kind));
+                    }
+                  }}>
                     {what?.kind === 'layout' ? t('settings.interface.device.reset') : known === 'org' ? t('settings.interface.device.forget') : t('craftDevices.clear')}
                   </Button>
                 </li>
               );
             })}
-          </ul>
-          <div>
+          </ul></ScrollArea>
+          {inventory.readable && <div>
             <Button variant="danger-ghost" onClick={() => setForgetting(true)}>
               {t('settings.interface.device.forgetAll')}
             </Button>
-          </div>
+          </div>}
         </>
       )}
       {error !== null && <ErrorAlert error={error} />}
@@ -403,7 +473,9 @@ function ThisPersonDevice({ userId }: { userId: string | null }) {
         confirmLabel={t('settings.interface.device.forgetAllConfirm')}
         danger
         onConfirm={() => {
-          if (forget(readKept(userId).map((item) => item.key), true)) setForgetting(false);
+          const current = readKept(userId);
+          if (!current.readable) { setInventory(current); return; }
+          if (forget(current.items.map((item) => item.key), true)) setForgetting(false);
         }}
       >
         {t('settings.interface.device.forgetAllBody')}
@@ -433,6 +505,9 @@ export function InterfaceSettings() {
           )}
           <Keys />
           <LinkSharing state={state.data} />
+          <OpenLinks />
+          <HiddenBars />
+          <Reading />
           <Viewers state={state.data} />
           <Tutorials state={state.data} />
           <ThisDevice />

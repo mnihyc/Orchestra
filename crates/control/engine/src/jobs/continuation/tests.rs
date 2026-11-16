@@ -91,6 +91,7 @@ impl crate::commands::Commands for RecoveredCommands {
     ) -> Result<Option<crate::commands::RetainedCommand>, crate::commands::CommandsError> {
         if id == self.expected.id {
             Ok(Some(crate::commands::RetainedCommand {
+                after: None,
                 machine: self.expected.machine,
                 kind: self.command.kind.clone(),
                 key: self.command.key.clone(),
@@ -108,6 +109,7 @@ impl crate::commands::Commands for RecoveredCommands {
             return self.inner.status(id).await;
         }
         Ok(self.server.entry(id).map(|entry| crate::commands::Info {
+            completed_at: None,
             stage: if entry.result().is_some() {
                 crate::commands::Stage::Over
             } else {
@@ -1402,6 +1404,7 @@ async fn an_actual_recovered_started_journal_refusal_never_authorizes_another_pr
         .await,
     )?;
     let command = orch_link_contract::commands::Cmd {
+        after: None,
         id: outgoing.id,
         kind: outgoing.kind.as_str().into(),
         key: Some(fixture.thread.to_string()),

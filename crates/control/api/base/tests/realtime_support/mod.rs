@@ -383,6 +383,7 @@ struct Issued {
     cmd: Cmd,
     handle: CommandHandle,
     at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// The API's end of a machine's commands: each is kept from the moment it is
@@ -397,7 +398,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -422,6 +423,7 @@ impl Commands for ScriptedCommands {
         }
         // Use the real scripted link without retaining the volatile roster in issued rows.
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -446,6 +448,7 @@ impl Commands for ScriptedCommands {
         Ok(lock(&self.issued)
             .get(&id)
             .map(|entry| orch_engine::commands::RetainedCommand {
+                after: entry.cmd.after,
                 machine: entry.machine,
                 kind: entry.cmd.kind.clone(),
                 key: entry.cmd.key.clone(),
@@ -469,6 +472,7 @@ impl Commands for ScriptedCommands {
             Time::new(now + Span::seconds(i64::from(command.kind.deadline_secs())))
         });
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -486,17 +490,26 @@ impl Commands for ScriptedCommands {
                 cmd,
                 handle,
                 at: now,
+                completed_at: None,
             },
         );
         Ok(())
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
-        Ok(lock(&self.issued).get(&id).map(|entry| {
+        Ok(lock(&self.issued).get_mut(&id).map(|entry| {
             let progress = entry.handle.progress();
+            if progress.is_final() && entry.completed_at.is_none() {
+                entry.completed_at = Some(self.clock.now());
+            }
             Info {
-                stage: stage_of(&progress),
+                stage: if entry.cmd.after.is_some() && progress == Progress::Accepted {
+                    Stage::Sent
+                } else {
+                    stage_of(&progress)
+                },
                 issued_at: entry.at,
+                completed_at: entry.completed_at,
                 outcome: outcome_of(&progress),
             }
         }))
@@ -510,6 +523,11 @@ impl Commands for ScriptedCommands {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let progress = handle.wait().await;
+        if let Some(entry) = lock(&self.issued).get_mut(&id)
+            && entry.completed_at.is_none()
+        {
+            entry.completed_at = Some(self.clock.now());
+        }
         outcome_of(&progress).ok_or(CommandsError::Stopping)
     }
 

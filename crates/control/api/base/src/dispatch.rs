@@ -250,6 +250,7 @@ pub fn cmd_of(row: &CommandRow) -> Cmd {
         id: row.id,
         kind: row.kind.clone(),
         key,
+        after: row.after_command_id,
         deadline: Time::new(row.deadline_at),
         body,
     }
@@ -407,7 +408,7 @@ impl Dispatcher {
     /// once if the machine has a session, and whenever it has one until the
     /// command is over.
     pub async fn issue_stored(&self, command: StoredCommand) -> Result<Issued, DispatchError> {
-        self.issue_stored_boundary(command, None).await
+        self.issue_stored_boundary(command, None, None).await
     }
 
     /// Queue the same native command with its writer's check at the first SQL mutation.
@@ -416,13 +417,26 @@ impl Dispatcher {
         command: StoredCommand,
         before: orch_engine::commands::BeforeCommand<'_>,
     ) -> Result<Issued, DispatchError> {
-        self.issue_stored_boundary(command, Some(before)).await
+        self.issue_stored_boundary(command, Some(before), None)
+            .await
+    }
+
+    /// The engine may pipeline dependent native work without changing either command's origin.
+    pub(crate) async fn issue_after(
+        &self,
+        command: StoredCommand,
+        prerequisite: Option<Id>,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<Issued, DispatchError> {
+        self.issue_stored_boundary(command, before, prerequisite)
+            .await
     }
 
     fn issue_stored_boundary<'a>(
         &'a self,
         command: StoredCommand,
         before: Option<orch_engine::commands::BeforeCommand<'a>>,
+        after: Option<Id>,
     ) -> futures::future::BoxFuture<'a, Result<Issued, DispatchError>> {
         Box::pin(async move {
             let guarded = before.is_some();
@@ -461,12 +475,23 @@ impl Dispatcher {
             let inner = &self.link.inner;
             let now = inner.clock.now();
             let id = command.id.unwrap_or_else(new_id);
+            if after == Some(id) {
+                return Err(DispatchError::AuthorityMismatch);
+            }
             let deadline = command.deadline.map_or_else(
                 || now + ChronoDuration::seconds(i64::from(kind.deadline_secs())),
                 Time::get,
             );
             let mut body = command.body;
             let mut tx = inner.db.begin().await?;
+            if let Some(prerequisite) = after {
+                let parent = queries::command(&mut tx, prerequisite)
+                    .await?
+                    .ok_or(DispatchError::UnknownCommand)?;
+                if parent.machine_id != command.machine {
+                    return Err(DispatchError::AuthorityMismatch);
+                }
+            }
             let owner_read_result = if kind == CommandKind::OrchToolResult {
                 let tools = inner
                     .read_tools
@@ -530,6 +555,7 @@ impl Dispatcher {
                 && (saved.command.machine_id != command.machine
                     || saved.command.kind != kind.as_str()
                     || saved.command.serial_key() != command.key.as_deref()
+                    || saved.command.after_command_id != after
                     || saved.command.body != body
                     || !same_private_origin(saved.authority.as_ref(), command.authority.as_ref()))
             {
@@ -570,7 +596,7 @@ impl Dispatcher {
             {
                 return Err(DispatchError::Unavailable);
             }
-            let inserted = queries::insert_command_with_authority(
+            let inserted = queries::insert_command_with_dependency(
                 &mut tx,
                 &NewCommand {
                     id,
@@ -582,8 +608,15 @@ impl Dispatcher {
                 },
                 now,
                 authority.as_ref(),
+                after,
             )
             .await?;
+            if queries::command(&mut tx, id)
+                .await?
+                .is_none_or(|saved| saved.after_command_id != after)
+            {
+                return Err(DispatchError::AuthorityMismatch);
+            }
             if inserted && owner_read_result {
                 sqlx::query("UPDATE thread_tool_calls SET plan=jsonb_set(plan,'{owner_read,completed}','true') WHERE answer_id=$1")
                     .bind(id).execute(&mut *tx).await.map_err(DbError::from)?;
@@ -645,15 +678,32 @@ impl Dispatcher {
                 && inserted
                 && let Some(authority) = &command.authority
             {
-                let current = authority
-                    .current_callers(
-                        &mut tx,
-                        &row,
-                        inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
+                // Reuse only the still-fenced native source proof. The HTTP/paid wrappers still
+                // recheck the stored command and persist every narrower credential boundary.
+                let current = match issue_callers.as_ref() {
+                    Some(issued) => {
+                        authority
+                            .current_callers_after_issue(
+                                &mut tx,
+                                &row,
+                                issued,
+                                inner.clock.as_ref(),
+                                &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                            )
+                            .await
+                    }
+                    None => {
+                        authority
+                            .current_callers(
+                                &mut tx,
+                                &row,
+                                inner.clock.as_ref(),
+                                &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                            )
+                            .await
+                    }
+                }
+                .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
                 let allowed = current
                     .is_some_and(|callers| issuing_deadlines_allow(&callers, inner.clock.as_ref()));
                 if !allowed {
@@ -1170,9 +1220,36 @@ impl Link {
             orch_db::queries::transaction_guard::lock_action(&mut tx)
                 .await
                 .map_err(|_| internal())?;
+            let mut checked_before_row = None;
             if let Some(value) = &private.authority {
                 let authority: orch_engine::commands::CommandAuthority =
                     serde_json::from_value(value.clone()).map_err(|_| internal())?;
+                // Whatever the rows around the command already decide is decided before the
+                // source's rows are taken: a command that is refused for that reason never holds
+                // a person's thread, or any place above it, while the refusal is made. A command
+                // that passes (or that this cannot decide) takes them and is checked as before.
+                if authority
+                    .refused_without_fence(&mut tx, &row)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        format!("the accepted {operation} command is no longer authorized"),
+                    )
+                    .into());
+                }
+                if authority.reads_before_fence() {
+                    let checked = authority
+                        .current_callers(
+                            &mut tx,
+                            &row,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await;
+                    checked_before_row = Some((authority.clone(), checked));
+                }
                 authority
                     .lock_native_source(&mut tx)
                     .await
@@ -1209,6 +1286,16 @@ impl Link {
                 return Ok(None);
             }
             if current.state != "accepted"
+                && checked_before_row.is_some()
+                && private.authority.is_none()
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native command's source disappeared during admission",
+                )
+                .into());
+            }
+            if current.state != "accepted"
                 && let Some(stored) = private.authority
             {
                 let authority: orch_engine::commands::CommandAuthority =
@@ -1218,15 +1305,36 @@ impl Link {
                             format!("{operation} command authority is invalid"),
                         )
                     })?;
-                let Some(checked) = authority
-                    .current_callers(
-                        &mut tx,
-                        &current,
-                        self.inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|_| internal())?
+                let checked = if let Some((opened, checked)) = checked_before_row {
+                    if !authority.same_origin(&opened) {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native command's source changed during admission",
+                        )
+                        .into());
+                    }
+                    checked
+                } else {
+                    authority
+                        .current_callers(
+                            &mut tx,
+                            &current,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await
+                };
+                let Some(checked) = checked.map_err(|error| {
+                    if let Some(change) = orch_engine::summaries::resource::source_change(&error) {
+                        WireAdmissionError::Command(CommandError::new(ErrorCode::Conflict, change.sentence())
+                            .with_details(serde_json::json!({"source_change":change.reason(),"before_effect":true})))
+                    } else {
+                        match error {
+                            orch_engine::EngineError::Db(DbError::Retry) => WireAdmissionError::Database(DbError::Retry),
+                            _ => WireAdmissionError::Command(internal()),
+                        }
+                    }
+                })?
                 else {
                     return Err(CommandError::new(
                         ErrorCode::Conflict,
@@ -1424,6 +1532,19 @@ impl Link {
                         .into());
                     }
                 }
+            }
+            if current.state != "accepted"
+                && canonical.kind == "provider.complete"
+                && let Some(value) = queries::command_authority(&mut tx, current.id)
+                    .await
+                    .map_err(|_| internal())?
+            {
+                let authority: orch_engine::commands::CommandAuthority =
+                    serde_json::from_value(value).map_err(|_| internal())?;
+                authority
+                    .mark_model_admitted(&mut tx, self.inner.clock.time())
+                    .await
+                    .map_err(|_| internal())?;
             }
             #[cfg(any(test, feature = "test-support"))]
             crate::backplane::command_admission_tests::before_admission_commit(original.id).await;
@@ -1646,7 +1767,8 @@ pub mod tests {
                     platform_os: "linux",
                     platform_arch: "x86_64",
                     connector_version: "0.1.0",
-                    protocol_version: 1,
+                    protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION)
+                        .unwrap(),
                     cert_serial: "01",
                     cert_fingerprint: &hex::decode(certificate.fingerprint()).unwrap(),
                     cert_not_after: certificate.not_after().get(),
@@ -1671,6 +1793,7 @@ pub mod tests {
 
     fn command(body: Json) -> Cmd {
         Cmd {
+            after: None,
             id: new_id(),
             kind: "provider.start".to_owned(),
             key: None,
@@ -1684,11 +1807,13 @@ pub mod tests {
         let body = stored_body(json!({ "thread_id": "t" }), Some("machine"));
         assert_eq!(body["$key"], "machine");
         let mut row = CommandRow {
+            after_command_id: None,
             id: new_id(),
             machine_id: new_id(),
             kind: "machine.probe".into(),
             body,
             serial_key: None,
+            key_phase: 0,
             state: "queued".into(),
             result: None,
             error: None,

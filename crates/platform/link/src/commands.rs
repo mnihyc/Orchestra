@@ -6,7 +6,10 @@
 //! [`CommandServer`] is the machine's end. It writes a command down before it
 //! says that it has it, runs commands that share a serial key one at a time in
 //! the order they arrived and the rest side by side, does not start one whose
-//! deadline has passed, writes the result down before it says how the command
+//! deadline had passed when it came, does not count the time one waited between
+//! reaching the machine and starting (the disk writing it down, the line of its
+//! key behind other commands) against its deadline (a deadline is for the
+//! work), writes the result down before it says how the command
 //! ended, and answers a command it has seen before from what it wrote down
 //! instead of running it again.
 //! A transport-only session rebind retains the same serial queue and in-flight ownership,
@@ -19,13 +22,15 @@
 //! handed to a machine expire at its deadline, and lets whoever issued a
 //! command wait for its result.
 
+use crate::framing::Refused;
 use crate::journal::{Entry, Journal, JournalError, Step};
 use crate::session::SessionSender;
 use async_trait::async_trait;
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
-    ACK_RESENDS, ACK_TIMEOUT_SECS, Cmd, CmdAck, CmdCancel, CmdRes, Command, CommandBody,
-    CommandError, CommandKind, CommandResult, ErrorCode, SerialKey, is_transport_rebind,
+    ACK_RESENDS, ACK_TIMEOUT_SECS, Cmd, CmdAck, CmdCancel, CmdRes, CmdSeen, Command, CommandBody,
+    CommandError, CommandKeyPhase, CommandKind, CommandResult, ErrorCode, SerialKey,
+    is_transport_rebind,
 };
 use orch_link_contract::frames::Frame;
 use orch_link_contract::session::Role;
@@ -40,6 +45,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+mod prerequisites;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -153,6 +160,40 @@ fn too_late() -> CommandError {
     )
 }
 
+/// How a command fails when it is larger than a message on the link may be: the system says so at once,
+/// with the size and the setting, instead of leaving the machine to never answer.
+#[must_use]
+pub fn command_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// How a command fails when its answer is larger than a message on the link may be.
+#[must_use]
+pub fn reply_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the answer to the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// What the system is told when the answer to a command cannot be sent.
+fn unsendable_reply(refused: Refused) -> CommandError {
+    match refused {
+        Refused::TooLarge { bytes, limit } => reply_too_large(bytes, limit),
+        Refused::SessionOver | Refused::Unwritable => CommandError::new(
+            ErrorCode::Internal,
+            "the answer to the command could not be written",
+        ),
+    }
+}
+
 // ---------------------------------------------------------------- the machine's end
 
 /// What a handler is told about the command it runs.
@@ -226,6 +267,7 @@ struct Queued {
 }
 
 struct InHand {
+    after: Option<Id>,
     cancel: CancellationToken,
     queued_under: Option<String>,
     /// Whether it is written down, and so acknowledged: a copy that arrives
@@ -234,6 +276,10 @@ struct InHand {
     /// A live transport replacement is acknowledged and executed entirely in memory.
     transport_only: bool,
     accepted: Instant,
+    /// The system's time when the command reached the machine: what passes from then until it starts (the
+    /// disk writing it down, the line of its key) is not counted against its deadline, which is for its work.
+    accepted_at: Time,
+    key_phase: CommandKeyPhase,
     finishing: bool,
     finalizer: Option<tokio::task::JoinHandle<()>>,
 }
@@ -312,7 +358,7 @@ impl CommandServer {
     /// as long as it is not cancelled and its deadline has not passed, and is not failed for good.
     async fn handler_for(
         &self,
-        cmd: &Cmd,
+        deadline: Time,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn CommandHandler>, CommandError> {
         let mut registered = self.inner.handler.subscribe();
@@ -320,7 +366,7 @@ impl CommandServer {
             if let Some(handler) = registered.borrow_and_update().clone() {
                 return Ok(handler);
             }
-            let left = (cmd.deadline.get() - self.system_now().get())
+            let left = (deadline.get() - self.system_now().get())
                 .to_std()
                 .unwrap_or_default();
             tokio::select! {
@@ -366,11 +412,84 @@ impl CommandServer {
         Time::new(self.inner.clock.now() - chrono::Duration::milliseconds(offset))
     }
 
+    /// Says a word to the system that is small by its kind: an acknowledgement.
     fn send(&self, frame: impl Into<Frame>) {
         let session = lock(&self.inner.state).session.clone();
-        if let Some(session) = session {
-            let _ = session.send(frame);
+        if let Some(session) = session
+            && let Err(refused @ (Refused::TooLarge { .. } | Refused::Unwritable)) =
+                session.send(frame)
+        {
+            tracing::error!(%refused, "a word to the system was not sent");
         }
+    }
+
+    /// Says how a command ended. An answer that this session cannot carry is
+    /// not lost in silence: the system is told that the command cannot be
+    /// answered, and why, which is what its caller is shown.
+    fn send_result(&self, result: CmdRes) {
+        let session = lock(&self.inner.state).session.clone();
+        let Some(session) = session else {
+            return;
+        };
+        let id = result.id;
+        let paged = self.paged_result(id);
+        let sent = if paged {
+            session.send_paged(result)
+        } else {
+            session.send(result)
+        };
+        let refused = match sent {
+            Ok(()) | Err(Refused::SessionOver) => return,
+            Err(refused) => refused,
+        };
+        tracing::error!(command = %id, %refused, "the answer to a command was not sent as it was");
+        metrics::counter!("orch_link_replies_refused_total").increment(1);
+        self.send(CmdRes {
+            id,
+            outcome: Err(unsendable_reply(refused)),
+        });
+    }
+
+    /// What a command ended with, or, where the session it is to be answered
+    /// on cannot carry that answer, the failure that says so: this is what is
+    /// written down, so that a command asked for again is answered the same.
+    fn fitting(&self, id: Id, outcome: Result<Json, CommandError>) -> Result<Json, CommandError> {
+        if self.paged_result(id) {
+            return outcome;
+        }
+        let limit = lock(&self.inner.state)
+            .session
+            .as_ref()
+            .map(SessionSender::max_message_bytes);
+        let Some(limit) = limit else {
+            return outcome;
+        };
+        let result = CmdRes { id, outcome };
+        match orch_link_contract::frames::encode(&Frame::from(result.clone()), limit) {
+            Err(orch_link_contract::frames::FrameError::TooLarge { bytes, .. }) => {
+                Err(unsendable_reply(Refused::TooLarge { bytes, limit }))
+            }
+            _ => result.outcome,
+        }
+    }
+
+    fn send_ack(&self, id: Id) {
+        let key_phase = lock(&self.inner.state)
+            .in_hand
+            .get(&id)
+            .map_or(CommandKeyPhase::Released, |hand| hand.key_phase);
+        self.send(CmdAck { id, key_phase });
+    }
+
+    /// Read only the kind: a retained result may be much larger than a message.
+    fn paged_result(&self, id: Id) -> bool {
+        lock(&self.inner.journal).get(id).is_some_and(|entry| {
+            entry
+                .cmd
+                .kind
+                .parse::<CommandKind>()
+                .is_ok_and(CommandKind::is_paged)
+        })
     }
 
     /// Writes a command down, durably. The journal is held only to stage the entry and to keep it: the
@@ -423,15 +542,30 @@ impl CommandServer {
         // Admission uses this same state-before-journal order, so collection cannot act on a
         // stale live-set snapshot while a command takes ownership.
         let state = lock(&self.inner.state);
-        let live = state.in_hand.keys().copied().collect();
-        lock(&self.inner.journal).purge_except(now, &live)
+        let mut live: HashSet<Id> = state.in_hand.keys().copied().collect();
+        let mut needed: Vec<Id> = state
+            .in_hand
+            .values()
+            .filter_map(|hand| hand.after)
+            .collect();
+        let mut journal = lock(&self.inner.journal);
+        while let Some(id) = needed.pop() {
+            if live.insert(id)
+                && let Some(parent) = journal.get(id).and_then(|entry| entry.cmd.after)
+            {
+                needed.push(parent);
+            }
+        }
+        journal.purge_except(now, &live)
     }
 
     /// A command arrived: from the system, or again. It is taken in hand at
     /// once, in its key's place, and written down on a task of its own: the
     /// machine's link does not await each command's disk flush before reading the next frame.
     pub async fn on_cmd(&self, cmd: Cmd) {
+        self.send(CmdSeen { id: cmd.id });
         self.take_in_hand(cmd);
+        self.inner.changed.notify_waiters();
     }
 
     /// Takes a command in hand in its key's line. Ordinary work is written before admission;
@@ -444,34 +578,34 @@ impl CommandServer {
             let written = hand.written || hand.transport_only;
             drop(state);
             if written {
-                self.send(CmdAck { id });
+                self.send_ack(id);
             }
             return;
         }
         // Reserve ownership against the current journal view. Reading it before checking in_hand
         // could replay a stale Accepted entry after its original owner has already finished.
         let known = lock(&self.inner.journal).get(id).cloned();
-        let (cmd, written, interrupted) = match known {
+        let (cmd, written, interrupted, accepted_at) = match known {
             Some(Entry {
                 step: Step::Done { result },
                 ..
             }) => {
                 drop(state);
-                self.send(CmdAck { id });
-                self.send(result);
+                self.send_ack(id);
+                self.send_result(result);
                 return;
             }
             Some(Entry {
                 cmd,
                 step: Step::Started,
-                ..
-            }) => (cmd, true, true),
+                accepted_at,
+            }) => (cmd, true, true, accepted_at),
             Some(Entry {
                 cmd,
                 step: Step::Accepted,
-                ..
-            }) => (cmd, true, false),
-            None => (cmd, false, false),
+                accepted_at,
+            }) => (cmd, true, false, accepted_at),
+            None => (cmd, false, false, self.system_now()),
         };
         let transport_only = is_transport_rebind(&cmd.kind, &cmd.body);
         let cancel = CancellationToken::new();
@@ -481,18 +615,25 @@ impl CommandServer {
         state.in_hand.insert(
             id,
             InHand {
+                after: cmd.after,
                 cancel,
                 queued_under: if interrupted { None } else { cmd.key.clone() },
                 written,
                 transport_only,
                 accepted: Instant::now(),
+                accepted_at,
+                key_phase: if interrupted {
+                    CommandKeyPhase::Released
+                } else {
+                    CommandKeyPhase::Queued
+                },
                 finishing: false,
                 finalizer: None,
             },
         );
         if interrupted {
             drop(state);
-            self.send(CmdAck { id });
+            self.send_ack(id);
             let server = self.clone();
             tokio::spawn(async move {
                 loop {
@@ -540,7 +681,7 @@ impl CommandServer {
         let keyed = cmd.key.is_some();
         let server = self.clone();
         if written || transport_only {
-            self.send(CmdAck { id });
+            self.send_ack(id);
             if keyed {
                 let _ = admit.send(true);
             } else {
@@ -558,7 +699,10 @@ impl CommandServer {
     /// meanwhile, is answered so and does not run.
     async fn write_down(&self, cmd: Cmd, admit: Option<oneshot::Sender<bool>>) {
         let id = cmd.id;
-        let now = self.system_now();
+        let now = lock(&self.inner.state)
+            .in_hand
+            .get(&id)
+            .map_or_else(|| self.system_now(), |hand| hand.accepted_at);
         if let Err(error) = self.write_accepted(&cmd, now).await {
             // Not written down: not acknowledged either, so that the system
             // sends it again when the disk is there.
@@ -577,7 +721,8 @@ impl CommandServer {
                 hand.cancel.clone()
             })
         };
-        self.send(CmdAck { id });
+        self.inner.changed.notify_waiters();
+        self.send_ack(id);
         let refused = if cmd.deadline <= now {
             Some(CommandError::new(
                 TIMEOUT,
@@ -624,37 +769,45 @@ impl CommandServer {
     /// is not to run.
     async fn work_through(&self, key: String) {
         loop {
-            let next = {
-                let mut state = lock(&self.inner.state);
-                let next = state.queues.get_mut(&key).and_then(VecDeque::pop_front);
-                if next.is_none() {
-                    state.queues.remove(&key);
-                    state.working.remove(&key);
-                } else if let Some(queued) = &next
-                    && let Some(hand) = state.in_hand.get_mut(&queued.cmd.id)
-                {
-                    hand.queued_under = None;
-                }
-                next
-            };
-            match next {
-                Some(Queued { cmd, admitted }) => {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+            match self.next_queued(&key) {
+                prerequisites::Next::Run(Queued { cmd, admitted }, failure) => {
                     if matches!(admitted.await, Ok(true)) {
-                        self.execute(cmd).await;
+                        match failure {
+                            Some(error) => self.end(cmd.id, Err(error)).await,
+                            None => self.execute(cmd).await,
+                        }
                     }
                 }
-                None => return,
+                prerequisites::Next::Wait(Some(until)) => {
+                    tokio::select! {
+                        () = &mut changed => {}
+                        () = tokio::time::sleep(until) => {}
+                    }
+                }
+                prerequisites::Next::Wait(None) => changed.await,
+                prerequisites::Next::Empty => return,
             }
         }
     }
 
     async fn execute(&self, cmd: Cmd) {
         let id = cmd.id;
+        if let Err(error) = self.wait_for_prerequisite(&cmd).await {
+            self.end(id, Err(error)).await;
+            return;
+        }
         let cancel = lock(&self.inner.state)
             .in_hand
-            .get(&id)
-            .map(|hand| hand.cancel.clone())
+            .get_mut(&id)
+            .map(|hand| {
+                hand.key_phase = CommandKeyPhase::Running;
+                hand.cancel.clone()
+            })
             .unwrap_or_default();
+        self.send_ack(id);
         let accepted = {
             lock(&self.inner.state)
                 .in_hand
@@ -664,8 +817,23 @@ impl CommandServer {
         if let (Ok(kind), Some(accepted)) = (cmd.kind.parse::<CommandKind>(), accepted) {
             command_phase(kind, CommandPhase::KeyWait, accepted.elapsed());
         }
+        // A deadline is for the work: the time between a command reaching the machine and starting (the
+        // disk writing it down, the line of its key behind other commands) is not the command's. Measured
+        // in the system's time, as the deadline is.
+        let waited = lock(&self.inner.state)
+            .in_hand
+            .get(&id)
+            .map_or_else(chrono::Duration::zero, |hand| {
+                (self.system_now().get() - hand.accepted_at.get()).max(chrono::Duration::zero())
+            });
+        let deadline = Time::new(
+            cmd.deadline
+                .get()
+                .checked_add_signed(waited)
+                .unwrap_or_else(|| cmd.deadline.get()),
+        );
         let captured = Instant::now();
-        let execution = self.run(&cmd, cancel).await;
+        let execution = self.run(&cmd, cancel, deadline).await;
         if cmd.kind == CommandKind::FsRecord.as_str() {
             command_phase(
                 CommandKind::FsRecord,
@@ -705,8 +873,10 @@ impl CommandServer {
                     let mut state = lock(&self.inner.state);
                     if let Some(hand) = state.in_hand.get_mut(&id) {
                         hand.finalizer = Some(task);
+                        hand.key_phase = CommandKeyPhase::Released;
                     }
                 }
+                self.send_ack(id);
                 let _ = start.send(());
             }
             Ok((kind, CommandExecution::Captured { finish, hold })) => {
@@ -718,10 +888,13 @@ impl CommandServer {
         }
     }
 
+    /// Starts a command. `deadline` is the command's own, moved later by the time it waited in the line
+    /// of its key.
     async fn run(
         &self,
         cmd: &Cmd,
         cancel: CancellationToken,
+        deadline: Time,
     ) -> Result<(CommandKind, CommandExecution), CommandError> {
         if cancel.is_cancelled() {
             return Err(CommandError::new(
@@ -729,7 +902,7 @@ impl CommandServer {
                 "cancelled before it started",
             ));
         }
-        if cmd.deadline <= self.system_now() {
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let command = match cmd.command() {
@@ -754,8 +927,8 @@ impl CommandServer {
                 format!("this machine does not take {kind} commands"),
             ));
         }
-        let handler = self.handler_for(cmd, &cancel).await?;
-        if cmd.deadline <= self.system_now() {
+        let handler = self.handler_for(deadline, &cancel).await?;
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let id = cmd.id;
@@ -768,7 +941,7 @@ impl CommandServer {
         let context = CommandContext {
             id,
             key: cmd.key.clone(),
-            deadline: cmd.deadline,
+            deadline,
             cancel,
         };
         // On a task of its own, so that a handler that panics fails its
@@ -803,6 +976,8 @@ impl CommandServer {
                 written: true,
                 transport_only: false,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
+                key_phase: CommandKeyPhase::Queued,
                 finishing: false,
                 finalizer: None,
             });
@@ -817,7 +992,7 @@ impl CommandServer {
             return;
         }
         if transport_only {
-            self.send(CmdRes { id, outcome });
+            self.send_result(CmdRes { id, outcome });
             drop(hold);
             {
                 let mut state = lock(&self.inner.state);
@@ -846,7 +1021,7 @@ impl CommandServer {
                 "the live observation expired; read the current session again",
             ))
         } else {
-            outcome
+            self.fitting(id, outcome)
         };
         loop {
             match self.write_finished(id, outcome.clone()).await {
@@ -854,7 +1029,7 @@ impl CommandServer {
                     if let Some(kind) = kind {
                         command_phase(kind, CommandPhase::Finalization, started.elapsed());
                     }
-                    self.send(live.unwrap_or(result));
+                    self.send_result(live.unwrap_or(result));
                     drop(hold);
                     {
                         let mut state = lock(&self.inner.state);
@@ -927,6 +1102,7 @@ impl CommandServer {
                 false
             }
         };
+        self.inner.changed.notify_waiters();
         if answer_now {
             let server = self.clone();
             tokio::spawn(async move {
@@ -1005,6 +1181,10 @@ pub enum Progress {
     Sent,
     /// The machine accepted it; a live transport rebind is held only in memory.
     Accepted,
+    /// It currently owns its serial key.
+    Running,
+    /// It released its key while retaining ownership of its unfinished result.
+    Released,
     /// It ended well.
     Succeeded(Json),
     /// It ended badly, or the machine did not answer.
@@ -1016,6 +1196,17 @@ pub enum Progress {
 }
 
 impl Progress {
+    /// The actual accepted key phase, without treating an upload as a key holder.
+    #[must_use]
+    pub const fn key_phase(&self) -> Option<CommandKeyPhase> {
+        match self {
+            Self::Accepted => Some(CommandKeyPhase::Queued),
+            Self::Running => Some(CommandKeyPhase::Running),
+            Self::Released => Some(CommandKeyPhase::Released),
+            _ => None,
+        }
+    }
+
     /// Whether nothing more will happen to the command.
     #[must_use]
     pub const fn is_final(&self) -> bool {
@@ -1098,9 +1289,13 @@ impl CommandHandle {
             Progress::Failed(error) => Err(CommandFailure::Failed(error)),
             Progress::Expired => Err(CommandFailure::Expired),
             Progress::Cancelled => Err(CommandFailure::Cancelled),
-            Progress::Queued | Progress::Sent | Progress::Accepted => Err(
-                CommandFailure::Unreadable("the command did not end".to_owned()),
-            ),
+            Progress::Queued
+            | Progress::Sent
+            | Progress::Accepted
+            | Progress::Running
+            | Progress::Released => Err(CommandFailure::Unreadable(
+                "the command did not end".to_owned(),
+            )),
         }
     }
 }
@@ -1159,9 +1354,11 @@ impl CommandIssuer {
         self.down.send(frame)
     }
 
-    fn transmit(&self, issued: &mut Issued, now: Instant) {
+    fn transmit(&self, issued: &mut Issued) {
         if self.send_down(DownFrame::Cmd(issued.cmd.clone())).is_ok() {
-            issued.sent_at = Some(now);
+            // Queueing is not transmission: a large command may spend minutes waiting
+            // for and crossing the line. Only the machine's complete-arrival receipt starts the wait.
+            issued.sent_at = None;
             issued.tx.send_if_modified(|progress| {
                 if *progress == Progress::Queued {
                     *progress = Progress::Sent;
@@ -1201,7 +1398,7 @@ impl CommandIssuer {
             resends: 0,
         };
         if state.ready && !issued.tx.borrow().is_final() {
-            self.transmit(&mut issued, Instant::now());
+            self.transmit(&mut issued);
         }
         state.commands.insert(id, issued);
         CommandHandle { id, progress: rx }
@@ -1220,13 +1417,12 @@ impl CommandIssuer {
 
     /// A session is ready: every command that did not end is sent again.
     pub fn session_ready(&self) {
-        let now = Instant::now();
         let mut state = lock(&self.state);
         state.ready = true;
         for issued in state.commands.values_mut() {
             if !issued.tx.borrow().is_final() {
                 issued.resends = 0;
-                self.transmit(issued, now);
+                self.transmit(issued);
             }
         }
     }
@@ -1255,13 +1451,33 @@ impl CommandIssuer {
         if let Some(issued) = state.commands.get_mut(&ack.id) {
             issued.sent_at = None;
             issued.tx.send_if_modified(|progress| {
-                if matches!(*progress, Progress::Queued | Progress::Sent) {
-                    *progress = Progress::Accepted;
+                if !progress.is_final()
+                    && progress
+                        .key_phase()
+                        .is_none_or(|phase| phase < ack.key_phase)
+                {
+                    *progress = match ack.key_phase {
+                        CommandKeyPhase::Queued => Progress::Accepted,
+                        CommandKeyPhase::Running => Progress::Running,
+                        CommandKeyPhase::Released => Progress::Released,
+                    };
                     true
                 } else {
                     false
                 }
             });
+        }
+    }
+
+    /// The machine received the complete command on its current session.
+    /// A native acknowledgement or result can arrive first and already retires this wait.
+    pub fn on_cmd_seen(&self, seen: &CmdSeen) {
+        let mut state = lock(&self.state);
+        if state.ready
+            && let Some(issued) = state.commands.get_mut(&seen.id)
+            && matches!(*issued.tx.borrow(), Progress::Sent)
+        {
+            issued.sent_at = Some(Instant::now());
         }
     }
 
@@ -1305,7 +1521,7 @@ impl CommandIssuer {
         });
         // A suppressed duplicate cannot receive a new ACK. Retire that resend's
         // ACK timer just as the acknowledgement already observed by this issuer did.
-        let accepted = matches!(*issued.tx.borrow(), Progress::Accepted);
+        let accepted = issued.tx.borrow().key_phase().is_some();
         if refused || accepted {
             issued.sent_at = None;
         }
@@ -1374,7 +1590,7 @@ impl CommandIssuer {
             if issued.tx.borrow().is_final() {
                 continue;
             }
-            let handed_over = matches!(*issued.tx.borrow(), Progress::Accepted);
+            let handed_over = issued.tx.borrow().key_phase().is_some();
             if !handed_over && issued.cmd.deadline <= wall {
                 issued.tx.send_replace(Progress::Expired);
                 continue;
@@ -1385,7 +1601,7 @@ impl CommandIssuer {
             if ready && now.duration_since(sent_at) >= patience {
                 if issued.resends < ACK_RESENDS {
                     issued.resends += 1;
-                    self.transmit(issued, now);
+                    self.transmit(issued);
                 } else {
                     let error = CommandError::new(
                         ErrorCode::Timeout,

@@ -88,9 +88,23 @@ describe('the context ring', () => {
     expect(document.querySelector('[data-context-ring="red"]')).not.toBeNull();
   });
 
-  it('is absent where the harness reported no size of its prompt', () => {
+  it('shows the tokens alone where the harness named no window, and the share where it did', () => {
+    show(<ContextRing thread={threadWith(152_000, null, null)} />);
+    const ring = screen.getByRole('button', { name: /Show what fills the context \(Context 152k used; no window reported\)/ });
+    expect(ring).toHaveAttribute('data-context-ring', 'unmeasured');
+    expect(ring).toHaveTextContent('152k');
+    expect(ring).not.toHaveTextContent('%');
+  });
+
+  it('keeps the context details available without inventing a prompt size', async () => {
+    answers.context = { ...answers.context!, reports: { tokens: true, context: false, breakdown: false }, fill: null, shortened: null };
     show(<ContextRing thread={threadWith(null, null, null)} />);
-    expect(screen.queryByRole('button')).toBeNull();
+    const context = screen.getByRole('button', { name: 'Show what fills the context (Context window not reported)' });
+    expect(context).toBeVisible();
+    expect(context).toHaveAttribute('data-context-ring', 'unmeasured');
+    expect(context).not.toHaveTextContent(/0|%/);
+    await userEvent.setup().click(context);
+    expect(await screen.findByText('Codex does not report how full its context is.')).toBeVisible();
   });
 });
 

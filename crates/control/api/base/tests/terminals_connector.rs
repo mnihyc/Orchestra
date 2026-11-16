@@ -404,7 +404,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -518,7 +518,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -559,6 +559,7 @@ impl Commands for LinkCommands {
             check().map_err(CommandsError::BeforeEffect)?;
         }
         let handle = link.commands().issue(Cmd {
+            after: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -573,6 +574,7 @@ impl Commands for LinkCommands {
         Ok(lock(&self.sent).get(&id).map(|sent| {
             let progress = sent.handle.progress();
             Info {
+                completed_at: None,
                 stage: stage_of(&progress),
                 issued_at: sent.at,
                 outcome: outcome_of(&progress),
@@ -820,6 +822,8 @@ impl Plant {
     /// Attaches the environment to the connector, as the step that does so in the system does.
     async fn attach_environment(&self) {
         let body = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

@@ -1,5 +1,5 @@
 /** Actual Files/door/tree/ledger lifecycle; only native replies and virtual viewport measurement are synthetic. */
-import { act, cleanup, fireEvent, render, screen, waitFor, type RenderResult } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderResult } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider } from '@tanstack/react-router';
 import { createStore } from 'zustand/vanilla';
@@ -12,6 +12,7 @@ import type { FeedFrame, SocketStatus } from '@/realtime/socket';
 import { ApiError, client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { environmentQuery } from '@/api/workspace';
+import { i18n, setLocale } from '@/i18n';
 import { FilesView } from '@/features/inspector/Files';
 import { allTabs, findTab, makeGroup, makeTab, type Tab } from '@/features/workbench/layout';
 import { PageView } from '@/features/workbench/PageView';
@@ -30,7 +31,7 @@ import { RoutingFrame } from './workbench-routing/frame';
 import { delayedReads, feedCalls, FileWitness, heldFeeds, nativeEnvironment, nativeNodes, nativeRows, nativeThread, USER } from './workbench-content/fixture';
 
 const TREE_WAIT_MS = 15_000;
-const calls = vi.hoisted(() => ({ list: vi.fn(), subscribe: vi.fn() }));
+const calls = vi.hoisted(() => ({ list: vi.fn(), subscribe: vi.fn(), liveOnly: false }));
 vi.mock('@/realtime/live', async (original) => {
   const actual = await original<typeof Live>();
   const { useNativeFeed } = await import('./workbench-content/fixture');
@@ -43,7 +44,7 @@ vi.mock('@/api/workspace', async (original) => {
   const actual = await original<typeof Workspace>();
   const { nativeEnvironment: environment } = await import('./workbench-content/fixture');
   return { ...actual, listDirectory: calls.list,
-    environmentQuery: (id: string) => ({ ...actual.environmentQuery(id), queryFn: () => Promise.resolve({ ...environment(id), workspace_incarnation: 'source-one' }) }),
+    environmentQuery: (id: string) => ({ ...actual.environmentQuery(id), queryFn: () => Promise.resolve({ ...environment(id), ...(calls.liveOnly ? { index: 'live', index_reason: 'chosen' } : {}), workspace_incarnation: 'source-one' }) }),
   };
 });
 vi.mock('@/features/thread/Thread', async () => {
@@ -74,7 +75,7 @@ function listing(path: string): DirListing {
 beforeEach(() => {
   state().leave(); localStorage.clear(); stopWatching(); queryClient.clear(); threadWriter.clear();
   nativeRows.clear(); nativeNodes.clear(); heldFeeds.clear(); delayedReads.clear(); feedCalls.length = 0;
-  calls.list.mockReset(); calls.subscribe.mockReset(); watches.length = 0;
+  calls.list.mockReset(); calls.subscribe.mockReset(); watches.length = 0; calls.liveOnly = false;
   calls.list.mockImplementation((_door: Workspace.Door, path: string) => Promise.resolve(listing(path)));
   calls.subscribe.mockImplementation((feed: string, options: { onFrame: (frame: FeedFrame) => void }) => {
     const watch = { feed, onFrame: options.onFrame, unsubscribe: vi.fn() }; watches.push(watch); return watch;
@@ -134,6 +135,7 @@ function fileTab(): Tab {
   return tab;
 }
 
+// The complete trip through the held native admissions shares the first tree's observation budget.
 it('the actual Board thread-to-file-to-thread transition retains expansion, selection and scroll through a held E/T admission without another tree read', async () => {
   const drawn = draw(), { tree, src, app } = await expanded();
   const sourceWatches = [...watches], reads = calls.list.mock.calls.length;
@@ -160,7 +162,7 @@ it('the actual Board thread-to-file-to-thread transition retains expansion, sele
   expect(feedCalls.some((one) => one.owner === workspace.key.owner && !one.controls)).toBe(true);
   expect(feedCalls.filter((one) => one.native === threadId).every((one) => one.owner === drawn.page.id || one.owner === workspace.key.owner)).toBe(true);
   expect(workspace.controls).toBeUndefined();
-});
+}, TREE_WAIT_MS);
 
 it('an explicitly chosen folder root survives another same-source admission with its selected child and viewport', async () => {
   draw(); const { src } = await expanded();
@@ -266,4 +268,29 @@ it('hiding the sidebar panel during an admission releases its leases, and late m
   expect(before.every((one) => one.unsubscribe.mock.calls.length === 1)).toBe(true);
   expect(screen.queryByRole('tree')).toBeNull(); expect(calls.list).toHaveBeenCalledTimes(count);
   expect(useDirectories.getState().dirs.get(directoryKey(environmentId, 'web'))?.entries.map((one) => one.path)).not.toContain('web/late.ts');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`names the opened-folder watch scope without claiming the unopened workspace is watched in ${locale}`, async () => {
+  await setLocale(locale); calls.liveOnly = true;
+  try {
+    const { view } = draw(); await expanded();
+    expect(await screen.findByText(locale === 'en' ? /open folders/i : /已打开的文件夹/)).toBeVisible();
+    expect(view.container.querySelector('time[datetime="2026-10-17T00:00:00Z"]')).not.toBeNull();
+    expect(calls.list.mock.calls.every(([, path]) => path === 'web' || path === 'web/src')).toBe(true);
+  } finally { await setLocale('en'); }
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`distinguishes retained file bytes from metadata in the same cached folder in ${locale}`, async () => {
+  await setLocale(locale);
+  calls.list.mockImplementation((_door: Workspace.Door, path: string) => {
+    const value = listing(path);
+    return Promise.resolve({ ...value, source: 'cached', entries: value.entries.map((one) => ({ ...one, cached: one.path === 'web/src/app.ts' })) });
+  });
+  try {
+    draw(); const { app } = await expanded();
+    expect(within(app).getByText(i18n.t('files.tree.cached'))).toBeVisible();
+    const missing = screen.getByRole('treeitem', { name: /lib.ts/ });
+    expect(within(missing).getByText(locale === 'en' ? 'Needs machine' : '需要连接机器')).toBeVisible();
+    expect(within(missing).queryByText(i18n.t('files.tree.cached'))).not.toBeInTheDocument();
+  } finally { await setLocale('en'); }
 });

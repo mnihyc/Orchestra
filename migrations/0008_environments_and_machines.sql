@@ -97,7 +97,10 @@ CREATE TABLE commands (
     kind text NOT NULL,
     body jsonb NOT NULL,
     serial_key text,
+    after_command_id uuid,
+    session_open_capture jsonb,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -116,6 +119,8 @@ CREATE TABLE commands (
 CREATE INDEX commands_busy_detach_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'env.detach'::text) AND (state = 'failed'::text));
 
 CREATE INDEX commands_open_idx ON commands USING btree (machine_id) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
+CREATE INDEX commands_prerequisite_wait_idx ON commands (after_command_id)
+    WHERE after_command_id IS NOT NULL AND state IN ('queued','sent','accepted');
 CREATE INDEX commands_mcp_import_open_idx ON commands ((body->>'server_id'), id)
     WHERE kind='mcp.import' AND state IN ('queued','sent','accepted');
 
@@ -209,6 +214,7 @@ CREATE TABLE environments (
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     manifest_blob bytea,
     manifest_at timestamp with time zone,
+    manifest_source_facts jsonb,
     env_seq bigint DEFAULT 0 NOT NULL,
     unused_since timestamp with time zone,
     remove_at timestamp with time zone,
@@ -797,3 +803,18 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- One native source transfer per current environment, independent of browser upload sessions.
+CREATE TABLE environment_file_transfers (
+    environment_id uuid PRIMARY KEY REFERENCES environments(id) ON DELETE CASCADE,
+    machine_id uuid NOT NULL,
+    generation bigint NOT NULL,
+    hash bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('transferring', 'interrupted', 'expired')),
+    observed_at timestamp with time zone NOT NULL,
+    last_piece_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    idle_retention_secs bigint,
+    retention_default boolean
+);
+CREATE INDEX environment_file_transfers_content_idx ON environment_file_transfers(machine_id,hash);

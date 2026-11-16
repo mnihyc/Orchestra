@@ -85,6 +85,9 @@ pub struct Outgoing {
     /// What it must not run beside.
     #[serde(with = "RetainedKey")]
     pub key: SerialKey,
+    /// The existing prerequisite receipt a pipelined command consumes on the same machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Id>,
     /// Its kind.
     pub kind: CommandKind,
     /// Its body.
@@ -137,6 +140,7 @@ impl Outgoing {
             id,
             machine,
             key,
+            after: None,
             kind: B::KIND,
             body: serde_json::to_value(body)
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
@@ -166,6 +170,13 @@ impl Outgoing {
     #[must_use]
     pub fn by(mut self, deadline: Time) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    /// Queue dependent work together; the peer checks the original prerequisite's result.
+    #[must_use]
+    pub fn after(mut self, opening: Id) -> Self {
+        self.after = Some(opening);
         self
     }
 }
@@ -301,6 +312,8 @@ pub struct Info {
     pub stage: Stage,
     /// When it was issued.
     pub issued_at: chrono::DateTime<chrono::Utc>,
+    /// When its terminal answer was first durably observed; absent while it remains in flight.
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// How it ended, once it is over.
     pub outcome: Option<Outcome>,
 }
@@ -314,6 +327,8 @@ pub struct RetainedCommand {
     pub kind: String,
     /// The actual retained serial lane, including its absent value.
     pub key: Option<String>,
+    /// Its original prerequisite, never reconstructed on replay.
+    pub after: Option<Id>,
     /// The body the command retained for replay.
     pub body: Json,
 }
@@ -452,6 +467,7 @@ mod tests {
             (Stage::Over, None, false),
         ] {
             let commands = ReportedStatus(Some(Info {
+                completed_at: None,
                 stage,
                 issued_at: chrono::DateTime::UNIX_EPOCH,
                 outcome,

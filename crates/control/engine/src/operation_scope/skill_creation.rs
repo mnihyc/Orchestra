@@ -635,6 +635,7 @@ impl CommandSource {
             return Ok(None);
         };
         let outgoing = Outgoing {
+            after: None,
             id: command.id,
             machine: command.machine_id,
             key: SerialKey::None,
