@@ -154,7 +154,9 @@ fn node_with_case(
                         if failed_case == Some("omit_cases") {
                             json!({"cases":[]})
                         } else {
-                            json!({ "cases": orch_agent_programs::Programs::builtin().program("codex").unwrap().checks.cases().map(|(name, _)| json!({
+                            json!({ "cases": orch_agent_programs::Programs::builtin().program("codex").unwrap().checks.cases()
+                            .filter(|(name, _)| !(failed_case == Some("older_node") && *name == "background_commands"))
+                            .map(|(name, _)| json!({
                             "name": name, "passed": failed_case != Some(name), "feature": "steer",
                             "error": if failed_case == Some(name) { Some(if name == "native_import" { "native import unsupported" } else { "the native question was not observed" }) } else { None },
                             "unsupported": if (failed_case == Some("unavailable_import") && name == "history.native_import")
@@ -685,6 +687,203 @@ async fn an_older_interface_only_certification_is_untested_until_its_native_case
     let found = listed(&world, &people.root).await;
     assert_eq!(found.status, HarnessBuildStatus::Checked);
     assert!(found.check.unwrap().cases.iter().all(|case| case.passed));
+}
+
+/// What the stored check of a Codex build looked like before the cases `without` were added to the manifest: every
+/// case it had passed, the check complete.
+fn earlier_check(world: &World, without: &[&str]) -> serde_json::Value {
+    let programs = orch_agent_programs::Programs::builtin();
+    let cases: Vec<_> = programs
+        .program("codex")
+        .unwrap()
+        .checks
+        .cases()
+        .filter(|(name, _)| !without.contains(name))
+        .map(|(name, feature)| {
+            json!({"name": name, "passed": true, "feature": feature, "error": null, "elapsed_ms": 12})
+        })
+        .collect();
+    // It ran some days before the release that adds the cases.
+    json!({"at": world.now() - chrono::Duration::days(3), "machine": "check-host", "missing": [],
+        "off": [], "error": null, "stage": "complete", "cases": cases})
+}
+
+/// Keeps `build` and gives it the stored status and check of an earlier release.
+async fn kept_as_checked_before(world: &World, build: &HarnessBuild, without: &[&str]) {
+    keep(world, build).await;
+    let key = orch_api_core::harness_channels::channel_key(build);
+    let mut conn = world.conn().await;
+    orch_db::queries::resources::management::set_harness_build_status(
+        &mut conn,
+        &key,
+        "checked",
+        Some(&earlier_check(world, without)),
+        world.now(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn version_listed(world: &World, by: &Who, version: &str) -> HarnessBuild {
+    world
+        .app
+        .call(AdminHarnessList, &[])
+        .token(&by.token)
+        .send()
+        .await
+        .ok()
+        .into_iter()
+        .find(|build| build.kind == "codex" && build.version == version)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_build_that_passed_every_case_it_had_stays_checked_when_the_manifest_adds_cases() {
+    let world = World::new().await;
+    let people = cast(&world).await;
+    kept_as_checked_before(&world, &channel_build(), &["background_commands"]).await;
+    let found = listed(&world, &people.root).await;
+    assert_eq!(
+        found.status,
+        HarnessBuildStatus::Checked,
+        "the cases it has not run are pending, not a failure and not a build nobody checked"
+    );
+    let check = found.check.unwrap();
+    assert!(check.cases.iter().all(|case| case.passed));
+    assert!(
+        check
+            .cases
+            .iter()
+            .all(|case| case.name != "background_commands")
+    );
+}
+
+#[tokio::test]
+async fn native_import_that_a_stored_check_proved_survives_the_cases_the_manifest_adds() {
+    let world = World::new().await;
+    kept_as_checked_before(&world, &channel_build(), &["background_commands"]).await;
+    let declared = json!({"kind":"codex", "harness":{"version":VERSION},
+        "capabilities":{"import_native":true,"import_neutral":true,"steer":true}});
+    let mut conn = world.conn().await;
+    let limited = orch_engine::hosting::with_build_limits(&mut conn, declared)
+        .await
+        .unwrap();
+    assert_eq!(
+        limited["capabilities"]["import_native"], true,
+        "the case that proves native import passed: a longer list does not take it back"
+    );
+}
+
+#[tokio::test]
+async fn the_background_takes_up_a_build_that_lacks_a_present_case_though_it_is_not_the_newest() {
+    let world = World::new().await;
+    let people = cast(&world).await;
+    kept_as_checked_before(&world, &channel_build(), &["background_commands"]).await;
+    // A newer build whose stored check is whole: the background has nothing to do for it.
+    let newer = HarnessBuild {
+        version: "0.171.0".into(),
+        sha256: "d".repeat(64),
+        url: "https://example.com/codex-0.171.0.tar.gz".into(),
+        ..channel_build()
+    };
+    kept_as_checked_before(&world, &newer, &[]).await;
+    let machine = system_host(&world).await;
+    let node = node_answering(&world, machine, &[]);
+    orch_api_core::harness_checks::check_waiting(&world.app.app).await;
+    assert_eq!(
+        node.await.unwrap(),
+        [
+            "node.tool.ensure",
+            "node.tool.check",
+            "node.tool.conformance"
+        ],
+        "the older build was taken up, by itself, for the case it lacks"
+    );
+    let found = version_listed(&world, &people.root, VERSION).await;
+    assert_eq!(found.status, HarnessBuildStatus::Checked);
+    assert!(
+        found
+            .check
+            .unwrap()
+            .cases
+            .iter()
+            .any(|case| case.name == "background_commands" && case.passed)
+    );
+    let untouched = version_listed(&world, &people.root, "0.171.0").await;
+    assert_eq!(untouched.status, HarnessBuildStatus::Checked);
+}
+
+#[tokio::test]
+async fn a_new_run_that_reaches_no_host_leaves_what_the_build_proved() {
+    let world = World::new().await;
+    let people = cast(&world).await;
+    kept_as_checked_before(&world, &channel_build(), &["background_commands"]).await;
+    // No host of the system is online: the run decides nothing.
+    orch_api_core::harness_checks::check_waiting(&world.app.app).await;
+    let found = listed(&world, &people.root).await;
+    assert_eq!(
+        found.status,
+        HarnessBuildStatus::Checked,
+        "an attempt that could not run is not a finding about the build"
+    );
+    let before = earlier_check(&world, &["background_commands"]);
+    assert_eq!(
+        found.check.unwrap().cases.len(),
+        before["cases"].as_array().unwrap().len(),
+        "what it proved is still there"
+    );
+    let mut conn = world.conn().await;
+    let limited = orch_engine::hosting::with_build_limits(
+        &mut conn,
+        json!({"kind":"codex", "harness":{"version":VERSION},
+            "capabilities":{"import_native":true}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(limited["capabilities"]["import_native"], true);
+}
+
+#[tokio::test]
+async fn a_case_a_node_of_an_earlier_release_does_not_have_is_pending_and_never_a_failure() {
+    let world = World::new().await;
+    let people = cast(&world).await;
+    keep(&world, &channel_build()).await;
+    let machine = system_host(&world).await;
+    let node = node_with_case(&world, machine, &[], Some("older_node"));
+    world
+        .app
+        .call(AdminHarnessCheck, &[&"codex", &VERSION])
+        .token(&people.root.token)
+        .send()
+        .await
+        .ok();
+    node.await.unwrap();
+    let found = checked(&world, &people.root).await;
+    assert_eq!(found.status, HarnessBuildStatus::Checked);
+    let check = found.check.unwrap();
+    assert!(check.cases.iter().all(|case| case.passed));
+    assert!(
+        check
+            .cases
+            .iter()
+            .all(|case| case.name != "background_commands" && case.name != "runner")
+    );
+    assert!(check.off.is_empty(), "nothing is off for a case not run");
+    let note = check.error.unwrap_or_default();
+    assert!(
+        note.contains("not run by this node's version")
+            && note.contains("Lists a command left running and ends it by name"),
+        "{note}"
+    );
+    let mut conn = world.conn().await;
+    let limited = orch_engine::hosting::with_build_limits(
+        &mut conn,
+        json!({"kind":"codex", "harness":{"version":VERSION},
+            "capabilities":{"import_native":true}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(limited["capabilities"]["import_native"], true);
 }
 
 #[tokio::test]
