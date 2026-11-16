@@ -68,8 +68,11 @@ it('shows a file chip with its environment, size and line and copies the same re
 it('keeps unreadable files as locked kind-only chips without a legacy label', async () => {
   calls.preview.mockRejectedValue(new Error('not found'));
   show(<TypedChip reference={{kind:'file',id:FILE,line:2}} />);
-  await waitFor(() => expect(calls.preview).toHaveBeenCalled());
-  expect(screen.getByRole('button',{name:i18n.t('people.reference.kinds.file')})).toHaveAttribute('data-reference-state','no-access');
+  // The chip is a button of its kind from the first drawing; it carries the lock once the refusal has been applied.
+  const kind=i18n.t('people.reference.kinds.file');
+  await waitFor(() => expect(screen.getByRole('button',{name:kind}).querySelector('svg.lucide-lock-keyhole')).not.toBeNull());
+  expect(calls.preview).toHaveBeenCalled();
+  expect(screen.getByRole('button',{name:kind})).toHaveAttribute('data-reference-state','no-access');
   expect(screen.queryByRole('link')).not.toBeInTheDocument();
   expect(screen.queryByText('auth.rs')).not.toBeInTheDocument();
 });

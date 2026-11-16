@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test kmounts_files
+test -p orch-engine --lib -- jobs::mount_copy::command::tests::
