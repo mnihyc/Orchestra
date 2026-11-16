@@ -58,6 +58,7 @@ pub mod mcp;
 pub mod mcp_host;
 pub mod measure;
 pub mod media;
+pub mod mount_transfer;
 pub mod mounts;
 pub mod paths;
 pub mod platform;

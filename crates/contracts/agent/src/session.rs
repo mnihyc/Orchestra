@@ -557,6 +557,8 @@ pub struct ExecBinding {
 /// An MCP server of the environment, as `session.open` names it on the link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpBinding {
+    /// The registered server's stable identity, independent of its offered name.
+    pub server_id: Id,
     /// The server's name.
     pub name: String,
     /// The tunnel to it.
@@ -641,6 +643,8 @@ pub struct LocalFile {
 /// What the adapter is given to open a session ([`crate::adapter::AgentAdapter::open_session`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSpec {
+    /// The accepted physical opening command, retained by every asynchronous report producer.
+    pub opening_id: Id,
     /// What is the same on the link.
     #[serde(flatten)]
     pub settings: SessionSettings,
@@ -1134,7 +1138,7 @@ mod tests {
                         "protocol": "openai-responses", "ticket": { "$ticket": { "kind": "llm" } } },
           "exec": { "executor": "codex-exec-server", "environment_id": "0199abcd-1234-7000-8000-000000000005",
                     "generation": 3, "ticket": { "$ticket": { "kind": "exec" } } },
-          "mcp": [ { "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
+          "mcp": [ { "server_id":"0199abcd-1234-7000-8000-000000000006", "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
           "orch_tools": ["list_shared", "read_shared", "search_shared", "download_shared", "edit_document",
                          "send_message", "announce", "request_capability"],
           "raw_events": true
@@ -1364,6 +1368,7 @@ mod tests {
     fn what_an_adapter_is_given_has_the_session_key_and_no_tickets() {
         let open: SessionOpen = serde_json::from_value(open()).unwrap();
         let spec = SessionSpec {
+            opening_id: orch_types::new_id(),
             settings: open.settings.clone(),
             session_key: "0123456789abcdef0123456789abcdef".into(),
             archive: Some(SessionArchive {

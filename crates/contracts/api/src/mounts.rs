@@ -545,6 +545,51 @@ crate::common::full_or_receipt! {
     pub enum MountLocationSetResponse { Full(Mount), Receipt(MountLocationSetReceipt), }
 }
 
+/// A standalone data copy names only existing native machine identities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MountCopyPreflightBody {
+    pub source_machine_id: Id,
+    pub target_machine_id: Id,
+    #[serde(default)]
+    pub into: Option<crate::forks::CopyInto>,
+}
+
+/// The measured data and destination choice, before any copy is accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MountCopyPlan {
+    pub preflight_id: Id,
+    pub expires_at: Time,
+    pub mount: MountRef,
+    pub source: MachineRef,
+    pub target: MachineRef,
+    pub copy: Option<crate::forks::PlanMountCopy>,
+    pub blockers: Vec<crate::forks::PlanBlocker>,
+    pub notification: crate::loss::OperationNotificationPlan,
+}
+
+/// Acknowledges the saved review without disclosing existing mount or machine content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MountCopyPlanReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub mount_id: Id,
+    pub preflight_id: Id,
+    pub expires_at: Time,
+}
+crate::common::full_or_receipt! {
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum MountCopyPlanResponse { Full(MountCopyPlan), Receipt(MountCopyPlanReceipt), }
+}
+
+/// Accepts exactly one current reviewed copy as a durable job.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MountCopyCreateBody {
+    pub preflight_id: Id,
+    #[serde(default)]
+    pub notify: Option<bool>,
+}
+
 crate::endpoints! {
     /// Mounts located on a readable host or the caller's own machine, and manageable add choices.
     MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), none, none, json MachineMounts, 200,
@@ -561,11 +606,24 @@ crate::endpoints! {
     /// Reads a mount.
     MountGet: GET "/mounts/{id}", Rule("any permission on the mount"), none, none, json Mount, 200,
         operation Op::facets(&crate::resource_reads::MOUNT.facets::<7>(Target::TypedPath { parameter: "id", kind: Object(K::Mount) }));
+    /// Reviews a standalone copy of one location's data to another allowed machine.
+    MountCopyPreflight: POST "/mounts/{id}/copy-plan", Rule("mount.use and management of both machines; native paths and data makers remain current"), none, json MountCopyPreflightBody, json MountCopyPlanResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::mount_copy_sources::FACETS));
+    /// Accepts the reviewed standalone copy, keeping displaced data and joining a repeated acceptance.
+    MountCopyCreate: POST "/mounts/{id}/copy", Rule("the original review's mount and both machines remain manageable"), none, json MountCopyCreateBody, json crate::workspace::JobCreationResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::mount_copy_sources::FACETS));
+    /// Reads this person's latest durable copy job without exposing its native recipe.
+    MountCopyLatest: GET "/mounts/{id}/copy", Permission("mount.view"), none, none, json Option<crate::workspace::Job>, 200,
+        operation Op::facets(&crate::mount_copy_sources::READ_FACETS);
     /// Changes a mount.
     MountUpdate: PATCH "/mounts/{id}", Permission("mount.manage"), none, json MountUpdateBody, json Mount, 200,
         operation Op::returning(Manage, &[Object(K::Mount)], Target::PermissionObject);
-    /// Deletes a mount that no scope enables.
-    MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, none, none, 204;
+    /// Previews removal of the definition, its next-start consequences and the fates of owned data.
+    MountDeletePreflight: POST "/mounts/{id}/delete-plan", Permission("mount.manage"), none, none, json crate::storage::CleanupPlanResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
+    /// Deletes the definition through the common cleanup job, keeping data unless its displayed fate is confirmed.
+    MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, json crate::storage::CleanupStart, json crate::storage::CleanupJobResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
     /// Sets where a mount is on a machine: a path, or a volume on a host's storage.
     MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json MountLocationSetResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mount_location_sources::SET_FACETS));

@@ -5,6 +5,7 @@
  * interval. An org where nothing is named can be given the provider Local embeddings, which is then named
  * there; an index that waits for a choice offers the two, with the size and time of a new set shown first.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { ReferenceCard } from '@/ui/ReferenceCard';
@@ -192,11 +193,11 @@ function Actions({ org }: { org: SemanticSearchOrg }) {
 function OrgName({org}: {org: SemanticSearchOrg['org']}) {
   const Icon = PLACE_ICONS.org;
   const name = org.name ?? '';
-  return <ReferenceCard reference={{kind: 'node', id: org.id}} label={name}>{(keep) => <a href={`/org/${org.id}`}
+  return <ReferenceCard reference={{kind: 'node', id: org.id}} label={name}>{(keep) => <PathLink href={`/org/${org.id}`}
     onClick={(event) => {if (isPlainClick(event)) {event.preventDefault(); keep();}}}
     className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm bg-bg-muted px-1 font-medium text-text hover:underline">
     <Icon aria-hidden className="size-3.5 shrink-0" /><span className="truncate">{name}</span>
-  </a>}</ReferenceCard>;
+  </PathLink>}</ReferenceCard>;
 }
 
 function TemplateUsed({ providerId }: { providerId: string | null }) {

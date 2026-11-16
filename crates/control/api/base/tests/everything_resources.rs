@@ -9,6 +9,8 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
 #[path = "everything_resources/figures_scopes.rs"]
 mod figures_scopes;
 #[path = "everything_resources/library_people_scopes.rs"]
@@ -1238,4 +1240,51 @@ async fn hosts_page_by_the_same_memory_load_as_their_meter_and_by_running_units_
         }
         assert_eq!(found, expected.map(|id| id.to_string()));
     }
+}
+
+/// A provider whose connection runs in a container of its own, as the system leaves it once the container has enrolled:
+/// the unit's machine has no owner, no home and no page of its own, and the provider names it as its machine and as the
+/// machine its key is on.
+async fn provider_in_a_container(world: &World, owner: &Who, home: Id, name: &str) -> (Id, Id) {
+    let provider = resource(world, owner, home, "provider", name).await;
+    let mut conn = world.conn().await;
+    let (host, template) =
+        container_units::host_and_template(&mut conn, owner.id(), home, name, world.now()).await;
+    let unit =
+        container_units::provider_unit(&mut conn, host, template, provider, world.now()).await;
+    (provider, unit)
+}
+
+#[tokio::test]
+async fn a_provider_whose_connection_runs_in_a_container_is_listed_whichever_view_is_asked_and_names_no_origin()
+ {
+    let world = World::new().await;
+    let owner = person(&world, "unit-owner").await;
+    let home = make_org(&world, &owner, "Unit home", "unit-home")
+        .await
+        .base
+        .id;
+    let (provider, unit) = provider_in_a_container(&world, &owner, home, "OpenAI").await;
+    for view in [
+        None,
+        Some(orch_api_contract::resources::ProviderListScope::Mine),
+        Some(orch_api_contract::resources::ProviderListScope::Managed),
+        Some(orch_api_contract::resources::ProviderListScope::Usable),
+        Some(orch_api_contract::resources::ProviderListScope::Viewable),
+    ] {
+        let mut ask = query("provider");
+        ask.limit = Some(50);
+        ask.resource_view = view;
+        let page = read(&world, &owner, &ask).await;
+        let row = page
+            .items
+            .iter()
+            .find(|row| row.id == provider.to_string())
+            .unwrap_or_else(|| panic!("the provider is in the list for {view:?}"));
+        // The container's machine is nobody's to open, so it labels nothing: the row keeps its home and has no origin.
+        let grouping = row.grouping.as_ref().unwrap();
+        assert_eq!(grouping.home.as_ref().unwrap().id, home, "{view:?}");
+        assert!(grouping.origin_machine.is_none(), "{view:?}");
+    }
+    let _ = unit;
 }

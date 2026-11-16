@@ -1,4 +1,5 @@
 /** The page of `/dev/ui`: each shared control that is built, drawn in the light and the dark theme side by side, with the density and the language of the whole page to choose. */
+import { PathLink } from '@/shell/TrailLink';
 import { useRouter } from '@tanstack/react-router';
 import {
   Archive,
@@ -746,7 +747,7 @@ export default function Gallery() {
             <TagChip name={NAMES.tagUi} color={5} onRemove={() => undefined} />
           </Row>
           <Row>
-            <PersonCard user={ADA} actions={<Button asChild><a href={`/org/acme/settings/audit?actor=${ADA.id}`}><ScrollText aria-hidden />{t('trace.entry')}</a></Button>}><UserChip user={ADA} showUsername /></PersonCard>
+            <PersonCard user={ADA} actions={<Button asChild><PathLink href={`/org/acme/settings/audit?actor=${ADA.id}`}><ScrollText aria-hidden />{t('trace.entry')}</PathLink></Button>}><UserChip user={ADA} showUsername /></PersonCard>
             <UserChip user={BOT} />
           </Row>
           <Row>
