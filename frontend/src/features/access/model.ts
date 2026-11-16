@@ -249,7 +249,7 @@ function lineHolder(source: PageHolder, among: ReadonlySet<string> | null): Line
  * of an area is also every level below it, and a role is also the roles below it); one that holds
  * something of the lines but not a whole choice is Custom; one that holds nothing of them is in none.
  */
-export function linesOf(page: PermissionPage, catalogue: Catalogue, kind: string): Lines {
+export function linesOf(page: Pick<PermissionPage, 'rows'>, catalogue: Catalogue, kind: string): Lines {
   const lines: Lines = { manage: [], interact: [], view: [], custom: [] };
   const present = new Map<string, PermissionDef>();
   for (const row of page.rows) {

@@ -1,0 +1,2 @@
+test -p orch-adapter-codex --test conformance -- native_translation
+test -p orch-adapter-claude-code --test conformance -- native_translation

@@ -758,6 +758,7 @@ struct FileTarget {
     opening: Option<attachments::Opening>,
     environment: Option<live_file::Opening>,
     blob: Option<Hash>,
+    transit: Option<bytes::Bytes>,
     text: bool,
     place: Id,
 }
@@ -855,6 +856,7 @@ async fn attachment_target_on(
                 access_requests: None,
             },
             blob: Some(file.blob),
+            transit: None,
             text: file.file.is_text,
             place,
         });
@@ -930,6 +932,7 @@ async fn attachment_target_on(
             access_requests: None,
         },
         blob: Some(blob),
+        transit: None,
         text: media.starts_with("text/") || media == "application/json",
         place,
     })
@@ -1049,6 +1052,9 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
         None
     };
     let machine = crate::routes::workspace::live::machine_of(ctx, &mut conn, &env).await?;
+    let relayed =
+        orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(env.id))
+            .await;
     let cached = orch_db::queries::storage::cached_latest(&mut conn, env.id, path).await?;
     drop(conn);
     let (stat, missing): (Option<FileStat>, bool) = match machine {
@@ -1072,17 +1078,19 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
     let is_file = stat
         .as_ref()
         .is_some_and(|stat| matches!(stat.entry.kind, DirEntryKind::File | DirEntryKind::Symlink));
+    let mut transit = None;
     let mut blob = cached
         .as_ref()
         .filter(|cached| {
-            stat.as_ref().is_none_or(|stat| {
-                stat.entry.size == cached.size
-                    && stat.entry.mtime.get().timestamp_millis()
-                        == cached
-                            .mtime_ns
-                            .div_euclid(orch_db::queries::storage::NANOS_PER_MILLI)
-                    && stat.hash.is_none_or(|hash| hash == cached.hash)
-            })
+            !relayed
+                && stat.as_ref().is_none_or(|stat| {
+                    stat.entry.size == cached.size
+                        && stat.entry.mtime.get().timestamp_millis()
+                            == cached
+                                .mtime_ns
+                                .div_euclid(orch_db::queries::storage::NANOS_PER_MILLI)
+                        && stat.hash.is_none_or(|hash| hash == cached.hash)
+                })
         })
         .map(|cached| cached.hash);
     let size = stat
@@ -1108,7 +1116,12 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
         .map_err(ApiError::internal)?
         .unwrap_or_default();
         drop(conn);
-        if size.is_some_and(|size| size <= limit) {
+        if relayed {
+            if let Some(stat) = stat.as_ref().filter(|stat| stat.entry.size <= limit) {
+                transit =
+                    relay_excerpt(ctx, &mut opening, machine, env.id, path, stat, limit).await?;
+            }
+        } else if size.is_some_and(|size| size <= limit) {
             let fetched = opening
                 .run(
                     ctx,
@@ -1200,9 +1213,79 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
             access_requests: None,
         },
         blob,
+        transit,
         text,
         place: env.home_node_id,
     })
+}
+
+/// The original native authority owns command admission/delivery; the memory reader owns cancellation.
+async fn relay_excerpt(
+    ctx: &Ctx,
+    opening: &mut live_file::Opening,
+    machine: Id,
+    environment: Id,
+    path: &str,
+    stat: &FileStat,
+    limit: i64,
+) -> ApiResult<Option<bytes::Bytes>> {
+    use orch_link_contract::commands::{FsRelayDescribe, FsRelaySend};
+    let (hash, size) = if let Some(hash) = stat.hash {
+        (hash, stat.entry.size)
+    } else {
+        let Ok(described) = opening
+            .run(
+                ctx,
+                machine,
+                &FsRelayDescribe {
+                    environment_id: environment,
+                    mount: None,
+                    path: path.to_owned(),
+                },
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        if described.size > limit
+            || described.size != stat.entry.size
+            || described
+                .mtime_ns
+                .div_euclid(orch_db::queries::storage::NANOS_PER_MILLI)
+                != stat.entry.mtime.get().timestamp_millis()
+        {
+            return Ok(None);
+        }
+        (described.hash, described.size)
+    };
+    let reading = crate::relay::Read::create(ctx, size).await?;
+    let body = FsRelaySend {
+        environment_id: environment,
+        mount: None,
+        path: path.to_owned(),
+        hash,
+        offset: 0,
+        len: size,
+        relay_id: reading.relay.id(),
+        idle_secs: reading.options.idle_secs,
+        retry_ms: reading.options.retry_ms,
+    };
+    let producer = async {
+        opening
+            .run_as(
+                ctx,
+                reading.command_id(),
+                machine,
+                &body,
+                Some(reading.options.until),
+            )
+            .await?
+            .map(|_| ())
+            .map_err(|failure| failure.problem(crate::routes::workspace::problems::Doing::Reading))
+    };
+    // A transient native refusal leaves the ordinary metadata-only card. The original source is
+    // always re-prepared below and retained for response publication, including denied readers.
+    Ok(reading.collect(producer).await.ok())
 }
 
 async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<ReferencePreview> {
@@ -1226,7 +1309,8 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
             .map_err(live_file::mapped)?;
     }
     if target.text
-        && let (Some(line), Some(blob)) = (query.line, target.blob)
+        && let Some(line) = query.line
+        && (target.blob.is_some() || target.transit.is_some())
     {
         let mut conn = ctx.app.db.acquire().await?;
         let bytes = orch_settings::get::<i64>(
@@ -1255,7 +1339,11 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
         if let Some(opening) = &target.opening {
             opening.check(ctx)?;
         }
-        let text = if bytes > 0 {
+        let text = if let Some(transit) = target.transit.take() {
+            Some(String::from_utf8_lossy(&transit).into_owned())
+        } else if let Some(blob) = target.blob
+            && bytes > 0
+        {
             match ctx
                 .app
                 .blobs
@@ -1539,6 +1627,11 @@ pub mod tests {
         .await
         .unwrap();
         drop(conn);
+        scene
+            .rig
+            .world
+            .set("storage.relay_transfers", serde_json::json!(false))
+            .await;
         let query = ReferencePreviewQuery {
             path: Some("src/auth.rs".into()),
             line: Some(2),
@@ -1587,6 +1680,26 @@ pub mod tests {
                 .as_ref()
                 .is_some_and(|part| part.text.contains("fn second() {}"))
         );
+        scene
+            .rig
+            .world
+            .set("storage.relay_transfers", serde_json::json!(true))
+            .await;
+        let relayed = app
+            .call(ReferencePreviewGet, &[])
+            .token(&scene.ada.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        assert!(
+            relayed
+                .part
+                .as_ref()
+                .is_none_or(|part| part.text.is_empty()),
+            "relay mode does not open a cached excerpt while its source is away"
+        );
+        assert!(relayed.file.as_ref().unwrap().blob.is_none());
         assert_eq!(
             app.call(
                 orch_api_contract::nodes::NodeGet,
