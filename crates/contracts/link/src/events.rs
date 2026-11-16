@@ -462,6 +462,8 @@ pub struct SessionTitle {
 /// The body of `session.lost`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// The native outcome is unavailable, rather than confirmed lost. Preserve admitted work without retry.
+    pub uncertain: bool,
     /// Why.
     pub reason: String,
 }
@@ -598,8 +600,7 @@ pub struct ItemCompleted {
     pub status: foreign::ItemStatus,
     /// What it holds for good.
     pub payload: foreign::ItemPayload,
-    /// The whole output of a command, where it is too long for the
-    /// payload.
+    /// Retained command output bytes; the payload declares their original interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_blob: Option<BlobRef>,
 }
@@ -883,6 +884,9 @@ pub struct ProviderFound {
 /// The body of `harness.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HarnessStatus {
+    /// Actual process home evidence, including supervised recovery and connector reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<orch_driver_contract::runtime::HarnessHome>,
     /// The state of the harness process, in the words that state is
     /// written with everywhere.
     pub status: String,
@@ -1062,6 +1066,8 @@ pub enum IndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// One hosted server's state, without its definition or any credentials.
@@ -1131,6 +1137,16 @@ pub struct EnvironmentFacts {
     /// The actual exceeded entry limit, reported only for that Live reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_entry_limit: Option<u64>,
+    /// While the machine looks at the whole tree to bring what it keeps of it up to date: how far it
+    /// has come. Omitted when it is not doing so, which is nearly always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingProgress>,
+    /// The root directory's current whole-recording coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingCoverage>,
+    /// An exclusion rule that prevents safe workspace coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_problem: Option<ExclusionProblem>,
     /// What became of the mounts it was to have.
     pub mounts: Vec<EnvironmentFactsMount>,
     /// Whether a mount can be attached with changes of the environment's
@@ -1142,6 +1158,35 @@ pub struct EnvironmentFacts {
     pub git: bool,
     /// How many times it was made anew.
     pub generation: i64,
+}
+
+/// A safe diagnostic for rules that could not be applied, without exposing their contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExclusionProblem {
+    /// Workspace-relative file or configured setting key.
+    pub path: String,
+    /// One-based source line, when known.
+    pub line: Option<u64>,
+    /// Unreadable, linked, too large, invalid text/pattern or changed while read.
+    pub reason: String,
+}
+
+/// Whether a whole recording is ready, or why per-file restore is used instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordingCoverage {
+    /// Complete or unavailable; unavailable never promises partial whole coverage.
+    pub state: crate::source::RecordState,
+    /// The reason when whole recording is unavailable.
+    pub reason: Option<String>,
+}
+
+/// How far a machine is in looking at a whole tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexingProgress {
+    /// The files it has looked at.
+    pub done: u64,
+    /// The files it has to look at.
+    pub total: u64,
 }
 
 /// The body of `env.status`.
@@ -1157,8 +1202,17 @@ pub struct EnvStatus {
 }
 
 /// The body of `env.manifest`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvManifest {
+    /// An announcement or interruption of this exact transfer; absent means completed publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_state: Option<orch_api_contract::workspace::FileTransferState>,
+    /// Native source facts captured with this manifest, not current defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_facts: Option<orch_api_contract::workspace::FileSourceFacts>,
+    /// The exact attached generation that produced these facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
     /// The list of the tree, which the system now holds.
     pub manifest_blob: Hash,
     /// How many files it names.
@@ -1209,6 +1263,9 @@ pub struct ProcsSnapshot {
 /// The body of `fs.changed`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FsChanged {
+    /// Captured facts of this source observation, absent when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<orch_api_contract::workspace::FileSourceFacts>,
     /// The watch that noticed.
     pub watch_id: Id,
     /// The exact installation that observed these changes; absent for a legacy caller.
@@ -1536,7 +1593,7 @@ mod tests {
         event("session.title", json!({ "title": "Fix the login" }));
         event(
             "session.lost",
-            json!({ "reason": "the harness was restarted" }),
+            json!({ "uncertain":false, "reason": "the harness was restarted" }),
         );
         event(
             "turn.started",

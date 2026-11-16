@@ -214,16 +214,19 @@ pub fn credential_forms() -> Vec<CredentialForm> {
         CredentialForm {
             form: FORM_TOKEN.to_owned(),
             custody: Custody::Shared,
+            expires: false,
             lifetime_secs: Some(TOKEN_LIFETIME_SECS),
         },
         CredentialForm {
             form: FORM_KEY.to_owned(),
             custody: Custody::Shared,
+            expires: false,
             lifetime_secs: None,
         },
         CredentialForm {
             form: FORM_LOGIN.to_owned(),
             custody: Custody::Transferred,
+            expires: false,
             lifetime_secs: None,
         },
     ]
@@ -676,6 +679,7 @@ pub fn descriptor_of(
         // The fake declares what its profile says; it is no evidence of a native boundary.
         side_thread_modes: profile.side_thread_modes.clone().unwrap_or_default(),
         capabilities,
+        features: Default::default(),
         parameters: parameters_named(&program.name),
         text: program
             .names

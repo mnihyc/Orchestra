@@ -28,15 +28,15 @@ struct Key {
 }
 async fn key(room: &Room, user: Id, rules: Option<Vec<Value>>, life: chrono::Duration) -> Key {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope = rules.map(|rules| {
         let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
         assert!(scope.validate().is_empty());
         serde_json::to_value(scope).unwrap()
     });
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     let legacy = vec!["*".to_owned()];
     create_api_token_scoped(
         &mut *room.world.conn().await,

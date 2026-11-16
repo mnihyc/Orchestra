@@ -17,9 +17,9 @@ const info=vi.hoisted(()=>({secure:true,public_url:'https://orch.example',config
 vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
   gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [{ id: 'asia', label: 'Asia tools', region: 'Asia', endpoints: [{ url: 'wss://asia.gateway.example.test', trust: 'pinned' as const }] }] }) },
 }));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({useHomeChoices:()=>({choices:[{id:'org',label:'Acme'}]}),HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Personal</option><option value="org">Acme</option></select>}));
 vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),
   createMachineToken:vi.fn(),createHostToken:vi.fn(),
@@ -204,4 +204,18 @@ it('changes the gateway flag of the displayed installer without minting another 
   expect(createMachineToken).toHaveBeenCalledTimes(1);
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });
   expect(createHostToken).not.toHaveBeenCalled();
+});
+
+for(const locale of ['en','zh-CN'] as const) it(`shows the installed-sign-in enrollment preset before issuing its command (${locale})`,async()=>{
+  await setLocale(locale);
+  try {
+    const user=userEvent.setup();show(<AddMachineDialog onClose={vi.fn()}/>);
+    await user.click(screen.getByRole('combobox',{name:i18n.t('machineSignup.purpose')}));
+    await user.click(screen.getByRole('option',{name:i18n.t('machineSignup.useInstalled')}));
+    for(const role of ['environment','agent','provider'] as const)expect(screen.getByRole('checkbox',{name:i18n.t(`machines.add.roleChoices.${role}.name`)})).toBeChecked();
+    expect(createMachineToken).not.toHaveBeenCalled();
+    await showCommand();
+    await waitFor(()=>expect(createMachineToken).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({roles:['environment','agent','provider'],delegate:['agent']})));
+    expect(await screen.findByText("install.sh --roles 'environment,agent,provider' --delegate 'agent' --gateway automatic")).toBeVisible();
+  } finally {await setLocale('en');}
 });

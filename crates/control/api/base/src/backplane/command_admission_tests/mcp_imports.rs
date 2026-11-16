@@ -262,10 +262,10 @@ impl Scene {
             .execute(&mut *conn)
             .await?;
         let credential = new_id();
-        let bearer = authentication::new_token(match mode {
-            Mode::Key => authentication::API_TOKEN_PREFIX,
-            Mode::Session => authentication::ACCESS_TOKEN_PREFIX,
-        });
+        let bearer = match mode {
+            Mode::Key => authentication::new_api_token(credential),
+            Mode::Session => authentication::new_token(authentication::ACCESS_TOKEN_PREFIX),
+        };
         let digest = authentication::token_hash(&bearer);
         let until = transport.clock.now() + chrono::Duration::hours(1);
         match mode {

@@ -94,6 +94,33 @@ pub fn needs_of(spec: &Json, own: Option<&Json>, limits: Option<&Json>) -> Needs
     }
 }
 
+/// Provenance from the very same member order as needs_of, without reading another setting.
+#[must_use]
+pub fn need_sources(
+    spec: &Json,
+    own: Option<&Json>,
+    limits: Option<&Json>,
+) -> std::collections::BTreeMap<String, orch_api_contract::environment::PlacementNeedSource> {
+    use orch_api_contract::environment::PlacementNeedSource as Source;
+    ["cpu_millis", "memory_mb", "disk_gb"]
+        .into_iter()
+        .map(|key| {
+            let source = if number(own, key).is_some() {
+                Source::ResolvedNeeds
+            } else if number(spec.get("needs"), key).is_some() {
+                Source::TemplateNeeds
+            } else if number(limits, key).is_some() {
+                Source::ResolvedResources
+            } else if number(spec.get("resources"), key).is_some() {
+                Source::TemplateResources
+            } else {
+                Source::NotReported
+            };
+            (key.to_owned(), source)
+        })
+        .collect()
+}
+
 /// The limits an environment's unit is made with: the template's `resources`, each member raised or
 /// lowered by the environment's own `env.resources`, within the template's `resources_max`.
 #[must_use]
@@ -139,6 +166,9 @@ pub fn source_of(spec: &Json) -> &'static str {
 /// What a new environment would be made with, worked out from its template and its own values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wanted {
+    /// Actual branches of the needs resolver used for this proposal.
+    pub need_sources:
+        std::collections::BTreeMap<String, orch_api_contract::environment::PlacementNeedSource>,
     /// The template.
     pub template: TemplateState,
     /// What it declares it needs.
@@ -235,6 +265,7 @@ pub async fn wanted(
         })
         .unwrap_or_default();
     Ok(Wanted {
+        need_sources: need_sources(&template.spec, needs_own.as_ref(), Some(&limits)),
         needs,
         limits,
         source: source_of(&template.spec),
@@ -373,6 +404,130 @@ pub fn declared_with_overhead(loads: &[LoadRow], drivers: &Json) -> Amounts {
         declared.memory_mb = declared.memory_mb.saturating_add(overhead.max(0));
     }
     declared
+}
+
+/// The inputs already read by a placement decision; explanation performs no additional I/O.
+pub(crate) struct CalculationInput<'a> {
+    pub host: &'a HostState,
+    pub template: &'a TemplateState,
+    pub runtime: Option<&'a str>,
+    pub needs: &'a Needs,
+    pub need_sources:
+        std::collections::BTreeMap<String, orch_api_contract::environment::PlacementNeedSource>,
+    pub declared: Amounts,
+    pub applied: Amounts,
+    pub full_percent: i64,
+    pub when_full: WhenFull,
+    pub now: DateTime<Utc>,
+}
+
+/// Captures the scheduler's actual arithmetic and declaration resolution, without changing placement.
+pub(crate) fn capture_calculation(
+    input: CalculationInput<'_>,
+) -> orch_api_contract::environment::PlacementCalculation {
+    use orch_api_contract::environment::{
+        PlacementCalculation, PlacementCalculationSources, PlacementRuntimeOverhead,
+        PlacementSettingSource, PlacementThresholds,
+    };
+    use orch_driver_contract::isolation::{Boundary, RuntimeAssumptionSource, class_in};
+    let descriptor = input.host.drivers.get(&input.template.driver);
+    let class = descriptor.and_then(|descriptor| class_in(descriptor, input.runtime));
+    let isolation = descriptor.map(|descriptor| {
+        let title = descriptor
+            .get("title")
+            .and_then(Json::as_str)
+            .unwrap_or(&input.template.driver);
+        let fallback = if descriptor.get("confinement").and_then(Json::as_str) == Some("isolated") {
+            Boundary::SharedKernel
+        } else {
+            Boundary::Unbounded
+        };
+        let runtime = input
+            .runtime
+            .or_else(|| descriptor.get("default_runtime").and_then(Json::as_str));
+        let mut isolation = crate::isolation::isolation_of(
+            &input.template.driver,
+            title,
+            class.as_ref(),
+            runtime,
+            fallback,
+            &[],
+        );
+        isolation.assumptions = Some(crate::isolation::assumption_sources(descriptor, runtime));
+        isolation
+    });
+    PlacementCalculation {
+        captured_at: Time::new(input.now),
+        runtime_overhead: PlacementRuntimeOverhead {
+            existing_memory_mb: input
+                .applied
+                .memory_mb
+                .saturating_sub(input.declared.memory_mb)
+                .max(0),
+            incoming_memory_mb: class
+                .as_ref()
+                .filter(|_| {
+                    isolation
+                        .as_ref()
+                        .and_then(|isolation| isolation.assumptions.as_ref())
+                        .is_some_and(|assumptions| {
+                            assumptions.overhead_source
+                                == RuntimeAssumptionSource::RuntimeDeclaration
+                        })
+                })
+                .map(|class| class.memory_overhead_mb.max(0)),
+            incoming_included: false,
+            source: isolation
+                .as_ref()
+                .and_then(|isolation| isolation.assumptions.as_ref())
+                .map_or(
+                    RuntimeAssumptionSource::UnknownRuntimeFallback,
+                    |assumptions| assumptions.overhead_source,
+                ),
+        },
+        capacities: capacity_of(input.host),
+        capacities_as_of: input.host.capacity_at.map(Time::new),
+        thresholds: PlacementThresholds {
+            full_percent: input.full_percent,
+            incoming_memory_mb: input.needs.memory_mb,
+        },
+        consequence: input.when_full,
+        sources: PlacementCalculationSources {
+            needs: input.need_sources,
+            capacity_unreported: ["cpu_millis", "memory_mb", "disk_gb"]
+                .into_iter()
+                .filter(|key| {
+                    if *key == "cpu_millis" {
+                        input
+                            .host
+                            .capacity
+                            .get("cpu_millis")
+                            .and_then(Json::as_i64)
+                            .is_none()
+                            && input
+                                .host
+                                .capacity
+                                .get("cpus")
+                                .and_then(Json::as_f64)
+                                .is_none()
+                    } else {
+                        number(Some(&input.host.capacity), key).is_none()
+                    }
+                })
+                .map(str::to_owned)
+                .collect(),
+            template_revision: input.template.revision,
+            full_percent: PlacementSettingSource::System,
+            consequence: if input.host.when_full.is_some() {
+                PlacementSettingSource::Host
+            } else {
+                PlacementSettingSource::System
+            },
+        },
+        declared_totals: input.declared,
+        applied_totals: input.applied,
+        isolation,
+    }
 }
 
 // Group current units once; visiting every unit for each host multiplies scheduling work.
@@ -869,6 +1024,18 @@ async fn host_places_inner(
             mount_sources: names.iter().map(|(id, _)| *id).collect(),
             owner: host.owner_id,
             place: PlaceHost {
+                calculation: Some(Box::new(capture_calculation(CalculationInput {
+                    host: &host,
+                    template: &wanted.template,
+                    runtime: wanted.runtime_class.as_deref(),
+                    needs: &wanted.needs,
+                    need_sources: wanted.need_sources.clone(),
+                    declared: declared_of(&held),
+                    applied: declared.clone(),
+                    full_percent,
+                    when_full,
+                    now: ask.now,
+                }))),
                 grouping: Default::default(),
                 host: HostRef {
                     id: host.id,
