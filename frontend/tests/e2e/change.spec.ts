@@ -277,7 +277,8 @@ test('a side thread is asked from a message, answered inline and in its panel, a
 test('a thread with as many side threads open as it may have says so, and one is closed to ask again', async ({ page }) => {
   await openHistory(page);
   await change.sides(MAIN, 4);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).click();
   const ask = page.getByRole('dialog', { name: 'Side thread' });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
   await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
@@ -542,7 +543,9 @@ test('a switch is planned, confirmed and hidden from the keyboard alone, and Esc
 
 test('a side thread is asked, kept in view and closed from the keyboard alone', async ({ page }) => {
   await openHistory(page);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).focus();
+  await page.locator('[data-thread-header] [data-thread-more]').focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).focus();
   await page.keyboard.press('Enter');
   const ask = page.getByRole('dialog', { name: 'Side thread' });
   await expect(ask.getByRole('textbox', { name: 'What to ask' })).toBeFocused();

@@ -55,6 +55,7 @@ async fn cached(site: &Site, path: &str, bytes: &[u8], mtime_ns: i64) -> Hash {
         &mut conn,
         site.environment,
         &CachedFile {
+            minimum_reach: orch_access_contract::permissions::FileReach::Roots,
             path: path.to_owned(),
             size: meta.size,
             mtime_ns,
@@ -322,4 +323,41 @@ async fn a_browser_upload_that_ran_out_goes_with_its_pieces() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn an_unfinished_transfer_is_not_forgotten_when_its_temporary_bytes_cannot_be_removed() {
+    let depot = Depot::new().await;
+    let app = depot.app();
+    let command = depot.uploading().await;
+    let bytes = vec![7_u8; 3000];
+    let hash = Hash::of(&bytes);
+    depot
+        .content
+        .put(depot.machine, command, &hash, 0, 3000, &bytes[..1000])
+        .await;
+    let part = app.blobs.part_of(&hash);
+    let held = part.with_extension("held");
+    tokio::fs::rename(&part, &held).await.unwrap();
+    tokio::fs::create_dir(&part).await.unwrap();
+    depot.world.advance(Duration::hours(25));
+    assert_eq!(
+        collect(app).await.uploads,
+        0,
+        "a failed unlink is still owed"
+    );
+    assert!(
+        storage::upload(&mut *depot.world.conn().await, &hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tokio::fs::remove_dir(&part).await.unwrap();
+    tokio::fs::rename(&held, &part).await.unwrap();
+    assert_eq!(
+        collect(app).await.uploads,
+        1,
+        "the next collection pays the retained debt"
+    );
+    assert!(!tokio::fs::try_exists(&part).await.unwrap());
 }

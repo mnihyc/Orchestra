@@ -1100,6 +1100,7 @@ async fn the_environments_files_are_given_on_its_own_page_and_a_thread_named_giv
             .call(EnvironmentFileList, &[&site.environment])
             .token(token)
             .query(&EnvironmentFileListQuery {
+                prefix: None,
                 thread,
                 path: "web".to_owned(),
                 source: None,
@@ -1189,6 +1190,7 @@ async fn a_thread_that_runs_in_no_such_environment_lets_nobody_in() {
         .call(EnvironmentFileList, &[&new_id()])
         .token(&site.ada.token)
         .query(&EnvironmentFileListQuery {
+            prefix: None,
             thread: Some(site.thread),
             path: String::new(),
             source: None,
@@ -2351,4 +2353,64 @@ async fn the_latest_list_of_the_tree_is_kept_pinned_and_the_one_it_replaces_is_l
     // The same list told again changes nothing.
     site.publish_manifest().await;
     assert_eq!(pins(second).await, 1);
+}
+
+#[tokio::test]
+async fn kept_machine_file_bytes_do_not_turn_into_roots_data_by_a_relative_alias() {
+    use orch_access_contract::permissions::FileReach;
+    use orch_db::queries::storage;
+    let site = Site::new().await;
+    let bytes = bytes::Bytes::from_static(b"outside content kept by an explicit machine read");
+    let blob = site.app().app.blobs.put_bytes(bytes).await.unwrap();
+    {
+        let mut conn = site.world.conn().await;
+        site.app()
+            .app
+            .blobs
+            .register(&mut conn, blob, site.world.now())
+            .await
+            .unwrap();
+        storage::record_cached(
+            &mut conn,
+            site.environment,
+            &storage::CachedFile {
+                path: "web/outside-link.txt".to_owned(),
+                size: blob.size,
+                mtime_ns: 1,
+                hash: blob.hash,
+                cached_at: site.world.now(),
+                minimum_reach: FileReach::Machine,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let refused = ask::content(
+        &site,
+        &site.vic,
+        "web/outside-link.txt",
+        &blob.hash,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::from_slice::<Json>(&refused.raw).unwrap()["code"],
+        "files.reach_denied"
+    );
+    let own = ask::content(
+        &site,
+        &site.ada,
+        "web/outside-link.txt",
+        &blob.hash,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(own.status, StatusCode::OK);
+    assert_eq!(
+        own.raw.as_ref(),
+        b"outside content kept by an explicit machine read"
+    );
 }

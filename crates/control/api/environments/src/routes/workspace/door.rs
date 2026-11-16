@@ -37,6 +37,8 @@ use orch_types::Id;
 /// A caller who may reach into an environment.
 #[derive(Debug)]
 pub struct Door {
+    /// Separate native bounds of the current same-credential human file acts.
+    pub access: orch_link_contract::commands::FsAccess,
     /// The physical machine's own ceiling, separate from the environment's narrowing.
     pub machine_write: bool,
     /// The environment.
@@ -127,7 +129,22 @@ pub(super) async fn open_with_principal(
         Some(thread) => Some(beside(conn, &principal, env.id, thread).await?),
         None => None,
     };
+    let mut reach =
+        orch_authz::file_reach::effective(conn, &principal, environment, Policy::default()).await?;
+    if matches!(
+        ctx.user()?.via,
+        crate::middleware::authentication::Via::OwnerRead { .. }
+    ) {
+        reach.view = reach
+            .view
+            .map(|_| orch_access_contract::permissions::FileReach::Roots);
+        reach.manage = None;
+    }
     Ok(Door {
+        access: orch_link_contract::commands::FsAccess {
+            view: reach.view,
+            manage: reach.manage,
+        },
         // A machine's own ceiling refuses only where a machine is known to hold the environment.
         machine_write: !orch_db::queries::environment_facts::refuses(
             conn,
@@ -140,4 +157,70 @@ pub(super) async fn open_with_principal(
         thread,
         directory,
     })
+}
+
+/// Retained bytes and native answers are checked again after their waits, under the current actor.
+pub async fn require_reach(
+    conn: &mut Conn,
+    principal: &Principal,
+    environment: Id,
+    minimum: orch_access_contract::permissions::FileReach,
+    write: bool,
+) -> ApiResult<()> {
+    let reach =
+        orch_authz::file_reach::effective(conn, principal, environment, Policy::default()).await?;
+    let allowed = if write { reach.manage } else { reach.view };
+    if allowed.is_some_and(|reach| reach >= minimum) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            ErrorCode::FileReachDenied,
+            "this target is outside your current file reach",
+        ))
+    }
+}
+
+/// A native fact can be retained after source work, but never beyond the current HTTP reader.
+pub async fn finish_read<T>(
+    ctx: &Ctx,
+    environment: Id,
+    minimum: orch_access_contract::permissions::FileReach,
+    value: T,
+) -> ApiResult<T> {
+    if minimum == orch_access_contract::permissions::FileReach::Machine
+        && matches!(
+            ctx.user()?.via,
+            crate::middleware::authentication::Via::OwnerRead { .. }
+        )
+    {
+        return Err(ApiError::new(
+            ErrorCode::FileReachDenied,
+            "this reader is confined to the environment roots",
+        ));
+    }
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
+    require_reach(&mut tx, guard.principal(), environment, minimum, false).await?;
+    guard.check_deadline(ctx)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(value)
+}
+
+/// Unreported policy cannot certify a smaller source than the admitted native command.
+#[must_use]
+pub fn minimum(
+    facts: Option<&orch_api_contract::workspace::FileSourceFacts>,
+    admitted: orch_link_contract::commands::FsAccess,
+    write: bool,
+) -> orch_access_contract::permissions::FileReach {
+    use orch_access_contract::permissions::FileReach;
+    match facts.map(|facts| facts.policy.kind) {
+        Some(orch_api_contract::workspace::FileSourceKind::Machine) => FileReach::Machine,
+        Some(_) => FileReach::Roots,
+        None => (if write {
+            admitted.manage
+        } else {
+            admitted.view
+        })
+        .unwrap_or(FileReach::Roots),
+    }
 }
