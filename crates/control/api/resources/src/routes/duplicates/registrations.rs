@@ -574,6 +574,7 @@ impl<F: Family> native::Selected for Preview<F> {
     type Query = DuplicateBody;
     type Value = Prepared;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = F::PREVIEW;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

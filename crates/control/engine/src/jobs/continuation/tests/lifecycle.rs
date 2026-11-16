@@ -7,6 +7,22 @@ use orch_db::queries::{hierarchy, lifecycle as controls};
 use orch_link_contract::continuations::SessionCloseFenced;
 use std::collections::BTreeMap;
 
+async fn original_work(fixture: &Fixture, command: &Outgoing) -> Proof<std::time::Duration> {
+    let info = fixture
+        .world
+        .commands
+        .as_engine()
+        .status(command.id)
+        .await?
+        .ok_or("the original command issue receipt is absent")?;
+    Ok(orch_link_contract::commands::Cmd::work_budget(
+        orch_types::Time::new(info.issued_at),
+        command
+            .deadline
+            .ok_or("the original work-budget endpoint is absent")?,
+    ))
+}
+
 #[derive(Clone, Copy)]
 enum Ending {
     Archive,
@@ -192,7 +208,7 @@ async fn resume_snapshot(
         assert_eq!(entry.cmd.id, outgoing.id);
         assert_eq!(entry.cmd.kind, outgoing.kind.as_str());
         assert_eq!(entry.cmd.key, outgoing.key.wire());
-        assert_eq!(entry.cmd.deadline, recipe.deadline);
+        assert_eq!(entry.cmd.work, original_work(fixture, outgoing).await?);
         assert!(
             entry.cmd.body == outgoing.body,
             "the actual native journal retains the exact prior body"
@@ -243,7 +259,7 @@ async fn resume_snapshot(
             sent.body == command.body
                 && sent.kind == command.kind.as_str()
                 && sent.key == command.key.wire()
-                && Some(sent.deadline) == command.deadline,
+                && sent.work == original_work(fixture, command).await?,
             "the prior transport retains every outgoing source/budget field"
         );
     }
@@ -558,12 +574,7 @@ async fn after_creation(ending: Ending) -> Proof {
             .await?,
         )?;
         assert_eq!(actual.cmd.id, command.id);
-        assert_eq!(
-            actual.cmd.deadline,
-            command
-                .deadline
-                .ok_or("the reducing command lost its original deadline")?
-        );
+        assert_eq!(actual.cmd.work, original_work(&fixture, &command).await?);
         assert_eq!(actual.cmd.key, command.key.wire());
         assert_eq!(
             actual.cmd.body,

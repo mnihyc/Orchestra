@@ -653,6 +653,7 @@ impl Scene {
                 let dir = body.path != "web/out/result.bin";
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: if dir { "web" } else { "result.bin" }.into(),
                             path: body.path.clone(),
@@ -734,6 +735,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -1605,6 +1608,15 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
     // The common controller supplier retains commands in its owned journal, not SQL.
     // Reconstruct only the production dispatcher's storage half from that actual issued
     // command, preserving every field; no synthetic answer or successful effect is invented.
+    let issued_at = scene
+        .world
+        .commands
+        .as_engine()
+        .status(command.id)
+        .await?
+        .ok_or("the actual issued answer receipt is absent")?
+        .issued_at;
+    let deadline = issued_at + chrono::Duration::from_std(command.work)?;
     let mut conn = scene.world.pool.acquire().await?;
     assert!(
         link::insert_command(
@@ -1615,9 +1627,9 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
                 kind: &command.kind,
                 body: &command.body,
                 serial_key: command.key.as_deref(),
-                deadline_at: command.deadline.get()
+                deadline_at: deadline
             },
-            scene.world.clock.now()
+            issued_at
         )
         .await?
     );
@@ -1650,7 +1662,7 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
         .ok_or("the canonical queue body was lost")?;
     assert_eq!(
         (saved.body, saved.serial_key, saved.deadline_at),
-        (command.body, command.key, command.deadline.get())
+        (command.body, command.key, deadline)
     );
     assert_eq!(
         scene
@@ -1845,6 +1857,7 @@ async fn download_peer(
             })?;
             Ok(CommandResult::FsWrite(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "copied-doc.md".into(),
                         path: body.path.clone(),
@@ -1899,6 +1912,7 @@ async fn download_peer(
             };
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: if is_source {
                             "result.bin"
@@ -3347,6 +3361,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     let environment = scene.world.environment;
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             environment_id: environment,
             workspace_root: Some(root.display().to_string()),
             resources: None,

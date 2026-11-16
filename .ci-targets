@@ -1,0 +1,3 @@
+fmt
+test -p orch-link --lib
+test -p orch-link --test commands

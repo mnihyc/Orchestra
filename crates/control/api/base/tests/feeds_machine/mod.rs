@@ -152,8 +152,10 @@ impl Machine {
         let attach = Cmd::new(
             new_id(),
             &SerialKey::Environment(environment),
-            Time::new(app.clock.now() + chrono::Duration::minutes(5)),
+            std::time::Duration::from_millis(300_000),
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: Some(i64::from(generation)),
                 storage: None,
@@ -304,7 +306,7 @@ impl Machine {
         let cmd = Cmd::new(
             new_id(),
             &SerialKey::None,
-            Time::new(self.app.clock.now() + chrono::Duration::minutes(5)),
+            std::time::Duration::from_millis(300_000),
             body,
         )
         .unwrap();

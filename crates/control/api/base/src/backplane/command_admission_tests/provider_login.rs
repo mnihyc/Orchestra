@@ -417,7 +417,7 @@ impl LoginFixture {
                 serde_json::to_value(&wire[0])?,
                 json!({
                     "id":command.id, "k":command.kind.as_str(), "key":command.key.wire(),
-                    "deadline":deadline, "b":command.body,
+                    "work":Cmd::work_budget(Time::new(row.created_at),deadline), "b":command.body,
                 })
             );
         } else {

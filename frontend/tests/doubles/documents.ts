@@ -461,8 +461,10 @@ export class Documents implements Part {
     const nodes = new Set([nodeId]);
     if (under) for (const doc of this.docs.values()) if (this.world.places.pathTo(doc.nodeId).some((row) => row.id === nodeId)) nodes.add(doc.nodeId);
     const onlyDeleted = query.get('deleted') === 'only';
+    const title = (query.get('q') ?? '').toLowerCase();
     const rows = [...this.docs.values()]
       .filter((doc) => nodes.has(doc.nodeId) && doc.deleted === onlyDeleted && this.holdings(person, doc).permissions.includes('doc.view'))
+      .filter((doc) => doc.title.toLowerCase().includes(title))
       .sort((one, other) => (one.updatedAt < other.updatedAt ? 1 : one.updatedAt > other.updatedAt ? -1 : one.id < other.id ? 1 : -1));
     const limit = Math.min(200, Number(query.get('limit') ?? 50));
     const start = Number(query.get('cursor') ?? 0);
