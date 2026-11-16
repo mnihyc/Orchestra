@@ -35,6 +35,7 @@ fn vendor_read(s: &Scene, supported: bool, verified: bool) -> Arc<AtomicUsize> {
     };
     s.rig.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".into(),
             descriptor: serde_json::from_value(descriptor.clone()).unwrap(),

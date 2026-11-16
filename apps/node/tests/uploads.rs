@@ -61,6 +61,7 @@ async fn uploaded(app: &TestApp, token: &str, bytes: &[u8]) -> Hash {
         .call(UploadSessionCreate, &[])
         .token(token)
         .body(&UploadSessionCreateBody {
+            to: None,
             name: "authored.txt".into(),
             size: bytes.len() as i64,
             media_type: Some("text/plain".into()),
@@ -85,6 +86,8 @@ async fn uploaded(app: &TestApp, token: &str, bytes: &[u8]) -> Hash {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained private upload has completed verification")
         .blob
 }
 
@@ -170,6 +173,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
                 data_sources: None,
                 environment_id: unit.environment_id,
                 workspace_root: None,
+                workspace: Default::default(),
                 ignore: Vec::new(),
                 index: IndexMode::Full,
                 mounts: Some(Vec::new()),
@@ -221,6 +225,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         .token(&token)
         .query(&ThroughThreadQuery::default())
         .body(&EnvironmentUploadWriteBody {
+            relay: None,
             path: "authored.txt".into(),
             blob,
             expected_hash: Some(Hash::of(original.as_bytes()).to_string()),
@@ -255,12 +260,29 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
             && current.progress.bytes_done < length as i64
     })
     .await;
-    assert_eq!(pin_count(&world, blob).await, before + 1);
     let current = orch_db::queries::jobs::job(&mut world.db.acquire().await.unwrap(), id)
         .await
         .unwrap()
         .unwrap();
     let command: Id = serde_json::from_value(current.plan["active_command"]["id"].clone()).unwrap();
+    let command_pins: i32 = sqlx::query_scalar(
+        "SELECT count(*)::int FROM command_blob_pins WHERE command_id=$1 AND job_id=$2 AND blob=$3",
+    )
+    .bind(command)
+    .bind(id)
+    .bind(blob.as_bytes().as_slice())
+    .fetch_one(&world.test_db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        command_pins, 1,
+        "the native reader holds its own command claim"
+    );
+    assert_eq!(
+        pin_count(&world, blob).await,
+        before + 1 + command_pins,
+        "the accepted job and its native reader each retain the content"
+    );
     assert_eq!(
         current.plan["active_command"]["machine"],
         serde_json::json!(machine)
@@ -289,6 +311,18 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         "Cancelled is downstream of the authenticated native result"
     );
     assert!(staged_files(&lab, &unit.name).await.is_empty());
+    eventually(
+        "the ended job releases both admitted and native reader claims",
+        || async { pin_count(&world, blob).await == before },
+    )
+    .await;
+    let command_pins: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM command_blob_pins WHERE command_id=$1")
+            .bind(command)
+            .fetch_one(&world.test_db.pool)
+            .await
+            .unwrap();
+    assert_eq!(command_pins, 0);
     assert_eq!(pin_count(&world, blob).await, before);
     let receipt = app
         .call(EnvironmentUploadWriteResult, &[&unit.environment_id, &id])

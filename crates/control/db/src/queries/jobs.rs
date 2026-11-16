@@ -1805,6 +1805,32 @@ pub mod changes {
         ).bind(provider).fetch_optional(conn).await?)
     }
 
+    /// A job that holds a provider's runtime and is not the provider's own work on it: a thread's fork, the move,
+    /// update or restart of an environment a thread of the provider is in, or a job of another kind about the
+    /// provider. Forcing a stop or a removal does not end such a job.
+    pub async fn provider_hold_besides_own(
+        conn: &mut Conn,
+        provider: Id,
+    ) -> Result<Option<JobRow>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT j.* FROM jobs j WHERE j.state IN ('queued','running') AND
+             ((j.provider_id = $1 AND NOT (j.kind = ANY($2))) OR EXISTS
+                (SELECT 1 FROM threads t WHERE t.provider_id = $1 AND
+                  ((j.kind = 'thread_fork' AND j.node_id = t.node_id)
+                   OR (j.kind IN ('environment_move','environment_recreate','environment_restart') AND j.environment_id = t.environment_id))))
+             ORDER BY j.created_at, j.id LIMIT 1",
+        )
+        .bind(provider)
+        .bind(
+            super::provider_jobs::ONE_AT_A_TIME
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_optional(conn)
+        .await?)
+    }
+
     /// Threads affected by a runtime change, locked in identifier order by its confirmation.
     pub async fn threads(
         conn: &mut Conn,

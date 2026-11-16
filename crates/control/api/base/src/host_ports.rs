@@ -619,6 +619,7 @@ async fn ask_for_reader(
     dispatcher
         .issue_stored_before(
             crate::dispatch::StoredCommand {
+                content_transit: false,
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().into(),

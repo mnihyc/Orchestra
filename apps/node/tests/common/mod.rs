@@ -1503,7 +1503,8 @@ impl<'a> Fleet<'a> {
             "resources": {}, "roles": ["environment"], "gateway_url": gateway_url,
             "enroll_token": { "$secret": secret },
             "ca_cert": self.world.secrets.ca_certificate().pem(),
-            "tools": [], "volumes": volumes, "mounts": [], "env": {},
+            "tools": [], "volumes": volumes, "mounts": [],
+            "env": { "ORCH_RUNTIME_ID": unit.runtime_id.to_string() },
             "labels": {
                 "orch.system": self.lab.system, "orch.runtime_id": unit.runtime_id,
                 "orch.kind": "environment", "orch.test": self.lab.token

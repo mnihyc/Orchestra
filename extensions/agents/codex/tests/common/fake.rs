@@ -31,6 +31,7 @@ pub type Handler = Arc<dyn Fn(&str, &Json) -> Answer + Send + Sync>;
 /// What the test can see and do of the fake.
 pub struct FakeState {
     pub received: Mutex<Vec<Json>>,
+    received_changed: Notify,
     pub launches: AtomicU32,
     pub kills: AtomicU32,
     pub requests: Mutex<Vec<LaunchRequest>>,
@@ -118,6 +119,19 @@ impl FakeState {
             .find(|frame| frame["id"] == json!(id) && frame.get("method").is_none())
     }
 
+    /// A reply is observed at its real read, without a polling delay or a busy loop.
+    pub async fn wait_answer(&self, id: i64) -> Json {
+        loop {
+            let changed = self.received_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(answer) = self.answer_to(id) {
+                return answer;
+            }
+            changed.await;
+        }
+    }
+
     /// Sets the version the harness reports of itself.
     pub fn set_version(&self, version: &str) {
         *self.version.lock().unwrap() = version.to_owned();
@@ -171,6 +185,7 @@ impl FakeLauncher {
         Self {
             state: Arc::new(FakeState {
                 received: Mutex::new(Vec::new()),
+                received_changed: Notify::new(),
                 launches: AtomicU32::new(0),
                 kills: AtomicU32::new(0),
                 requests: Mutex::new(Vec::new()),
@@ -221,6 +236,7 @@ impl Launcher for FakeLauncher {
                         let Ok(Some(line)) = line else { break };
                         let frame: Json = serde_json::from_str(&line).unwrap();
                         state.received.lock().unwrap().push(frame.clone());
+                        state.received_changed.notify_waiters();
                         let (Some(id), Some(method)) = (frame.get("id"), frame.get("method").and_then(Json::as_str)) else {
                             continue;
                         };
@@ -288,5 +304,22 @@ impl Launcher for FakeLauncher {
                 _raw: raw_inject,
             }),
         })
+    }
+}
+
+pub fn copied_chatgpt_token(sequence: u64) -> orch_agent_contract::credentials::GivenCredential {
+    use base64::Engine as _;
+    let expires = chrono::Utc::now() + chrono::Duration::hours(1);
+    let claims = json!({"exp":expires.timestamp(),"iat":chrono::Utc::now().timestamp()-1,"sequence":sequence,"sub":"synthetic-person","email":"person@example.invalid",
+        "https://api.openai.com/auth":{"chatgpt_account_id":"workspace-account","chatgpt_plan_type":"team"}});
+    let token = format!(
+        "e30.{}.synthetic",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    orch_agent_contract::credentials::GivenCredential {
+        form: "codex_access_token".into(),
+        credential: orch_plugin_contract::Secret::new(token),
+        expires_at: Some(orch_types::Time::new(expires)),
+        upstream: None,
     }
 }

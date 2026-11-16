@@ -1,0 +1,7 @@
+test -p orch-connector-core --lib
+test -p orch-connector-core --test source_reports --test source_dispatch --test provider_role --test harness_program
+test -p orch-node-core --test tools
+test -p orch-engine --test provider_runtime --test provider_homes --test provider_fact_reads
+test -p orch-api-core --test providers --test provider_harness --test provider_setup --test binding_readiness --test binding_set --test threads_make
+test -p orch-link --test commands
+test -p orch-gateway-core --test commands
