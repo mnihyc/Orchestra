@@ -114,6 +114,7 @@ pub fn workspace_on(
             ));
         }
         Ok(CommandResult::FsStat(FileStat {
+            facts: None,
             entry: DirEntry {
                 name: "web".into(),
                 path: body.path.clone(),
@@ -143,6 +144,8 @@ pub fn workspace_on(
             ));
         }
         Ok(CommandResult::FsRecord(FsRecordResult {
+            indexing: None,
+
             state: RecordState::Unavailable,
             tree_ref: None,
             repository_head: None,

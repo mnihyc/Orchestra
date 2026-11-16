@@ -620,7 +620,7 @@ impl World {
                 arch: Arch::X86_64,
             },
             connector_version: "0.1.0".to_owned(),
-            protocol_versions: vec![1],
+            protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
             roles: vec![Role::Agent, Role::Environment],
         };
         let tls = pinned_client_config(

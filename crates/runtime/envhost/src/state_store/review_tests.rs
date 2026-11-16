@@ -42,7 +42,10 @@ impl Capture {
         );
         Ok(Self {
             files,
-            index: Index::new(IndexMode::Full, Limits::default().index_max_entries),
+            index: Index::new(
+                IndexMode::Full,
+                orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+            ),
             states: FileStates::new(store),
             control,
             now: "2026-10-16T00:00:00Z".parse()?,
@@ -55,6 +58,7 @@ impl Capture {
             self.files.ignore().ok_or("ignore rules absent")?,
         )?;
         self.states.refresh(&self.files, &self.index, None, true)?;
+        self.states.prepare_recordings(&self.files, 1, self.now)?;
         Ok(())
     }
     fn request(&self) -> FsRecord {
@@ -62,6 +66,7 @@ impl Capture {
             environment_id: new_id(),
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: RecordKind::Turn,
             record_days: 1,
             max_bytes: 1024 * 1024,
@@ -562,5 +567,718 @@ fn captured_state_and_crash_pin_reopen_after_abrupt_exit() -> TestResult {
     );
     // This is abrupt process recovery; injected barrier-order tests establish the required fsync
     // calls. It does not simulate loss of the kernel cache or certify non-Unix power loss.
+    Ok(())
+}
+
+#[test]
+fn a_baseline_flushes_its_objects_and_shared_directories_before_a_root_names_them() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let workspace = capture.files.root().root_path().to_owned();
+    for number in 0..40 {
+        std::fs::write(
+            workspace.join(format!("file-{number}.txt")),
+            format!("the bytes of file {number}"),
+        )?;
+    }
+    capture.index.scan(
+        capture.files.root(),
+        capture.files.ignore().ok_or("ignore rules absent")?,
+    )?;
+    capture.clear();
+    capture
+        .states
+        .refresh(&capture.files, &capture.index, None, true)?;
+    let flushes = capture
+        .events()
+        .iter()
+        .filter(|event| {
+            **event == DirectoryEvent::Sync(capture.states.store().root().join("git/objects"))
+        })
+        .count();
+    assert_eq!(
+        flushes, 1,
+        "the shared object directory is flushed once per batch"
+    );
+    assert_eq!(
+        capture
+            .events()
+            .iter()
+            .filter(|event| matches!(event, DirectoryEvent::FileSynced(_)))
+            .count(),
+        40,
+        "each retained file is flushed without a filesystem-wide barrier"
+    );
+    let store = capture.states.store();
+    assert!(
+        store.deferred_written() >= 40,
+        "every file was read and kept"
+    );
+    assert_eq!(
+        (store.flushes(), store.unsynced_objects()),
+        (1, 0),
+        "one flush for the whole pass"
+    );
+    capture
+        .states
+        .prepare_recordings(&capture.files, 1, capture.now)?;
+    let request = capture.request();
+    let captured = capture.states.capture(
+        &capture.files,
+        &request,
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(captured.result.files, 40);
+    assert_eq!(
+        (store.flushes(), store.unsynced_objects()),
+        (2, 0),
+        "the trees of the state were flushed once, before its root was kept"
+    );
+    let (root, parsed) = store.load(request.snapshot_id, capture.now)?;
+    assert_eq!(parsed.entries.len(), 40);
+    for entry in parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.t != EntryKind::Dir)
+    {
+        assert_eq!(
+            std::fs::read(store.read_entry(&root, entry)?.path())?,
+            std::fs::read(workspace.join(&entry.p))?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_heavy_writer_beside_the_store_does_not_join_a_recordings_flush() -> TestResult {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    let mut kept = Vec::new();
+    for number in 0..40 {
+        let oid = store.write_object_deferred("blob", format!("saved {number}").as_bytes())?;
+        kept.push(store.object_path(&oid)?);
+    }
+    capture.clear();
+    let stop = AtomicBool::new(false);
+    let writes = AtomicUsize::new(0);
+    let unrelated = dir.path().join("building-beside-the-store");
+    let (ready, writing) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| -> TestResult {
+        let writer = scope.spawn(|| -> TestResult {
+            use std::io::{Seek, SeekFrom};
+            let mut file = File::create(&unrelated)?;
+            let bytes = vec![1u8; 1024 * 1024];
+            file.write_all(&bytes)?;
+            ready.send(())?;
+            let began = Instant::now();
+            while !stop.load(Ordering::SeqCst) && began.elapsed() < PATIENCE {
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&bytes)?;
+                writes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let result = (|| -> TestResult {
+            writing.recv_timeout(PATIENCE)?;
+            let began = Instant::now();
+            store.make_durable()?;
+            assert!(
+                began.elapsed() < PATIENCE,
+                "recording waited for the unrelated writer"
+            );
+            let events = capture.events();
+            for path in &kept {
+                assert!(events.contains(&DirectoryEvent::FileSynced(path.clone())));
+            }
+            assert!(
+                events.iter().all(|event| match event {
+                    DirectoryEvent::Sync(path) | DirectoryEvent::FileSynced(path) =>
+                        path.starts_with(store.root()),
+                    _ => true,
+                }),
+                "only the store's own files and directory handles belong to the barrier"
+            );
+            assert_eq!(store.unsynced_objects(), 0);
+            Ok(())
+        })();
+        stop.store(true, Ordering::SeqCst);
+        writer.join().map_err(|_| "the beside writer panicked")??;
+        result
+    })?;
+    Ok(())
+}
+
+#[test]
+fn failed_and_concurrent_flushes_keep_the_same_pending_objects_until_they_are_durable() -> TestResult
+{
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    let oid = store.write_object_deferred("blob", b"durable after retry")?;
+    let path = store.object_path(&oid)?;
+    capture.refuse(&path);
+    assert!(store.make_durable().is_err());
+    assert_eq!(
+        store.unsynced_objects(),
+        1,
+        "a failed batch never loses its debt"
+    );
+    std::thread::scope(|scope| -> TestResult {
+        let other = scope.spawn(|| store.make_durable());
+        store.make_durable()?;
+        other.join().map_err(|_| "the second flush panicked")??;
+        Ok(())
+    })?;
+    assert_eq!((store.flushes(), store.unsynced_objects()), (1, 0));
+    store.verify_object(
+        &oid,
+        "blob",
+        Some(i64::try_from(b"durable after retry".len())?),
+        Some(Hash::of(b"durable after retry")),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn a_verified_object_is_never_replaced_under_an_existing_recording() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    let oid = store.write_object_deferred("blob", b"the same retained bytes")?;
+    store.make_durable()?;
+    let path = store.object_path(&oid)?;
+    let before = platform::file_meta(&File::open(&path)?)?;
+    store.write_object_deferred("blob", b"the same retained bytes")?;
+    assert_eq!(
+        platform::file_meta(&File::open(&path)?)?.identity(),
+        before.identity(),
+        "a later baseline cannot replace a durable inode with unflushed identical bytes"
+    );
+    store.make_durable()?;
+    Ok(())
+}
+
+#[test]
+fn a_recording_barrier_flushes_pending_directories_even_when_its_files_are_already_durable()
+-> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    store.write_object_deferred("blob", b"kept by another capture")?;
+    store.write_object("blob", b"kept by another capture")?;
+    assert_eq!(store.unsynced_objects(), 0);
+    capture.clear();
+    store.make_durable()?;
+    assert!(
+        capture
+            .events()
+            .contains(&DirectoryEvent::Synced(store.root().join("git/objects")))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_full_refresh_keeps_the_preparation_owed_to_a_requested_restore_point() -> TestResult {
+    use crate::file_states::Work;
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    capture.prepare(b"unchanged file bytes")?;
+    let request = capture.request();
+    capture.states.request(&RelPath::root(), request.max_bytes);
+    assert!(matches!(capture.states.take_work(), Work::RecordMetadata));
+    capture
+        .states
+        .prepare_recordings(&capture.files, 1, capture.now)?;
+    capture.states.want_everything();
+    assert!(matches!(capture.states.take_work(), Work::Everything));
+    capture
+        .states
+        .reconcile(&capture.files, &capture.index, true)?;
+    if matches!(capture.states.take_work(), Work::RecordMetadata) {
+        capture
+            .states
+            .prepare_recordings(&capture.files, 1, capture.now)?;
+    }
+    let captured = capture.states.capture(
+        &capture.files,
+        &request,
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(
+        captured.result.state,
+        RecordState::Complete,
+        "{:?}",
+        captured.result
+    );
+    Ok(())
+}
+
+#[test]
+fn a_ready_turn_capture_reuses_prepared_metadata_without_touching_the_object_tree() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    capture.prepare(b"ready file bytes")?;
+    capture
+        .states
+        .prepare_recordings(&capture.files, 1, capture.now)?;
+    let store = capture.states.store();
+    let written = store.deferred_written();
+    capture.clear();
+    capture.refuse(&store.root().join("git/objects"));
+    let request = capture.request();
+    let captured = capture.states.capture(
+        &capture.files,
+        &request,
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(captured.result.state, RecordState::Complete);
+    assert_eq!(
+        store.deferred_written(),
+        written,
+        "the turn builds no trees"
+    );
+    assert!(capture.events().iter().all(|event| match event {
+        DirectoryEvent::Sync(path) => !path.starts_with(store.root().join("git/objects")),
+        _ => true,
+    }));
+    drop(captured);
+    let (root, _) = store.load(request.snapshot_id, capture.now)?;
+    assert!(
+        root.objects.contains_key("code.bin"),
+        "explicit reads still get the complete saved namespace"
+    );
+    Ok(())
+}
+
+#[test]
+fn writes_excluded_by_gitignore_keep_the_prepared_turn_recording_ready() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    std::fs::write(
+        capture.files.root().root_path().join(".gitignore"),
+        "build/\n",
+    )?;
+    capture.prepare(b"included source")?;
+    let path = capture.files.parse("build/output.txt")?;
+    capture.states.changed(&[path]);
+    let result = capture.states.capture(
+        &capture.files,
+        &capture.request(),
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(
+        result.result.state,
+        RecordState::Complete,
+        "an excluded build output cannot invalidate the included files or force their tree to be rebuilt"
+    );
+    Ok(())
+}
+
+#[test]
+fn collection_after_an_unreadable_seed_allows_changed_files_to_be_recorded_again() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let good = capture.files.root().root_path().join("a-readable");
+    let bad = capture.files.root().root_path().join("z-unreadable");
+    std::fs::write(&good, b"old bytes")?;
+    std::fs::write(&bad, b"unreadable bytes")?;
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000))?;
+    capture.index.scan(
+        capture.files.root(),
+        capture.files.ignore().ok_or("ignore rules absent")?,
+    )?;
+    capture
+        .states
+        .refresh(&capture.files, &capture.index, None, true)?;
+    let store = capture.states.store();
+    assert_eq!(
+        store.deferred_written(),
+        1,
+        "the earlier readable entry was staged"
+    );
+    assert_eq!(
+        store.unsynced_objects(),
+        1,
+        "the later unreadable entry ended the seed before its barrier"
+    );
+    store.prune(&[], capture.now, BTreeSet::new())?;
+
+    std::fs::write(&good, b"new bytes after collection")?;
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600))?;
+    capture.index.scan(
+        capture.files.root(),
+        capture.files.ignore().ok_or("ignore rules absent")?,
+    )?;
+    capture
+        .states
+        .refresh(&capture.files, &capture.index, None, true)?;
+    capture
+        .states
+        .prepare_recordings(&capture.files, 1, capture.now)?;
+    let recorded = capture
+        .states
+        .record(&capture.files, &capture.request(), 1, capture.now)?;
+    assert_eq!(
+        recorded.state,
+        RecordState::Complete,
+        "collection cannot leave an impossible old file barrier"
+    );
+    assert_eq!(store.unsynced_objects(), 0);
+    Ok(())
+}
+
+struct ReleaseSync(Arc<SyncPause>);
+impl Drop for ReleaseSync {
+    fn drop(&mut self) {
+        *self
+            .0
+            .released
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+        self.0.changed.notify_all();
+    }
+}
+
+struct NativeRecordingCommands {
+    states: Arc<FileStates>,
+    files: Files,
+    blobs: MemoryBlobs,
+    now: Time,
+    pruning: tokio::sync::Semaphore,
+}
+
+#[async_trait::async_trait]
+impl orch_link::commands::CommandHandler for NativeRecordingCommands {
+    async fn handle(
+        &self,
+        context: orch_link::commands::CommandContext,
+        command: orch_link_contract::commands::Command,
+    ) -> std::result::Result<
+        orch_link_contract::commands::CommandResult,
+        orch_link_contract::commands::CommandError,
+    > {
+        use orch_link_contract::commands::{Command, CommandError, CommandResult, ErrorCode};
+        let files = self.files.clone();
+        let states = Arc::clone(&self.states);
+        let now = self.now;
+        match command {
+            Command::FsRecord(body) => {
+                let captured = tokio::task::spawn_blocking(move || {
+                    states.capture(
+                        &files,
+                        &body,
+                        1,
+                        now,
+                        &RecordOperation {
+                            id: context.id,
+                            until: context.deadline,
+                            cancel: context.cancel,
+                        },
+                    )
+                })
+                .await
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+                .map_err(|error| error.command_error())?;
+                captured
+                    .publish(&self.blobs)
+                    .await
+                    .map(CommandResult::FsRecord)
+                    .map_err(|error| error.command_error())
+            }
+            Command::FsRecordPrune(body) => {
+                self.pruning.add_permits(1);
+                let removed = tokio::task::spawn_blocking(move || {
+                    states.prune(&body.expired_snapshot_ids, now)
+                })
+                .await
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+                .map_err(|error| error.command_error())?;
+                Ok(CommandResult::FsRecordPrune(
+                    orch_link_contract::source::FsRecordPruneResult { removed },
+                ))
+            }
+            Command::FsMkdir(body) => {
+                let value =
+                    tokio::task::spawn_blocking(move || files.make_dir(&files.parse(&body.path)?))
+                        .await
+                        .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+                        .map_err(|error| error.command_error())?;
+                Ok(CommandResult::FsMkdir(value))
+            }
+            _ => Err(CommandError::new(
+                ErrorCode::Internal,
+                "this native recording fixture has no other commands",
+            )),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retention_ahead_of_a_start_and_mkdir_does_not_wait_for_a_background_recording()
+-> TestResult {
+    use orch_link::commands::{CommandServer, ServerOptions};
+    use orch_link::journal::Journal;
+    use orch_link_contract::commands::{Cmd, CommandKind, FsMkdir, KeyKind, SerialKey};
+    use orch_link_contract::session::Role;
+    use orch_link_contract::source::FsRecordPrune;
+    use orch_types::{Clock, ManualClock};
+
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let Capture {
+        files,
+        index,
+        states,
+        control,
+        now,
+    } = capture;
+    let root = files.root().root_path();
+    std::fs::create_dir(root.join("a"))?;
+    std::fs::create_dir(root.join("b"))?;
+    std::fs::write(root.join("a/kept"), b"ready input")?;
+    std::fs::write(root.join("b/changing"), b"old bytes")?;
+    index.scan(files.root(), files.ignore().ok_or("ignore rules absent")?)?;
+    states.request(
+        &files.parse("a")?,
+        crate::file_states::DEFAULT_RECORD_MAX_BYTES,
+    );
+    states.refresh(&files, &index, None, true)?;
+    states.prepare_recordings(&files, 1, now)?;
+    let states = Arc::new(states);
+    let index = Arc::new(index);
+    let gate = Arc::new(SyncPause {
+        entered: tokio::sync::Semaphore::new(0),
+        released: Mutex::new(false),
+        changed: std::sync::Condvar::new(),
+    });
+    let release = ReleaseSync(Arc::clone(&gate));
+    *control.pause.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
+    std::fs::write(root.join("b/changing"), b"changed background bytes")?;
+    index.scan(files.root(), files.ignore().ok_or("ignore rules absent")?)?;
+    let changed = files.parse("b/changing")?;
+    states.changed(std::slice::from_ref(&changed));
+    let refresh = {
+        let states = Arc::clone(&states);
+        let files = files.clone();
+        let index = Arc::clone(&index);
+        tokio::task::spawn_blocking(move || {
+            states.refresh(&files, &index, Some(&[changed]), true)?;
+            states.prepare_recordings(&files, 1, now)
+        })
+    };
+    tokio::time::timeout(PATIENCE, gate.entered.acquire())
+        .await??
+        .forget();
+
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(now.get()));
+    let handler = Arc::new(NativeRecordingCommands {
+        states: Arc::clone(&states),
+        files: files.clone(),
+        blobs: MemoryBlobs::new(),
+        now,
+        pruning: tokio::sync::Semaphore::new(0),
+    });
+    let server = CommandServer::new(
+        Journal::open(&dir.path().join("journal"), PATIENCE, now)?,
+        clock,
+        ServerOptions {
+            roles: vec![Role::Environment],
+            connected: true,
+        },
+    );
+    server.serve(handler.clone());
+    let environment = new_id();
+    let deadline = Time::new(now.get() + chrono::Duration::minutes(1));
+    let prune_key = match CommandKind::FsRecordPrune.key() {
+        KeyKind::None => SerialKey::None,
+        KeyKind::Environment => SerialKey::Environment(environment),
+        _ => return Err("recording collection uses an unrelated key".into()),
+    };
+    server
+        .on_cmd(Cmd::new(
+            new_id(),
+            &prune_key,
+            deadline,
+            &FsRecordPrune {
+                environment_id: environment,
+                expired_snapshot_ids: Vec::new(),
+            },
+        )?)
+        .await;
+    tokio::time::timeout(PATIENCE, handler.pruning.acquire())
+        .await??
+        .forget();
+    let record = new_id();
+    server
+        .on_cmd(Cmd::new(
+            record,
+            &SerialKey::Environment(environment),
+            deadline,
+            &FsRecord {
+                environment_id: environment,
+                snapshot_id: new_id(),
+                directory: "a".into(),
+                wait_for_indexing: false,
+                kind: RecordKind::Turn,
+                record_days: 1,
+                max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
+            },
+        )?)
+        .await;
+    let mkdir = new_id();
+    server
+        .on_cmd(Cmd::new(
+            mkdir,
+            &SerialKey::Environment(environment),
+            deadline,
+            &FsMkdir {
+                environment_id: environment,
+                path: "a/new-folder".into(),
+            },
+        )?)
+        .await;
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            let done = [record, mkdir].into_iter().all(|id| {
+                server
+                    .entry(id)
+                    .is_some_and(|entry| entry.result().is_some())
+            });
+            if done {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let entry = server.entry(record).ok_or("recording entry absent")?;
+    let reply = entry.result().ok_or("recording reply absent")?;
+    let value: FsRecordResult =
+        serde_json::from_value(reply.outcome.clone().map_err(|error| error.detail)?)?;
+    assert_eq!(
+        value.state,
+        RecordState::Complete,
+        "retention keeps the ready restore point available"
+    );
+    assert!(
+        server
+            .entry(mkdir)
+            .and_then(|entry| entry.result().cloned())
+            .ok_or("mkdir reply absent")?
+            .outcome
+            .is_ok()
+    );
+    assert!(root.join("a/new-folder").is_dir());
+    drop(release);
+    tokio::time::timeout(PATIENCE, refresh).await???;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_during_recording_metadata_rearms_the_original_recording() -> TestResult {
+    use crate::file_states::Work;
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    std::fs::write(
+        capture.files.root().root_path().join("code.bin"),
+        b"first bytes",
+    )?;
+    capture.index.scan(
+        capture.files.root(),
+        capture.files.ignore().ok_or("ignore rules absent")?,
+    )?;
+    let request = capture.request();
+    capture.states.request(&RelPath::root(), request.max_bytes);
+    assert!(matches!(capture.states.take_work(), Work::Everything));
+    capture
+        .states
+        .refresh(&capture.files, &capture.index, None, true)?;
+    assert!(matches!(capture.states.take_work(), Work::RecordMetadata));
+    let Capture {
+        files,
+        index,
+        states,
+        control,
+        now,
+    } = capture;
+    let states = Arc::new(states);
+    let gate = Arc::new(SyncPause {
+        entered: tokio::sync::Semaphore::new(0),
+        released: Mutex::new(false),
+        changed: std::sync::Condvar::new(),
+    });
+    let release = ReleaseSync(Arc::clone(&gate));
+    *control.pause.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
+    let preparing = {
+        let states = Arc::clone(&states);
+        let files = files.clone();
+        tokio::task::spawn_blocking(move || states.prepare_recordings(&files, 1, now))
+    };
+    tokio::time::timeout(PATIENCE, gate.entered.acquire())
+        .await??
+        .forget();
+    let changed = files.parse("code.bin")?;
+    std::fs::write(
+        files.root().root_path().join("code.bin"),
+        b"the settled bytes",
+    )?;
+    states.queue(std::slice::from_ref(&changed));
+    index.refresh(
+        files.root(),
+        files.ignore().ok_or("ignore rules absent")?,
+        std::slice::from_ref(&changed),
+    )?;
+    drop(release);
+    tokio::time::timeout(PATIENCE, preparing).await???;
+    let Work::Paths(paths) = states.take_work() else {
+        return Err("the native change was lost".into());
+    };
+    states.refresh(&files, &index, Some(&paths), index.fully_observed())?;
+    let (whole, patch) = states.seal_end(&files, &RelPath::root(), 1, now)?;
+    assert!(
+        whole.is_none() && patch.is_some(),
+        "the preempted encoder remains a complete immutable base for the settled end"
+    );
+    assert!(
+        matches!(states.take_work(), Work::RecordMetadata),
+        "the same pending request still owns its interrupted metadata preparation"
+    );
+    states.prepare_recordings(&files, 1, now)?;
+    let recorded = states.capture(
+        &files,
+        &request,
+        1,
+        now,
+        &RecordOperation {
+            id: new_id(),
+            until: Time::new(now.get() + chrono::Duration::minutes(1)),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        },
+    )?;
+    assert_eq!(recorded.result.state, RecordState::Complete);
+    assert!(!states.has_work());
+    let (saved, tree) = states.store().load(request.snapshot_id, now)?;
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.p == "code.bin")
+        .ok_or("recorded code absent")?;
+    assert_eq!(
+        std::fs::read(states.store().read_entry(&saved, entry)?.path())?,
+        b"the settled bytes"
+    );
     Ok(())
 }
