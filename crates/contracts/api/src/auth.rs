@@ -173,6 +173,8 @@ pub struct Meta {
     /// Other browser origins that name this same installation.
     #[serde(default)]
     pub alternate_urls: Vec<String>,
+    /// The committed revision that primary and alternate browser origins were read from together.
+    pub public_address_revision: i64,
     /// Whether the first administrator is still to be made.
     pub needs_setup: bool,
     /// Who may register.

@@ -94,6 +94,7 @@ pub struct Reports {
     publisher: Arc<dyn Publisher>,
     told: Mutex<Account>,
     networks: Mutex<HashMap<Id, orch_api_contract::environment::NetworkState>>,
+    server_update: tokio::sync::Mutex<Option<orch_link_contract::events::NodeServerUpdate>>,
 }
 
 impl std::fmt::Debug for Reports {
@@ -148,11 +149,37 @@ impl Reports {
             publisher,
             told: Mutex::new(Account::default()),
             networks: Mutex::new(HashMap::new()),
+            server_update: tokio::sync::Mutex::new(None),
         }
     }
 
     fn account(&self) -> MutexGuard<'_, Account> {
         self.told.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keep a changed updater observation in the ordinary durable node stream.
+    pub async fn server_update(
+        &self,
+        report: orch_link_contract::events::NodeServerUpdate,
+    ) -> bool {
+        let mut previous = self.server_update.lock().await;
+        if previous.as_ref() == Some(&report) {
+            return true;
+        }
+        match self
+            .publisher
+            .publish(Stream::Node, Event::NodeServerUpdate(report.clone()))
+            .await
+        {
+            Ok(()) => {
+                *previous = Some(report);
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the server update observation could not be kept in the spool");
+                false
+            }
+        }
     }
 
     async fn put(&self, event: Event) {
@@ -563,6 +590,7 @@ mod tests {
         let id = new_id();
         Record {
             runtime_id: id,
+            incarnation: crate::ledger::Incarnation::Tracked(new_id()),
             kind: RuntimeKind::Environment,
             driver: "memory".into(),
             unit: UnitRef {
@@ -684,11 +712,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Publisher for Kept {
-        async fn publish(
+        async fn publish_from(
             &self,
+            native_opening_id: Option<Id>,
             _stream: Stream,
             event: Event,
         ) -> Result<(), orch_link::streams::PublishError> {
+            assert!(
+                native_opening_id.is_none(),
+                "runtime facts have no physical session"
+            );
             self.0.lock().unwrap().push(event);
             Ok(())
         }

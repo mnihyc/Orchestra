@@ -638,8 +638,7 @@ fn no_capacity(why: &str) -> CommandError {
 }
 
 #[tokio::test]
-async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_what_it_had_declared()
-{
+async fn a_host_that_cannot_make_a_unit_keeps_its_capacity_refusal_in_the_error_and_job_log() {
     let world = World::new().await;
     serve(&world);
     // 1 100 MiB, and an environment declares 1 024: one fits, a second finds the host full.
@@ -649,7 +648,7 @@ async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_wha
     let before = host.kinds().len();
     host.refuse(K::NodeRuntimeCreate, no_capacity("out of memory"));
     let made = make(&world, template, "Second").await;
-    let (state, _, error) = wait_over(&world, made.job.id).await;
+    let (state, progress, error) = wait_over(&world, made.job.id).await;
     assert_eq!(state, "failed");
     let error = error.unwrap();
     assert_eq!(error["phase"], "create");
@@ -657,6 +656,18 @@ async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_wha
     assert_eq!(
         error["message"],
         "host-1 could not start it: out of memory. It had declared 76 MiB free, and this environment needs 1024 MiB"
+    );
+    let log = progress["log"]
+        .as_str()
+        .expect("the failed setup has a readable log");
+    let reason = format!(
+        "create · no_capacity: {}",
+        error["message"].as_str().unwrap()
+    );
+    assert_eq!(
+        log.lines().filter(|line| *line == reason).count(),
+        1,
+        "the same native refusal is visible once in the log after cleanup"
     );
     assert!(
         host.kinds().len() > before,
@@ -1290,4 +1301,38 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
         tx.rollback().await.unwrap();
     }
     assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_multiline_host_refusal_is_kept_once_in_the_failed_setup_log() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host", 16_384).await;
+    let template = template(&world).await;
+    host.refuse(
+        K::NodeImageEnsure,
+        CommandError::new(
+            ErrorCode::Unsupported,
+            "The image could not be prepared.\nThe registry refused this image.",
+        ),
+    );
+    let made = make(&world, template, "Main").await;
+    let (state, progress, error) = wait_over(&world, made.job.id).await;
+    assert_eq!(state, "failed");
+    let error = error.unwrap();
+    let summary = format!(
+        "{} · {}: {}",
+        error["phase"].as_str().unwrap(),
+        error["code"].as_str().unwrap(),
+        error["message"].as_str().unwrap()
+    );
+    assert!(summary.contains('\n'));
+    let log = progress["log"]
+        .as_str()
+        .expect("the refused setup has a log");
+    assert_eq!(
+        log.matches(summary.as_str()).count(),
+        1,
+        "cleanup keeps the complete public reason without duplicating its lines"
+    );
 }

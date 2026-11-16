@@ -465,6 +465,8 @@ pub fn native_settings_snapshot(asked: &Json) -> BTreeMap<String, Json> {
 /// What the mapper is told about the session it follows.
 #[derive(Debug, Clone)]
 pub struct MapperConfig {
+    /// The physical opening that owns every asynchronous lifecycle report.
+    pub opening_id: Id,
     /// The thread of Orch.
     pub thread_id: ThreadId,
     /// The segment of the thread.
@@ -1139,6 +1141,8 @@ impl Mapper {
             self.pending_turn = None;
             // Unloaded is not evidence that native tools or child processes ended.
             out.push(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.config.opening_id,
                 reason: "Codex closed the session while a turn was running.".into(),
             }));
         }
@@ -1269,6 +1273,12 @@ impl Mapper {
     #[must_use]
     pub fn last_failure_row(&self) -> Option<&'static str> {
         self.last_failure_row
+    }
+
+    /// The physical opening of this mapper, retained by a replay before it starts asynchronous reads.
+    #[must_use]
+    pub fn opening_id(&self) -> Id {
+        self.config.opening_id
     }
 
     /// The thread of Orch.
@@ -4090,6 +4100,8 @@ impl Mapper {
         self.turn = None;
         self.pending_turn = None;
         out.push(SessionEvent::SessionLost(SessionLost {
+            expected: false,
+            opening_id: self.config.opening_id,
             reason: reason.to_owned(),
         }));
         out
@@ -4593,6 +4605,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             Self {
                 mapper: Mapper::new(MapperConfig {
+                    opening_id: orch_types::new_id(),
                     thread_id: id(1),
                     segment_id: id(2),
                     native_thread: THREAD.into(),
@@ -4868,6 +4881,7 @@ mod tests {
         let replayed = replay(
             &[json!({"id":TURN, "status":"completed", "items":[item]})],
             MapperConfig {
+                opening_id: orch_types::new_id(),
                 thread_id: id(1),
                 segment_id: id(2),
                 native_thread: THREAD.into(),
@@ -7282,6 +7296,7 @@ mod tests {
                 command("c1", "completed", json!("9"), json!("ok\n"), json!(0)),
             ] })];
         let config = MapperConfig {
+            opening_id: orch_types::new_id(),
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7316,6 +7331,7 @@ mod tests {
             replay(
                 &running,
                 MapperConfig {
+                    opening_id: orch_types::new_id(),
                     thread_id: id(1),
                     segment_id: id(2),
                     native_thread: THREAD.into(),
@@ -7341,6 +7357,7 @@ mod tests {
             })
             .collect();
         let config = MapperConfig {
+            opening_id: orch_types::new_id(),
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7389,6 +7406,7 @@ mod tests {
         ];
         let source_before = serde_json::to_vec(&turns).unwrap();
         let config = MapperConfig {
+            opening_id: orch_types::new_id(),
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7496,6 +7514,7 @@ mod tests {
             windows: None,
         };
         let config = MapperConfig {
+            opening_id: orch_types::new_id(),
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),

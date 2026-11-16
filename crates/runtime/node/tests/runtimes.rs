@@ -23,6 +23,128 @@ use orch_types::new_id;
 use serde_json::json;
 
 #[tokio::test]
+async fn a_new_native_start_gets_its_own_persistent_identity_while_a_running_unit_keeps_its_original_one()
+ {
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "native-identity");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        let made = rig.role().ledger().get(spec.runtime_id).unwrap();
+        assert!(made.incarnation.id().is_some());
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let first = rig.role().ledger().get(spec.runtime_id).unwrap();
+        assert_ne!(first.incarnation, made.incarnation);
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation,
+            first.incarnation
+        );
+        assert!(matches!(
+            rig.stop_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation,
+            first.incarnation
+        );
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let next = rig.role().ledger().get(spec.runtime_id).unwrap();
+        assert_ne!(next.incarnation, first.incarnation);
+        assert_eq!(
+            next.started_at, first.started_at,
+            "the unchanged test clock is not the physical identity"
+        );
+        rig.stop().await;
+        rig.start().await;
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation,
+            next.incarnation
+        );
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn the_original_native_start_identity_is_saved_before_a_held_driver_start_can_finish() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "held-native-identity");
+    rig.made(&spec).await;
+    let before = rig
+        .role()
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation;
+    rig.driver.hold(Operation::Start);
+    struct Release(std::sync::Arc<MemoryDriver>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release(Operation::Start);
+        }
+    }
+    let release = Release(rig.driver.clone());
+    let command = new_id();
+    rig.controller.issue_with_id(
+        command,
+        &SerialKey::Runtime(spec.runtime_id),
+        rig.deadline(),
+        &NodeRuntimeStart {
+            runtime_id: spec.runtime_id,
+        },
+    );
+    rig.wait_call(Operation::Start, &spec.name).await;
+    let accepted = rig
+        .role()
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation;
+    assert_ne!(accepted, before);
+    drop(release);
+    assert!(matches!(
+        tokio::time::timeout(PATIENCE, rig.controller.wait_command(command))
+            .await
+            .unwrap(),
+        Progress::Succeeded(_)
+    ));
+    assert_eq!(
+        rig.role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation,
+        accepted
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn an_unavailable_driver_reports_its_schema_without_a_schedulable_descriptor() {
     use orch_node_core::drivers::{DriverHost, Factory, Registrations};
     use std::sync::Arc;
@@ -804,6 +926,28 @@ async fn a_runtime_the_node_never_heard_of_cannot_be_started_or_stopped_and_is_a
         rig.remove_runtime(nobody).await,
         Progress::Succeeded(_)
     ));
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn stopping_a_known_unit_that_has_already_gone_succeeds_and_keeps_its_volume_records() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "missing-workspace");
+    rig.made(&spec).await;
+    rig.start_runtime(spec.runtime_id).await;
+    let unit = rig.driver.unit(&spec.name).unwrap().unit;
+    EnvironmentDriver::remove(rig.driver.as_ref(), &unit)
+        .await
+        .unwrap();
+    assert!(matches!(
+        rig.stop_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    rig.wait_state(spec.runtime_id, "absent").await;
+    assert!(rig.role().ledger().get(spec.runtime_id).is_some());
+    assert!(rig.driver.targets_of(Operation::RemoveVolume).is_empty());
     rig.stop().await;
 }
 

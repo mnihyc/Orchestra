@@ -18,6 +18,17 @@ fn invalid(detail: &str) -> CommandError {
 }
 
 impl Runtimes {
+    /// Called under the runtime's existing lock immediately before a new native start.
+    fn note_starting(&self, runtime: Id) -> Result<(), CommandError> {
+        self.inner
+            .ledger
+            .update(runtime, |record| {
+                record.incarnation = crate::ledger::Incarnation::Tracked(orch_types::new_id());
+            })
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        Ok(())
+    }
+
     pub async fn inspect_resources(
         &self,
         request: &orch_link_contract::commands::NodeResourcesInspect,
@@ -202,6 +213,14 @@ impl Runtimes {
         host: &HostDriver,
         record: &Record,
     ) -> Result<(), CommandError> {
+        let before = host
+            .contract()
+            .inspect(&record.unit)
+            .await
+            .map_err(|error| failure(&error))?;
+        if before.state != UnitStateKind::Running {
+            self.note_starting(record.runtime_id)?;
+        }
         let state = self
             .inner
             .ledger
@@ -264,6 +283,7 @@ impl Runtimes {
         {
             return Err(hook_failure(&run));
         }
+        self.note_starting(record.runtime_id)?;
         if let Err(error) = host
             .contract()
             .start_with_capabilities(&record.unit, state)
