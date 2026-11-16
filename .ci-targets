@@ -1,0 +1,2 @@
+fmt
+test -p orch-api-core --test threads_bound --test approval_operation_scopes
