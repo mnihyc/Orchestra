@@ -180,7 +180,7 @@ async fn clear_awaiting(
         )
         .bind(input.thread_id)
         .bind(task.origin_turn)
-        .bind(&task.native_item_ref)
+        .bind(orch_types::storable::encode_key(&task.native_item_ref))
         .fetch_optional(&mut *unit.conn)
         .await
         .map_err(orch_db::DbError::from)?;
@@ -915,15 +915,24 @@ async fn call_of(
     thread: Id,
     cause: &BackgroundTask,
 ) -> Result<Option<(Id, Option<Json>)>, EngineError> {
-    Ok(sqlx::query_as::<_, (Id, Option<Json>)>(
+    let row = sqlx::query_as::<_, (Id, Option<Json>)>(
         "SELECT id, payload->'tool'->'output' FROM items WHERE thread_id=$1 AND turn_id=$2 AND native_ref=$3",
     )
     .bind(thread)
     .bind(cause.origin_turn)
-    .bind(&cause.native_item_ref)
+    .bind(orch_types::storable::encode_key(&cause.native_item_ref))
     .fetch_optional(&mut *conn)
     .await
-    .map_err(orch_db::DbError::from)?)
+    .map_err(orch_db::DbError::from)?;
+    row.map(|(item, output)| {
+        output
+            .map(orch_types::storable::decode_exact)
+            .transpose()
+            .map(|output| (item, output))
+    })
+    .transpose()
+    .map_err(orch_db::DbError::from)
+    .map_err(Into::into)
 }
 
 /// What a finished command printed, as far as the item of its call keeps it: the end of the output, at most what
@@ -1183,11 +1192,7 @@ impl Engine {
         }
         let mut eligible = Vec::new();
         let mut wake_held = false;
-        for task in report
-            .tasks
-            .iter()
-            .take(orch_link_contract::background::SNAPSHOT_COMMANDS)
-        {
+        for task in &report.tasks {
             let Some(item) =
                 threads::item_by_native_ref(unit.conn, segment.id, &task.native_item_ref).await?
             else {
@@ -1425,7 +1430,7 @@ impl Engine {
         let command = crate::commands::Outgoing::new(
             crate::ids::derived("background.interrupt", &[input.id.as_bytes()]),
             machine,
-            orch_link_contract::commands::SerialKey::Thread(thread.node_id),
+            orch_link_contract::commands::SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: thread.node_id,
                 turn_id: wake.origin_turn,

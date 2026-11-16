@@ -101,6 +101,7 @@ fn outcome_of(outcome: CommandOutcome) -> Outcome {
 /// Why a command could not be handled, in the engine's words.
 fn commands_error(error: DispatchError) -> CommandsError {
     match error {
+        DispatchError::Db(error) => CommandsError::Database(error),
         DispatchError::BeforeEffect(error) => CommandsError::BeforeEffect(error),
         DispatchError::UnknownMachine => CommandsError::UnknownMachine,
         DispatchError::Revoked => CommandsError::Revoked,
@@ -291,6 +292,11 @@ impl EngineApplier {
 /// What the link is told when the engine could not apply events: a failed
 /// database is the database's, and anything else sends the events again.
 fn apply_error(error: EngineError) -> ApplyError {
+    if let Some(code) = error.data_code() {
+        return ApplyError::Db(orch_db::DbError::Data {
+            code: code.to_owned(),
+        });
+    }
     match error {
         EngineError::Db(error) => ApplyError::Db(error),
         other => ApplyError::Other(other.to_string()),
@@ -299,6 +305,21 @@ fn apply_error(error: EngineError) -> ApplyError {
 
 #[async_trait]
 impl EventApplier for EngineApplier {
+    async fn storage_gap(
+        &self,
+        conn: &mut Conn,
+        machine: Id,
+        delivery: &Delivery,
+        code: &str,
+    ) -> Result<(), ApplyError> {
+        for event in &delivery.events {
+            self.engine
+                .record_storage_gap(conn, machine, &delivery.stream, event, code)
+                .await
+                .map_err(apply_error)?;
+        }
+        Ok(())
+    }
     async fn command_reply(
         &self,
         tx: &mut Conn,
@@ -534,6 +555,14 @@ pub mod tests {
 
     #[cfg(any(test, feature = "test-support"))]
     fn what_the_dispatcher_cannot_do_is_told_in_the_engines_words() {
+        let data = EngineError::from(commands_error(DispatchError::Db(orch_db::DbError::Data {
+            code: "22P05".to_owned(),
+        })));
+        assert_eq!(
+            data.data_code(),
+            Some("22P05"),
+            "command work retains a deterministic storage refusal"
+        );
         assert!(matches!(
             commands_error(DispatchError::UnknownMachine),
             CommandsError::UnknownMachine

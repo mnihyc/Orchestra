@@ -12,10 +12,9 @@
 pub use orch_api_base::test_observers;
 
 pub mod archives {
+    pub use orch_api_base::archives::{ArchiveRead, ArchiveReads};
 
     pub use orch_api_base::archives::READ_TIME;
-
-    pub use orch_api_base::archives::ZIP_ENTRIES_MAX;
 
     pub use orch_api_base::archives::ArchiveError;
 
@@ -458,6 +457,15 @@ pub mod backplane {
     }
     #[cfg(test)]
     mod session_source_tests {
+        #[tokio::test]
+        async fn a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason() {
+            orch_api_base::backplane::session_source_tests::__api_run_a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason().await
+        }
+        #[tokio::test]
+        async fn a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues()
+         {
+            orch_api_base::backplane::session_source_tests::__api_run_a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues().await
+        }
         #[cfg(test)]
         mod port_creation_replays {
             #[cfg(test)]
@@ -571,6 +579,12 @@ pub mod backplane {
         #[tokio::test]
         async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
             orch_api_base::backplane::machine_report_tests::__api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding().await
+        }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+         {
+            orch_api_base::backplane::machine_report_tests::__api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted().await
         }
     }
     #[cfg(test)]
@@ -3084,9 +3098,9 @@ pub mod realtime {
         }
         #[cfg(test)]
         #[tokio::test]
-        async fn opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends()
+        async fn opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends()
         -> ::orch_api_base::realtime::history_read_tests::Proof {
-            orch_api_base::realtime::history_read_tests::__api_run_opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends().await
+            orch_api_base::realtime::history_read_tests::__api_run_opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends().await
         }
         #[cfg(test)]
         #[tokio::test]
@@ -3561,6 +3575,11 @@ pub mod registry {
     }
     #[cfg(test)]
     mod query_tests {
+        #[test]
+        fn public_request_text_is_repaired_without_changing_passwords_or_creation_keys()
+        -> ::orch_api_base::middleware::requests::ApiResult<()> {
+            orch_api_base::registry::query_tests::__api_run_public_request_text_is_repaired_without_changing_passwords_or_creation_keys()
+        }
         #[cfg(test)]
         #[test]
         fn storage_filters_and_flattened_paging_decode_through_the_real_query_adapter()
@@ -4749,13 +4768,32 @@ pub mod routes {
                 }
                 #[cfg(test)]
                 #[test]
-                fn what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled() {
-                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled()
+                fn what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
                 }
                 #[cfg(test)]
                 #[test]
                 fn search_offers_never_enable_the_tool_or_its_default() {
                     orch_api_resources::routes::resources::models::tests::__api_run_search_offers_never_enable_the_tool_or_its_default()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                }
+                #[cfg(test)]
+                #[test]
+                fn the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
                 }
             }
         }
@@ -6748,6 +6786,8 @@ pub mod testing {
     pub use orch_api_base::testing::machine_request_handler;
 
     pub use orch_api_base::testing::advance_component_updates;
+
+    pub use orch_api_base::testing::admit_stored_command;
 
     pub use orch_api_base::testing::authorize_machine;
 
