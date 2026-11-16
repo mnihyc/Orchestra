@@ -68,71 +68,19 @@ pub struct Selected {
     pub left_out_before: Option<i32>,
 }
 
-/// Makes the selected, already recorded conversation readable in a fork before its first input.
-/// All work uses the caller's transaction; no harness, file or second connection is awaited here.
-/// With no Orch turn, only the session's adopted earlier items can be copied. A Nothing fork skips this call.
-pub async fn copy_conversation(
+/// Publish an already-owned immutable capture without locking its live source.
+pub async fn copy_captured_conversation(
     unit: &mut crate::unit::Unit<'_>,
-    source: Id,
+    captured: &orch_db::queries::thread_history_cuts::Cut,
     target: Id,
     segment: Id,
-    range: Option<(i32, i32)>,
-    source_segment: Option<Id>,
 ) -> Result<(), EngineError> {
-    if source == target {
+    if captured.thread_id == target {
         return Err(EngineError::unreadable(
             "A full fork cannot copy into its source execution.",
         ));
     }
-    // This synchronous legacy entry point has no external wait. The confirmed job
-    // path uses its already-owned durable cut instead. Keep the source lock through
-    // both capture and copy, then release this temporary target-owned cut atomically.
-    let source_row = orch_db::queries::threads::lock(unit.conn, source)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The source conversation is unavailable."))?;
-    if source_segment.is_some_and(|segment| Some(segment) != source_row.current_segment_id) {
-        return Err(EngineError::unreadable(
-            "The requested source segment is no longer selected.",
-        ));
-    }
-    // This legacy API means all finished selected turns when no range was supplied.
-    // The durable cut API requires an explicit bound; None there means no turns.
-    let range = match range {
-        Some(range) => Some(range),
-        None => Some((
-            1,
-            orch_db::queries::thread_history_cuts::last_finished(
-                unit.conn,
-                source,
-                source_row.active_continuation_id,
-            )
-            .await?
-            .unwrap_or(0),
-        )),
-    };
-    let at = unit.now();
-    let captured = orch_db::queries::thread_history_cuts::capture(
-        unit.conn,
-        &orch_db::queries::thread_history_cuts::Capture {
-            id: target,
-            thread: source,
-            view: source_row.active_continuation_id,
-            job: None,
-            owner_thread: Some(target),
-            segment: source_row.current_segment_id,
-            execution_revision: source_row.execution_revision,
-            range,
-            at,
-        },
-    )
-    .await?;
-    cut::copy(unit, &captured, target, segment, source_segment).await?;
-    sqlx::query("DELETE FROM thread_history_cuts WHERE id=$1 AND owner_thread_id=$1")
-        .bind(target)
-        .execute(&mut *unit.conn)
-        .await
-        .map_err(orch_db::DbError::from)?;
-    Ok(())
+    cut::copy(unit, captured, target, segment, captured.source_segment_id).await
 }
 
 /// What a history holds, counted: how many turns, and its items by kind. The plan counts a history in SQL and never loads

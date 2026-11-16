@@ -254,10 +254,13 @@ struct Issued {
     machine: Id,
     kind: String,
     key: Option<String>,
+    after: Option<Id>,
     body: Json,
     deadline: Time,
     handle: CommandHandle,
     at: DateTime<Utc>,
+    work_started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// The API's end of a machine's commands: each is kept from the moment it is issued, and a command asked
@@ -277,7 +280,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -316,6 +319,7 @@ impl ScriptedCommands {
         lock(&self.issued).get(&id).map(|entry| {
             (
                 orch_engine::commands::RetainedCommand {
+                    after: entry.after,
                     machine: entry.machine,
                     kind: entry.kind.clone(),
                     key: entry.key.clone(),
@@ -466,15 +470,17 @@ impl Commands for ScriptedCommands {
             .and_then(|authority| authority.handover_source())
             .cloned();
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline,
+            work: Cmd::work_budget(self.clock.time(), deadline),
             body: command.body,
         };
         let kind = cmd.kind.clone();
         let key = cmd.key.clone();
         let body = cmd.body.clone();
+        let after = cmd.after;
         if let Some(check) = before {
             check().map_err(CommandsError::BeforeEffect)?;
         }
@@ -488,20 +494,46 @@ impl Commands for ScriptedCommands {
                 body,
                 kind,
                 key,
+                after,
                 deadline,
                 handle,
                 at: now,
+                work_started_at: None,
+                completed_at: None,
             },
         );
         Ok(())
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
-        Ok(lock(&self.issued).get(&id).map(|entry| {
+        Ok(lock(&self.issued).get_mut(&id).map(|entry| {
             let progress = entry.handle.progress();
+            if entry.work_started_at.is_none()
+                && matches!(
+                    progress,
+                    Progress::Running
+                        | Progress::Released
+                        | Progress::Succeeded(_)
+                        | Progress::Failed(_)
+                )
+            {
+                entry.work_started_at = Some(self.clock.now());
+            }
+            if progress.is_final() && entry.completed_at.is_none() {
+                entry.completed_at = Some(self.clock.now());
+            }
             Info {
-                stage: stage_of(&progress),
+                stage: if (entry.after.is_some()
+                    || matches!(entry.kind.as_str(), "turn.start" | "turn.start.fenced"))
+                    && progress == Progress::Accepted
+                {
+                    Stage::Sent
+                } else {
+                    stage_of(&progress)
+                },
                 issued_at: entry.at,
+                work_started_at: entry.work_started_at.or(entry.completed_at),
+                completed_at: entry.completed_at,
                 outcome: outcome_of(&progress),
             }
         }))
@@ -515,6 +547,11 @@ impl Commands for ScriptedCommands {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let progress = handle.wait().await;
+        if let Some(entry) = lock(&self.issued).get_mut(&id)
+            && entry.completed_at.is_none()
+        {
+            entry.completed_at = Some(self.clock.now());
+        }
         let outcome = outcome_of(&progress).ok_or(CommandsError::Stopping)?;
         self.complete_admitted(id, outcome).await
     }

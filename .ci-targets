@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib
+test -p orch-engine --lib
+test -p orch-engine --test turns --test source
+test -p orch-link --lib --test commands
+test -p orch-api-core --lib --features test-observers
+test -p orch-gateway-core --lib
+test -p orch-connector-core --lib
