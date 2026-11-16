@@ -1,0 +1,6 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/frame-review.spec.ts --project=chromium --grep "startup keeps one baseline|thread startup preloads"
+web-e2e tests/e2e/first-wave-edge.spec.ts --project=chromium
+web-e2e tests/e2e/measure-pages.spec.ts --project=chromium
