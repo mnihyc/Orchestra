@@ -29,7 +29,8 @@ it.each(['en', 'zh-CN'] as const)('names the embeddings and tuning controls in %
     value={{ provider_id: '01990000-0000-7000-8000-000000000001', model_name: 'example-model', dimensions: 256, query_prefix: 'query: ', document_prefix: 'text: ' }} />);
   try {
     const provider = screen.getByRole('combobox', { name: i18n.t('admin.semantic.provider') });
-    const model = screen.getByRole('textbox', { name: i18n.t('admin.semantic.fields.model') });
+    // The model is chosen from the provider's models by name, so it is a choice, never a box to type an identifier in.
+    const model = screen.getByRole('combobox', { name: i18n.t('admin.semantic.fields.model') });
     const dimensions = screen.getByRole('spinbutton', { name: i18n.t('admin.semantic.fields.dimensions') });
     expect(provider.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(model.compareDocumentPosition(dimensions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

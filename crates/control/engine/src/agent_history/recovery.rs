@@ -238,6 +238,7 @@ impl Engine {
                     WHERE id=$1 AND NOT (artifacts ? 'recovery_summary_attempted')")
                     .bind(cut.id).execute(&mut *self.db().acquire().await?).await.map_err(orch_db::DbError::from)?.rows_affected() == 1;
                 if attempted {
+                    let mut handoff_receipt = None;
                     let made = async {
                         let choice = crate::summaries::capture_handoff_choice(
                             &mut *self.db().acquire().await?,
@@ -252,9 +253,14 @@ impl Engine {
                         crate::summaries::handoff_captured(
                             self,
                             cut.thread_id,
-                            &previous,
+                            &previous.text,
                             cut.id,
                             &choice,
+                            Some(crate::summaries::HandoffCapture {
+                                cut: cut.id,
+                                input: &previous,
+                                receipt: &mut handoff_receipt,
+                            }),
                         )
                         .await
                     }
@@ -265,12 +271,20 @@ impl Engine {
                                 &mut *self.db().acquire().await?,
                                 cut.id,
                                 "recovery_summary",
-                                &json!({"text":text,"at":Time::new(self.inner.clock.now())}),
+                                &json!({"text":text,"at":Time::new(self.inner.clock.now()),"handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
                                 &[],
                             )
                             .await?;
                         }
                         Err(error) => {
+                            cuts::keep_artifact(
+                                &mut *self.db().acquire().await?,
+                                cut.id,
+                                "recovery_summary_failed",
+                                &json!({"handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
+                                &[],
+                            )
+                            .await?;
                             tracing::info!(%error,"the recovery uses brief recent turns because its summary is unavailable");
                         }
                     }

@@ -451,3 +451,215 @@ async fn probe_losing_response_read_after_commit_returns_its_receipt_without_a_s
         assert_eq!(count(&world, id).await, 1);
     }
 }
+
+fn directory_query() -> orch_api_contract::resources::MachineDirectoryListQuery {
+    orch_api_contract::resources::MachineDirectoryListQuery {
+        read_kind: orch_api_contract::resources::MachineDirectoryRead::Choices,
+        root: "/srv/work".into(),
+        path: String::new(),
+        prefix: "or".into(),
+        recent: Some("[\"orch\"]".into()),
+        cursor: None,
+        limit: Some(2),
+    }
+}
+
+async fn directory_call(world: &World, token: &str, id: Id) -> RawReply {
+    world
+        .app
+        .call(orch_api_contract::resources::MachineDirectoryList, &[&id])
+        .token(token)
+        .query(&directory_query())
+        .send_bytes()
+        .await
+}
+
+async fn asked_directory(world: &World, machine: Id) -> Id {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let command: Option<Id> = sqlx::query_scalar(
+                "SELECT id FROM commands WHERE machine_id=$1 AND kind='machine.directory.list'
+                 AND state IN ('queued','sent','accepted') ORDER BY created_at,id LIMIT 1",
+            )
+            .bind(machine)
+            .fetch_optional(&world.db.pool)
+            .await
+            .unwrap();
+            if let Some(command) = command {
+                return command;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the directory read reaches its actual native queue")
+}
+
+#[tokio::test]
+async fn directory_choices_use_registration_authority_without_making_an_environment_or_borrowing_another_scope()
+ {
+    let world = World::new().await;
+    let owner = places::person(&world, "directory_owner").await;
+    let other = places::person(&world, "directory_other").await;
+    let machine = machine(&world, owner.id()).await;
+    for rules in [
+        vec![rule("MachineProbe", "machine", machine, &["manage"])],
+        vec![rule(
+            "MachineDirectoryList",
+            "machine",
+            machine,
+            &["manage"],
+        )],
+        vec![rule("MachineDirectoryList", "machine", new_id(), &["read"])],
+    ] {
+        let token = key(&world, owner.id(), rules).await;
+        assert_eq!(
+            directory_call(&world, &token.secret, machine).await.status,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let stranger = key(
+        &world,
+        other.id(),
+        vec![rule("MachineDirectoryList", "machine", machine, &["read"])],
+    )
+    .await;
+    assert_eq!(
+        directory_call(&world, &stranger.secret, machine)
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    let commands: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM commands WHERE machine_id=$1 AND kind='machine.directory.list'",
+    )
+    .bind(machine)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(commands, 0);
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM environments WHERE machine_id=$1")
+        .bind(machine)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let permitted = key(
+        &world,
+        owner.id(),
+        vec![rule("MachineDirectoryList", "machine", machine, &["read"])],
+    )
+    .await;
+    let native = async {
+        let id = asked_directory(&world, machine).await;
+        let body: Json = sqlx::query_scalar("SELECT body FROM commands WHERE id=$1")
+            .bind(id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        let serial: Option<String> =
+            sqlx::query_scalar("SELECT serial_key FROM commands WHERE id=$1")
+                .bind(id)
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+        assert!(
+            serial.is_none(),
+            "a read never occupies the machine's mutation queue"
+        );
+        assert_eq!(body["root"], "/srv/work");
+        assert_eq!(body["prefix"], "or");
+        assert_eq!(body["limit"], 2);
+        assert_eq!(body["recent"], json!(["orch"]));
+        sqlx::query("UPDATE commands SET state='succeeded',result=$2 WHERE id=$1")
+            .bind(id)
+            .bind(json!({"read_kind":"choices","entries":["orch"],"next_cursor":null}))
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+    };
+    let (reply, ()) = tokio::join!(directory_call(&world, &permitted.secret, machine), native);
+    assert_eq!(
+        accepted(reply),
+        json!({"read_kind":"choices","entries":["orch"],"next_cursor":null})
+    );
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM environments WHERE machine_id=$1")
+        .bind(machine)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn a_directory_reply_cannot_outlive_the_original_reader_during_its_native_wait() {
+    let world = World::new().await;
+    let owner = places::person(&world, "directory_revoked").await;
+    let machine = machine(&world, owner.id()).await;
+    let permitted = key(
+        &world,
+        owner.id(),
+        vec![rule("MachineDirectoryList", "machine", machine, &["read"])],
+    )
+    .await;
+    let native = async {
+        let command = asked_directory(&world, machine).await;
+        sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+            .bind(permitted.id)
+            .bind(world.now())
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE commands SET state='succeeded',result=$2 WHERE id=$1")
+            .bind(command)
+            .bind(json!({"read_kind":"choices","entries":["PRIVATE-DIRECTORY"],"next_cursor":null}))
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+    };
+    let (reply, ()) = tokio::join!(directory_call(&world, &permitted.secret, machine), native);
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert!(!String::from_utf8_lossy(&reply.raw).contains("PRIVATE-DIRECTORY"));
+}
+
+#[tokio::test]
+async fn a_directory_policy_refusal_keeps_the_native_words_only_for_its_original_current_reader() {
+    for revoke in [false, true] {
+        let world = World::new().await;
+        let owner = places::person(&world, "directory_policy_reader").await;
+        let machine = machine(&world, owner.id()).await;
+        let permitted = key(
+            &world,
+            owner.id(),
+            vec![rule("MachineDirectoryList", "machine", machine, &["read"])],
+        )
+        .await;
+        let detail = "environment.roots: PRIVATE-ROOT is no longer allowed by this machine";
+        let native = async {
+            let command = asked_directory(&world, machine).await;
+            if revoke {
+                sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+                    .bind(permitted.id)
+                    .bind(world.now())
+                    .execute(&world.db.pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("UPDATE commands SET state='failed',error=$2 WHERE id=$1")
+                .bind(command)
+                .bind(json!({"code":"policy.root_not_allowed","detail":detail,"retryable":false}))
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        };
+        let (reply, ()) = tokio::join!(directory_call(&world, &permitted.secret, machine), native);
+        if revoke {
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+            assert!(!String::from_utf8_lossy(&reply.raw).contains("PRIVATE-ROOT"));
+        } else {
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+            let problem: Json = serde_json::from_slice(&reply.raw).unwrap();
+            assert_eq!(problem["code"], "request.invalid");
+            assert_eq!(problem["errors"], json!([{"path":"path","message":detail}]));
+        }
+    }
+}
