@@ -10,8 +10,10 @@ import { Check, Circle, LoaderCircle } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { settingsQuery } from '@/api/settings';
-import { decidePlan } from '@/api/threads';
+import { decidePlan, threadScreenFactsQuery } from '@/api/threads';
+import { readData, useReadRecovery } from '@/api/reads';
+import { useViewShown } from '@/features/workbench/viewOpening';
+import { ReadFeedback } from '@/ui/ReadFeedback';
 import { sourceDecisionOf } from '@/api/approvals';
 import type { Item, RequestDecisionStatus, ThreadPlanDecideBody } from '@/generated/api-types';
 import { PlanAnswer } from '@/features/approvals/PlanAnswer';
@@ -81,17 +83,21 @@ function ProposedPlanAnswer({ item }: { item: PlanItem }) {
     if (turn?.state !== 'completed' || view.thread?.current_turn_id !== null || view.thread.pending_inputs > 0) return false;
     return ![...view.turns.values()].some((other) => other.ordinal > turn.ordinal);
   });
-  const settings = useQuery({ ...settingsQuery(threadId), enabled: last });
+  const shown = useViewShown();
+  const options = threadScreenFactsQuery(threadId);
+  const facts = useQuery({ ...options, enabled: last && !passive && shown });
+  useReadRecovery(facts, last && !passive && shown, options.queryKey);
+  const screen = readData(facts);
   const [lost,setLost]=useState<RequestDecisionStatus|null>(null);
   const answer=useMutation({mutationFn:(body:ThreadPlanDecideBody)=>decidePlan(read,item.id,body),onSuccess:(reply,body)=>{composerWriter.setPlanning(threadId,!body.proceed);threadWriter.apply(read,{inputs:[reply.input]});},onError:(error)=>{const current=sourceDecisionOf(error);if(current!==null)setLost(current);}});
   const decision=item.payload.decision??answer.data?.decision??lost;
   if(decision!==null)return <DecisionStatus source={decision}/>;
   if (!last || thread === null) return null;
   // The place may keep plans to the thread's managers; otherwise whoever may write to the agent answers.
-  const managersOnly = settings.data?.find((setting) => setting.key === 'thread.plan_answered_by')?.value === 'managers';
-  const may = holds(thread.access, managersOnly ? 'thread.manage' : 'thread.interact') && !thread.archived && !passive && live;
+  const managersOnly = screen?.plan_answered_by === 'managers';
+  const may = screen !== undefined && holds(thread.access, managersOnly ? 'thread.manage' : 'thread.interact') && !thread.archived && !passive && live;
   return (
-    <><PlanAnswer disabled={!may} pending={answer.isPending?(answer.variables.proceed?'proceed':'keep'):null}
+    <>{!passive && <ReadFeedback read={facts} pending={facts.isPending} />}<PlanAnswer disabled={!may} pending={answer.isPending?(answer.variables.proceed?'proceed':'keep'):null}
       onProceed={() => answer.mutate({proceed:true})}
       onKeepPlanning={(text) => answer.mutate({proceed:false,text})}
     />{answer.error!==null&&<ErrorAlert error={answer.error}/>}</>

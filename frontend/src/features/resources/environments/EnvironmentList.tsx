@@ -19,8 +19,8 @@ import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnv
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
 import { RegisterEnvironmentDialog } from '@/features/resources/machines/RegisterEnvironment';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
-import { oneOf } from '@/features/resources/search';
-import type { Environment, EnvironmentStatus, Machine } from '@/generated/api-types';
+import { ENVIRONMENT_KINDS, ENVIRONMENT_STATUSES, type EnvironmentsSearch, oneOf } from '@/features/resources/search';
+import type { EnvironmentListRow as Environment, Machine } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { UpdateMark } from '@/features/resources/ComponentUpdate';
 import { Button } from '@/ui/Button';
@@ -34,17 +34,6 @@ import { StatusDot } from '@/ui/StatusDot';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Tooltip } from '@/ui/Tooltip';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
-
-export type EnvironmentKind = 'machine' | 'template';
-
-export const ENVIRONMENT_KINDS: readonly EnvironmentKind[] = ['machine', 'template'];
-export const ENVIRONMENT_STATUSES: readonly EnvironmentStatus[] = ['running', 'provisioning', 'recreating', 'moving', 'stopped', 'none', 'offline', 'failed', 'disabled', 'lost'];
-
-export interface EnvironmentsSearch {
-  q?: string;
-  kind?: EnvironmentKind;
-  status?: EnvironmentStatus;
-}
 
 export function EnvironmentLink({ environment, label = environment.name }: { environment: Pick<Environment, 'id' | 'name'> & Partial<Environment>; label?: string }) {
   return (
