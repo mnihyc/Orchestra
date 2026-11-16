@@ -35,6 +35,8 @@ pub struct ApiError {
     pub retry_after: Option<u64>,
     /// Trusted database failure category, never inferred from an HTTP status or serialized.
     database_retry: bool,
+    /// One field refusal whose native content the handler has authorized for this reader.
+    native_field: Option<FieldFault>,
 }
 
 /// What a handler returns.
@@ -57,6 +59,18 @@ impl ApiError {
     #[must_use]
     pub fn invalid(path: &str, message: &str) -> Self {
         Problem::invalid_at(path, message).into()
+    }
+
+    /// Keeps a native field refusal after the handler has checked the original reader's current
+    /// authority to read it. The public envelope still uses the ordinary catalogue words.
+    #[must_use]
+    pub fn native_invalid(path: &str, message: &str) -> Self {
+        let mut error = Self::invalid(path, message);
+        error.native_field = Some(FieldFault {
+            path: path.to_owned(),
+            message: message.to_owned(),
+        });
+        error
     }
 
     /// A failure nobody foresaw: logged with its cause, answered without.
@@ -151,6 +165,7 @@ impl ApiError {
             "the operation could not be completed",
         ));
         self.problem.status = status;
+        self.native_field = None;
         self
     }
 
@@ -182,7 +197,18 @@ impl ApiError {
     /// The same native problem and retry hint used by an HTTP reply, for a bounded opening member.
     pub fn into_parts_for(mut self, request_id: &str) -> (Problem, Option<u64>) {
         self.problem.request_id = request_id.to_owned();
+        // A replaced field or content-free envelope cannot borrow the old native field's authority.
+        // This provenance is private to the server; a deserialized Problem never supplies it.
+        let native_field = self.native_field.take().filter(|field| {
+            self.code() == ErrorCode::RequestInvalid
+                && !field.message.trim().is_empty()
+                && serde_json::to_value([field])
+                    .is_ok_and(|original| self.problem.extra.get("errors") == Some(&original))
+        });
         words::prepare(&mut self.problem);
+        if let Some(field) = native_field {
+            *self.problem = (*self.problem).clone().with("errors", [field]);
+        }
         (*self.problem, self.retry_after)
     }
 }
@@ -193,6 +219,7 @@ impl From<Problem> for ApiError {
             problem: Box::new(problem),
             retry_after: None,
             database_retry: false,
+            native_field: None,
         }
     }
 }

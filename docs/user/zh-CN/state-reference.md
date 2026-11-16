@@ -4,6 +4,7 @@ screens: [/help, /thread/$threadId, /resources/providers/$id]
 keywords: [state, status, phase, reference, 状态, 阶段, 参考]
 heading_id.条目: entries
 summary: 线程、提供方或机器旁显示的每种状态的含义。
+heading_id.文件准备: file-preparation
 ---
 
 # 状态参考
@@ -16,6 +17,9 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `state:NativeHistoryState.retained` | 上次成功的原生清单保留此缓存身份；可读对话的保留另行决定。 |
+| `state:NativeHistoryState.removed` | 适配器确认实际移除或不存在，不表示对话被删除。 |
+| `state:NativeHistoryState.unreported` | 未记录成功的实际观察；内存中的打开提示不决定是否丢失。 |
 | `state:ThreadDisplayState.waiting_approval` | 有请求或暂存输入等待人工处理。 |
 | `state:ThreadDisplayState.blocked` | 线程无法继续。 |
 | `state:ThreadDisplayState.failed` | 上个轮次失败，此后没有接受新的输入。 |
@@ -25,6 +29,34 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:ThreadDisplayState.finished` | 已完成的轮次尚未被当前读者查看。 |
 | `state:ThreadDisplayState.idle` | 没有工作或未读结果需要状态图标。 |
 | `state:ThreadDisplayState.archived` | 线程或其上级位置已归档。 |
+
+### StopState
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:StopState.stopping` | 停止请求已接受，程序或线程当前的变更尚未完成停止。 |
+| `state:StopState.stopped` | 指定轮次已结束，或尚无轮次的准备过程已撤回。最终结果仍保留在线程中。 |
+
+### BlockedReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:BlockedReason.source_failed` | 源码准备失败。源码面板显示已记录的原因，并提供重新准备操作；等待中的消息会保留。 |
+
+### SessionReopenReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:SessionReopenReason.unknown` | 无法确认会话仍处于打开状态，例如服务器或程序已经重启。 |
+| `state:SessionReopenReason.instructions` | 此轮次开始前，常驻指令或程序自己的指令文件发生了变化。 |
+| `state:SessionReopenReason.limits` | 会话的子代理限制发生了变化。 |
+| `state:SessionReopenReason.configuration` | 工作目录或其他在打开会话时应用的选择发生了变化。 |
+| `state:SessionReopenReason.mcp` | 提供给会话的 MCP 服务器发生了变化。 |
+| `state:SessionReopenReason.tools` | 提供给会话的 Orch 工具发生了变化。 |
+| `state:SessionReopenReason.skills` | 提供给会话的技能发生了变化。 |
+| `state:SessionReopenReason.program_reloads` | 程序在打开会话时重新加载自己的上下文，此轮次需要执行该操作。 |
+| `state:SessionReopenReason.side_history` | 侧线程需要重新读取父线程的历史。 |
+| `state:MarkerKind.session_reopened` | 时间线记录轮次开始前一次必要的会话打开操作及其原因。 |
 
 ### PageState
 
@@ -129,8 +161,8 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | 参考标识 | 含义 |
 | --- | --- |
 | `state:GoalStatus.active` | Orch 继续让线程朝此目标工作。 |
-| `state:GoalStatus.paused` | 有人暂停，或代理报告阻塞。 |
-| `state:GoalStatus.met` | 目标条件已满足。 |
+| `state:GoalStatus.paused` | 有人暂停、代理报告阻塞，或未经核实的完成报告需要人工决定。 |
+| `state:GoalStatus.met` | 独立检查确认目标已达成，或用户明确接受了相应证据。 |
 | `state:GoalStatus.stopped` | 未达成即停止：达到限制或无人可继续。 |
 | `state:GoalStatus.cleared` | 有人清除了目标。 |
 
@@ -139,8 +171,36 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | 参考标识 | 含义 |
 | --- | --- |
 | `state:GoalReportStatus.working` | 正在朝目标工作。 |
-| `state:GoalReportStatus.met` | 目标条件已满足。 |
+| `state:GoalReportStatus.met` | 代理报告目标条件已满足；仅凭此报告不会将目标标记为达成。 |
 | `state:GoalReportStatus.blocked` | 需要人工处理才能继续。 |
+
+### GoalReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalReason.unchecked` | 完成报告缺少可用的独立检查。目标保持暂停，等待用户明确标记为达成或选择继续工作。 |
+
+### GoalOutcome
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalOutcome.unchecked` | 保留报告及其证据，但尚未作出完成决定。检查模型未配置或不可用，都不会让它自动变为达成。 |
+
+### GoalCheckedBy
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalCheckedBy.person` | 用户明确接受了未经核实的完成报告，审计中记录实际操作者。选择继续工作不会设置此值。 |
+
+### MarkerHarnessChanged
+
+这些值表示观察记录的 `change` 字段，不表示轮次结果。
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:MarkerHarnessChanged.warning` | 原生程序的警告原文，每次发生都保留，并在普通对话中显示于折叠工作之外。警告本身不会让轮次失败。 |
+| `state:MarkerHarnessChanged.turn_diff` | 原生轮次最近报告的净文件更改。快照替代同一流内的各次工具编辑；空快照清除此流的净更改。 |
+| `state:MarkerHarnessChanged.turn_diff_unavailable` | Orch 无法读取某次原生差异更新。保留此前有效的更改文件，并显示说明，不会虚构替代结果。 |
 
 ### FirstStepsState
 
@@ -484,6 +544,15 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:PluginState.restarting` | 正在重新启动。 |
 | `state:PluginState.failed` | 执行失败。 |
 
+### RawCaptureOmissionCause
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:RawCaptureOmissionCause.capture_off` | 这些帧到达时捕获已关闭；数量只能来自已记录的判定。 |
+| `state:RawCaptureOmissionCause.masking_unavailable` | 无法打开脱敏依据，因此安全地省略帧正文。 |
+| `state:RawCaptureOmissionCause.capture_allowance` | 按当时应用的捕获额度，更新的帧替换了这些已保留帧。 |
+| `state:RawCaptureOmissionCause.retention_elapsed` | 实际清理已在保留期限后移除这些帧；它不同于当前策略或空白页。 |
+
 ### SemanticState
 
 | 参考标识 | 含义 |
@@ -495,6 +564,14 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:SemanticState.indexing` | 正在切分内容或生成向量。 |
 | `state:SemanticState.paused` | 索引等待原因所指的磁盘空间、提供方、机器、限额或权限。 |
 | `state:SemanticState.waiting` | 新模型等待管理员选择，因为磁盘配额无法同时容纳两代索引。 |
+
+### SemanticRetryNext
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:SemanticRetryNext.immediate` | 较小的重试在记录的时刻即可进行；请求开始前仍会重新检查准入条件。 |
+| `state:SemanticRetryNext.indexer_pass` | 等待下一次索引检查；共用的检查间隔不是此提供方已安排的重试截止时间。 |
+| `state:SemanticRetryNext.finished` | 此次重试请求已结束；该记录不承诺还会重试。 |
 
 ### ProgramChannelState
 
@@ -571,3 +648,17 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:UploadInventoryState.complete` | 已验证的不可变文件内容已入库。 |
 | `state:UploadInventoryState.partial` | 上传尚未完成；不能据此认定发送方此刻仍在活动。 |
 | `state:UploadInventoryState.expired` | 上传会话的完成期限已过。 |
+
+### 文件准备
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:EnvironmentIndexReason.unreadable` | 部分元数据或排除规则无法读取；安全的实时读取保留修正路径。 |
+| `state:CommandKeyPhase.queued` | 已接受并等待执行位置；尚未占据执行通道。 |
+| `state:CommandKeyPhase.running` | 命令当前正在使用执行通道。 |
+| `state:CommandKeyPhase.released` | 捕获已释放执行通道；上传可以与后续启动同时继续。 |
+
+| `state:NodeRetentionHold.active_work` | 活动工作暂缓自动归档。 |
+| `state:NodeRetentionHold.already_archived` | 此位置已经归档。 |
+| `state:NodeRetentionHold.ancestor_archived` | 已归档的上级阻止此处的自动归档。 |
+| `state:NodeRetentionHold.not_archived` | 自动删除仅适用于已归档的位置。 |
