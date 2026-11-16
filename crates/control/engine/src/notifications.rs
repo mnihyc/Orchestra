@@ -69,6 +69,10 @@ pub fn operation_scope<T>(
     async move { NOTIFICATION_OPERATION.scope(id, work).await }
 }
 
+pub(crate) fn current_operation() -> Option<Id> {
+    NOTIFICATION_OPERATION.try_with(|id| *id).ok().flatten()
+}
+
 /// The kind of notification, as the contract names it.
 pub use orch_api_contract::notifications::NotificationKind as Kind;
 
@@ -1022,6 +1026,12 @@ pub(crate) async fn set_state(
         )
     {
         return Ok(threads::set_state(&mut *unit.conn, thread, from, to, seq).await?);
+    }
+    if to.reason == Some("provider_unavailable") {
+        let grouped: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM threads t JOIN providers p ON p.id=t.provider_id AND (p.status='disabled' OR p.deleted_at IS NOT NULL) JOIN jobs j ON j.kind='resource_quiesce' AND j.plan#>>'{quiesce,target,object,kind}'='provider' AND j.plan#>>'{quiesce,target,object,id}'=t.provider_id::text JOIN notification_operations o ON o.id=(j.plan->>'notification_operation')::uuid WHERE t.node_id=$1 AND j.plan->'notification_threads' ? $1::text)").bind(thread).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        if grouped {
+            return Ok(threads::set_state(&mut *unit.conn, thread, from, to, seq).await?);
+        }
     }
     let before = threads::thread(&mut *unit.conn, thread).await?;
     let changed = threads::set_state(&mut *unit.conn, thread, from, to, seq).await?;

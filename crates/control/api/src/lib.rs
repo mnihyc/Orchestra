@@ -12,10 +12,9 @@
 pub use orch_api_base::test_observers;
 
 pub mod archives {
+    pub use orch_api_base::archives::{ArchiveRead, ArchiveReads};
 
     pub use orch_api_base::archives::READ_TIME;
-
-    pub use orch_api_base::archives::ZIP_ENTRIES_MAX;
 
     pub use orch_api_base::archives::ArchiveError;
 
@@ -572,6 +571,12 @@ pub mod backplane {
         async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
             orch_api_base::backplane::machine_report_tests::__api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding().await
         }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+         {
+            orch_api_base::backplane::machine_report_tests::__api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted().await
+        }
     }
     #[cfg(test)]
     pub(crate) mod command_admission_tests {
@@ -1082,6 +1087,10 @@ pub mod backplane {
     }
 }
 
+pub mod relay {
+    pub use orch_api_base::relay::{Input, Options, Read, Relay, RelayError, Relays};
+}
+
 pub mod blobs {
 
     pub use orch_api_base::blobs::UPLOADS_DIR;
@@ -1133,8 +1142,6 @@ pub mod cache {
 
     pub use orch_api_base::cache::MANIFEST_MAX_STORED_BYTES;
 
-    pub use orch_api_base::cache::STALE_UPLOAD_AGE;
-
     pub use orch_api_base::cache::EVICTION_EVERY;
 
     pub use orch_api_base::cache::COLLECTION_EVERY;
@@ -1150,6 +1157,8 @@ pub mod cache {
     pub use orch_api_base::cache::Samples;
 
     pub use orch_api_base::cache::Cache;
+
+    pub use orch_api_base::cache::{Purged, purge_relayed_caches};
 
     pub use orch_api_base::cache::Evicted;
 
@@ -1275,8 +1284,6 @@ pub mod content {
 }
 
 pub mod dispatch {
-
-    pub use orch_api_base::dispatch::KEY_MEMBER;
 
     pub use orch_api_base::dispatch::DispatchError;
 
@@ -2187,6 +2194,8 @@ pub mod middleware {
 
         pub use orch_api_base::middleware::authentication::new_token;
 
+        pub use orch_api_base::middleware::authentication::new_api_token;
+
         pub use orch_api_base::middleware::authentication::bearer;
 
         pub use orch_api_base::middleware::authentication::cookie;
@@ -2501,11 +2510,15 @@ pub mod previews {
 
     pub use orch_api_base::previews::serve;
 
-    pub use orch_api_base::previews::source_limit;
+    pub use orch_api_base::previews::{policy, serve_source};
 
     pub use orch_api_base::previews::unavailable;
     #[cfg(test)]
     mod tests {
+        #[tokio::test]
+        async fn a_refusal_keeps_its_particular_allowance_when_the_policy_later_changes() {
+            orch_api_base::previews::tests::__api_run_a_refusal_keeps_its_particular_allowance_when_the_policy_later_changes().await;
+        }
         #[cfg(test)]
         #[test]
         fn text_cards_share_the_reference_card_bound_even_for_one_very_long_line() {
@@ -3084,9 +3097,9 @@ pub mod realtime {
         }
         #[cfg(test)]
         #[tokio::test]
-        async fn opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends()
+        async fn opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends()
         -> ::orch_api_base::realtime::history_read_tests::Proof {
-            orch_api_base::realtime::history_read_tests::__api_run_opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends().await
+            orch_api_base::realtime::history_read_tests::__api_run_opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends().await
         }
         #[cfg(test)]
         #[tokio::test]
@@ -3340,6 +3353,11 @@ pub mod realtime {
             async fn an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_real_pending()
             -> ::orch_api_base::session_ticket_support::Proof {
                 orch_api_base::realtime::ticket_scope_tests::session_ticket_wire_tests::__api_run_an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_real_pending().await
+            }
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown()
+            -> ::orch_api_base::session_ticket_support::Proof {
+                orch_api_base::realtime::ticket_scope_tests::session_ticket_wire_tests::__api_run_a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown().await
             }
         }
         #[cfg(test)]
@@ -4749,13 +4767,32 @@ pub mod routes {
                 }
                 #[cfg(test)]
                 #[test]
-                fn what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled() {
-                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled()
+                fn what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
                 }
                 #[cfg(test)]
                 #[test]
                 fn search_offers_never_enable_the_tool_or_its_default() {
                     orch_api_resources::routes::resources::models::tests::__api_run_search_offers_never_enable_the_tool_or_its_default()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                }
+                #[cfg(test)]
+                #[test]
+                fn the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
                 }
             }
         }
@@ -6718,8 +6755,6 @@ pub mod routes {
 
 pub mod uploads {
 
-    pub use orch_api_base::uploads::SESSION_LIFE;
-
     pub use orch_api_base::uploads::NAME_MAX_CHARS;
 
     pub use orch_api_base::uploads::chunk_bytes;
@@ -6748,6 +6783,8 @@ pub mod testing {
     pub use orch_api_base::testing::machine_request_handler;
 
     pub use orch_api_base::testing::advance_component_updates;
+
+    pub use orch_api_base::testing::admit_stored_command;
 
     pub use orch_api_base::testing::authorize_machine;
 

@@ -8,6 +8,9 @@
 //! cut are the link's ([`orch_link::content`]); this module is the HTTPS requests under them, and the
 //! files at either end.
 
+mod relay;
+pub use relay::NativeRelay;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +19,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use hyper::{Method, StatusCode};
 use orch_link::content::{
-    BlobEndpoint, BlobSink, BlobSource, ContentError, PutRefusal, TransferOptions, Transfers,
+    BlobEndpoint, BlobSink, BlobSource, ContentError, PutRefusal, RelayReply, RelayRequest,
+    TransferOptions, Transfers,
 };
 use orch_link::framing::LinkMeter;
 use orch_link_contract::commands::{BlobRef, CommandError, ErrorCode};
@@ -112,6 +116,16 @@ async fn interruptible<T>(
 struct CancellableEndpoint(Arc<dyn BlobEndpoint>);
 #[async_trait]
 impl BlobEndpoint for CancellableEndpoint {
+    async fn relay(
+        &self,
+        command: Id,
+        relay: Id,
+        request: RelayRequest,
+        within: Duration,
+    ) -> Result<RelayReply, PutRefusal> {
+        interruptible(self.0.relay(command, relay, request, within)).await
+    }
+
     async fn head(&self, command: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
         interruptible(self.0.head(command, hash)).await
     }
@@ -209,6 +223,19 @@ impl HttpsBlobs {
         body: Bytes,
         extra: &[(&str, String)],
     ) -> Result<crate::https::Reply, PutRefusal> {
+        self.call_within(method, path, command, body, extra, REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn call_within(
+        &self,
+        method: Method,
+        path: &str,
+        command: Id,
+        body: Bytes,
+        extra: &[(&str, String)],
+        within: Duration,
+    ) -> Result<crate::https::Reply, PutRefusal> {
         let Some(now) = (self.endpoint)() else {
             return Err(PutRefusal::Failed("no session stands".to_owned()));
         };
@@ -222,7 +249,7 @@ impl HttpsBlobs {
             Trust::Public => &self.public,
         };
         client
-            .send(&now.base, method, path, &headers, body, REQUEST_TIMEOUT)
+            .send(&now.base, method, path, &headers, body, within)
             .await
             .map_err(|e| PutRefusal::Failed(e.to_string()))
     }
@@ -247,6 +274,53 @@ fn progress_of(reply: &crate::https::Reply) -> Option<BlobProgress> {
 
 #[async_trait]
 impl BlobEndpoint for HttpsBlobs {
+    async fn relay(
+        &self,
+        command: Id,
+        relay: Id,
+        request: RelayRequest,
+        within: Duration,
+    ) -> Result<RelayReply, PutRefusal> {
+        let root = format!("{}/relay/{relay}", orch_link_contract::content::BLOBS_PATH);
+        let (method, path, bytes, progress) = match request {
+            RelayRequest::Stand { received } => (
+                Method::HEAD,
+                format!("{root}?received={received}"),
+                Bytes::new(),
+                true,
+            ),
+            RelayRequest::Pull { offset, len } => (
+                Method::GET,
+                format!("{root}?offset={offset}&len={len}"),
+                Bytes::new(),
+                false,
+            ),
+            RelayRequest::Push { offset, bytes } => {
+                (Method::PUT, format!("{root}?offset={offset}"), bytes, true)
+            }
+        };
+        let reply = self
+            .call_within(method, &path, command, bytes, &[], within)
+            .await?;
+        match reply.status.as_u16() {
+            200 if progress => progress_of(&reply)
+                .map(|p| RelayReply::Progress(p.received))
+                .ok_or_else(|| {
+                    PutRefusal::Failed("the relay states no acknowledged offset".into())
+                }),
+            200 | 206 => Ok(RelayReply::Piece(reply.body)),
+            204 => Ok(RelayReply::Idle),
+            205 => Ok(RelayReply::End),
+            400 => Err(PutRefusal::Refused("the relay rejected this range".into())),
+            STATUS_OFFSET_CONFLICT => Err(PutRefusal::Offset {
+                received: progress_of(&reply).map_or(0, |p| p.received),
+            }),
+            _ => Err(refused(reply.status).unwrap_or_else(|| {
+                PutRefusal::Failed(format!("the file relay answered {}", reply.status))
+            })),
+        }
+    }
+
     async fn head(&self, command: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
         let reply = self
             .call(Method::HEAD, &blob_path(hash), command, Bytes::new(), &[])

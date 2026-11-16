@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-engine --lib -- tools::source::tests::
