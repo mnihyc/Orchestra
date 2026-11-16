@@ -340,6 +340,103 @@ CREATE INDEX usage_events_user_idx ON usage_events USING btree (user_id, at);
 
 CREATE TRIGGER usage_events_change BEFORE INSERT OR UPDATE ON usage_events FOR EACH ROW EXECUTE FUNCTION usage_mark_change();
 
+-- A radix-16 timestamp tree keeps exact microsecond ranges read-only in authorization snapshots.
+-- Four bits per level cover a signed bigint in sixteen folds, independent of request rate.
+CREATE TABLE usage_health_tree (
+    provider_id uuid NOT NULL,
+    level smallint NOT NULL CHECK (level BETWEEN 0 AND 15),
+    prefix bigint NOT NULL,
+    totals jsonb NOT NULL,
+    PRIMARY KEY(provider_id,level,prefix)
+);
+
+CREATE FUNCTION usage_health_scale(counts jsonb, direction bigint) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(jsonb_object_agg(key,value::bigint*direction),'{}'::jsonb)
+    FROM jsonb_each_text(COALESCE(counts,'{}'::jsonb))
+$$;
+
+CREATE FUNCTION usage_health_projection(event usage_events, direction bigint) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN (event).outcome IS NULL THEN NULL ELSE jsonb_build_object(
+        'requests',direction,
+        'hidden_requests',direction*CASE WHEN (event).measurement_states->>'reasoning_hidden'='true' THEN 1 ELSE 0 END,
+        'short_requests',direction*CASE WHEN (event).measurement_states->'speed_milli'->>'state'='empty' THEN 1 ELSE 0 END,
+        'speed_tokens',direction*CASE WHEN (event).speed_milli IS NOT NULL THEN COALESCE((event).streamed_output_tokens,0) ELSE 0 END,
+        'generation_ms_sum',direction*CASE WHEN (event).speed_milli IS NOT NULL THEN COALESCE((event).generation_ms,0) ELSE 0 END,
+        'errors',jsonb_build_object((event).outcome,direction),
+        'speed_buckets',usage_health_scale(usage_hist_add('{}'::jsonb,(event).speed_milli::double precision/1000),direction),
+        'first_token_buckets',usage_health_scale(usage_hist_add('{}'::jsonb,(event).first_token_ms::double precision),direction)
+    ) END
+$$;
+
+CREATE FUNCTION usage_health_add(state jsonb, part jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_build_object(
+        'requests',COALESCE((state->>'requests')::bigint,0)+COALESCE((part->>'requests')::bigint,0),
+        'hidden_requests',COALESCE((state->>'hidden_requests')::bigint,0)+COALESCE((part->>'hidden_requests')::bigint,0),
+        'short_requests',COALESCE((state->>'short_requests')::bigint,0)+COALESCE((part->>'short_requests')::bigint,0),
+        'speed_tokens',COALESCE((state->>'speed_tokens')::bigint,0)+COALESCE((part->>'speed_tokens')::bigint,0),
+        'generation_ms_sum',COALESCE((state->>'generation_ms_sum')::bigint,0)+COALESCE((part->>'generation_ms_sum')::bigint,0),
+        'errors',usage_counts_merge(COALESCE(state->'errors','{}'::jsonb),COALESCE(part->'errors','{}'::jsonb)),
+        'speed_buckets',usage_counts_merge(COALESCE(state->'speed_buckets','{}'::jsonb),COALESCE(part->'speed_buckets','{}'::jsonb)),
+        'first_token_buckets',usage_counts_merge(COALESCE(state->'first_token_buckets','{}'::jsonb),COALESCE(part->'first_token_buckets','{}'::jsonb))
+    )
+$$;
+CREATE AGGREGATE usage_health_merge(jsonb) (SFUNC=usage_health_add,STYPE=jsonb,INITCOND='{}');
+
+CREATE FUNCTION usage_health_prefix(ticks bigint, level integer) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+    -- Integer division keeps the last microsecond below a large prefix boundary exact.
+    SELECT CASE WHEN ticks>=0 THEN ticks/width ELSE -((-(ticks+1))/width)-1 END
+    FROM (SELECT 1::bigint << (level*4) AS width) range_value
+$$;
+
+CREATE FUNCTION usage_health_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE before_event usage_events; after_event usage_events;
+BEGIN
+    IF TG_OP<>'INSERT' THEN before_event:=OLD; END IF;
+    IF TG_OP<>'DELETE' THEN after_event:=NEW; END IF;
+    IF TG_OP='UPDATE' AND OLD.provider_id=NEW.provider_id AND OLD.at=NEW.at
+       AND usage_health_projection(OLD,1) IS NOT DISTINCT FROM usage_health_projection(NEW,1) THEN RETURN NULL; END IF;
+    INSERT INTO usage_health_tree(provider_id,level,prefix,totals)
+        WITH observations AS MATERIALIZED (
+            SELECT (entry.observation).provider_id AS provider_id,
+                (extract(epoch FROM (entry.observation).at)*1000000)::bigint AS ticks,
+                usage_health_projection(entry.observation,entry.direction) AS totals
+            FROM (VALUES(before_event,-1::bigint),(after_event,1::bigint)) AS entry(observation,direction)
+            WHERE (entry.observation).outcome IS NOT NULL
+        )
+        SELECT o.provider_id,levels.level,usage_health_prefix(o.ticks,levels.level),usage_health_merge(o.totals)
+        FROM observations o CROSS JOIN generate_series(0,15) AS levels(level)
+        GROUP BY 1,2,3 ORDER BY 1,2,3
+        ON CONFLICT(provider_id,level,prefix) DO UPDATE SET totals=usage_health_add(usage_health_tree.totals,EXCLUDED.totals);
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER usage_health_changed AFTER DELETE OR UPDATE OF provider_id,at,outcome,first_token_ms,speed_milli,generation_ms,streamed_output_tokens,measurement_states ON usage_events
+    FOR EACH ROW EXECUTE FUNCTION usage_health_changed();
+
+CREATE FUNCTION usage_health_inserted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO usage_health_tree(provider_id,level,prefix,totals)
+        WITH observations AS MATERIALIZED (
+            SELECT e.provider_id,(extract(epoch FROM e.at)*1000000)::bigint AS ticks,
+                usage_health_projection(e::usage_events,1) AS totals
+            FROM inserted_health e WHERE e.outcome IS NOT NULL
+        )
+        SELECT o.provider_id,levels.level,usage_health_prefix(o.ticks,levels.level),usage_health_merge(o.totals)
+        FROM observations o CROSS JOIN generate_series(0,15) AS levels(level)
+        GROUP BY 1,2,3 ORDER BY 1,2,3
+        ON CONFLICT(provider_id,level,prefix) DO UPDATE SET totals=usage_health_add(usage_health_tree.totals,EXCLUDED.totals);
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER usage_health_inserted AFTER INSERT ON usage_events REFERENCING NEW TABLE AS inserted_health
+    FOR EACH STATEMENT EXECUTE FUNCTION usage_health_inserted();
+
+CREATE FUNCTION usage_health_cleared() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN DELETE FROM usage_health_tree; RETURN NULL; END;
+$$;
+CREATE TRIGGER usage_health_cleared AFTER TRUNCATE ON usage_events FOR EACH STATEMENT EXECUTE FUNCTION usage_health_cleared();
+
 CREATE TABLE usage_limit_bypasses (
     id uuid NOT NULL,
     cap_id uuid,
@@ -517,6 +614,10 @@ CREATE TABLE usage_turn_daily (
     tier_unknown boolean NOT NULL,
     tier_unavailable boolean NOT NULL,
     members bigint NOT NULL CHECK (members >= 0),
+    credits numeric DEFAULT 0 NOT NULL,
+    estimated_credits numeric DEFAULT 0 NOT NULL,
+    unrated_tokens bigint DEFAULT 0 NOT NULL,
+    rated_rows bigint DEFAULT 0 NOT NULL,
     service_key bytea GENERATED ALWAYS AS (usage_service_key(service)) STORED,
     CONSTRAINT usage_turn_daily_key UNIQUE NULLS NOT DISTINCT (day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service_key,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable),
     CHECK (day=(at AT TIME ZONE 'UTC')::date AND (at AT TIME ZONE 'UTC')=date_trunc('hour',at AT TIME ZONE 'UTC'))
@@ -525,11 +626,17 @@ CREATE INDEX usage_turn_daily_org_id_idx ON usage_turn_daily (org_id,day);
 CREATE INDEX usage_turn_daily_project_id_idx ON usage_turn_daily (project_id,day);
 CREATE INDEX usage_turn_daily_topic_id_idx ON usage_turn_daily (topic_id,day);
 CREATE INDEX usage_turn_daily_thread_id_idx ON usage_turn_daily (thread_id,day);
+CREATE INDEX usage_turn_daily_current_thread_idx ON usage_turn_daily (thread_id,turn_id);
 CREATE INDEX usage_turn_daily_provider_id_idx ON usage_turn_daily (provider_id,day);
 CREATE INDEX usage_turn_daily_user_id_idx ON usage_turn_daily (user_id,day);
 CREATE FUNCTION usage_turn_projection(event usage_events) RETURNS usage_turn_daily
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
-    SELECT ((event).at AT TIME ZONE 'UTC')::date,date_trunc('hour',(event).at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',(event).turn_id,(event).org_id,(event).project_id,(event).topic_id,(event).thread_id,(event).purpose,(event).provider_id,(event).user_id,(event).model,(event).service,(event).effort,(event).tier,(event).access_program,(event).outcome,(event).harness_kind,(event).environment_kind,usage_tier_unknown((event).tier,(event).measurement_states),usage_tier_unavailable((event).tier,(event).measurement_states),1::bigint,usage_service_key((event).service) WHERE (event).turn_id IS NOT NULL
+    SELECT ((event).at AT TIME ZONE 'UTC')::date,date_trunc('hour',(event).at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',(event).turn_id,(event).org_id,(event).project_id,(event).topic_id,(event).thread_id,(event).purpose,(event).provider_id,(event).user_id,(event).model,(event).service,(event).effort,(event).tier,(event).access_program,(event).outcome,(event).harness_kind,(event).environment_kind,usage_tier_unknown((event).tier,(event).measurement_states),usage_tier_unavailable((event).tier,(event).measurement_states),1::bigint,
+        CASE WHEN (event).counted THEN COALESCE((event).credits,0) ELSE 0 END,
+        CASE WHEN (event).counted AND (event).rate_source='catalogue' THEN COALESCE((event).credits,0) ELSE 0 END,
+        CASE WHEN (event).counted AND (event).credits IS NULL THEN (event).total_tokens ELSE 0::bigint END,
+        CASE WHEN (event).counted AND (event).credits IS NOT NULL THEN 1::bigint ELSE 0::bigint END,
+        usage_service_key((event).service) WHERE (event).turn_id IS NOT NULL
 $$;
 CREATE FUNCTION usage_turn_membership_change() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE old_member usage_turn_daily; new_member usage_turn_daily; remaining bigint;
@@ -538,13 +645,13 @@ BEGIN
     IF TG_OP<>'DELETE' THEN new_member:=usage_turn_projection(NEW); END IF;
     IF TG_OP='UPDATE' AND old_member IS NOT DISTINCT FROM new_member THEN RETURN NULL; END IF;
     IF old_member.turn_id IS NOT NULL THEN
-        UPDATE usage_turn_daily d SET members=d.members-1 WHERE d.day=old_member.day AND d.at=old_member.at AND d.turn_id=old_member.turn_id AND d.day IS NOT DISTINCT FROM old_member.day AND d.at IS NOT DISTINCT FROM old_member.at AND d.turn_id IS NOT DISTINCT FROM old_member.turn_id AND d.org_id IS NOT DISTINCT FROM old_member.org_id AND d.project_id IS NOT DISTINCT FROM old_member.project_id AND d.topic_id IS NOT DISTINCT FROM old_member.topic_id AND d.thread_id IS NOT DISTINCT FROM old_member.thread_id AND d.purpose IS NOT DISTINCT FROM old_member.purpose AND d.provider_id IS NOT DISTINCT FROM old_member.provider_id AND d.user_id IS NOT DISTINCT FROM old_member.user_id AND d.model IS NOT DISTINCT FROM old_member.model AND d.service IS NOT DISTINCT FROM old_member.service AND d.effort IS NOT DISTINCT FROM old_member.effort AND d.tier IS NOT DISTINCT FROM old_member.tier AND d.access_program IS NOT DISTINCT FROM old_member.access_program AND d.outcome IS NOT DISTINCT FROM old_member.outcome AND d.harness_kind IS NOT DISTINCT FROM old_member.harness_kind AND d.environment_kind IS NOT DISTINCT FROM old_member.environment_kind AND d.tier_unknown IS NOT DISTINCT FROM old_member.tier_unknown AND d.tier_unavailable IS NOT DISTINCT FROM old_member.tier_unavailable RETURNING members INTO remaining;
+        UPDATE usage_turn_daily d SET members=d.members-1,credits=d.credits-old_member.credits,estimated_credits=d.estimated_credits-old_member.estimated_credits,unrated_tokens=d.unrated_tokens-old_member.unrated_tokens,rated_rows=d.rated_rows-old_member.rated_rows WHERE d.day=old_member.day AND d.at=old_member.at AND d.turn_id=old_member.turn_id AND d.day IS NOT DISTINCT FROM old_member.day AND d.at IS NOT DISTINCT FROM old_member.at AND d.turn_id IS NOT DISTINCT FROM old_member.turn_id AND d.org_id IS NOT DISTINCT FROM old_member.org_id AND d.project_id IS NOT DISTINCT FROM old_member.project_id AND d.topic_id IS NOT DISTINCT FROM old_member.topic_id AND d.thread_id IS NOT DISTINCT FROM old_member.thread_id AND d.purpose IS NOT DISTINCT FROM old_member.purpose AND d.provider_id IS NOT DISTINCT FROM old_member.provider_id AND d.user_id IS NOT DISTINCT FROM old_member.user_id AND d.model IS NOT DISTINCT FROM old_member.model AND d.service IS NOT DISTINCT FROM old_member.service AND d.effort IS NOT DISTINCT FROM old_member.effort AND d.tier IS NOT DISTINCT FROM old_member.tier AND d.access_program IS NOT DISTINCT FROM old_member.access_program AND d.outcome IS NOT DISTINCT FROM old_member.outcome AND d.harness_kind IS NOT DISTINCT FROM old_member.harness_kind AND d.environment_kind IS NOT DISTINCT FROM old_member.environment_kind AND d.tier_unknown IS NOT DISTINCT FROM old_member.tier_unknown AND d.tier_unavailable IS NOT DISTINCT FROM old_member.tier_unavailable RETURNING members INTO remaining;
         IF NOT FOUND THEN RAISE EXCEPTION 'usage turn membership missing' USING ERRCODE='23514'; END IF;
         IF remaining=0 THEN DELETE FROM usage_turn_daily d WHERE d.day=old_member.day AND d.at=old_member.at AND d.turn_id=old_member.turn_id AND d.day IS NOT DISTINCT FROM old_member.day AND d.at IS NOT DISTINCT FROM old_member.at AND d.turn_id IS NOT DISTINCT FROM old_member.turn_id AND d.org_id IS NOT DISTINCT FROM old_member.org_id AND d.project_id IS NOT DISTINCT FROM old_member.project_id AND d.topic_id IS NOT DISTINCT FROM old_member.topic_id AND d.thread_id IS NOT DISTINCT FROM old_member.thread_id AND d.purpose IS NOT DISTINCT FROM old_member.purpose AND d.provider_id IS NOT DISTINCT FROM old_member.provider_id AND d.user_id IS NOT DISTINCT FROM old_member.user_id AND d.model IS NOT DISTINCT FROM old_member.model AND d.service IS NOT DISTINCT FROM old_member.service AND d.effort IS NOT DISTINCT FROM old_member.effort AND d.tier IS NOT DISTINCT FROM old_member.tier AND d.access_program IS NOT DISTINCT FROM old_member.access_program AND d.outcome IS NOT DISTINCT FROM old_member.outcome AND d.harness_kind IS NOT DISTINCT FROM old_member.harness_kind AND d.environment_kind IS NOT DISTINCT FROM old_member.environment_kind AND d.tier_unknown IS NOT DISTINCT FROM old_member.tier_unknown AND d.tier_unavailable IS NOT DISTINCT FROM old_member.tier_unavailable; END IF;
     END IF;
     IF new_member.turn_id IS NOT NULL THEN
-        INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members) VALUES(new_member.day,new_member.at,new_member.turn_id,new_member.org_id,new_member.project_id,new_member.topic_id,new_member.thread_id,new_member.purpose,new_member.provider_id,new_member.user_id,new_member.model,new_member.service,new_member.effort,new_member.tier,new_member.access_program,new_member.outcome,new_member.harness_kind,new_member.environment_kind,new_member.tier_unknown,new_member.tier_unavailable,1)
-        ON CONFLICT ON CONSTRAINT usage_turn_daily_key DO UPDATE SET members=usage_turn_daily.members+1;
+        INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members,credits,estimated_credits,unrated_tokens,rated_rows) VALUES(new_member.day,new_member.at,new_member.turn_id,new_member.org_id,new_member.project_id,new_member.topic_id,new_member.thread_id,new_member.purpose,new_member.provider_id,new_member.user_id,new_member.model,new_member.service,new_member.effort,new_member.tier,new_member.access_program,new_member.outcome,new_member.harness_kind,new_member.environment_kind,new_member.tier_unknown,new_member.tier_unavailable,1,new_member.credits,new_member.estimated_credits,new_member.unrated_tokens,new_member.rated_rows)
+        ON CONFLICT ON CONSTRAINT usage_turn_daily_key DO UPDATE SET members=usage_turn_daily.members+1,credits=usage_turn_daily.credits+EXCLUDED.credits,estimated_credits=usage_turn_daily.estimated_credits+EXCLUDED.estimated_credits,unrated_tokens=usage_turn_daily.unrated_tokens+EXCLUDED.unrated_tokens,rated_rows=usage_turn_daily.rated_rows+EXCLUDED.rated_rows;
     END IF;
     RETURN NULL;
 END
@@ -554,18 +661,22 @@ FOR EACH ROW EXECUTE FUNCTION usage_turn_membership_change();
 -- Bulk imports fold a transition set once instead of repeatedly updating the same membership.
 CREATE FUNCTION usage_turn_membership_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
-    SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM inserted_usage e
+    INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members,credits,estimated_credits,unrated_tokens,rated_rows)
+    SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*),sum(p.credits),sum(p.estimated_credits),sum(p.unrated_tokens),sum(p.rated_rows) FROM inserted_usage e
     CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p WHERE e.turn_id IS NOT NULL
     GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable
-    ON CONFLICT ON CONSTRAINT usage_turn_daily_key DO UPDATE SET members=usage_turn_daily.members+EXCLUDED.members;
+    ON CONFLICT ON CONSTRAINT usage_turn_daily_key DO UPDATE SET members=usage_turn_daily.members+EXCLUDED.members,credits=usage_turn_daily.credits+EXCLUDED.credits,estimated_credits=usage_turn_daily.estimated_credits+EXCLUDED.estimated_credits,unrated_tokens=usage_turn_daily.unrated_tokens+EXCLUDED.unrated_tokens,rated_rows=usage_turn_daily.rated_rows+EXCLUDED.rated_rows;
     RETURN NULL;
 END
 $$;
 CREATE TRIGGER usage_turn_membership_insert AFTER INSERT ON usage_events
 REFERENCING NEW TABLE AS inserted_usage FOR EACH STATEMENT EXECUTE FUNCTION usage_turn_membership_insert();
--- The projection is filled in one ledger pass; stored consumption is never rewritten.
-INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
-SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM usage_events e
-CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p WHERE e.turn_id IS NOT NULL
-GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable;
+-- Resetting the detailed ledger also resets its turn projection; daily totals remain separate.
+CREATE FUNCTION usage_turn_membership_cleared() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    TRUNCATE usage_turn_daily;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER usage_turn_membership_cleared AFTER TRUNCATE ON usage_events
+FOR EACH STATEMENT EXECUTE FUNCTION usage_turn_membership_cleared();
