@@ -8,6 +8,7 @@ import type { HarnessBuild, RunningHarnessBuild } from '@/generated/api-types';
 import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
+import { HelpHint } from '@/ui/HelpHint';
 import { disabledFeatures, featureFallback, featureName } from './buildChecks';
 
 export function DisabledBuildFeatures({ build, name }: { build: HarnessBuild; name?: string | undefined }) {
@@ -23,7 +24,7 @@ export function ProgramBuild({ program, name }: { program: RunningHarnessBuild; 
   const title = name ?? programNameIn(program, i18n.resolvedLanguage ?? i18n.language) ?? programNameIn(program.build, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
   return <div className="flex min-w-0 flex-col gap-1" data-program={program.kind}>
     <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm"><span className="min-w-0 wrap-anywhere">{title} {program.version}</span>
-      {program.build === null ? <span className="text-text-muted">{t('programVersions.unknownCheck')}</span> : <BuildStatus build={program.build} name={title} />}
+      {program.build === null ? <span className="inline-flex items-center gap-1 text-text-muted">{t('programVersions.unknownCheck')}<HelpHint term={t('programVersions.unknownCheck')} what={t('programVersions.unknownCheckWhy')} /></span> : <BuildStatus build={program.build} name={title} />}
     </div>
     {program.build !== null && <DisabledBuildFeatures build={program.build} name={title} />}
   </div>;

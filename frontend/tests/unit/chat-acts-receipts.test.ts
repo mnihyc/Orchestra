@@ -18,7 +18,7 @@ const requests = vi.hoisted(() => ({
 vi.mock('@/api/chats', async (load) => ({
   ...await load<typeof Chats>(), editMessage: requests.edit, deleteMessage: requests.remove, pin: requests.pin, react: requests.react,
 }));
-vi.mock('@/ui/Toast', () => ({ toast: vi.fn() }));
+vi.mock('@/ui/Toast', async (loadOriginal) => ({ ...await loadOriginal<object>(), toast: vi.fn() }));
 
 const row = () => message(1);
 const held = () => useChatStore.getState().byChat.get(chat().id)?.messages.get(row().id);

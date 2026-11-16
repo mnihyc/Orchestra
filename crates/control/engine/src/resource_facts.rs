@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::EngineError;
 
 pub mod activity;
+pub mod applications;
 pub mod custody;
 pub mod library;
 
