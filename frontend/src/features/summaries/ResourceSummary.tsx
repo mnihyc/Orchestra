@@ -1,6 +1,5 @@
 /** Ordinary native read, explicit paid receipt, and the same root-pinned editable Ask draft. */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 import { ApiError, client } from '@/api/client';
@@ -11,8 +10,7 @@ import { modelResource } from '@/features/resource-facts/facts';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { IconButton } from '@/ui/IconButton';
-import { Popover } from '@/ui/Popover';
+import { FactDisclosure } from '@/ui/FactDisclosure';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { SummaryBox } from './SummaryBox';
@@ -66,22 +64,19 @@ function CurrentSummary({ target, reference, range, enabled = true, onConfigure,
     return rate?.currency === 'credits' && rate.unit === 'million_tokens' ? [{ key, label, amount: rate.amount }] : [];
   });
   const detailsLabel = t(summaryActionKey(target.kind, 'details'));
-  const details = <Popover label={detailsLabel} trigger={<IconButton size="sm" label={detailsLabel} icon={<Info aria-hidden />} />}>
-    <div className="flex min-w-0 flex-col gap-2 p-1">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+  const details = <FactDisclosure label={detailsLabel} groups={[{ key: 'rates', facts: readableRates.map((rate) => ({ key: rate.key, label: rate.label, value: t('summaryBox.perMillion', { amount: rate.amount }) })) }]}
+    header={<div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-medium text-text">{t('summaryBox.baseRates')}</p>
         <ArticleGuideLink article="summaries" title={t('summaryBox.title')} />
-      </div>
+      </div>}>
       {reply.input !== null && <p className="text-sm text-text-muted" data-summary-input-facts>{t('summaryBox.inputFacts', { included: reply.input.included_items, shortened: reply.input.shortened_items, omitted: reply.input.omitted_items })}</p>}
-      {readableRates.length === 0 ? <StateLine compact title={t('summaryBox.noRates')} /> : <dl className="grid min-w-0 grid-cols-1 gap-2">
-        {readableRates.map((rate) => <div key={rate.key} className="flex min-w-0 flex-wrap justify-between gap-x-4 gap-y-1 text-sm"><dt className="text-text-muted">{rate.label}</dt><dd className="m-0 text-text">{t('summaryBox.perMillion', { amount: rate.amount })}</dd></div>)}
-      </dl>}
-    </div>
-  </Popover>;
+      {readableRates.length === 0 && <StateLine compact title={t('summaryBox.noRates')} />}
+  </FactDisclosure>;
   return <SummaryBox readerKey={reader} target={{ kind: target.kind, reference }} className={className}
     summary={{ revision: JSON.stringify(reply), state: reply.state, text: reply.text, producer: producer(reply, t('summaryBox.model')), updated_at: reply.updated_at, wait: reply.wait,
       ...(reply.problem === null ? {} : { error: new ApiError(reply.problem, null) }) }}
     onRefresh={refresh} refreshBlockedReason={reply.inspecting ? t('summaryBox.inspection') : manualReason}
+    nothingNew={target.kind === 'chat' && range !== undefined && range.after >= range.through}
     askBlockedReason={reply.inspecting ? t('summaryBox.inspection') : undefined} {...(onConfigure === undefined ? {} : { onConfigure })} details={details}
     onAsk={({ summary }) => { if (reader !== summaryReaderKey() || reply.inspecting) return; openAskWithDraft({ root: reply.root_org_id,
       text: [t('summaryBox.ask'), reference, ...(summary === null ? [] : summary.split('\n').map((line) => `> ${line}`))].join('\n\n') }); }} />;

@@ -252,8 +252,35 @@ export async function screenReady(page: Page, locale: string, theme: string): Pr
   });
 }
 
+/**
+ * Waits until nothing on the page is moving: the fonts, every animation and transition that ends (a menu, a dialog or a card that fades
+ * in is drawn with the opacity of the moment, which every colour rule reads as the ink of what it holds: a frame the compositor has
+ * not drawn yet leaves it at the start of its fade however long the test waited), and two frames. An animation that never ends
+ * (a spinner) is not waited for.
+ */
+export async function settleMotion(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    for (let pass = 0; pass < 5; pass += 1) {
+      const moving = document.getAnimations().filter((animation) => {
+        const end = animation.effect?.getComputedTiming().endTime;
+        return animation.playState === 'running' && typeof end === 'number' && Number.isFinite(end);
+      });
+      if (moving.length === 0) break;
+      await Promise.all(moving.map((animation) => animation.finished.catch(() => undefined)));
+    }
+    await new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+  });
+}
+
+/** The layout audit of the page once it has stopped moving: every audit taken just after a menu, a picker, a card or a dialog opens. */
+export async function inspectSettled(page: Page, input: LayoutInput): Promise<LayoutResult> {
+  await settleMotion(page);
+  return page.evaluate(inspectLayout, input);
+}
+
 export async function auditPage(page: Page, cutWithin?: string): Promise<LayoutResult> {
-  const result = await page.evaluate(inspectLayout, { ...LAYOUT_INPUT, ...(cutWithin === undefined ? {} : { cutWithin }) });
+  const result = await inspectSettled(page, { ...LAYOUT_INPUT, ...(cutWithin === undefined ? {} : { cutWithin }) });
   result.faults.push(...await duplicateAccessibleNames(page));
   // The settled page already revealed every underlying value. A menu pass still
   // measures all rules, but only exercises disclosures belonging to its open layer.
