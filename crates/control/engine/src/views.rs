@@ -20,10 +20,10 @@ use orch_api_contract::goals::ThreadGoal;
 use orch_api_contract::nodes::{JobRef, NodeBase, NodeRef};
 use orch_api_contract::threads::continuations::ThreadReadSelector;
 use orch_api_contract::threads::{
-    BlockedReason, Item, RecordedCost, Segment, SideReading, StartingStep, THREAD_SYNC_ENDED_TURNS,
-    THREAD_SYNC_MAX_CHANGES, Thread, ThreadBinding, ThreadBlocked, ThreadCan, ThreadCosts,
-    ThreadInput, ThreadInputAccess, ThreadKind, ThreadMemory, ThreadQueue, ThreadSides,
-    ThreadState, ThreadSync, ThreadUsage, Turn, TurnRecordedCost,
+    BlockedReason, Item, RecordedCost, Segment, SideReading, StartingStep, StartingWork,
+    THREAD_SYNC_ENDED_TURNS, THREAD_SYNC_MAX_CHANGES, Thread, ThreadBinding, ThreadBlocked,
+    ThreadCan, ThreadCosts, ThreadInput, ThreadInputAccess, ThreadKind, ThreadMemory, ThreadQueue,
+    ThreadSides, ThreadState, ThreadSync, ThreadUsage, Turn, TurnRecordedCost,
 };
 use orch_api_contract::users::UserRef;
 use orch_blob_contract::range::ByteRange;
@@ -39,10 +39,6 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_segmentation::UnicodeSegmentation;
-
-/// The most characters of an item's plain-text projection that are kept for
-/// search.
-pub const SEARCH_TEXT_MAX_CHARS: usize = crate::projections::SEARCH_TEXT_MAX_CHARS;
 
 /// The time as the wire writes it.
 #[must_use]
@@ -127,7 +123,7 @@ async fn machine_ref_json(conn: &mut Conn, machine: Id) -> Result<Json, EngineEr
         .map_or(Json::Null, |row| {
             json!({
                 "id": row.id, "name": row.name, "online": row.online,
-                "platform_os": row.platform_os, "placement": row.placement,
+                "platform_os": row.platform_os, "placement": row.placement, "host_id": row.host_id,
             })
         }))
 }
@@ -371,14 +367,17 @@ pub fn source_approval(row: &ItemRow) -> Option<Id> {
 #[must_use]
 pub fn item_view(row: &ItemRow, people: &People) -> Item {
     let mut item = record_item_view(row, people);
-    // Complete file images belong to the guarded restore supplier. Human
-    // timeline readers and written exports expose the tool's bounded diff.
-    if let orch_api_contract::threads::ItemPayload::ToolCall(call) = &mut item.payload
-        && let orch_api_contract::threads::ToolPayload::FileChange { changes } = &mut call.tool
-    {
-        for change in changes {
-            change.before = None;
-            change.after = None;
+    if let orch_api_contract::threads::ItemPayload::ToolCall(call) = &mut item.payload {
+        // The call as its harness made it repeats the typed call and is as long: the timeline leaves it out,
+        // and `item_raw_in` reads it when a person opens it.
+        call.raw = None;
+        // Complete file images belong to the guarded restore supplier. Human
+        // timeline readers and written exports expose the tool's bounded diff.
+        if let orch_api_contract::threads::ToolPayload::FileChange { changes } = &mut call.tool {
+            for change in changes {
+                change.before = None;
+                change.after = None;
+            }
         }
     }
     item
@@ -432,6 +431,7 @@ pub(crate) fn record_item_view(row: &ItemRow, people: &People) -> Item {
 /// itself does not read, which would be a change of the type.
 fn unreachable_item(row: &ItemRow) -> Item {
     Item {
+        notice_decision: None,
         continuation_id: Some(row.continuation_id),
         id: row.id,
         thread_id: row.thread_id,
@@ -473,6 +473,9 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
                     .unwrap_or("internal"),
             );
             object.insert("message".to_owned(), Json::String(message));
+            // An error stored without this member (Ask's failures before 0.1.3 were) must not make the
+            // whole turn, and with it the thread, unreadable: it is read as not worth trying again.
+            object.entry("retryable").or_insert(Json::Bool(false));
         }
         error
     });
@@ -487,6 +490,11 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
             "id": row.id, "thread_id": row.thread_id, "segment_id": row.segment_id, "ordinal": row.ordinal,
             "state": row.state, "input_id": row.input_id, "model": row.model,
             "before_snapshot_id": row.before_snapshot_id,
+            "files_changed": row.files_changed.map(i64::from),
+            "files_changed_paths": row.files_changed_paths,
+            "files_changed_complete": row.files_changed_complete,
+            "recording_notice": row.recording_notice,
+            "recording_indexing": row.recording_indexing,
             "model_display": display,
             "effort": row.effort, "params": row.params, "error": error, "usage": row.usage,
             // What the harness reported beyond the totals, and what filled the context: a record of another
@@ -494,6 +502,7 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
             "usage_detail": crate::context_fill::readable::<orch_api_contract::context::TurnUsageDetail>(row.usage_detail.as_ref()),
             "context": crate::context_fill::readable::<orch_api_contract::context::ContextFill>(row.context.as_ref()),
             "interrupted_by": people.named_or_null(row.interrupted_by),
+            "interrupted_at": optional_time(row.interrupted_at),
             "command_cleanup": row.command_cleanup,
             "limit_bypass": bypass_json(row.limit_bypass.as_ref(), people),
             "phase": phase, "waiting_since": optional_time(row.waiting_since), "waited_ms": row.waited_ms,
@@ -510,13 +519,24 @@ pub async fn queue_of(
     conn: &mut Conn,
     row: &threads::ThreadRow,
 ) -> Result<ThreadQueue, EngineError> {
+    queue_of_captured(conn, row, None).await
+}
+
+async fn queue_of_captured(
+    conn: &mut Conn,
+    row: &threads::ThreadRow,
+    activity: Option<&threads::ThreadActivity>,
+) -> Result<ThreadQueue, EngineError> {
     if !row.queue_held {
         return Ok(ThreadQueue {
             revision: row.queue_revision,
             ..ThreadQueue::default()
         });
     }
-    let held_inputs = threads::count_queue_held(conn, row.node_id).await?;
+    let held_inputs = match activity {
+        Some(value) => value.held_inputs,
+        None => threads::count_queue_held(conn, row.node_id).await?,
+    };
     let by = match row.queue_held_by {
         Some(by) => Some(read::<UserRef>(user_ref_json(conn, by).await?, "a person")?),
         None => None,
@@ -538,6 +558,7 @@ pub fn input_view(row: &InputRow, people: &People) -> Result<ThreadInput, Engine
             "run_as": people.named_or_null(row.run_as),
             "decision": people.outcome(row.approval_id),"approval_id":row.approval_id,
             "plan": row.plan,
+            "native_image_delivery":row.delivered_at.and(row.native_image_delivery.as_ref()),
             "source": row.source, "content": crate::paste::metadata(&row.content), "native_action":row.native_action, "delivery": row.delivery, "state": row.state,
             "state_detail": row.state_detail,
             "attachment_issues": row.attachment_issues, "queue_held": row.queue_held,
@@ -605,7 +626,7 @@ pub(crate) async fn segment_view(
     };
     read(
         json!({
-            "id": row.id, "ordinal": row.ordinal,
+            "id": row.id, "ordinal": row.ordinal, "native_history": row.native_history,
             "agent": agent, "provider": provider, "environment": environment, "program": program,
             "env_generation": row.env_generation, "arrangement": row.arrangement,
             "executor": row.executor, "tool_set": row.tool_set, "credential_path": row.credential_path,
@@ -651,6 +672,12 @@ pub struct ThreadFacts {
     pub side_reading: Option<SideReading>,
     /// What a starting thread waits for.
     pub starting_step: Option<StartingStep>,
+    /// When that step began.
+    pub starting_since: Option<orch_types::Time>,
+    /// The command the step waits for, and what holds it up.
+    pub starting_work: Option<StartingWork>,
+    /// Since when the thread is being stopped.
+    pub stopping_since: Option<orch_types::Time>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -929,6 +956,7 @@ impl ThreadSyncData {
             inputs_next_after: self.inputs_next_after,
             inputs_queue_revision: Some(self.inputs_queue_revision),
             thread: Thread {
+                environment_preparation: None,
                 program: facts.program,
                 program_model: facts.program_model,
                 background: frame.background,
@@ -943,6 +971,9 @@ impl ThreadSyncData {
                 sides: frame.sides,
                 side_reading: facts.side_reading,
                 starting_step: facts.starting_step,
+                starting_since: facts.starting_since,
+                starting_work: facts.starting_work,
+                stopping_since: facts.stopping_since,
                 blocked: frame.blocked,
                 queue: facts.queue,
                 binding: frame.binding,
@@ -1072,6 +1103,19 @@ pub struct ItemsPage {
     pub has_older: bool,
     /// Whether newer ones exist.
     pub has_newer: bool,
+}
+
+/// A complete text page, including at most the remainder of its final UTF-8 character.
+fn output_text(bytes: &[u8], mut first: usize, mut end: usize) -> Result<String, ReadError> {
+    while first < bytes.len() && bytes[first] & 0xc0 == 0x80 {
+        first += 1;
+    }
+    while end < bytes.len() && bytes[end] & 0xc0 == 0x80 {
+        end += 1;
+    }
+    Ok(std::str::from_utf8(&bytes[first.min(end)..end])
+        .map_err(EngineError::unreadable)?
+        .to_owned())
 }
 
 /// A stretch of a command's output.
@@ -1487,8 +1531,35 @@ async fn thread_facts(
     viewer: Option<Id>,
     now: Time,
 ) -> Result<ThreadFacts, EngineError> {
+    let settings = crate::resolved::load(conn, row.node_id).await?;
+    thread_facts_resolved(conn, row, viewer, now, settings, None).await
+}
+
+struct CapturedThreadFacts {
+    credits: orch_db::usage::ledger::ThreadCredits,
+    activity: threads::ThreadActivity,
+    display: orch_db::queries::source::ThreadDisplayFacts,
+    answer: Option<Json>,
+}
+
+async fn thread_facts_resolved(
+    conn: &mut Conn,
+    row: &threads::ThreadRow,
+    viewer: Option<Id>,
+    now: Time,
+    settings: crate::resolved::Resolved,
+    captured: Option<CapturedThreadFacts>,
+) -> Result<ThreadFacts, EngineError> {
     {
-        let settings = crate::resolved::load(conn, row.node_id).await?;
+        let (credits, activity, display_facts, answer) = match captured {
+            Some(value) => (
+                Some(value.credits),
+                Some(value.activity),
+                Some(value.display),
+                Some(value.answer),
+            ),
+            None => (None, None, None, None),
+        };
         let environment = match row.environment_id {
             Some(id) => {
                 orch_db::queries::environments::thread_engine::environment(conn, id).await?
@@ -1523,8 +1594,13 @@ async fn thread_facts(
             .clone()
             .map(|usage| read::<ThreadUsage>(usage, "a thread's usage"))
             .transpose()?;
-        let credits =
-            orch_db::usage::ledger::status_credits(conn, row.node_id, row.current_turn_id).await?;
+        let credits = match credits {
+            Some(value) => value,
+            None => {
+                orch_db::usage::ledger::status_credits(conn, row.node_id, row.current_turn_id)
+                    .await?
+            }
+        };
         let costs = if credits.credits.is_some() || credits.unrated_tokens > 0 {
             Some(ThreadCosts {
                 total: RecordedCost {
@@ -1544,14 +1620,25 @@ async fn thread_facts(
         } else {
             None
         };
-        let pending_inputs = threads::count_pending_inputs(conn, row.node_id).await?;
-        let pending_approvals =
-            approval_queries::count_pending_of_thread(conn, row.node_id).await?;
-        let queue = queue_of(conn, row).await?;
-        let my_last_read_seq = match viewer {
-            Some(viewer) => threads::last_read(conn, viewer, row.node_id).await?,
-            None => None,
+        let (pending_inputs, pending_approvals, my_last_read_seq, stopping_since) = match &activity
+        {
+            Some(value) => (
+                value.pending_inputs,
+                value.pending_approvals,
+                value.last_read_seq,
+                value.stopping_since,
+            ),
+            None => (
+                threads::count_pending_inputs(conn, row.node_id).await?,
+                approval_queries::count_pending_of_thread(conn, row.node_id).await?,
+                match viewer {
+                    Some(viewer) => threads::last_read(conn, viewer, row.node_id).await?,
+                    None => None,
+                },
+                threads::stopping_since(conn, row.node_id).await?,
+            ),
         };
+        let queue = queue_of_captured(conn, row, activity.as_ref()).await?;
         let mut source = row
             .source
             .as_ref()
@@ -1572,8 +1659,11 @@ async fn thread_facts(
             row.links.clone(),
             "a thread's links",
         )?;
-        let suggested_links = orch_db::queries::source::last_agent_message(conn, row.node_id)
-            .await?
+        let answer = match answer {
+            Some(value) => value,
+            None => orch_db::queries::source::last_agent_message(conn, row.node_id).await?,
+        };
+        let suggested_links = answer
             .as_ref()
             .map(crate::git_work::suggested_links)
             .unwrap_or_default();
@@ -1606,12 +1696,16 @@ async fn thread_facts(
                 work.reason = Some("source_offline".to_owned());
             }
         }
-        let display_facts =
-            orch_db::queries::source::thread_display_facts(conn, &[row.node_id], viewer, now)
-                .await?
-                .into_iter()
-                .next()
-                .ok_or_else(|| EngineError::unreadable("a readable thread has no icon facts"))?;
+        let display_facts = match display_facts {
+            Some(value) => value,
+            None => {
+                orch_db::queries::source::thread_display_facts(conn, &[row.node_id], viewer, now)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| EngineError::unreadable("a readable thread has no icon facts"))?
+            }
+        };
         let failed = display_facts.failed;
         let display = thread_display(&display_facts);
         let attention = orch_api_contract::source::ThreadAttention {
@@ -1657,6 +1751,12 @@ async fn thread_facts(
                 .as_deref()
                 .map(|step| read::<StartingStep>(Json::String(step.to_owned()), "a starting step"))
                 .transpose()?,
+            starting_since: row.starting_step_at.map(orch_types::Time::new),
+            starting_work: row.starting_command.clone().map(|command| StartingWork {
+                command,
+                behind: row.starting_behind.clone(),
+            }),
+            stopping_since: stopping_since.map(orch_types::Time::new),
             blocked: blocked_of(conn, row).await?,
             queue,
             environment: environment_ref,
@@ -1881,15 +1981,14 @@ impl Engine {
         self.item_view_in(conn, thread, item, None, None).await
     }
 
-    /// A direct known-item link resolves its actual owner unless a prefix view was explicitly chosen.
-    pub async fn item_view_in(
-        &self,
+    /// The row of an item that a direct link names: its actual owner, unless a prefix view was explicitly chosen.
+    async fn item_row_in(
         conn: &mut Conn,
         thread: Id,
         item: Id,
         continuation: Option<Id>,
         revision: Option<i64>,
-    ) -> Result<Item, ReadError> {
+    ) -> Result<ItemRow, ReadError> {
         let owner = match continuation {
             Some(owner) => owner,
             None => history_rows::item_owner(conn, thread, item)
@@ -1904,9 +2003,41 @@ impl Engine {
                 crate::continuations::projection::scope(&projection),
             ));
         }
-        let row = history_rows::item(conn, thread, owner, item)
+        history_rows::item(conn, thread, owner, item)
             .await?
-            .ok_or(ReadError::NotFound)?;
+            .ok_or(ReadError::NotFound)
+    }
+
+    /// A tool call exactly as its harness made it, which `item_view` leaves out of the thread's timeline: found
+    /// the way the item itself is, and an item that is no tool call has none.
+    pub async fn item_raw_in(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<orch_api_contract::threads::RawCall, ReadError> {
+        let row = Self::item_row_in(conn, thread, item, continuation, revision).await?;
+        if row.kind != "tool_call" {
+            return Err(ReadError::NotFound);
+        }
+        row.payload
+            .get("raw")
+            .and_then(|raw| serde_json::from_value(raw.clone()).ok())
+            .ok_or(ReadError::NotFound)
+    }
+
+    /// A direct known-item link resolves its actual owner unless a prefix view was explicitly chosen.
+    pub async fn item_view_in(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<Item, ReadError> {
+        let row = Self::item_row_in(conn, thread, item, continuation, revision).await?;
         let people = People::load(conn, [row.author_id, row.pinned_by].into_iter().flatten())
             .await?
             .with_approvals(conn, source_approval(&row))
@@ -2202,7 +2333,7 @@ impl Engine {
         let to = usize::try_from((offset.max(0).saturating_add(limit.max(0))).clamp(0, total))
             .unwrap_or(bytes.len());
         Ok(OutputPage {
-            text: String::from_utf8_lossy(&bytes[from.min(to)..to]).into_owned(),
+            text: output_text(bytes, from.min(to), to)?,
             total_len: total,
         })
     }
@@ -2229,7 +2360,7 @@ impl Engine {
                     hash,
                     Some(ByteRange::Between {
                         start,
-                        end: end - 1,
+                        end: end.saturating_add(3).min(total) - 1,
                     }),
                 )
                 .await
@@ -2237,7 +2368,13 @@ impl Engine {
             let bytes = orch_blob_contract::store::read_all(read.body)
                 .await
                 .map_err(EngineError::unreadable)?;
-            String::from_utf8_lossy(&bytes).into_owned()
+            output_text(
+                &bytes,
+                0,
+                usize::try_from(end - start)
+                    .unwrap_or(bytes.len())
+                    .min(bytes.len()),
+            )?
         } else {
             String::new()
         };
@@ -2255,6 +2392,8 @@ impl Engine {
 /// placed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BindingParts {
+    /// The exact segment selected with these binding rows.
+    pub segment: Id,
     /// The agent profile.
     pub agent: orch_api_contract::resources::AgentRef,
     /// The provider.
@@ -2275,6 +2414,8 @@ pub struct BindingParts {
 /// facts, what it runs on, and how many other threads share its directory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadParts {
+    /// The native row captured with these facts, for callers that need its current associations.
+    pub row: threads::ThreadRow,
     /// What the engine owns of the thread.
     pub facts: ThreadFacts,
     /// What it runs on; none until it is bound.
@@ -2353,60 +2494,138 @@ pub async fn thread_metadata_sources(
     }))
 }
 
-/// The thread's own part of its view, for a reader (`viewer`, whose place
-/// in the thread is told). None where there is no such thread.
+/// The thread's own part of its view, for the current reader.
 pub async fn thread_parts(
     conn: &mut Conn,
     thread: Id,
     viewer: Option<Id>,
     now: Time,
 ) -> Result<Option<ThreadParts>, EngineError> {
-    {
-        let Some(row) = threads::thread(conn, thread).await? else {
-            return Ok(None);
-        };
-        let facts = thread_facts(conn, &row, viewer, now).await?;
-        let settings = crate::resolved::load(conn, thread).await?;
-        let binding = match binding_rows(conn, &row).await? {
-            Some((segment, agent, provider)) => Some(BindingParts {
-                agent: read(agent_ref_json(conn, &agent).await?, "an agent reference")?,
-                provider: read(
-                    provider_ref_json(conn, &provider).await?,
-                    "a provider reference",
-                )?,
-                arrangement: read(
-                    Json::String(row.arrangement.clone().unwrap_or(segment.arrangement)),
-                    "an arrangement type",
-                )?,
-                executor: row.executor.clone().or(segment.executor),
-                tool_set: row.tool_set.clone().or(segment.tool_set),
-                credential_path: read(Json::String(segment.credential_path), "a credential path")?,
-                // An invalid persisted profile disables its descriptor-derived
-                // controls; it must not hide authoritative turn/state progress.
-                // Execution admission continues to reject that profile strictly.
-                descriptor: match crate::harnesses::descriptor_of(&agent) {
-                    Ok(descriptor) => descriptor,
-                    Err(_) => {
-                        tracing::warn!(agent = %agent.id, "an invalid profile descriptor was omitted from its thread view");
-                        None
-                    }
-                },
-            }),
-            None => None,
-        };
-        let directory_threads = match row.environment_id {
-            Some(environment) => {
-                threads::threads_in_directory(conn, environment, &row.workspace_dir, thread).await?
-            }
-            None => 0,
-        };
-        Ok(Some(ThreadParts {
-            facts,
-            binding,
-            directory_threads,
-            memory_setting: settings.memory,
-        }))
+    let Some(row) = threads::thread(conn, thread).await? else {
+        return Ok(None);
+    };
+    let settings = crate::resolved::load(conn, thread).await?;
+    Ok(Some(
+        thread_parts_resolved(conn, row, viewer, now, settings, None).await?,
+    ))
+}
+
+/// Full native thread parts for one page. Settings and thread identities share
+/// their source reads; every per-thread fact and call-recovery choice is retained.
+pub async fn thread_parts_many(
+    conn: &mut Conn,
+    ids: &[Id],
+    viewer: Option<Id>,
+    now: Time,
+) -> Result<BTreeMap<Id, ThreadParts>, EngineError> {
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
     }
+    let rows = threads::threads_among(conn, ids).await?;
+    let threads = rows.iter().map(|row| row.node_id).collect::<Vec<_>>();
+    let mut settings = crate::resolved::load_many(conn, &threads).await?;
+    let current = rows
+        .iter()
+        .map(|row| (row.node_id, row.current_turn_id))
+        .collect::<Vec<_>>();
+    let mut credits = orch_db::usage::ledger::status_credits_many(conn, &current).await?;
+    let mut activity = threads::activity_many(conn, &threads, viewer).await?;
+    let mut display = orch_db::queries::source::thread_display_facts(conn, &threads, viewer, now)
+        .await?
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut answers = orch_db::queries::source::last_agent_messages(conn, &threads).await?;
+    let mut result = BTreeMap::new();
+    for row in rows {
+        let resolved = settings
+            .remove(&row.node_id)
+            .ok_or_else(|| EngineError::unreadable("a thread's resolved settings are missing"))?;
+        let credit = credits.remove(&row.node_id).ok_or_else(|| {
+            EngineError::unreadable("a thread's native cost projection is missing")
+        })?;
+        let activity = activity.remove(&row.node_id).ok_or_else(|| {
+            EngineError::unreadable("a thread's native activity projection is missing")
+        })?;
+        let display = display.remove(&row.node_id).ok_or_else(|| {
+            EngineError::unreadable("a thread's native display facts are missing")
+        })?;
+        let answer = answers.remove(&row.node_id).ok_or_else(|| {
+            EngineError::unreadable("a thread's completed-message source is missing")
+        })?;
+        result.insert(
+            row.node_id,
+            thread_parts_resolved(
+                conn,
+                row,
+                viewer,
+                now,
+                resolved,
+                Some(CapturedThreadFacts {
+                    credits: credit,
+                    activity,
+                    display,
+                    answer,
+                }),
+            )
+            .await?,
+        );
+    }
+    Ok(result)
+}
+
+async fn thread_parts_resolved(
+    conn: &mut Conn,
+    row: threads::ThreadRow,
+    viewer: Option<Id>,
+    now: Time,
+    settings: crate::resolved::Resolved,
+    captured: Option<CapturedThreadFacts>,
+) -> Result<ThreadParts, EngineError> {
+    let memory_setting = settings.memory;
+    let facts = thread_facts_resolved(conn, &row, viewer, now, settings, captured).await?;
+    let binding = match binding_rows(conn, &row).await? {
+        Some((segment, agent, provider)) => Some(BindingParts {
+            segment: segment.id,
+            agent: read(agent_ref_json(conn, &agent).await?, "an agent reference")?,
+            provider: read(
+                provider_ref_json(conn, &provider).await?,
+                "a provider reference",
+            )?,
+            arrangement: read(
+                Json::String(row.arrangement.clone().unwrap_or(segment.arrangement)),
+                "an arrangement type",
+            )?,
+            executor: row.executor.clone().or(segment.executor),
+            tool_set: row.tool_set.clone().or(segment.tool_set),
+            credential_path: read(Json::String(segment.credential_path), "a credential path")?,
+            // An invalid persisted profile disables its descriptor-derived
+            // controls; it must not hide authoritative turn/state progress.
+            // Execution admission continues to reject that profile strictly.
+            descriptor: match crate::harnesses::descriptor_of(&agent) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    tracing::warn!(agent = %agent.id, "an invalid profile descriptor was omitted from its thread view");
+                    None
+                }
+            },
+        }),
+        None => None,
+    };
+    let directory_threads = match row.environment_id {
+        Some(environment) => {
+            threads::threads_in_directory(conn, environment, &row.workspace_dir, row.node_id)
+                .await?
+        }
+        None => 0,
+    };
+    Ok(ThreadParts {
+        row,
+        facts,
+        binding,
+        directory_threads,
+        memory_setting,
+    })
 }
 
 #[cfg(test)]
@@ -2453,10 +2672,11 @@ mod tests {
             Some("hello")
         );
         assert_eq!(search_text("marker", &json!({})), None);
-        let long = json!({ "text": "x".repeat(SEARCH_TEXT_MAX_CHARS + 5) });
+        // Extraction keeps the source whole; the masked writer applies the effective allowance.
+        let long = json!({ "text": "x".repeat(20_005) });
         assert_eq!(
             search_text("agent_message", &long).map(|text| text.chars().count()),
-            Some(SEARCH_TEXT_MAX_CHARS)
+            Some(20_005)
         );
     }
 }
