@@ -157,6 +157,7 @@ async fn session_upload(room: &Room, by: &Who, bytes: &[u8]) -> UploadedBlob {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: "source.txt".into(),
             media_type: None,
@@ -181,6 +182,8 @@ async fn session_upload(room: &Room, by: &Who, bytes: &[u8]) -> UploadedBlob {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
 }
 
 fn same_refusal(known: &Problem, missing: &Problem) {

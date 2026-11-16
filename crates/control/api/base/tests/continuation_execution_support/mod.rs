@@ -59,6 +59,7 @@ pub fn install(
         }
         Ok(CommandResult::AgentStart(
             orch_link_contract::commands::AgentStartResult {
+                home: None,
                 reused: true,
                 harness_version: "1.0.0".into(),
                 descriptor: descriptor.clone(),

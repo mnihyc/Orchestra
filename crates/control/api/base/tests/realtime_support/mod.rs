@@ -36,6 +36,7 @@ use orch_api_core::backplane::Link;
 
 use orch_api_core::middleware::authentication::ACCESS_TOKEN_PREFIX;
 
+use orch_api_core::middleware::authentication::new_api_token;
 use orch_api_core::middleware::authentication::new_token;
 
 use orch_api_core::middleware::authentication::token_hash;
@@ -397,7 +398,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -1452,6 +1453,7 @@ impl Rig {
                 lock(&seen).push(command.clone());
                 Ok(match command {
                     Command::AgentStart(_) => CommandResult::AgentStart(AgentStartResult {
+                        home: None,
                         reused: false,
                         harness_version: "1.0.0".to_owned(),
                         descriptor: serde_json::from_value(descriptor()).unwrap(),
@@ -1619,10 +1621,15 @@ impl Rig {
     /// An API token of a person, which is no key to the socket.
     pub async fn api_token(&self, user: Id) -> String {
         let mut conn = self.pool.acquire().await.unwrap();
-        let token = new_token(orch_api_core::middleware::authentication::API_TOKEN_PREFIX);
-        orch_db::queries::identity::testing::insert_api_token(&mut conn, user, &token_hash(&token))
-            .await
-            .unwrap();
+        let token = new_api_token(orch_types::new_id());
+        orch_db::queries::identity::testing::insert_api_token(
+            &mut conn,
+            orch_api_contract::api_keys::key_id(&token).unwrap(),
+            user,
+            &token_hash(&token),
+        )
+        .await
+        .unwrap();
         token
     }
 

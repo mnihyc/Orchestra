@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
 
-import type { Job, UploadedBlob } from '@/generated/api-types';
+import type { Job, UploadedBlob, UploadDestination } from '@/generated/api-types';
 import { UploadTask } from '@/lib/uploads';
 import { useViewWork } from '@/features/workbench/viewOpening';
 
@@ -11,7 +11,7 @@ export interface QueuedUpload {
   id: string;
   file: File;
   received: number;
-  phase: 'waiting' | 'uploading' | 'writing' | 'stopping' | 'failed';
+  phase: 'waiting' | 'uploading' | 'verifying' | 'writing' | 'stopping' | 'failed';
   work?: Job;
   error?: unknown;
   uploadId?: string | null;
@@ -49,7 +49,8 @@ export function useUploads<T>(source: string, attach: (blob: UploadedBlob, signa
     const abort = job.abort;
     change((rows) => rows.map((row) => row.id === id ? { ...row, phase: 'uploading', error: undefined } : row));
     try {
-      const blob = await job.task.run(abort.signal, (received) => change((rows) => rows.map((row) => row.id === id ? { ...row, received, uploadId: job.task.uploadId } : row)));
+      const blob = await job.task.run(abort.signal, (received) => change((rows) => rows.map((row) => row.id === id ? { ...row, received, uploadId: job.task.uploadId } : row)),
+        (phase) => change((rows) => rows.map((row) => row.id === id ? { ...row, phase } : row)));
       if (client.session.getState().readerVersion !== reader) return;
       const part = await job.attach(blob, abort.signal, (work) => {
         if (work.stop !== undefined) job.stop = work.stop;
@@ -76,12 +77,12 @@ export function useUploads<T>(source: string, attach: (blob: UploadedBlob, signa
     if (queued !== undefined) void run(queued[0]);
   }, [run]);
   useEffect(() => { next.current = startNext; }, [startNext]);
-  const add = useCallback((files: Iterable<File>, publishOne?: (part: T) => void, attachOne?: (blob: UploadedBlob, signal: AbortSignal, file: File, report: (work: UploadWork) => void) => Promise<T>, metadata?: Pick<QueuedUpload, 'kind' | 'characters' | 'replaces'>) => {
+  const add = useCallback((files: Iterable<File>, publishOne?: (part: T) => void, attachOne?: (blob: UploadedBlob, signal: AbortSignal, file: File, report: (work: UploadWork) => void) => Promise<T>, metadata?: Pick<QueuedUpload, 'kind' | 'characters' | 'replaces'>, destination?: (file: File) => UploadDestination) => {
     const ids: string[] = [];
     for (const file of files) {
       const id = crypto.randomUUID();
       ids.push(id);
-      work.current.set(id, { task: new UploadTask(file), abort: new AbortController(), running: false, pending: true, attach: attachOne === undefined ? callbacks.current.attach : (blob, signal, report) => attachOne(blob, signal, file, report), publish: publishOne ?? callbacks.current.publish });
+      work.current.set(id, { task: new UploadTask(file, undefined, destination?.(file)), abort: new AbortController(), running: false, pending: true, attach: attachOne === undefined ? callbacks.current.attach : (blob, signal, report) => attachOne(blob, signal, file, report), publish: publishOne ?? callbacks.current.publish });
       change((rows) => [...rows, { id, file, received: 0, phase: 'waiting', ...metadata }]);
     }
     startNext();

@@ -8,6 +8,10 @@ summary: Connect a machine with the roles, folders and gateway you intend to use
 
 # Connect a machine
 
+Use the API, gateway and connector builds from the same update. An incompatible
+framing version is reported before a session opens. Large model catalogues and
+conversation history transfer automatically in parts.
+
 ## 1. Choose what runs here
 
 Open **Resources → Machines → Add**, then choose its roles. **Environment** uses folders
@@ -181,3 +185,14 @@ the shared program only after the last connector. For a node, remove its environ
 volumes, then the host, in Orch; disable and remove its service before removing its program
 and data. Keep configuration used by other Orch programs. Service removal alone keeps identity
 and data. See [updates](updates.md) for automatic updates and the local update command.
+
+To use a program already signed in on this computer, choose **Use an installed
+sign-in** in Add machine before generating the command. The existing role
+controls show Agent, Provider and Environment, with Agent program control on;
+you can review those choices before running the command. After it connects,
+choose the detected program and its home, then Register. Orch confirms its
+reported path and registers the profile and provider together. It preserves
+the program's existing sign-in. If provider registration fails after the profile
+was added, Try again reuses that profile. The machine's Registered here section
+offers the same flow. The provider page shows any remaining sign-in or model
+selection before you start a thread.

@@ -447,7 +447,7 @@ fn metric_kind(feed: &Feed) -> &'static str {
         | Feed::EnvTerminals(_)
         | Feed::EnvPorts(_)
         | Feed::EnvGit { .. } => "environment",
-        Feed::Resource { .. } => "resource",
+        Feed::Resource { .. } | Feed::ProviderRow(_) => "resource",
         Feed::Usage(_) => "usage",
         Feed::Job(_) | Feed::Fork(_) => "job",
     }
@@ -715,7 +715,9 @@ pub(crate) async fn decide(inner: &Inner, user: Id, feed: &Feed) -> Result<Acces
             }
             None => Ok(Access::NotFound),
         },
-        Feed::Resource { .. } => super::resources::decide(inner, user, feed).await,
+        Feed::Resource { .. } | Feed::ProviderRow(_) => {
+            super::resources::decide(inner, user, feed).await
+        }
         Feed::ThreadRaw(thread) => super::resources::raw_access(inner, user, *thread).await,
         // An environment's own feed is read by whoever may read the environment.
         Feed::Env(id) => super::environments::decide(inner, user, *id).await,
@@ -893,7 +895,8 @@ impl Inner {
                     }
                     // A Resource event replaces its complete recipient view. Its native
                     // projection/fingerprint, rather than an epoch alone, decides delivery.
-                    if !matches!(sub.feed(), Feed::Resource { .. }) && (!st.reload || purged.resync)
+                    if !matches!(sub.feed(), Feed::Resource { .. } | Feed::ProviderRow(_))
+                        && (!st.reload || purged.resync)
                     {
                         let text = ServerFrame::Resync(ResyncFrame {
                             id: sub.tag().id,
@@ -1209,6 +1212,7 @@ async fn inner_opened(
             environment_id: id, ..
         } => ("environment", *id),
         Feed::Resource { kind, id } => (kind.as_str(), *id),
+        Feed::ProviderRow(id) => ("provider", *id),
         Feed::User | Feed::Usage(_) | Feed::Job(_) | Feed::Fork(_) | Feed::DocumentTree(_) => {
             return Ok(());
         }

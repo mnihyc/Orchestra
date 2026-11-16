@@ -113,6 +113,14 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsUnwatch,
     CommandKind::FsStat,
     CommandKind::FsFetch,
+    CommandKind::FsRelayDescribe,
+    CommandKind::FsRelaySend,
+    CommandKind::FsRelayArchiveRead,
+    CommandKind::FsRelayReceive,
+    CommandKind::FsRelayVerify,
+    CommandKind::FsRelayPrepare,
+    CommandKind::FsRelayCommit,
+    CommandKind::FsRelayAbort,
     CommandKind::FsWrite,
     CommandKind::FsMkdir,
     CommandKind::FsRename,
@@ -335,8 +343,6 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
     let tunables = &services.config.envhost;
     settings.limits.rescan = Duration::from_secs(tunables.rescan_secs);
     settings.limits.manifest_interval = Duration::from_secs(tunables.manifest_interval_secs);
-    settings.limits.index_max_entries = tunables.index_max_entries;
-    settings.limits.index_scan_max = std::time::Duration::from_secs(tunables.index_scan_max_secs);
     settings.mcp_restarts = tunables.mcp_restarts;
     settings.mcp_restart_window = Duration::from_secs(tunables.mcp_restart_window_secs);
     if let Some(scope) = parts.process_scope {
@@ -1121,6 +1127,53 @@ impl EnvironmentRole {
             Command::FsFetch(body) => {
                 CommandResult::FsFetch(self.host.fs_fetch(&body, &blobs).await?)
             }
+            Command::FsRelayDescribe(body) => {
+                CommandResult::FsRelayDescribe(self.host.fs_relay_describe(&body).await?)
+            }
+            Command::FsRelaySend(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                self.host.fs_relay_send(&body, &relay).await?;
+                CommandResult::FsRelaySend(Empty {})
+            }
+            Command::FsRelayArchiveRead(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayArchiveRead(
+                    self.host.fs_relay_archive_read(&body, &relay).await?,
+                )
+            }
+            Command::FsRelayReceive(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayReceive(self.host.fs_relay_receive(&body, &relay).await?)
+            }
+            Command::FsRelayVerify(body) => {
+                CommandResult::FsRelayVerify(self.host.fs_relay_verify(&body).await?)
+            }
+            Command::FsRelayPrepare(body) => {
+                self.host.fs_relay_prepare(&body).await?;
+                CommandResult::FsRelayPrepare(Empty {})
+            }
+            Command::FsRelayCommit(body) => {
+                CommandResult::FsRelayCommit(self.host.fs_relay_commit(&body).await?)
+            }
+            Command::FsRelayAbort(body) => {
+                self.host.fs_relay_abort(&body).await?;
+                CommandResult::FsRelayAbort(Empty {})
+            }
             Command::FsWrite(body) => {
                 if let Some(work) = &body.work {
                     let (progress, task) =
@@ -1424,12 +1477,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;
@@ -1478,7 +1534,15 @@ impl RoleHandler for EnvironmentRole {
     }
 
     async fn handle(&self, call: Call, command: Command) -> Result<CommandResult, CommandError> {
-        orch_envhost::error::with_cancellation(call.context.cancel.clone(), async {
+        let relayed = matches!(
+            &command,
+            Command::FsRelayReceive(_) | Command::FsRelaySend(_) | Command::FsRelayArchiveRead(_)
+        );
+        let cancel = call.context.cancel.clone();
+        let allowance =
+            u64::try_from((call.context.deadline.get() - self.services.clock.now()).num_seconds())
+                .unwrap_or(1);
+        let operation = orch_envhost::error::with_cancellation(cancel.clone(), async {
             if crate::reconciliation::environments::Desired::retains(&command) {
                 let _action = self.lifecycle.lock().await;
                 let command = self.services.policy.gate(command)?.command;
@@ -1486,14 +1550,25 @@ impl RoleHandler for EnvironmentRole {
             } else {
                 self.carry_out(call.context.id, command).await
             }
-        })
-        .await
+        });
+        if relayed {
+            crate::content::stoppable(&cancel, allowance, operation).await
+        } else {
+            operation.await
+        }
     }
 
     fn contribute(&self, facts: &mut FactsDraft) {
         if let Some(policy) = self.services.policy.policy() {
             if facts.build_fetch.is_none() {
-                facts.build_fetch=Some(orch_driver_contract::descriptor::OperationSupport {supported:false,reason:Some("this machine uses installed harnesses; downloading requested builds is not available".into())});
+                facts.build_fetch = Some(orch_driver_contract::descriptor::OperationSupport {
+                    supported: self.services.build_cache.is_some(),
+                    reason: self
+                        .services
+                        .build_cache
+                        .is_none()
+                        .then(|| "this connector cannot fetch named harness builds".into()),
+                });
             }
             facts.environment_data_storage = Some(orch_driver_contract::descriptor::EnvironmentDataStorage {
                 made_by_orch: (orch_envhost::RUNTIME_VERIFIED && !crate::storages::facts(&self.services.config,&policy).is_empty()).then_some(orch_driver_contract::descriptor::MadeDataKind::Directory),
@@ -1625,7 +1700,9 @@ async fn publish_reports(
             HostReport::BrowserState(state) => Some(Event::BrowserState(state)),
             HostReport::DisplayState(state) => Some(Event::DisplayState(state)),
             HostReport::Facts(facts) => Some(Event::EnvFacts(*facts)),
-            HostReport::Manifest(manifest) => Some(Event::EnvManifest(manifest)),
+            HostReport::Manifest(manifest) | HostReport::ManifestTransfer(manifest) => {
+                Some(Event::EnvManifest(manifest))
+            }
             HostReport::PtyExited(ended) => Some(Event::PtyExited(ended)),
             HostReport::FsChanged(changed) => {
                 link.report(&stream, at, &LinkReport::FsChanged(changed));

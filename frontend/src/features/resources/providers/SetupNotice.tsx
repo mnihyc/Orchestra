@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import type { Provider } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { useNow } from '@/lib/time';
+import { useErrorText } from '@/ui/errorText';
+import { modelsSource } from './details';
 import { Button } from '@/ui/Button';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { PROVIDER_NEXT, providerState } from './state';
@@ -15,13 +17,18 @@ export function ProviderSetupNotice({ provider, manage, onTab, currentTab }: {
   currentTab?:ProviderTab;
 }) {
   const { t } = useTranslation();
+  const describe = useErrorText();
   const format = useFormatContext();
   const state = providerState(provider, t, format, useNow());
   if (state.next === null || !manage && provider.status !== 'needs_setup') return null;
   const step = PROVIDER_NEXT[state.next];
+  const failure = state.next === 'models' ? modelsSource(provider).last_error : null;
+  const detail = failure === null ? state.detail : failure.code === 'too_large'
+    ? t('providerSources.modelListingTooLarge')
+    : t('providerSources.modelListingFailed', { reason: describe(failure).message });
   if(manage && (currentTab===step.tab || currentTab==='settings' && step.tab==='runtime'))return null;
   return <InlineAlert tone="warning" title={state.text}
     action={manage ? <Button size="sm" icon={<PlugZap aria-hidden />} onClick={() => onTab(step.tab)}>{t(step.label)}</Button> : undefined}>
-    {state.detail}
+    {detail}
   </InlineAlert>;
 }

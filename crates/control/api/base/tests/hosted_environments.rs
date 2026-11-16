@@ -1187,7 +1187,7 @@ async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_r
     let making = make(&world, &t, &t.c.admin, "Committed before response");
     let inspect = async {
         rig::eventually("the response's blocked component update read", || async {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates%')")
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id%FROM component_updates%')")
                 .fetch_one(&world.db.pool).await.unwrap()
         }).await;
         let committed: (Id, Id) = sqlx::query_as(
@@ -1612,6 +1612,24 @@ async fn the_places_of_a_topic_are_the_hosts_the_caller_may_use_with_why_one_can
     assert_eq!(hosts[0].owner.as_ref().unwrap().username, "admin");
     assert_eq!(hosts[0].host.address, "acme.admin.Build box");
     assert_eq!(hosts[0].capacity.memory_mb, 16_384);
+    let captured = hosts[0]
+        .calculation
+        .as_ref()
+        .expect("the scheduler supplies its calculation");
+    assert_eq!(captured.capacities.memory_mb, 16_384);
+    assert!(
+        captured.capacities_as_of.is_none(),
+        "fixture declarations carry no report date"
+    );
+    let mut old = serde_json::to_value(hosts[0]).unwrap();
+    old.as_object_mut().unwrap().remove("calculation");
+    assert!(
+        serde_json::from_value::<orch_api_contract::environment::PlaceHost>(old)
+            .unwrap()
+            .calculation
+            .is_none()
+    );
+
     assert!(!hosts[1].usable && !hosts[1].automatic);
     assert_eq!(hosts[1].reasons, [HostReason::Unschedulable]);
     let environments: Vec<_> = listed
@@ -2043,11 +2061,37 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "another".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
         .problem();
     assert_eq!(wrong.code, ErrorCode::RequestInvalid);
+    // By force is for a provider's unit: for an environment's it is refused with its reason, and changes nothing.
+    let forced = world
+        .app
+        .call(HostRuntimeDelete, &[&t.host, &runtime])
+        .token(&t.c.admin.token)
+        .query(&HostRuntimeDeleteQuery {
+            confirm: "orch-environment-0123456789ab".to_owned(),
+            volumes: None,
+            force: Some(true),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(forced.code, ErrorCode::PlanBlocked);
+    assert_eq!(
+        forced
+            .extra
+            .get("reason")
+            .and_then(|reason| reason.as_str()),
+        Some("force_environment")
+    );
+    assert_eq!(
+        forced.extra.get("can_force"),
+        Some(&serde_json::Value::Bool(false))
+    );
     world
         .app
         .call(HostRuntimeDelete, &[&t.host, &runtime])
@@ -2055,6 +2099,7 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "orch-environment-0123456789ab".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
@@ -2145,4 +2190,59 @@ async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_
         ErrorCode::EnvironmentNoneUsable,
         "{implicit:?}"
     );
+}
+
+#[tokio::test]
+async fn choosing_another_template_checks_the_agent_and_host_that_will_actually_start() {
+    use orch_api_contract::binding::NodeBindingOptionsGet;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let alternate = a_template(&world, &t.c.admin, t.c.acme, "Agent ready").await;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{exec,offers}','[]') WHERE id=$1")
+        .bind(t.template)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_types::new_id()),
+        )
+        .await;
+    for (template, host, automatic, ready) in [
+        (t.template, Some(t.host), false, false),
+        (alternate, Some(t.host), false, true),
+        (alternate, Some(orch_types::new_id()), false, false),
+        (alternate, None, false, false),
+        (alternate, None, true, true),
+    ] {
+        let mut query =
+            json!({ "environment_new": true, "template_id": template, "host_auto": automatic });
+        if let Some(host) = host {
+            query["host_id"] = json!(host);
+        }
+        let offered = world
+            .app
+            .call(NodeBindingOptionsGet, &[&t.topic])
+            .token(&t.c.admin.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        let agent = offered
+            .providers
+            .iter()
+            .find(|row| row.provider.id == binding.provider_id)
+            .unwrap()
+            .agents
+            .iter()
+            .find(|row| row.agent.id == binding.agent_id)
+            .unwrap();
+        assert_eq!(
+            agent.usable, ready,
+            "the exact chosen template and host decide readiness"
+        );
+    }
 }

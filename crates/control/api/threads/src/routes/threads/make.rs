@@ -152,6 +152,7 @@ pub(super) async fn binding_of(
         .provider_use(
             conn,
             &ProviderUse {
+                purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                 person,
                 node: topic,
                 provider,
@@ -846,15 +847,21 @@ async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Threa
             .await;
         if matches!(&created, Err(CreateThreadError::AgentNotReported)) && !discovered {
             discovered = true;
-            if matches!(
-                ctx.app
-                    .engine
-                    .learn_descriptor(new.agent, new.provider, Some(new.environment))
-                    .await
-                    .map_err(ApiError::engine)?,
-                Learning::Known
-            ) {
-                continue;
+            match ctx
+                .app
+                .engine
+                .learn_descriptor(new.agent, new.provider, Some(new.environment))
+                .await
+                .map_err(ApiError::engine)?
+            {
+                Learning::Known => continue,
+                Learning::Unknown(orch_engine::provider_setup::Unlearned::Policy(key)) => {
+                    return Err(super::harness_start_failed(Some(&key)));
+                }
+                Learning::Unknown(orch_engine::provider_setup::Unlearned::Failed(_)) => {
+                    return Err(super::harness_start_failed(None));
+                }
+                Learning::Unknown(_) => {}
             }
         }
         break created;
