@@ -1123,10 +1123,37 @@ async fn restart_is_one_manager_job_on_the_existing_unit_and_rejects_an_overlap_
         .send()
         .await;
     assert_eq!(malformed.status, 400);
+    let key_id = orch_types::new_id();
+    let key = orch_api_core::middleware::authentication::new_token(
+        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
+    );
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"environment","id":made.base.id,"reach":"self"},
+            "allow":[{"operation":"EnvironmentRestart","actions":["manage"]}]
+        }]}))
+        .unwrap();
+    assert!(policy.validate().is_empty());
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut *world.conn().await,
+        &orch_db::queries::identity::NewApiToken {
+            id: key_id,
+            user_id: t.c.admin.id(),
+            name: "Only this restart",
+            token_hash: &orch_api_core::middleware::authentication::token_hash(&key),
+            scopes: &[],
+            node_id: None,
+            at: world.now(),
+            expires_at: None,
+        },
+        Some(&json!(policy)),
+    )
+    .await
+    .unwrap();
     let reply = world
         .app
         .call(EnvironmentRestart, &[&made.base.id])
-        .token(&t.c.admin.token)
+        .token(&key)
         .body(&EnvironmentRestartBody {
             mode: EnvironmentRestartMode::Wait,
         })
@@ -1142,6 +1169,19 @@ async fn restart_is_one_manager_job_on_the_existing_unit_and_rejects_an_overlap_
     assert_eq!(row.plan["runtime"], json!(runtime));
     assert_eq!(row.plan["restart_mode"], "wait");
     assert_eq!(row.created_by, Some(t.c.admin.id()));
+    assert!(
+        orch_engine::jobs::lifecycle_commands::environment::present(&row),
+        "the deferred restart must retain its own operation instead of a caller-only fallback"
+    );
+    let retained: orch_engine::operation_scope::http_origin::HttpOrigin =
+        serde_json::from_value(row.plan["environment_lifecycle"]["accepted"].clone()).unwrap();
+    assert_eq!(retained.origin().operation(), "EnvironmentRestart");
+    assert_eq!(retained.origin().user(), t.c.admin.id());
+    assert!(
+        matches!(retained.credential(),
+        orch_engine::operation_scope::request_origin::Credential::Token { id, .. } if *id == key_id),
+        "the actual original key must survive into later native phases"
+    );
     let overlap = world
         .app
         .call(EnvironmentRestart, &[&made.base.id])

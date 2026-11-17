@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 const FIELD: &str = "creator_provision";
 const COMMANDS: &str = "creator_provision_commands";
 const VERSION: &str = "creator_provision_version";
+fn creator_present(row: &JobRow) -> bool {
+    [FIELD, VERSION, COMMANDS]
+        .iter()
+        .any(|field| row.plan.get(*field).is_some())
+}
 pub fn is_retained(row: &JobRow) -> bool {
-    crate::jobs::lifecycle_commands::environment::present(row)
-        || row.plan.get(FIELD).is_some()
-        || row.plan.get(VERSION).is_some()
-        || row.plan.get(COMMANDS).is_some()
+    crate::jobs::lifecycle_commands::environment::present(row) || creator_present(row)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -133,7 +135,7 @@ fn read(row: &JobRow) -> Result<Option<Authority>, EngineError> {
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| closed())?;
-    if authority.is_none() && is_retained(row) {
+    if authority.is_none() && creator_present(row) {
         return Err(closed());
     }
     if let Some(authority) = &authority {

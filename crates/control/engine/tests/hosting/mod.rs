@@ -162,6 +162,57 @@ pub struct Call {
 type Refusals = Mutex<HashMap<CommandKind, VecDeque<CommandError>>>;
 type OrderedCalls = Arc<Mutex<Vec<(Id, Command)>>>;
 
+/// One dedicated test unit's created source and actual incoming Start headers.
+pub type CanonicalStarts =
+    Arc<Mutex<Vec<(Id, Option<orch_link_contract::native_target::NativeTarget>)>>>;
+
+/// This opt-in native producer owns one stable created unit and returns each admitted
+/// new Start opening. Other stateless hosts retain their explicit untracked results.
+pub fn canonical_creation_replies(host: &ScriptedHost) -> (Id, CanonicalStarts) {
+    use orch_link_contract::native_target::{NativeTarget, RuntimeSource};
+    let created = new_id();
+    host.added
+        .machine
+        .handler
+        .on(CommandKind::NodeRuntimeCreate, move |command| {
+            let Command::NodeRuntimeCreate(request) = command else {
+                unreachable!()
+            };
+            Ok(CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+                source: RuntimeSource {
+                    incarnation: Some(created),
+                },
+                unit: orch_driver_contract::units::UnitRef {
+                    reference: "canonical-created-unit".into(),
+                    name: request.0.name.clone(),
+                    runtime_id: request.0.runtime_id,
+                    kind: request.0.kind,
+                },
+            }))
+        });
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let capture = starts.clone();
+    host.added
+        .machine
+        .handler
+        .on_with_context(CommandKind::NodeRuntimeStart, move |context, _| {
+            lock(&capture).push((context.id, context.native_target.clone()));
+            let source = match &context.native_target {
+                Some(NativeTarget::Lifecycle(target)) => RuntimeSource {
+                    incarnation: target.opening,
+                },
+                _ => RuntimeSource::untracked(),
+            };
+            Ok(CommandResult::NodeRuntimeStart(
+                orch_link_contract::commands::NodeRuntimeStartResult {
+                    source,
+                    reused: false,
+                },
+            ))
+        });
+    (created, starts)
+}
+
 /// A host with a node that answers, and the rows that make it a place.
 pub struct ScriptedHost {
     /// The host.
@@ -327,6 +378,7 @@ impl ScriptedHost {
                     ),
                     Command::NodeRuntimeCreate(request) => {
                         CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+                            source: orch_link_contract::native_target::RuntimeSource::untracked(),
                             unit: orch_driver_contract::units::UnitRef {
                                 reference: "unit".to_owned(),
                                 name: request.0.name.clone(),
@@ -335,7 +387,7 @@ impl ScriptedHost {
                             },
                         })
                     }
-                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(Empty {}),
+                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(orch_link_contract::commands::NodeRuntimeStartResult {source:orch_link_contract::native_target::RuntimeSource::untracked(),reused:false}),
                     Command::NodeRuntimeStop(_) => CommandResult::NodeRuntimeStop(Empty {}),
                     Command::NodeRuntimeRemove(_) => CommandResult::NodeRuntimeRemove(Empty {}),
                     Command::NodeResourcesApply(_)=>CommandResult::NodeResourcesApply(Empty {}),
@@ -466,6 +518,7 @@ impl ScriptedHost {
             .publish(
                 &Stream::Node,
                 &Event::NodeRuntime(NodeRuntime {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
                     runtime_id: runtime,
                     state: state.to_owned(),
                     detail: detail.map(str::to_owned),
