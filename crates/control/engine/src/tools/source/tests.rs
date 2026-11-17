@@ -1029,9 +1029,19 @@ impl Scene {
     ) {
         // No prepare/open helper: this is the exact already-admitted recorded native stream,
         // including when its turn is terminal and another continuation now runs.
+        let opening = orch_testkit::doubles::sessions::first_turn_opening(
+            world.pool.pool(),
+            source.thread_id,
+            source.segment_id,
+            turn,
+        )
+        .await
+        .expect("the original admitted turn command is readable")
+        .expect("this producer has an actual physical opening");
         world
             .machine
-            .publish(
+            .publish_from(
+                Some(opening),
                 &Stream::Session {
                     thread_id: source.thread_id,
                     segment_id: source.segment_id,
@@ -1459,10 +1469,19 @@ async fn fresh_old_native_calls_refuse_while_completed_answers_replay_and_the_cu
         total_tokens: 999,
         ..Default::default()
     };
+    let original_opening = orch_testkit::doubles::sessions::first_turn_opening(
+        scene.world.pool.pool(),
+        scene.thread,
+        scene.source.segment_id,
+        scene.start.turn_id,
+    )
+    .await?
+    .ok_or("the original report producer is absent")?;
     scene
         .world
         .machine
-        .publish(
+        .publish_from(
+            Some(original_opening),
             &Stream::Session {
                 thread_id: scene.thread,
                 segment_id: scene.source.segment_id,
@@ -1602,24 +1621,20 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
             )
             .await
     );
-    // The common controller supplier retains commands in its owned journal, not SQL.
-    // Reconstruct only the production dispatcher's storage half from that actual issued
-    // command, preserving every field; no synthetic answer or successful effect is invented.
+    // The production-shaped supplier already retained this exact issued answer before its owner was lost.
     let mut conn = scene.world.pool.acquire().await?;
-    assert!(
-        link::insert_command(
-            &mut conn,
-            &link::NewCommand {
-                id: command.id,
-                machine_id: machine,
-                kind: &command.kind,
-                body: &command.body,
-                serial_key: command.key.as_deref(),
-                deadline_at: command.deadline.get()
-            },
-            scene.world.clock.now()
-        )
+    let saved = link::command(&mut conn, command.id)
         .await?
+        .ok_or("the canonical issued answer was not retained")?;
+    assert_eq!(saved.machine_id, machine);
+    assert_eq!(saved.kind, command.kind);
+    assert_eq!(saved.body, command.body);
+    assert_eq!(saved.serial_key(), command.key.as_deref());
+    assert_eq!(saved.deadline_at, command.deadline.get());
+    assert_eq!(
+        orch_db::queries::session_dependencies::command_native_target(&mut conn, command.id)
+            .await?,
+        command.native_target
     );
     drop(conn);
     let before = scene.snapshot().await?;

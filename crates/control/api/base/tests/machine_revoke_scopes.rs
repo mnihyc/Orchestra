@@ -70,6 +70,7 @@ async fn command(world: &World, machine: Id, state: &str) -> Id {
     link::insert_command(
         &mut conn,
         &NewCommand {
+            native_target: None,
             id,
             machine_id: machine,
             kind: "machine.probe",
