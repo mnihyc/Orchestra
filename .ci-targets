@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-node-core --lib
+test -p orch-node-core --test runtimes --test reconciliation --test resource_inventory
