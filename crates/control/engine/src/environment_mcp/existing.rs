@@ -495,7 +495,7 @@ impl<K: Kind> Source for Stored<K> {
                 .fetch_optional(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.machine)
                 .fetch_optional(&mut *conn)
                 .await

@@ -247,7 +247,7 @@ impl Engine {
             model: None,
             range,
         };
-        let source = json!({"target":target,"range":selected.material.range,"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint});
+        let source = json!({"target":target,"range":selected.pinned_range(),"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint});
         let accepted = rows::enqueue(
             &mut tx,
             cache.id,

@@ -373,6 +373,7 @@ impl Workspace {
                 assert_eq!(body.environment_id, environment);
                 if let Some((size, hash, bytes)) = stat_table.get(&body.path) {
                     return Ok(CommandResult::FsStat(FileStat {
+                        facts: None,
                         entry: entry_of(&body.path, DirEntryKind::File, *size, now),
                         hash: Some(*hash),
                         media_type: orch_documents::files::media_type_of(&body.path, None),
@@ -381,6 +382,7 @@ impl Workspace {
                 }
                 if body.path == "web" || stat_listing.contains_key(&body.path) {
                     return Ok(CommandResult::FsStat(FileStat {
+                        facts: None,
                         entry: entry_of(&body.path, DirEntryKind::Dir, 0, now),
                         hash: None,
                         media_type: "inode/directory".to_owned(),
@@ -415,6 +417,7 @@ impl Workspace {
                 };
                 match listing.get(&body.path) {
                     Some(entries) => Ok(CommandResult::FsList(FsListResult {
+                        facts: None,
                         entries: entries.clone(),
                         truncated: false,
                         watch_instance: None,
