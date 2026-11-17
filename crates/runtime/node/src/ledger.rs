@@ -70,6 +70,8 @@ pub struct Record {
     pub driver: String,
     /// The unit, as the driver named it.
     pub unit: UnitRef,
+    /// The native unit/start this record actually owns; unrecorded inventory invents no identity.
+    pub incarnation: Incarnation,
     /// The names of the volumes its unit stands on. Two units on one volume never run at once.
     pub volumes: Vec<String>,
     /// The hash of the enrollment token its unit was given. The token itself is never kept.
@@ -87,6 +89,28 @@ pub struct Record {
     /// How long its connector has to enroll, in seconds, where its runtime needs another time than the node's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enroll_timeout_secs: Option<u64>,
+}
+
+/// Persistent native identity, separate from runtime UUID, process numbers and times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum Incarnation {
+    Tracked(Id),
+    Untracked,
+}
+impl Incarnation {
+    #[must_use]
+    pub const fn id(self) -> Option<Id> {
+        match self {
+            Self::Tracked(id) => Some(id),
+            Self::Untracked => None,
+        }
+    }
 }
 
 /// What the node noted when it last made an image available.
@@ -712,6 +736,7 @@ mod tests {
         let id = new_id();
         Record {
             runtime_id: id,
+            incarnation: Incarnation::Tracked(new_id()),
             kind: RuntimeKind::Environment,
             driver: "memory".to_owned(),
             unit: UnitRef {
