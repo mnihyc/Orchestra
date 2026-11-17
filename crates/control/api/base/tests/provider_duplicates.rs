@@ -833,7 +833,7 @@ async fn a_provider_move_requires_the_actual_owner_and_a_current_native_delete_c
         .await;
     ok(&preview)?;
     let plan: MoveOutDeletePlan = serde_json::from_slice(&preview.raw)?;
-    sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
+    sqlx::query("UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1")
         .bind(s.source)
         .execute(&s.world.db.pool)
         .await?;
