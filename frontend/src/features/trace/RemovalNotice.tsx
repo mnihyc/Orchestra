@@ -1,4 +1,5 @@
 /** The resolved retention window before scheduling, and the frozen facts afterwards, with unknown size shown honestly. */
+import { PathLink } from '@/shell/TrailLink';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
@@ -29,5 +30,5 @@ export function RemovalNotice({ environment }: { environment: Environment }) {
   const locked = row?.locked_by?.node;
   if (lifecycle === 'attach') return <p className="text-base text-text-muted">{t('trace.removalConnected')}</p>;
   if (lifecycle === null) return <p className="text-base text-text-muted">{t('trace.removalKindUnknown')}</p>;
-  return <div className="flex flex-col gap-2"><p className="text-base text-text-muted">{t(days === 0 ? 'trace.removalUnitZero' : 'trace.removalUnit')}</p>{days !== 0 && <p className="text-sm text-text-muted">{day === null ? t('trace.removalUnknown') : t('trace.removalKept', { day, size })}</p>}{days !== 0 && day !== null && <p className="text-sm text-text-muted">{t('trace.removalEstimate')}</p>}<p className="text-sm text-text-muted">{t('trace.removalIncludes')}</p>{locked !== undefined && locked !== null && <a href={objectHref(locked.kind, locked.id) ?? undefined} className="text-sm text-accent-text underline">{t('trace.lockedBy', { place: locked.name ?? t('trace.unknown') })}</a>}{policy.isError && <ErrorState compact error={policy.error} onRetry={() => void policy.refetch()} />}</div>;
+  return <div className="flex flex-col gap-2"><p className="text-base text-text-muted">{t(days === 0 ? 'trace.removalUnitZero' : 'trace.removalUnit')}</p>{days !== 0 && <p className="text-sm text-text-muted">{day === null ? t('trace.removalUnknown') : t('trace.removalKept', { day, size })}</p>}{days !== 0 && day !== null && <p className="text-sm text-text-muted">{t('trace.removalEstimate')}</p>}<p className="text-sm text-text-muted">{t('trace.removalIncludes')}</p>{locked !== undefined && locked !== null && <PathLink href={objectHref(locked.kind, locked.id) ?? undefined} className="text-sm text-accent-text underline">{t('trace.lockedBy', { place: locked.name ?? t('trace.unknown') })}</PathLink>}{policy.isError && <ErrorState compact error={policy.error} onRetry={() => void policy.refetch()} />}</div>;
 }

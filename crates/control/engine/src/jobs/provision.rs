@@ -433,6 +433,10 @@ impl Provision {
     }
 
     async fn placed(&self, job: &Job) -> Result<Placed, Stop> {
+        self.placed_for(job, false).await
+    }
+
+    async fn placed_for(&self, job: &Job, creating: bool) -> Result<Placed, Stop> {
         let plan = job.plan().await?;
         let mut conn = self
             .engine
@@ -460,6 +464,15 @@ impl Provision {
         let host = host_rows::host(&mut conn, runtime.host_id)
             .await?
             .ok_or_else(|| failed("no_host", "the host the unit is on is gone"))?;
+        super::runtime_commands::placement(
+            &mut conn,
+            job.id(),
+            runtime.id,
+            runtime.host_id,
+            host.machine_id,
+            creating,
+        )
+        .await?;
         if host.disabled || environment.status == "disabled" {
             return Err(failed(
                 "environment_unavailable",
@@ -684,6 +697,7 @@ impl Provision {
                 now,
             )
             .await?;
+        super::runtime_commands::capture(&mut tx, job.id(), runtime_id).await?;
         if let Some(recovery) = plan.get("recovery") {
             let mut volumes = recovery["volumes"].clone();
             volumes["state"] = json!({"name":format!("orch-state-{}-{}",environment.id,runtime_id.simple()),"storage":null});
@@ -1074,7 +1088,7 @@ impl Provision {
     // ------------------------------------------------------------ create, start
 
     async fn create(&self, job: &Job) -> Result<Done, Stop> {
-        let placed = self.placed(job).await?;
+        let placed = self.placed_for(job, true).await?;
         let plan = job.plan().await?;
         let services = self.services()?;
         let enrollment: Enrollment = if super::recreate::environment_authority::is_restricted(
@@ -1390,9 +1404,30 @@ impl Provision {
             &NodeRuntimeCreate(serde_json::from_value(spec).map_err(EngineError::from)?),
         )
         .map_err(body_stop)?;
-        if let Err(stop) = job.command(made).await {
-            return Err(self.explain_creation(&plan, &placed, stop));
-        }
+        let original = super::runtime_commands::prepare_create(
+            &self.engine,
+            job.id(),
+            placed.runtime.id,
+            &made,
+        )
+        .await?;
+        let created_command = made.id;
+        let created_result = job
+            .command(made)
+            .await
+            .map_err(|stop| self.explain_creation(&plan, &placed, stop))?;
+        let created_source = match original.as_ref() {
+            Some(original) => Some(
+                super::runtime_commands::created(
+                    &self.engine,
+                    original,
+                    created_command,
+                    &created_result,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         job.progress(0.5, Some("starting the unit")).await?;
         let started = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"create"]),
@@ -1403,9 +1438,28 @@ impl Provision {
             },
         )
         .map_err(body_stop)?;
-        job.command(started)
+        let started = match (original.as_ref(), created_source) {
+            (Some(original), Some(source)) => {
+                super::runtime_commands::prepare_start(&self.engine, original, source, started)
+                    .await?
+            }
+            _ => started,
+        };
+        let start_command = started.id;
+        let start_result = job
+            .command(started)
             .await
             .map_err(|stop| self.explain_creation(&plan, &placed, stop))?;
+        if let (Some(original), Some(source)) = (original.as_ref(), created_source) {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                source,
+                start_command,
+                &start_result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1738,6 +1792,15 @@ impl Provision {
         let current = env_rows::lock_environment(&mut tx, placed.environment.id)
             .await?
             .ok_or_else(|| failed("environment_gone", "the environment was removed"))?;
+        super::runtime_commands::placement(
+            &mut tx,
+            job.id(),
+            placed.runtime.id,
+            placed.runtime.host_id,
+            placed.host.machine_id,
+            false,
+        )
+        .await?;
         let up = env_rows::make_running(
             &mut tx,
             current.id,
@@ -1951,7 +2014,12 @@ impl Provision {
         }
         let fresh = plan.get("fresh").and_then(Json::as_bool).unwrap_or(false);
         if left.is_empty() {
-            left.extend(crate::mount_copies::undo(job).await);
+            match crate::mount_copies::undo(job).await {
+                Ok(copies) => left.extend(copies),
+                Err(_) => {
+                    return Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into());
+                }
+            }
         }
         if (fresh || plan.get("recovery").is_some()) && left.is_empty() {
             for (role, volume) in placed.runtime.volumes.as_object().into_iter().flatten() {
@@ -2221,6 +2289,18 @@ impl Phased for Provision {
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        if let Ok(plan) = job.plan().await
+            && let Some(runtime) = plan
+                .get("runtime")
+                .and_then(Json::as_str)
+                .and_then(|id| id.parse::<Id>().ok())
+        {
+            match super::runtime_commands::undo_current(&self.engine, job.id(), runtime).await {
+                Ok(true) => {},
+                Ok(false) => return Undone::Partly("The original native unit or control changed; its unit and data were left unchanged.".into()),
+                Err(error) => return Undone::Deferred(format!("The original native unit could not be confirmed before cleanup: {error:?}")),
+            }
+        }
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted after-start outcome could not be recorded");
         }

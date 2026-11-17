@@ -520,6 +520,7 @@ async fn three_sigterm_restarts_keep_each_raw_frame_once_in_order_in_a_real_data
             .append(
                 &stream,
                 &SpoolEvent {
+                    native_opening_id: None,
                     at,
                     kind: "session.title".to_owned(),
                     body: json!({ "title": format!("Wave {wave}") }),
@@ -534,6 +535,7 @@ async fn three_sigterm_restarts_keep_each_raw_frame_once_in_order_in_a_real_data
                 .append(
                     &stream,
                     &SpoolEvent {
+                        native_opening_id: None,
                         at,
                         kind: "raw.frame".to_owned(),
                         body: json!({ "direction": "in", "payload": payload }),
@@ -763,6 +765,7 @@ async fn a_session_open_installs_the_server_raw_floor_before_a_real_connector_re
         .append(
             &stream,
             &SpoolEvent {
+                native_opening_id: None,
                 at: Time::new(system.clock.now()),
                 kind: "raw.frame".to_owned(),
                 body: json!({"direction": "in", "payload": "new capture"}),

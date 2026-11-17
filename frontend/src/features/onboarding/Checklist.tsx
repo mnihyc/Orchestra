@@ -2,6 +2,8 @@
  * The org page supplies its name; only its root's owners see missing setup. All ticks come from one current read;
  * choosing a mode or closing this card changes only the person's portable interface state.
  */
+import { useOpenPath } from '@/features/chat/open';
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, CircleHelp, FileText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -51,7 +53,7 @@ export function StartHere({ document }: { document: FirstSteps['start_here'] }) 
       <h2 className="text-sm font-medium text-text-muted">{t('firstSteps.startHere')}</h2>
       <p className="wrap-anywhere font-medium text-text">{document.title}</p>
     </div>
-    <Button action="openDocument" asChild size="sm"><a href={`/doc/${encodeURIComponent(document.id)}`} aria-label={actionName('openDocument', document.title)} title={actionName('openDocument', document.title)}>{t('firstSteps.open')}</a></Button>
+    <Button action="openDocument" asChild size="sm"><PathLink href={`/doc/${encodeURIComponent(document.id)}`} aria-label={actionName('openDocument', document.title)} title={actionName('openDocument', document.title)}>{t('firstSteps.open')}</PathLink></Button>
   </section>;
 }
 
@@ -85,7 +87,7 @@ export function StepList({ data, contextPath, onReadChoices }: { data: FirstStep
         </div>
         {step.id === 'provider' && !done && step.action?.allowed === true && <ResourceCreationActions {...(onReadChoices === undefined ? {} : { onReadChoices })} />}
         {!(step.id === 'provider' && !done && step.action?.allowed === true) && url !== null && url !== contextPath && step.action !== null && (step.action.allowed ?
-          <Button action={action} size="sm" asChild className="self-start"><a href={url}>{actionLabel}</a></Button> :
+          <Button action={action} size="sm" asChild className="self-start"><PathLink href={url}>{actionLabel}</PathLink></Button> :
           <Button action={action} size="sm" blocked className="self-start" aria-label={t(`firstSteps.actions.${step.id}`)}>{t(`firstSteps.actions.${step.id}`)}</Button>)}
       </li>;
     })}
@@ -109,6 +111,7 @@ function OwnedChecklist({ org }: { org: Org }) {
 function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; data: FirstSteps; loadError: unknown; retrying: boolean; onRetry: () => void }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
+  const open = useOpenPath();
   const [progressOpen, keepProgressOpen] = useViewChoice<boolean>('onboarding', 'progressOpen', true);
   const personal = useQuery(meStateQuery);
   const choice = firstStepsChoice(personal.data);
@@ -124,7 +127,7 @@ function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; 
   });
   const choose = (target: Org, workMode: 'team' | 'solo') => {
     mutation.mutate({ org_id: target.id, work_mode: workMode, dismissed: false }, {
-      onSuccess: () => { if (target.id !== org.id) window.location.assign(`/org/${encodeURIComponent(target.address)}`); },
+      onSuccess: () => { if (target.id !== org.id) open(`/org/${encodeURIComponent(target.address)}`); },
     });
   };
   const saveDismissal = (value: boolean) => {
