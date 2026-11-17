@@ -785,6 +785,7 @@ pub(super) async fn finish_sources(
             })
         },
     )?;
+    crate::testing::hold_boundary(ctx.route.name, "embedded.settle").await;
     if let Some(summary) = summary {
         embedded::retain(ctx, guard.principal(), summary)?;
     }

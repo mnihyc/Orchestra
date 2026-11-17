@@ -201,3 +201,13 @@ for (const locale of ['en','zh-CN'] as const) it(`names a stopped recovery with 
     expect(text.title).toBe(i18n.t('inbox.actions.threadBlocked'));
   } finally {await setLocale('en');}
 });
+
+it.each(['en','zh-CN'] as const)('uses human words for chosen resource stops and deletions (%s)',async(locale)=>{
+  await setLocale(locale);
+  try {
+    for(const operation of ['provider_disable','provider_delete','mcp_delete','mount_delete']) {
+      const row=notice('environment.attention',{operation_kind:operation,name:'Team resource',state:'done',thread_count:10});
+      expect(notificationText(row,i18n.t,locale).title).toBe(locale==='en'?`Team resource ${operation==='provider_disable'?'paused':'removed'}`:`Team resource ${operation==='provider_disable'?'已停用':'已移除'}`);
+    }
+  } finally {await setLocale('en');}
+});
