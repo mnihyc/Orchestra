@@ -786,7 +786,7 @@ pub(crate) async fn run_turn(
     cancel: CancellationToken,
 ) {
     let emitter = Emitter::new(
-        shared.sink.clone(),
+        shared.sink.for_opening(live.spec.opening_id),
         Arc::clone(&live),
         Arc::clone(&shared.clock),
         turn.turn_id,

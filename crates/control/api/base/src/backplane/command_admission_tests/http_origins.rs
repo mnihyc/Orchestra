@@ -297,6 +297,7 @@ impl HttpFixture {
     }
     fn stored(&self) -> StoredCommand {
         StoredCommand {
+            native_target: self.command.native_target.clone(),
             id: Some(self.command.id),
             machine: self.command.machine,
             kind: self.command.kind.as_str().into(),

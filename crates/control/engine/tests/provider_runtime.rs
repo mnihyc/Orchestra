@@ -1094,51 +1094,60 @@ async fn a_deleted_providers_runtime_is_retired_and_the_reaper_removes_its_unit_
 #[tokio::test]
 async fn a_unit_that_its_host_finds_gone_leaves_the_provider_without_a_machine_and_the_next_start_makes_it_again()
  {
-    let world = World::new().await;
-    serve(&world);
-    let host = ScriptedHost::on(&world, "host-1", 16_384).await;
-    let _template = provider_template(&world).await;
-    let provider = managed_subscription(&world, "Crashes").await;
-    let (runtime, _unit) = made(&world, &host, provider).await;
-    // This control exercises an explicit start; the separate scheduled-recovery case makes reads due.
-    sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
-        .bind(provider)
-        .bind(world.clock.now())
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
-    host.tell(runtime, "absent", Some("the unit is gone")).await;
-    eventually("the runtime to be marked failed", || async {
-        runtime_state(&world, runtime).await == "failed"
-    })
-    .await;
-    assert!(machine_of(&world, provider).await.is_none());
-    let RuntimeStart::Job(job) = world
-        .engine()
-        .start_provider_runtime(provider, Some(world.ada))
-        .await
-        .unwrap()
-    else {
-        panic!("a failed runtime is made again by a job");
-    };
-    host.wait_for(K::NodeRuntimeStart, 2).await;
-    let second = host.started().unwrap();
-    assert_ne!(second, runtime, "a new unit is made on the same volume");
-    let _unit = enrol(&world, second).await;
-    let (state, progress, error) = wait_over(&world, job.id).await;
-    assert_eq!(state, "succeeded", "{error:?}");
-    assert_eq!(phases(&progress)[0].0, "schedule");
-    assert_eq!(
-        host.count(K::NodeVolumeEnsure),
-        2,
-        "the volume is ensured again and not made over"
-    );
-    assert_eq!(runtime_state(&world, runtime).await, "retired");
-    assert_eq!(
-        host.count(K::NodeVolumeRemove),
-        0,
-        "a failed unit's volume is the new unit's"
-    );
+    for stopping in [false, true] {
+        let world = World::new().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "host-1", 16_384).await;
+        let _template = provider_template(&world).await;
+        let provider = managed_subscription(&world, "Crashes").await;
+        let (runtime, _unit) = made(&world, &host, provider).await;
+        // This control exercises an explicit start; the separate scheduled-recovery case makes reads due.
+        sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
+            .bind(provider)
+            .bind(world.clock.now())
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        if stopping {
+            sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+                .bind(runtime)
+                .execute(world.pool.pool())
+                .await
+                .unwrap();
+        }
+        host.tell(runtime, "absent", Some("the unit is gone")).await;
+        eventually("the runtime to be marked failed", || async {
+            runtime_state(&world, runtime).await == if stopping { "stopped" } else { "failed" }
+        })
+        .await;
+        assert!(machine_of(&world, provider).await.is_none());
+        let RuntimeStart::Job(job) = world
+            .engine()
+            .start_provider_runtime(provider, Some(world.ada))
+            .await
+            .unwrap()
+        else {
+            panic!("a failed runtime is made again by a job");
+        };
+        host.wait_for(K::NodeRuntimeStart, 2).await;
+        let second = host.started().unwrap();
+        assert_ne!(second, runtime, "a new unit is made on the same volume");
+        let _unit = enrol(&world, second).await;
+        let (state, progress, error) = wait_over(&world, job.id).await;
+        assert_eq!(state, "succeeded", "{error:?}");
+        assert_eq!(phases(&progress)[0].0, "schedule");
+        assert_eq!(
+            host.count(K::NodeVolumeEnsure),
+            2,
+            "the volume is ensured again and not made over"
+        );
+        assert_eq!(runtime_state(&world, runtime).await, "retired");
+        assert_eq!(
+            host.count(K::NodeVolumeRemove),
+            0,
+            "a failed unit's volume is the new unit's"
+        );
+    }
 }
 
 #[tokio::test]

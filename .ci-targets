@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test restart --test lifecycle --test provider_runtime
+test -p orch-api-core --test hosted_environments --test kguard_engine --features test-support
