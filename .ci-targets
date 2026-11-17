@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test fixture_lifecycle --test creator_source_authority --test recording_cleanup
+test -p orch-engine --test lifecycle -- starting_a_kept_environment_consumes_its_admitted_source_and_records_the_actual_new_start --exact
+test -p orch-engine --test provider_runtime -- a_kept_provider_start_and_scheduled_renewal_keep_their_original_unit_and_actual_start_source --exact
+test -p orch-api-core --test kguard_engine --test real_connector --test terminals_connector --test hosts --test hosted_environments --test provider_managed --test container_units --features test-support

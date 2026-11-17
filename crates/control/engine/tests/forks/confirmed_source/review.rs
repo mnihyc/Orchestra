@@ -469,12 +469,14 @@ async fn observed_success(
     // UPDATE of the native reference or a fabricated creation success.
     rig.world
         .machine
-        .publish(
+        .publish_from(
+            Some(original.id),
             &Stream::Session {
                 thread_id: side,
                 segment_id: body.session.segment_id,
             },
             &Event::SessionOpened(SessionOpened {
+                opening_id: original.id,
                 native_session_ref: opened.native_session_ref.clone(),
                 resumed: false,
             }),

@@ -169,6 +169,7 @@ const LINK_MEMBER: &str = rows::LINK_MEMBER;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    gateway::register(registry);
     reenrollment::mount(registry);
     enrollment::mount(registry);
     registry
@@ -322,12 +323,20 @@ fn installation_info(config: &ServerConfig) -> api::MachineEnrollmentInfo {
 }
 
 async fn enrollment_info(ctx: Ctx, (): (), (): ()) -> ApiResult<api::MachineEnrollmentInfo> {
-    Ok(installation_info(&installation_config(&ctx)))
+    let mut conn = ctx.app.db.acquire().await?;
+    Ok(installation_info(
+        &installation_config(&ctx, &mut conn).await?,
+    ))
 }
 
 /// Commands and readiness use the same effective catalogue as enrollment, including an admin override.
-pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
+pub(crate) async fn installation_config(ctx: &Ctx, conn: &mut Conn) -> ApiResult<ServerConfig> {
     let mut config = (*ctx.app.config).clone();
+    let addresses = crate::public_addresses::read(&ctx.app, conn)
+        .await?
+        .addresses;
+    config.system.public_url = addresses.public_url;
+    config.system.alternate_urls = addresses.alternate_urls;
     config.gateway.instances.clear();
     config.gateway.endpoints = ctx
         .app
@@ -344,7 +353,7 @@ pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
             .into(),
         })
         .collect();
-    config
+    Ok(config)
 }
 
 /// Never mint a secret for a command the shipped installer will refuse.
@@ -539,7 +548,7 @@ async fn prepare_inventory_for(
     readable_only: bool,
 ) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::hosts_naming(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
     let mut effective =
@@ -724,6 +733,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),
@@ -941,8 +951,6 @@ async fn token_create(
     (): (),
     body: api::MachineEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    let installation = installation_config(&ctx);
-    require_installable(&installation)?;
     let authed = ctx.user()?;
     if !authorization::caller_of(authed)?.reaches(None) {
         return Err(ApiError::not_found());
@@ -974,6 +982,8 @@ async fn token_create(
         Ok(Making::Refused(why)) => return Err(refused_making(&mut conn, home, why).await),
         Err(error) => return Err(refusals::problem(&mut conn, error).await),
     }
+    let installation = installation_config(&ctx, &mut conn).await?;
+    require_installable(&installation)?;
     drop(conn);
     let name_hint = body
         .name_hint
@@ -1501,6 +1511,8 @@ pub mod individual;
 #[path = "machines/mutations.rs"]
 pub mod mutations;
 
+#[path = "machines/gateway.rs"]
+mod gateway;
 #[path = "machines/policies.rs"]
 pub mod policies;
 

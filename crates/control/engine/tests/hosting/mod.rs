@@ -162,6 +162,164 @@ pub struct Call {
 type Refusals = Mutex<HashMap<CommandKind, VecDeque<CommandError>>>;
 type OrderedCalls = Arc<Mutex<Vec<(Id, Command)>>>;
 
+/// One dedicated test unit's created source and actual incoming Start headers.
+pub type CanonicalStarts =
+    Arc<Mutex<Vec<(Id, Option<orch_link_contract::native_target::NativeTarget>)>>>;
+
+/// This opt-in native producer owns one stable created unit and returns each admitted
+/// new Start opening. Other stateless hosts retain their explicit untracked results.
+pub fn canonical_creation_replies(host: &ScriptedHost) -> (Id, CanonicalStarts) {
+    use orch_link_contract::native_target::{NativeTarget, RuntimeSource};
+    let created = new_id();
+    host.answer(CommandKind::NodeRuntimeCreate, move |command| {
+        let Command::NodeRuntimeCreate(request) = command else {
+            unreachable!()
+        };
+        Ok(CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+            source: RuntimeSource {
+                incarnation: Some(created),
+            },
+            unit: orch_driver_contract::units::UnitRef {
+                reference: "canonical-created-unit".into(),
+                name: request.0.name.clone(),
+                runtime_id: request.0.runtime_id,
+                kind: request.0.kind,
+            },
+        }))
+    });
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let capture = starts.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeStart, move |context, _| {
+        lock(&capture).push((context.id, context.native_target.clone()));
+        let source = match &context.native_target {
+            Some(NativeTarget::Lifecycle(target)) => RuntimeSource {
+                incarnation: target.opening,
+            },
+            _ => RuntimeSource::untracked(),
+        };
+        Ok(CommandResult::NodeRuntimeStart(
+            orch_link_contract::commands::NodeRuntimeStartResult {
+                source,
+                reused: false,
+            },
+        ))
+    });
+    (created, starts)
+}
+
+/// One stopped fixture unit whose Start effect and terminal reply have separate boundaries.
+/// Its identities come from its actual admitted opening, never its logical runtime identifier.
+pub struct PendingStart {
+    pub source: Arc<Mutex<orch_link_contract::native_target::RuntimeSource>>,
+    pub running: Arc<std::sync::atomic::AtomicBool>,
+    pub starts: CanonicalStarts,
+    pub stops: Arc<Mutex<Vec<orch_link_contract::native_target::NativeTarget>>>,
+}
+
+pub fn hold_started_reply(
+    host: &ScriptedHost,
+    runtime: Id,
+    initial: orch_link_contract::native_target::RuntimeSource,
+) -> PendingStart {
+    use orch_link_contract::native_target::{LifecycleSubject, NativeTarget};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let source = Arc::new(Mutex::new(initial));
+    let running = Arc::new(AtomicBool::new(false));
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let stops = Arc::new(Mutex::new(Vec::new()));
+    let current = source.clone();
+    let active = running.clone();
+    let admitted = starts.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeStart, move |context, command| {
+        let Some(NativeTarget::Lifecycle(target)) = &context.native_target else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture Start needs its original native target",
+            ));
+        };
+        if target.subject
+            != (LifecycleSubject::Runtime {
+                runtime_id: runtime,
+            })
+            || !matches!(command, Command::NodeRuntimeStart(body) if body.runtime_id==runtime)
+            || target.observed != lock(&current).incarnation
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture's actual original unit changed",
+            ));
+        }
+        let opened = orch_link_contract::native_target::RuntimeSource {
+            incarnation: target.opening,
+        };
+        if opened.incarnation.is_none() {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture Start has no admitted opening",
+            ));
+        }
+        *lock(&current) = opened;
+        active.store(true, Ordering::SeqCst);
+        lock(&admitted).push((context.id, context.native_target.clone()));
+        Ok(CommandResult::NodeRuntimeStart(
+            orch_link_contract::commands::NodeRuntimeStartResult {
+                source: opened,
+                reused: false,
+            },
+        ))
+    });
+    let current = source.clone();
+    let active = running.clone();
+    let admitted = stops.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeStop, move |context, command| {
+        let Some(NativeTarget::Lifecycle(target)) = &context.native_target else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture Stop needs its original native target",
+            ));
+        };
+        let actual = *lock(&current);
+        let wire = serde_json::to_value(context.native_target.as_ref())
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        if target.subject
+            != (LifecycleSubject::Runtime {
+                runtime_id: runtime,
+            })
+            || !matches!(command, Command::NodeRuntimeStop(body) if body.runtime_id==runtime)
+            || (target.observed != actual.incarnation
+                && !wire
+                    .pointer("/target/pending")
+                    .and_then(Json::as_array)
+                    .is_some_and(|pending| pending.contains(&json!(actual.incarnation))))
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the admitted Stop does not own this actual native start",
+            ));
+        }
+        active.store(false, Ordering::SeqCst);
+        lock(&admitted).push(
+            context
+                .native_target
+                .clone()
+                .expect("the target was checked"),
+        );
+        let result = serde_json::from_value(json!({"source":actual}))
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        Ok(CommandResult::NodeRuntimeStop(result))
+    });
+    host.added
+        .machine
+        .handler
+        .hold_result(CommandKind::NodeRuntimeStart);
+    PendingStart {
+        source,
+        running,
+        starts,
+        stops,
+    }
+}
+
 /// A host with a node that answers, and the rows that make it a place.
 pub struct ScriptedHost {
     /// The host.
@@ -327,6 +485,7 @@ impl ScriptedHost {
                     ),
                     Command::NodeRuntimeCreate(request) => {
                         CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+                            source: orch_link_contract::native_target::RuntimeSource::untracked(),
                             unit: orch_driver_contract::units::UnitRef {
                                 reference: "unit".to_owned(),
                                 name: request.0.name.clone(),
@@ -335,7 +494,7 @@ impl ScriptedHost {
                             },
                         })
                     }
-                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(Empty {}),
+                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(orch_link_contract::commands::NodeRuntimeStartResult {source:orch_link_contract::native_target::RuntimeSource::untracked(),reused:false}),
                     Command::NodeRuntimeStop(_) => CommandResult::NodeRuntimeStop(Empty {}),
                     Command::NodeRuntimeRemove(_) => CommandResult::NodeRuntimeRemove(Empty {}),
                     Command::NodeResourcesApply(_)=>CommandResult::NodeResourcesApply(Empty {}),
@@ -382,12 +541,26 @@ impl ScriptedHost {
     where
         F: Fn(&Command) -> Result<CommandResult, CommandError> + Send + Sync + 'static,
     {
+        self.answer_with_context(kind, move |_, command| reply(command));
+    }
+
+    /// Context-aware replies keep the same actual execution log and queued refusals.
+    pub fn answer_with_context<F>(&self, kind: CommandKind, reply: F)
+    where
+        F: Fn(
+                &orch_link::commands::CommandContext,
+                &Command,
+            ) -> Result<CommandResult, CommandError>
+            + Send
+            + Sync
+            + 'static,
+    {
         let calls = Arc::clone(&self.calls);
         let refusals = Arc::clone(&self.refusals);
         self.added
             .machine
             .handler
-            .on(kind, move |command: &Command| {
+            .on_with_context(kind, move |context, command| {
                 lock(&calls).push(Call {
                     kind,
                     body: command.body().unwrap(),
@@ -395,7 +568,7 @@ impl ScriptedHost {
                 if let Some(error) = lock(&refusals).get_mut(&kind).and_then(VecDeque::pop_front) {
                     return Err(error);
                 }
-                reply(command)
+                reply(context, command)
             });
     }
 
@@ -466,6 +639,7 @@ impl ScriptedHost {
             .publish(
                 &Stream::Node,
                 &Event::NodeRuntime(NodeRuntime {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
                     runtime_id: runtime,
                     state: state.to_owned(),
                     detail: detail.map(str::to_owned),

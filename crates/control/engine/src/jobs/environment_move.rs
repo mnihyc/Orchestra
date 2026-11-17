@@ -1576,13 +1576,25 @@ impl Moving {
                 hosts::delete_runtime_secret(&mut conn, next, "enroll_token").await?;
                 drop(conn);
                 // With the candidate gone nothing uses the copies' volumes; a replaced location gets its data back.
-                let left = crate::mount_copies::undo(job).await;
+                let left = match crate::mount_copies::undo(job).await {
+                    Ok(left) => left,
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            "copy cleanup must retain its original data before the move can finish"
+                        );
+                        return Err(Stop::Lost);
+                    }
+                };
                 if !left.is_empty() {
                     return Err(fail("mount_copy_failed", left.join("; ")));
                 }
                 Ok(())
             }
             .await;
+            if matches!(cleanup, Err(Stop::Lost)) {
+                return Err(Stop::Lost);
+            }
             if let Err(error) = cleanup {
                 // Source processes must be resumed even when the destination will only answer
                 // a later cleanup attempt. Keep the candidate for the reaper, never publish it.
@@ -1700,6 +1712,7 @@ impl Phased for Moving {
         match self.rollback(job).await {
             Ok(None) => Undone::Everything,
             Ok(Some(detail)) => Undone::Partly(detail),
+            Err(Stop::Lost) => Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into()),
             Err(e) => Undone::Partly(format!("the move could not be fully undone: {e:?}")),
         }
     }

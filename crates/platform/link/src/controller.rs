@@ -363,6 +363,11 @@ mod observer_tests {
             .processed();
         let id = new_id();
         let _ = controller.commands().issue(Cmd {
+            authority_until: None,
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
             id,
             kind: "machine.probe".into(),
             key: None,

@@ -5,6 +5,7 @@ use super::*;
 use crate::{EngineParts, test_common::World};
 use orch_db::queries::environments::{changes, hosting as runtime_rows};
 use orch_db::queries::resources::{provider_runtime as provider_rows, testing::insert_machine};
+use orch_link_contract::native_target::RuntimeSource;
 use orch_types::new_id;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -125,6 +126,15 @@ impl Fixture {
     }
 
     async fn failed_report(&self, runtime: Id) -> TestResult {
+        self.report(runtime, "failed").await
+    }
+
+    async fn report(&self, runtime: Id, state: &str) -> TestResult {
+        self.report_from(runtime, state, RuntimeSource::untracked())
+            .await
+    }
+
+    async fn report_from(&self, runtime: Id, state: &str, source: RuntimeSource) -> TestResult {
         let mut tx = self.world.pool.begin().await?;
         let mut unit = Unit::new(&mut tx, self.world.clock.now());
         self.engine
@@ -132,8 +142,9 @@ impl Fixture {
                 &mut unit,
                 self.host,
                 &NodeRuntime {
+                    source,
                     runtime_id: runtime,
-                    state: "failed".into(),
+                    state: state.into(),
                     detail: Some("synthetic provider unit failure".into()),
                 },
             )
@@ -142,6 +153,76 @@ impl Fixture {
         tx.commit().await?;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn a_host_that_confirms_a_provider_stop_finishes_it_without_waiting_for_the_command_reply()
+-> TestResult {
+    for state in ["absent", "stopped", "failed"] {
+        let s = Fixture::new(true).await?;
+        let reason = provider_rows::STOPPED_PERSON;
+        sqlx::query("UPDATE runtimes SET state='stopping',state_detail=$2 WHERE id=$1")
+            .bind(s.old)
+            .bind(reason)
+            .execute(s.world.pool.pool())
+            .await?;
+        sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+            .bind(s.world.provider)
+            .execute(s.world.pool.pool())
+            .await?;
+        s.report(s.old, state).await?;
+        s.report(s.old, state).await?;
+        let mut conn = s.world.pool.acquire().await?;
+        let stopped = runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        assert_eq!(stopped.state, "stopped", "host report: {state}");
+        assert_eq!(stopped.state_detail.as_deref(), Some(reason));
+        let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+            .bind(s.old)
+            .fetch_one(&mut *conn)
+            .await?;
+        assert_eq!(missing, state == "absent");
+        let provider = provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?;
+        assert_eq!(provider.status, "disabled");
+        assert_eq!(provider.machine_id, None);
+        let candidate = runtime_rows::runtime(&mut conn, s.candidate)
+            .await?
+            .ok_or("candidate absent")?;
+        assert_eq!(candidate.state, "creating");
+        s.engine.stop();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stopped_successor_report_keeps_the_current_provider_and_its_connector() -> TestResult {
+    let s = Fixture::new(false).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.candidate)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report(s.candidate, "absent").await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let candidate = runtime_rows::runtime(&mut conn, s.candidate)
+        .await?
+        .ok_or("candidate absent")?;
+    assert_eq!(candidate.state, "stopped");
+    let current = provider_rows::live_runtime(&mut conn, s.world.provider)
+        .await?
+        .ok_or("current absent")?;
+    assert_eq!((current.id, current.state.as_str()), (s.old, "running"));
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    s.engine.stop();
+    Ok(())
 }
 
 #[tokio::test]
@@ -303,6 +384,1339 @@ async fn failed_unadopted_provider_successor_preserves_the_current_connector_and
         (Some(s.world.machine_id), ("online".to_owned(), 1), true),
         "an unadopted successor must preserve the current provider connector, harness and observed session"
     );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_reports_from_an_old_native_start_leave_its_replacement_serving() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let first = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    let replacement = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", first).await?;
+    s.report_from(s.old, "running", replacement).await?;
+    for state in ["failed", "absent", "stopped"] {
+        s.report_from(s.old, state, first).await?;
+        let mut conn = s.world.pool.acquire().await?;
+        let current = runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        assert_eq!(current.state, "running", "late original report: {state}");
+        let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+            .bind(s.old)
+            .fetch_one(&mut *conn)
+            .await?;
+        assert!(
+            !missing,
+            "an old absent report must not describe the replacement"
+        );
+        assert_eq!(
+            provider_rows::state(&mut conn, s.world.provider)
+                .await?
+                .ok_or("provider absent")?
+                .machine_id,
+            Some(s.world.machine_id)
+        );
+    }
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_terminal_native_start_cannot_clear_its_absence_with_a_late_running_report() -> TestResult
+{
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.old)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report_from(s.old, "absent", source).await?;
+    s.report_from(s.old, "running", source).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(current.state, "stopped");
+    let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+        .bind(s.old)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert!(
+        missing,
+        "a closed physical start cannot become present again"
+    );
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        None
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_untracked_native_report_does_not_confirm_a_tracked_stop() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.old)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report(s.old, "absent").await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(current.state, "stopping");
+    let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+        .bind(s.old)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert!(!missing);
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    drop(conn);
+    s.report_from(s.old, "absent", source).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    assert_eq!(
+        runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?
+            .state,
+        "stopped"
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_persisted_provider_stop_restores_its_original_key_and_allows_a_fresh_request_after_that_key_ends()
+-> TestResult {
+    let s = Fixture::new(true).await?;
+    s.report_from(
+        s.old,
+        "running",
+        RuntimeSource {
+            incarnation: Some(new_id()),
+        },
+    )
+    .await?;
+    let (token, _, http) = provider_stop_key(&s).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let control = orch_db::queries::runtime_controls::accept(&mut tx, s.old, new_id()).await?;
+    assert!(
+        orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            s.old,
+            &control,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    let pending = orch_db::queries::runtime_incarnations::stop(&mut tx, s.old)
+        .await?
+        .ok_or("pending Stop absent")?;
+    let command = http
+        .scope(crate::commands::provider_unit::pending(
+            &mut tx,
+            s.world.clock.as_ref(),
+            s.world.provider,
+            &pending,
+        ))
+        .await?
+        .ok_or("the actual Provider Stop has no native command")?;
+    assert!(
+        orch_db::queries::runtime_incarnations::bind_provider_command(
+            &mut tx,
+            &pending,
+            &serde_json::to_value(&command)?,
+        )
+        .await?
+    );
+    tx.commit().await?;
+    drop(http);
+    let saved =
+        orch_db::queries::runtime_incarnations::stop(&mut *s.world.pool.acquire().await?, s.old)
+            .await?
+            .ok_or("committed Stop absent")?;
+    let restored = crate::commands::provider_unit::restore(s.world.provider, &saved)?;
+    assert_eq!(
+        restored, command,
+        "crash continuation keeps the existing typed command carrier"
+    );
+    assert!(
+        !format!("{saved:?}").contains("credential"),
+        "private continuation identity is never Debug output"
+    );
+    let authority = restored
+        .authority
+        .as_ref()
+        .ok_or("original command authority absent")?;
+    sqlx::query("UPDATE providers SET runtime_config=jsonb_set(runtime_config,'{runtime.variables}',$2) WHERE id=$1")
+        .bind(s.world.provider).bind(json!({"NEXT_START_ONLY":"kept"}))
+        .execute(s.world.pool.pool()).await?;
+    let serial = restored.key.wire();
+    let proposed = orch_db::queries::link::NewCommand {
+        native_target: restored.native_target.as_ref(),
+        id: restored.id,
+        machine_id: restored.machine,
+        kind: restored.kind.as_str(),
+        body: &restored.body,
+        serial_key: serial.as_deref(),
+        deadline_at: s.world.clock.now()
+            + chrono::Duration::seconds(i64::from(restored.kind.deadline_secs())),
+    };
+    let mut checking = s.world.pool.begin().await?;
+    let current = authority
+        .current_issue_callers(
+            &mut checking,
+            &proposed,
+            s.world.clock.as_ref(),
+            s.world.access.as_ref(),
+        )
+        .await?;
+    let current = current.ok_or(
+        "the original Stop remains usable after an independent next-start variable change",
+    )?;
+    assert!(current.iter().any(|(caller, _)| {
+        caller
+            .as_ref()
+            .is_some_and(|caller| caller.admitted_operation() == Some("ProviderStop"))
+    }));
+    checking.commit().await?;
+    sqlx::query("UPDATE api_tokens SET expires_at=$2 WHERE id=$1")
+        .bind(token)
+        .bind(s.world.clock.now())
+        .execute(s.world.pool.pool())
+        .await?;
+    let mut checking = s.world.pool.begin().await?;
+    assert!(
+        authority
+            .current_issue_callers(
+                &mut checking,
+                &proposed,
+                s.world.clock.as_ref(),
+                s.world.access.as_ref()
+            )
+            .await?
+            .is_none(),
+        "restoration never turns an ended key into an ordinary caller"
+    );
+    checking.commit().await?;
+    assert!(
+        s.world
+            .commands
+            .issued_commands("node.runtime.stop")
+            .is_empty()
+    );
+    let mut refused = s.world.pool.begin().await?;
+    provider_rows::lock(&mut refused, s.world.provider).await?;
+    assert!(
+        orch_db::queries::runtime_incarnations::refuse_provider_command(&mut refused, &saved)
+            .await?
+    );
+    refused.commit().await?;
+    let (_, principal, fresh) = provider_stop_key(&s).await?;
+    let tx = s.world.pool.begin().await?;
+    let accepted = fresh
+        .scope(s.engine.accept_provider_stop_in(
+            tx,
+            &principal,
+            &orch_db::audit::Origin::default(),
+            s.world.provider,
+            false,
+        ))
+        .await?;
+    assert!(
+        !orch_db::queries::runtime_controls::is_current(
+            &mut *s.world.pool.acquire().await?,
+            &control
+        )
+        .await?,
+        "a fresh authorized request accepts its own control after the original command was refused"
+    );
+    drop(accepted);
+    let row = runtime_rows::runtime(&mut *s.world.pool.acquire().await?, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(
+        row.state, "stopping",
+        "authority loss alone confirms no physical outcome"
+    );
+    assert_eq!(
+        row.volumes,
+        json!({"state":{"name":"provider-report-state","storage":null}})
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+async fn provider_stop_key(
+    s: &Fixture,
+) -> TestResult<(
+    Id,
+    orch_authz::Principal,
+    crate::operation_scope::http_origin::HttpOrigin,
+)> {
+    let token = new_id();
+    let hash = orch_types::Hash::of(token.as_bytes());
+    let expires = orch_types::Time::new(s.world.clock.now() + chrono::Duration::hours(1));
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"provider","id":s.world.provider,"reach":"self"},
+            "allow":[{"operation":"ProviderStop","actions":["manage"]}]
+        }]}))?;
+    assert!(policy.validate().is_empty());
+    let mut tx = s.world.pool.begin().await?;
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut tx,
+        &orch_db::queries::identity::NewApiToken {
+            id: token,
+            user_id: s.world.ada,
+            name: "Original provider Stop origin",
+            token_hash: hash.as_bytes(),
+            scopes: &[],
+            node_id: None,
+            at: s.world.clock.now(),
+            expires_at: Some(expires.get()),
+        },
+        Some(&json!(policy.clone())),
+    )
+    .await?;
+    let caller = orch_authz::Caller::token(
+        s.world.ada,
+        orch_authz::TokenGrant::from_stored_scope(&[], None, Some(policy), Some(expires))?
+            .for_token(token),
+    );
+    let caller = crate::commands::provider_unit::admit(&mut tx, &caller, s.world.provider).await?;
+    let principal =
+        orch_authz::Principal::load(&mut tx, caller.clone(), s.world.clock.time()).await?;
+    let http = crate::operation_scope::http_origin::HttpOrigin::capture(
+        orch_authz::CapturedOperation::capture(&caller)?,
+        crate::operation_scope::request_origin::Credential::Token {
+            id: token,
+            hash: hash.as_bytes().to_vec(),
+        },
+        false,
+        principal.has_system_admin_standing(),
+        Some(expires),
+    )?;
+    tx.commit().await?;
+    Ok((token, principal, http))
+}
+
+#[tokio::test]
+async fn a_pending_provider_stop_with_lost_original_command_facts_never_falls_back_to_an_unbound_stop()
+-> TestResult {
+    for removed in ["producer", "command", "both"] {
+        let s = Fixture::new(true).await?;
+        let source = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        s.report_from(s.old, "running", source).await?;
+        let mut tx = s.world.pool.begin().await?;
+        provider_rows::lock(&mut tx, s.world.provider).await?;
+        let control = orch_db::queries::runtime_controls::accept(&mut tx, s.old, new_id()).await?;
+        assert!(
+            orch_db::queries::runtime_incarnations::begin_stop(
+                &mut tx,
+                s.old,
+                &control,
+                s.world.clock.now(),
+            )
+            .await?
+        );
+        let stripped = match removed {
+            "producer" => "command",
+            "command" => "producer",
+            _ => "neither",
+        };
+        sqlx::query(
+            "UPDATE runtimes SET native_stop = CASE $2
+             WHEN 'command' THEN (native_stop - 'producer') || '{\"command\":{}}'::jsonb
+             WHEN 'producer' THEN (native_stop - 'command') || '{\"producer\":\"provider_stop\"}'::jsonb
+             ELSE native_stop - 'producer' - 'command' END WHERE id=$1",
+        ).bind(s.old).bind(stripped).execute(&mut *tx).await?;
+        tx.commit().await?;
+        let stored = orch_db::queries::runtime_incarnations::stop(
+            &mut *s.world.pool.acquire().await?,
+            s.old,
+        )
+        .await;
+        assert!(
+            stored.is_err(),
+            "missing {removed} cannot become an ordinary native Stop"
+        );
+        assert!(
+            s.engine
+                .finish_provider_stop(s.world.provider, s.old)
+                .await
+                .is_err()
+        );
+        assert!(
+            s.world
+                .commands
+                .issued_commands("node.runtime.stop")
+                .is_empty()
+        );
+        let row = runtime_rows::runtime(&mut *s.world.pool.acquire().await?, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        assert_eq!(row.state, "stopping");
+        assert_eq!(
+            row.volumes,
+            json!({"state":{"name":"provider-report-state","storage":null}})
+        );
+        s.engine.stop();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_native_source_of_another_runtime_cannot_fail_the_serving_unit() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let foreign = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.candidate, "running", foreign).await?;
+    s.report_from(s.old, "failed", foreign).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(current.state, "running");
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_different_native_starts_terminal_report_cannot_complete_the_original_stop() -> TestResult
+{
+    let s = Fixture::new(true).await?;
+    let original = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    let replacement = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", original).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let control = orch_db::queries::runtime_controls::accept(&mut tx, s.old, new_id()).await?;
+    assert!(
+        orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            s.old,
+            &control,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    tx.commit().await?;
+    s.report_from(s.old, "running", replacement).await?;
+    s.report_from(s.old, "absent", replacement).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(
+        current.state, "stopping",
+        "no terminal report confirmed the admitted original"
+    );
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_finished_original_stop_does_not_capture_the_next_native_starts_stop() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let first = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    let replacement = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", first).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let control = orch_db::queries::runtime_controls::accept(&mut tx, s.old, new_id()).await?;
+    assert!(
+        orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            s.old,
+            &control,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    tx.commit().await?;
+    s.report_from(s.old, "stopped", first).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    assert!(
+        runtime_rows::set_runtime_state(
+            &mut tx,
+            s.old,
+            &["stopped"],
+            "running",
+            None,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    assert!(
+        provider_rows::set_machine(
+            &mut tx,
+            s.world.provider,
+            Some(s.world.machine_id),
+            s.world.clock.now()
+        )
+        .await?
+    );
+    tx.commit().await?;
+    s.report_from(s.old, "running", replacement).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    assert!(
+        runtime_rows::set_runtime_state(
+            &mut tx,
+            s.old,
+            &["running"],
+            "stopping",
+            None,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    tx.commit().await?;
+    s.report_from(s.old, "stopped", replacement).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(
+        current.state, "stopped",
+        "the completed first stop must not own a later job stop"
+    );
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        None
+    );
+    let pending: bool =
+        sqlx::query_scalar("SELECT native_stop IS NOT NULL FROM runtimes WHERE id=$1")
+            .bind(s.old)
+            .fetch_one(&mut *conn)
+            .await?;
+    assert!(
+        !pending,
+        "the original stop is retained only while it is pending"
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_newer_independent_stop_keeps_an_old_restart_from_preparing_its_next_start() -> TestResult
+{
+    use orch_db::queries::runtime_controls as controls;
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let restart = controls::accept(&mut tx, s.old, new_id()).await?;
+    let stop = controls::phase(
+        &mut tx,
+        &restart,
+        new_id(),
+        &json!({"kind":"node.runtime.stop","source":source}),
+    )
+    .await?
+    .ok_or("own stop was refused")?;
+    let start = controls::phase(
+        &mut tx,
+        &restart,
+        new_id(),
+        &json!({"kind":"node.runtime.start","source":source}),
+    )
+    .await?
+    .ok_or("own next phase was refused")?;
+    assert!(
+        start > stop,
+        "one original operation retains its own ordered continuation"
+    );
+    let later = controls::accept(&mut tx, s.old, new_id()).await?;
+    assert!(!controls::is_current(&mut tx, &restart).await?);
+    assert!(controls::is_current(&mut tx, &later).await?);
+    assert_eq!(
+        controls::phase(
+            &mut tx,
+            &restart,
+            new_id(),
+            &json!({"kind":"node.runtime.start","source":source})
+        )
+        .await?,
+        None,
+        "the old operation must not allocate a newer order after supersession"
+    );
+    let stopped = controls::phase(
+        &mut tx,
+        &later,
+        new_id(),
+        &json!({"kind":"node.runtime.stop","source":source}),
+    )
+    .await?
+    .ok_or("later stop absent")?;
+    assert!(stopped > start);
+    tx.commit().await?;
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn retrying_an_original_intent_keeps_its_first_source_and_exact_phase_operands() -> TestResult
+{
+    use orch_db::queries::runtime_controls as controls;
+    let s = Fixture::new(true).await?;
+    let original = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    let replacement = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", original).await?;
+    let id = new_id();
+    let phase = new_id();
+    let operands = json!({"kind":"node.runtime.stop","source":original});
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let first = controls::accept(&mut tx, s.old, id).await?;
+    let order = controls::phase(&mut tx, &first, phase, &operands)
+        .await?
+        .ok_or("phase absent")?;
+    tx.commit().await?;
+    s.report_from(s.old, "running", replacement).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let retried = controls::accept(&mut tx, s.old, id).await?;
+    assert_eq!(
+        retried, first,
+        "retry must not look up and substitute the replacement"
+    );
+    assert_eq!(retried.source(), original);
+    assert_eq!(
+        controls::phase(&mut tx, &retried, phase, &operands).await?,
+        Some(order)
+    );
+    assert!(
+        matches!(
+            controls::phase(
+                &mut tx,
+                &retried,
+                phase,
+                &json!({"kind":"node.runtime.stop","source":replacement})
+            )
+            .await,
+            Err(orch_db::DbError::Rule { .. })
+        ),
+        "the same phase ID cannot replace physical operands"
+    );
+    let later = controls::accept(&mut tx, s.old, new_id()).await?;
+    assert_eq!(controls::accept(&mut tx, s.old, id).await?, first);
+    assert!(
+        controls::is_current(&mut tx, &later).await?,
+        "retry never makes the retired intent current again"
+    );
+    assert!(!controls::is_current(&mut tx, &retried).await?);
+    tx.commit().await?;
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_original_runtime_control_never_follows_a_host_onto_its_new_node() -> TestResult {
+    use orch_db::queries::runtime_controls as controls;
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let old_node: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(s.host)
+        .fetch_one(&mut *tx)
+        .await?;
+    let original_id = new_id();
+    let original = controls::accept(&mut tx, s.old, original_id).await?;
+    assert_eq!(original.host(), s.host);
+    assert_eq!(original.machine(), old_node);
+    let phase = new_id();
+    let body = json!({"runtime_id":s.old});
+    let operands =
+        json!({"kind":"node.runtime.stop","runtime_id":s.old,"source":source,"body":body});
+    let first = controls::phase(&mut tx, &original, phase, &operands)
+        .await?
+        .ok_or("original phase absent")?;
+    let new_node = insert_machine(&mut tx, "The host's new node", "connected").await?;
+    sqlx::query("UPDATE hosts SET machine_id=$2 WHERE id=$1")
+        .bind(s.host)
+        .bind(new_node)
+        .execute(&mut *tx)
+        .await?;
+    let retried = controls::accept(&mut tx, s.old, original_id).await?;
+    assert_eq!(retried, original, "a retry retains its original receiver");
+    assert_eq!(retried.machine(), old_node);
+    assert!(!controls::is_current(&mut tx, &original).await?);
+    let target = orch_link_contract::native_target::NativeTarget::Lifecycle(
+        orch_link_contract::native_target::LifecycleTarget {
+            subject: orch_link_contract::native_target::LifecycleSubject::Runtime {
+                runtime_id: s.old,
+            },
+            observed: source.incarnation,
+            opening: None,
+            revision: first,
+        },
+    );
+    let key = orch_link_contract::commands::SerialKey::Runtime(s.old).wire();
+    for receiver in [old_node, new_node] {
+        assert!(
+            matches!(
+                orch_db::queries::link::insert_command(
+                    &mut tx,
+                    &orch_db::queries::link::NewCommand {
+                        native_target: Some(&target),
+                        id: phase,
+                        machine_id: receiver,
+                        kind: "node.runtime.stop",
+                        body: &body,
+                        serial_key: key.as_deref(),
+                        deadline_at: s.world.clock.now() + chrono::Duration::minutes(1),
+                    },
+                    s.world.clock.now()
+                )
+                .await,
+                Err(orch_db::DbError::Rule { .. })
+            ),
+            "a fresh old-phase frame cannot be redirected after receiver replacement"
+        );
+    }
+    let unqueued: bool =
+        sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM commands WHERE id=$1)")
+            .bind(phase)
+            .fetch_one(&mut *tx)
+            .await?;
+    assert!(unqueued);
+    assert_eq!(
+        controls::phase(&mut tx, &original, phase, &operands).await?,
+        None
+    );
+    assert_eq!(
+        controls::phase(&mut tx, &original, new_id(), &operands).await?,
+        None,
+        "old work cannot allocate a later order against the new receiver"
+    );
+    let fresh = controls::accept(&mut tx, s.old, new_id()).await?;
+    assert_eq!(fresh.machine(), new_node);
+    assert!(controls::is_current(&mut tx, &fresh).await?);
+    assert!(
+        controls::phase(&mut tx, &fresh, new_id(), &operands)
+            .await?
+            .ok_or("new receiver phase absent")?
+            > first
+    );
+    let other_node = insert_machine(&mut tx, "A different physical Host", "connected").await?;
+    let other_host = new_id();
+    sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Different runtime Host')")
+        .bind(other_host)
+        .bind(other_node)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE runtimes SET host_id=$2 WHERE id=$1")
+        .bind(s.old)
+        .bind(other_host)
+        .execute(&mut *tx)
+        .await?;
+    assert!(!controls::is_current(&mut tx, &fresh).await?);
+    assert_eq!(
+        controls::phase(&mut tx, &fresh, new_id(), &operands).await?,
+        None
+    );
+    assert!(
+        matches!(
+            controls::accept(&mut tx, s.old, new_id()).await,
+            Err(orch_db::DbError::Rule { .. })
+        ),
+        "a different Host cannot inherit another Host's tracked physical source"
+    );
+    tx.commit().await?;
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_native_creation_and_start_outcomes_own_their_sources_without_overwriting_a_later_one()
+-> TestResult {
+    use orch_db::queries::{link, runtime_controls as controls};
+    use orch_link_contract::commands::{
+        NodeRuntimeCreateResult, NodeRuntimeStartResult, SerialKey,
+    };
+    for reused in [false, true] {
+        let s = Fixture::new(true).await?;
+        let mut tx = s.world.pool.begin().await?;
+        provider_rows::lock(&mut tx, s.world.provider).await?;
+        let job = new_id();
+        let control = controls::accept_job(&mut tx, s.old, new_id(), job).await?;
+        assert_eq!(
+            controls::for_job(&mut tx, job, s.old).await?,
+            Some(control.clone())
+        );
+        let runtime = runtime_rows::runtime(&mut tx, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        let command = new_id();
+        let key = SerialKey::Runtime(s.old).wire();
+        let body = json!({"runtime_id":s.old,"kind":"provider","name":runtime.unit_name,"driver":runtime.driver});
+        controls::phase(
+            &mut tx,
+            &control,
+            command,
+            &json!({"kind":"node.runtime.create",
+        "source":control.source(),"body":body}),
+        )
+        .await?
+        .ok_or("creation phase absent")?;
+        assert!(
+            link::insert_command(
+                &mut tx,
+                &link::NewCommand {
+                    native_target: None,
+                    id: command,
+                    machine_id: control.machine(),
+                    kind: "node.runtime.create",
+                    body: &body,
+                    serial_key: key.as_deref(),
+                    deadline_at: s.world.clock.now() + chrono::Duration::minutes(1),
+                },
+                s.world.clock.now()
+            )
+            .await?
+        );
+        let created = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        let result = json!(NodeRuntimeCreateResult {
+            source: created,
+            unit: orch_driver_contract::units::UnitRef {
+                reference: "actual-canonical-unit".into(),
+                name: runtime.unit_name,
+                runtime_id: s.old,
+                kind: orch_driver_contract::runtime::RuntimeKind::Provider
+            }
+        });
+        assert!(
+            link::finish_command(
+                &mut tx,
+                command,
+                &link::Ending::Succeeded(&result),
+                s.world.clock.now()
+            )
+            .await?
+        );
+        let mut foreign = result.clone();
+        foreign["source"] = json!({"incarnation":new_id()});
+        assert!(
+            controls::bind_created(&mut tx, &control, command, &foreign)
+                .await
+                .is_err(),
+            "a payload from a different native source cannot claim this creation"
+        );
+        assert_eq!(
+            orch_db::queries::runtime_incarnations::current(&mut tx, s.old).await?,
+            Some(RuntimeSource::untracked())
+        );
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(&mut tx, s.host, s.old, created, false)
+                .await?
+        );
+        assert!(controls::awaiting_creation(&mut tx, &control).await?);
+        assert!(
+            !controls::owns_current_source(&mut tx, &control).await?,
+            "an early report permits consuming the queued Create reply, never Start or cleanup ownership"
+        );
+        assert_eq!(
+            controls::bind_created(&mut tx, &control, command, &result).await?,
+            Some(created)
+        );
+        assert!(!controls::awaiting_creation(&mut tx, &control).await?);
+        assert!(controls::owns_current_source(&mut tx, &control).await?);
+        sqlx::query("UPDATE commands SET result=NULL WHERE id=$1")
+            .bind(command)
+            .execute(&mut *tx)
+            .await?;
+        assert_eq!(
+            controls::bind_created(&mut tx, &control, command, &result).await?,
+            Some(created),
+            "the validated once-only outcome survives ordinary command-result archival"
+        );
+        let start = new_id();
+        let start_body = json!({"runtime_id":s.old});
+        let target = controls::start_phase(&mut tx, &control, start, created, &start_body)
+            .await?
+            .ok_or("original Start phase absent")?;
+        assert_eq!(
+            controls::start_phase(&mut tx, &control, start, created, &start_body).await?,
+            Some(target.clone()),
+            "retrying the original phase never invents another candidate"
+        );
+        assert_eq!(target.observed, created.incarnation);
+        let proposed = RuntimeSource {
+            incarnation: target.opening,
+        };
+        assert!(proposed.incarnation.is_some());
+        assert_ne!(proposed, created);
+        let opened = if reused { created } else { proposed };
+        let header = orch_link_contract::native_target::NativeTarget::Lifecycle(target);
+        assert!(
+            link::insert_command(
+                &mut tx,
+                &link::NewCommand {
+                    native_target: Some(&header),
+                    id: start,
+                    machine_id: control.machine(),
+                    kind: "node.runtime.start",
+                    body: &start_body,
+                    serial_key: key.as_deref(),
+                    deadline_at: s.world.clock.now() + chrono::Duration::minutes(1),
+                },
+                s.world.clock.now()
+            )
+            .await?
+        );
+        let started = json!(NodeRuntimeStartResult {
+            source: opened,
+            reused
+        });
+        assert!(
+            link::finish_command(
+                &mut tx,
+                start,
+                &link::Ending::Succeeded(&started),
+                s.world.clock.now()
+            )
+            .await?
+        );
+        assert_eq!(
+            controls::bind_started(&mut tx, &control, start, &started)
+                .await?
+                .map(|reply| reply.source),
+            Some(opened)
+        );
+        assert_eq!(
+            controls::bind_created(&mut tx, &control, command, &result).await?,
+            Some(created),
+            "a retry keeps original creation operands without rewinding its actual Start source"
+        );
+        assert_eq!(
+            orch_db::queries::runtime_incarnations::current(&mut tx, s.old).await?,
+            Some(opened)
+        );
+        if reused {
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut tx, s.host, s.old, proposed, false
+                )
+                .await?
+            );
+            assert!(!controls::owns_current_source(&mut tx, &control).await?);
+            assert_eq!(
+                controls::bind_created(&mut tx, &control, command, &result).await?,
+                None,
+                "an explicitly unused proposal is never this creation's physical result"
+            );
+            assert_eq!(
+                controls::bind_started(&mut tx, &control, start, &started).await?,
+                None
+            );
+            assert_eq!(
+                orch_db::queries::runtime_incarnations::current(&mut tx, s.old).await?,
+                Some(proposed)
+            );
+        }
+        let later = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(&mut tx, s.host, s.old, later, false)
+                .await?
+        );
+        assert_eq!(
+            controls::bind_created(&mut tx, &control, command, &result).await?,
+            None
+        );
+        assert_eq!(
+            controls::bind_started(&mut tx, &control, start, &started).await?,
+            None
+        );
+        assert_eq!(
+            orch_db::queries::runtime_incarnations::current(&mut tx, s.old).await?,
+            Some(later)
+        );
+        tx.commit().await?;
+        s.engine.stop();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_control_captures_only_its_original_admitted_pending_openings_and_never_recaptures_a_later_report()
+-> TestResult {
+    use orch_db::queries::{link, runtime_controls as controls};
+    use orch_link_contract::{
+        commands::{NodeRuntimeStartResult, SerialKey},
+        native_target::NativeTarget,
+    };
+    for state in [
+        "unqueued",
+        "queued",
+        "accepted_then_cancelled",
+        "succeeded_reused",
+        "other_kind",
+    ] {
+        let s = Fixture::new(true).await?;
+        let mut tx = s.world.pool.begin().await?;
+        provider_rows::lock(&mut tx, s.world.provider).await?;
+        let observed = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(
+                &mut tx, s.host, s.old, observed, false
+            )
+            .await?
+        );
+        let old = controls::accept_job(&mut tx, s.old, new_id(), new_id()).await?;
+        let command = new_id();
+        let body = json!({"runtime_id":s.old});
+        let key = SerialKey::Runtime(s.old).wire();
+        let target = controls::start_phase(&mut tx, &old, command, observed, &body)
+            .await?
+            .ok_or("original Start phase missing")?;
+        let opening = target.opening.ok_or("original opening missing")?;
+        if state == "other_kind" {
+            let other = new_id();
+            controls::phase(&mut tx,&old,other,&json!({"kind":"node.image.ensure","opening":opening,"source":observed,"body":body})).await?.ok_or("other phase missing")?;
+            link::insert_command(
+                &mut tx,
+                &link::NewCommand {
+                    native_target: None,
+                    id: other,
+                    machine_id: old.machine(),
+                    kind: "node.image.ensure",
+                    body: &body,
+                    serial_key: key.as_deref(),
+                    deadline_at: s.world.clock.now() + chrono::Duration::minutes(1),
+                },
+                s.world.clock.now(),
+            )
+            .await?;
+        } else if state != "unqueued" {
+            let header = NativeTarget::Lifecycle(target);
+            link::insert_command(
+                &mut tx,
+                &link::NewCommand {
+                    native_target: Some(&header),
+                    id: command,
+                    machine_id: old.machine(),
+                    kind: "node.runtime.start",
+                    body: &body,
+                    serial_key: key.as_deref(),
+                    deadline_at: s.world.clock.now() + chrono::Duration::minutes(1),
+                },
+                s.world.clock.now(),
+            )
+            .await?;
+            if state == "accepted_then_cancelled" {
+                assert!(link::mark_accepted(&mut tx, command, s.world.clock.now()).await?);
+                link::finish_command(
+                    &mut tx,
+                    command,
+                    &link::Ending::Cancelled,
+                    s.world.clock.now(),
+                )
+                .await?;
+            } else if state == "succeeded_reused" {
+                let result = json!(NodeRuntimeStartResult {
+                    source: observed,
+                    reused: true
+                });
+                link::finish_command(
+                    &mut tx,
+                    command,
+                    &link::Ending::Succeeded(&result),
+                    s.world.clock.now(),
+                )
+                .await?;
+            }
+        }
+        let id = new_id();
+        let accepted = controls::accept(&mut tx, s.old, id).await?;
+        let snapshot = serde_json::to_value(&accepted)?;
+        let expected = if matches!(state, "queued" | "accepted_then_cancelled") {
+            json!([opening])
+        } else {
+            json!([])
+        };
+        assert_eq!(snapshot["pending"], expected, "{state}");
+        assert_eq!(accepted.source(), observed);
+        let later = RuntimeSource {
+            incarnation: Some(new_id()),
+        };
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(&mut tx, s.host, s.old, later, false)
+                .await?
+        );
+        let fresh = controls::accept(&mut tx, s.old, new_id()).await?;
+        assert_eq!(fresh.source(), later);
+        assert_eq!(
+            serde_json::to_value(&fresh)?["pending"],
+            json!([]),
+            "an unrelated report cannot inherit older candidates"
+        );
+        assert_eq!(
+            controls::accept(&mut tx, s.old, id).await?,
+            accepted,
+            "retry retains the first snapshot instead of today's source"
+        );
+        assert!(!controls::is_current(&mut tx, &accepted).await?);
+        tx.commit().await?;
+        s.engine.stop();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn separate_runtimes_keep_separate_orders_and_never_borrow_another_intent_or_phase()
+-> TestResult {
+    use orch_db::queries::runtime_controls as controls;
+    let s = Fixture::new(true).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let id = new_id();
+    let original = controls::accept(&mut tx, s.old, id).await?;
+    assert!(matches!(
+        controls::accept(&mut tx, s.candidate, id).await,
+        Err(orch_db::DbError::Rule { .. })
+    ));
+    let candidate = controls::accept(&mut tx, s.candidate, new_id()).await?;
+    let phase = new_id();
+    let operands = json!({"kind":"node.runtime.stop"});
+    let first = controls::phase(&mut tx, &original, phase, &operands).await?;
+    assert!(matches!(
+        controls::phase(&mut tx, &candidate, phase, &operands).await,
+        Err(orch_db::DbError::Rule { .. })
+    ));
+    let second = controls::phase(&mut tx, &candidate, new_id(), &operands).await?;
+    assert_eq!(
+        first, second,
+        "independent subjects have independent native order spaces"
+    );
+    assert!(controls::is_current(&mut tx, &original).await?);
+    assert!(controls::is_current(&mut tx, &candidate).await?);
+    tx.commit().await?;
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn original_control_is_never_partially_accepted_outside_its_resource_transaction()
+-> TestResult {
+    let s = Fixture::new(true).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    assert!(matches!(
+        orch_db::queries::runtime_controls::accept(&mut conn, s.old, new_id()).await,
+        Err(orch_db::DbError::Rule { .. })
+    ));
+    let order: i64 = sqlx::query_scalar("SELECT native_control_revision FROM runtimes WHERE id=$1")
+        .bind(s.old)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert_eq!(order, 0);
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_queue_admission_keeps_the_original_phase_target_and_rejects_substituted_subjects()
+-> TestResult {
+    use orch_db::queries::{link, runtime_controls};
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget, NativeTarget};
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    let control = runtime_controls::accept(&mut tx, s.old, new_id()).await?;
+    assert!(
+        orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            s.old,
+            &control,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    let original = orch_db::queries::runtime_incarnations::stop(&mut tx, s.old)
+        .await?
+        .ok_or("pending original stop absent")?;
+    let machine: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(s.host)
+        .fetch_one(&mut *tx)
+        .await?;
+    let key = orch_link_contract::commands::SerialKey::Runtime(s.old).wire();
+    let body = json!({"runtime_id":s.old});
+    let target = LifecycleTarget {
+        subject: LifecycleSubject::Runtime { runtime_id: s.old },
+        observed: source.incarnation,
+        opening: None,
+        revision: original.revision,
+    };
+    let wrong = NativeTarget::Lifecycle(LifecycleTarget {
+        subject: LifecycleSubject::Runtime {
+            runtime_id: s.candidate,
+        },
+        ..target.clone()
+    });
+    let deadline = s.world.clock.now()
+        + chrono::Duration::seconds(i64::from(
+            orch_link_contract::commands::CommandKind::NodeRuntimeStop.deadline_secs(),
+        ));
+    assert!(matches!(
+        link::insert_command(
+            &mut tx,
+            &link::NewCommand {
+                native_target: Some(&wrong),
+                id: original.id,
+                machine_id: machine,
+                kind: "node.runtime.stop",
+                body: &body,
+                serial_key: key.as_deref(),
+                deadline_at: deadline,
+            },
+            s.world.clock.now()
+        )
+        .await,
+        Err(orch_db::DbError::Rule { .. })
+    ));
+    let absent: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM commands WHERE id=$1)")
+        .bind(original.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    assert!(
+        absent,
+        "a rejected target must not poison the original command ID"
+    );
+    let valid = NativeTarget::Lifecycle(target.clone());
+    assert!(matches!(
+        link::insert_command(
+            &mut tx,
+            &link::NewCommand {
+                native_target: Some(&valid),
+                id: original.id,
+                machine_id: s.world.machine_id,
+                kind: "node.runtime.stop",
+                body: &body,
+                serial_key: key.as_deref(),
+                deadline_at: deadline,
+            },
+            s.world.clock.now()
+        )
+        .await,
+        Err(orch_db::DbError::Rule { .. })
+    ));
+    assert!(
+        link::insert_command(
+            &mut tx,
+            &link::NewCommand {
+                native_target: Some(&valid),
+                id: original.id,
+                machine_id: machine,
+                kind: "node.runtime.stop",
+                body: &body,
+                serial_key: key.as_deref(),
+                deadline_at: deadline,
+            },
+            s.world.clock.now()
+        )
+        .await?
+    );
+    let stored =
+        orch_db::queries::session_dependencies::command_native_target(&mut tx, original.id)
+            .await?
+            .ok_or("original native target not retained")?;
+    assert_eq!(stored, valid);
+    assert!(
+        !link::insert_command(
+            &mut tx,
+            &link::NewCommand {
+                native_target: Some(&wrong),
+                id: original.id,
+                machine_id: machine,
+                kind: "node.runtime.stop",
+                body: &body,
+                serial_key: key.as_deref(),
+                deadline_at: deadline,
+            },
+            s.world.clock.now()
+        )
+        .await?,
+        "canonical duplicate keeps its first facts"
+    );
+    assert_eq!(
+        orch_db::queries::session_dependencies::command_native_target(&mut tx, original.id).await?,
+        Some(NativeTarget::Lifecycle(target))
+    );
+    tx.commit().await?;
     s.engine.stop();
     Ok(())
 }

@@ -25,6 +25,7 @@ export function ProgramBuild({ program, name }: { program: RunningHarnessBuild; 
     <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm"><span className="min-w-0 wrap-anywhere">{title} {program.version}</span>
       {program.build === null ? <span className="text-text-muted">{t('programVersions.unknownCheck')}</span> : <BuildStatus build={program.build} name={title} />}
     </div>
+    {program.build === null && <div className="text-sm text-text-muted" data-build-unknown>{t('programVersions.unknownCheckWhy')}</div>}
     {program.build !== null && <DisabledBuildFeatures build={program.build} name={title} />}
   </div>;
 }

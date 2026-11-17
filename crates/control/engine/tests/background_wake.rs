@@ -691,6 +691,8 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: world.opening_of(thread).await,
                     reason: "the native process ended".into(),
                 },
             ),
@@ -745,6 +747,89 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
         .bind(thread).fetch_one(world.pool.pool()).await.unwrap();
     assert!(lost);
     assert_eq!(world.turn_starts(thread).len(), 1);
+}
+
+#[tokio::test]
+async fn a_command_using_an_existing_session_keeps_its_source_while_its_owner_holds_the_thread() {
+    use orch_db::queries::{link, session_dependencies, threads};
+    use orch_link_contract::commands::{SerialKey, SessionBackground, SessionBackgroundEnd};
+    let world = World::new().await;
+    let thread = world.thread("Held native End").await;
+    let (turn, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, turn_ended(turn.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_state(thread, "idle").await;
+    let segment = world.segment_of(thread).await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let original = session_dependencies::target(&mut conn, thread, Some(segment))
+        .await
+        .unwrap();
+    let orch_link_contract::commands::NativeTarget::Session(binding) = &original else {
+        panic!("the original background session must keep its own session target");
+    };
+    assert_eq!(binding.opening_id, Some(world.opening_of(thread).await));
+    let mut held = world.pool.begin().await.unwrap();
+    threads::lock(&mut held, thread).await.unwrap();
+    let key = SerialKey::Thread(thread).wire();
+    for provided in [false, true] {
+        for (kind, body) in [
+            (
+                CommandKind::SessionBackground,
+                serde_json::to_value(SessionBackground {
+                    thread_id: thread,
+                    segment_id: segment,
+                    cursor: None,
+                })
+                .unwrap(),
+            ),
+            (
+                CommandKind::SessionBackgroundEnd,
+                serde_json::to_value(SessionBackgroundEnd {
+                    thread_id: thread,
+                    segment_id: segment,
+                    command_id: "actual-native-task".into(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            let id = orch_types::new_id();
+            let inserted = tokio::time::timeout(
+                common::PATIENCE,
+                link::insert_command(
+                    &mut conn,
+                    &link::NewCommand {
+                        native_target: provided.then_some(&original),
+                        id,
+                        machine_id: world.machine_id,
+                        kind: kind.as_str(),
+                        body: &body,
+                        serial_key: key.as_deref(),
+                        deadline_at: world.clock.now()
+                            + chrono::Duration::seconds(i64::from(kind.deadline_secs())),
+                    },
+                    world.clock.now(),
+                ),
+            )
+            .await;
+            if inserted.is_err() {
+                held.rollback().await.unwrap();
+                panic!(
+                    "an existing-session command cannot wait on its own controller's thread lock"
+                );
+            }
+            assert!(inserted.unwrap().unwrap());
+            assert_eq!(
+                session_dependencies::command_native_target(&mut conn, id)
+                    .await
+                    .unwrap(),
+                Some(original.clone())
+            );
+        }
+    }
+    held.rollback().await.unwrap();
+    drop(conn);
+    world.shutdown().await;
 }
 
 #[tokio::test]

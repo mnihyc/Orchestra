@@ -8,11 +8,12 @@ import { Trans, useTranslation } from 'react-i18next';
 import { record } from '@/api/cache';
 import { blockersOf, cancelJob, forkKeys } from '@/api/forks';
 import type { MountPick } from '@/features/change/choices';
+import { CopyDestination } from '@/features/change/CopyDestination';
 import { MeasurementSize, usePlanMeasurements } from '@/features/change/Measurements';
 import { Hint } from '@/features/help/Hint';
 import { JobActivityLine } from '@/features/change/Progress';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
-import type { CopyInto, CopyUnavailable, Job, MountFate, PlanMount, PlanMountFingerprints } from '@/generated/api-types';
+import type { CopyUnavailable, Job, MountFate, PlanMount, PlanMountFingerprints } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { Button } from '@/ui/Button';
@@ -124,13 +125,8 @@ export function MountFates({ mounts, picks, onPick, onPickAll, onCheck, checking
   const choice = ({ mount, pick, fate, copy }: Row) => mount.fates.length <= 1 ? null : <div className="flex flex-col gap-1">
     <Select<MountFate> size="sm" hideLabel className="w-36" label={t('mountPlan.fates.of', { mount: mount.mount.name })} value={fate} onValueChange={(next) => choose(mount, next)}
       options={FATES.map((value) => ({ value, name: t(`choiceCatalog.mountFate.${value}.name`), disabled: !mount.fates.includes(value), description: value === 'copy' ? reason(mount.copy_unavailable, t) : undefined }))} />
-    {copy?.holds !== undefined && copy.holds !== null && <Select<CopyInto | 'unanswered'> size="sm" hideLabel className="w-36" label={t('mountPlan.fates.into', { mount: mount.mount.name })} value={pick?.into ?? copy.into ?? 'unanswered'}
-      onValueChange={(into) => { if (into !== 'unanswered') onPick(mount.mount.id, { fate: 'copy', into }); }}
-      options={[
-        { value: 'unanswered', name: t('liveWork.choose'), disabled: true },
-        { value: 'replace', name: t('mountPlan.fates.replace'), disabled: !copy.replace, description: copy.replace ? undefined : t('mountPlan.fates.replaceUnavailable') },
-        { value: 'new_location', name: t('mountPlan.fates.keepBoth') },
-      ]} />}
+    {copy?.holds !== undefined && copy.holds !== null && <CopyDestination mount={mount.mount.name} value={pick?.into ?? copy.into ?? null} replace={copy.replace}
+      onChange={(into) => onPick(mount.mount.id, { fate: 'copy', into })} />}
   </div>;
   const entries = ({ mount, fate }: Row): MenuEntry[] => {
     const values: MenuEntry[] = [];
