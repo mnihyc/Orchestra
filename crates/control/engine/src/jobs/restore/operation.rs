@@ -390,7 +390,7 @@ impl NativeSource for ReviewSource {
                 .execute(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.anchor.machine)
                 .execute(conn)
                 .await
@@ -1252,6 +1252,7 @@ fn body_matches(
                     environment_id: plan.environment,
                     snapshot_id: expected.undo_snapshot_id,
                     directory: directory.clone(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Restore,
                     record_days: *record_days,
                     max_bytes: *max_bytes,
@@ -1449,7 +1450,7 @@ async fn physical_cleanup(conn: &mut Conn, request: &Request) -> Result<(), Stop
         .execute(&mut *conn)
         .await
         .map_err(DbError::from)?;
-    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
         .bind(request.anchor.machine)
         .execute(&mut *conn)
         .await

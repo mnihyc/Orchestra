@@ -203,6 +203,7 @@ CREATE TABLE providers (
     facts_overrides jsonb DEFAULT '{}'::jsonb NOT NULL,
     facts_at timestamp with time zone,
     revision bigint DEFAULT 1 NOT NULL,
+    observation_revision bigint DEFAULT 0 NOT NULL CHECK (observation_revision >= 0),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
@@ -226,6 +227,8 @@ CREATE TABLE providers (
 );
 
 -- The same factual option sources accompany every stored model reader.
+CREATE TRIGGER providers_revision BEFORE UPDATE ON providers FOR EACH ROW EXECUTE FUNCTION orch_provider_revision();
+
 CREATE FUNCTION provider_option_layers(uuid, text[]) RETURNS jsonb
     LANGUAGE sql STABLE
 AS $$
