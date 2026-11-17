@@ -156,6 +156,7 @@ async fn native_import_command_pins_the_actual_queue_frame_and_checks_current_so
             .dispatcher()
             .issue_stored_before(
                 StoredCommand {
+                    native_target: command.native_target.clone(),
                     id: Some(command.id),
                     machine,
                     kind: "mcp.import".to_owned(),
@@ -460,6 +461,7 @@ async fn native_import_inverse_owns_only_the_successful_unfiled_copy_after_the_o
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                native_target: command.native_target.clone(),
                 id: Some(command.id),
                 machine,
                 kind: "mcp.import".to_owned(),
@@ -597,6 +599,7 @@ async fn native_import_inverse_owns_only_the_successful_unfiled_copy_after_the_o
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                native_target: cleanup.native_target.clone(),
                 id: Some(cleanup.id),
                 machine,
                 kind: "mcp.forget".to_owned(),
@@ -784,6 +787,7 @@ async fn recorded_deletion_custody_requires_its_actual_journal_and_never_admits_
     let access = AuthzAccess::new(world.app.app.clock.clone());
     let lane = command.key.wire();
     let proposed = link::NewCommand {
+        native_target: None,
         id: command.id,
         machine_id: machine,
         kind: "mcp.forget",
@@ -879,6 +883,7 @@ async fn recorded_deletion_custody_requires_its_actual_journal_and_never_admits_
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                native_target: None,
                 id: Some(fresh),
                 machine,
                 kind: "mcp.forget".into(),

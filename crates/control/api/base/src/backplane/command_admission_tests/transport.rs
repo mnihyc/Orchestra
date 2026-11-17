@@ -76,6 +76,8 @@ fn connect(fixture: &mut Fixture, issuer: CommandIssuer) -> oneshot::Receiver<()
                 return Err("the transport gateway received another machine's work".into());
             }
             match frame {
+                // This roleless peer has no local endpoint; the case observes its actual transient command wire.
+                DownFrame::ToolSessionControl(_) | DownFrame::ToolSessionUpdate(_) => {}
                 DownFrame::Cmd(command) => {
                     let id = command.id;
                     native
@@ -199,16 +201,81 @@ impl CommandHandler for Harness {
     }
 }
 
-fn opening(fixture: &Fixture, thread: Id) -> Proof<SessionOpen> {
+async fn opening(fixture: &Fixture, thread: Id) -> Proof<SessionOpen> {
+    let mut conn = fixture.test.pool.acquire().await?;
+    let (owner, home): (Id, Id) =
+        sqlx::query_as("SELECT owner_id,home_node_id FROM environments WHERE id=$1")
+            .bind(fixture.environment)
+            .fetch_one(&mut *conn)
+            .await?;
+    let (project, topic, segment) = (new_id(), new_id(), new_id());
+    hierarchy::testing::insert_node(
+        &mut conn,
+        project,
+        "project",
+        Some(home),
+        "Transport",
+        owner,
+    )
+    .await?;
+    hierarchy::testing::insert_node(&mut conn, topic, "topic", Some(project), "Transport", owner)
+        .await?;
+    orch_db::queries::threads::insert_thread(
+        &mut conn,
+        thread,
+        topic,
+        "Retained model transport",
+        owner,
+        fixture.clock.now(),
+    )
+    .await?;
+    let agent = resources::access_fixtures::insert_resource(
+        &mut conn,
+        "agent",
+        Some(owner),
+        Some(home),
+        "Transport agent",
+    )
+    .await?;
+    let provider = resources::access_fixtures::insert_resource(
+        &mut conn,
+        "provider",
+        Some(owner),
+        Some(home),
+        "Transport provider",
+    )
+    .await?;
+    orch_db::queries::threads::insert_segment(
+        &mut conn,
+        &orch_db::queries::threads::NewSegment {
+            id: segment,
+            thread_id: thread,
+            agent_id: agent,
+            provider_id: provider,
+            environment_id: fixture.environment,
+            env_generation: 1,
+            arrangement: "together",
+            executor: None,
+            tool_set: None,
+            credential_path: "forwarded",
+            native_session_ref: None,
+            started_by: Some(owner),
+            started_at: fixture.clock.now(),
+        },
+        1,
+    )
+    .await?;
+    sqlx::query("UPDATE threads SET current_segment_id=$2,environment_id=$3,provider_id=$4,agent_id=$5 WHERE node_id=$1")
+        .bind(thread).bind(segment).bind(fixture.environment).bind(provider).bind(agent).execute(&mut *conn).await?;
     Ok(serde_json::from_value(serde_json::json!({
-        "agent_id":new_id(), "thread_id":thread, "segment_id":new_id(), "mode":"new",
+        "agent_id":agent, "thread_id":thread, "segment_id":segment, "mode":"new",
         "native_session_ref":null, "archive":null, "history":null, "upto_turn_ordinal":null,
         "workspace_root":"/workspace", "instruction_root_marker":true,
         "directory":"/workspace", "cwd":"/workspace", "mounts":[],
         "model":"fixture-model", "effort":null, "params":{},
         "approval_mode":"ask", "sandbox_mode":"read_only", "instructions":"", "memory":null,
         "arrangement":"together",
-        "provider":{"path":"forwarded", "provider_id":new_id(), "protocol":"openai-responses", "ticket":"synthetic-first-transport"},
+        "provider":{"path":"forwarded", "provider_id":provider, "protocol":"openai-responses", "ticket":"synthetic-first-transport"},
         "exec":{"executor":null, "environment_id":fixture.environment, "generation":1},
         "mcp":[], "orch_tools":[], "raw_events":false
     }))?)
@@ -255,7 +322,7 @@ async fn two_forwarded_turns_use_the_production_command_port_and_rebind_without_
     within(connect(&mut fixture, controller.link().commands().clone())).await??;
     let commands = DispatchCommands::new(fixture.dispatcher.clone());
     let thread = new_id();
-    let mut open = opening(&fixture, thread)?;
+    let mut open = opening(&fixture, thread).await?;
     let initial = Outgoing::new(new_id(), fixture.machine, SerialKey::Thread(thread), &open)?;
     // A real opening cannot acquire the transient route merely by calling observe.
     assert!(commands.observe(initial.clone()).await.is_err());
@@ -314,6 +381,15 @@ async fn two_forwarded_turns_use_the_production_command_port_and_rebind_without_
         .iter()
         .find(|command| command.kind == "session.open" && command.body["transport_only"] == true)
         .ok_or("the rebind never reached the actual wire")?;
+    let original = sent
+        .iter()
+        .find(|command| command.id == initial.id)
+        .ok_or("the original native opening was not recorded")?;
+    assert_eq!(
+        live.native_target, original.native_target,
+        "a non-journaled transport rebind keeps the exact original physical opening"
+    );
+    assert!(live.native_target.is_some());
     assert!(
         rows::command(&mut *fixture.test.pool.acquire().await?, live.id)
             .await?

@@ -619,6 +619,7 @@ async fn ask_for_reader(
     dispatcher
         .issue_stored_before(
             crate::dispatch::StoredCommand {
+                native_target: command.native_target.clone(),
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().into(),
