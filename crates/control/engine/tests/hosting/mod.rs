@@ -466,6 +466,7 @@ impl ScriptedHost {
             .publish(
                 &Stream::Node,
                 &Event::NodeRuntime(NodeRuntime {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
                     runtime_id: runtime,
                     state: state.to_owned(),
                     detail: detail.map(str::to_owned),

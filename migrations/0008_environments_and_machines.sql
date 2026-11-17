@@ -106,6 +106,7 @@ CREATE TABLE commands (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    tool_session jsonb,
     login_authority jsonb,
     authority_required boolean DEFAULT false NOT NULL,
     mcp_import_completion jsonb,
@@ -229,6 +230,7 @@ CREATE TABLE environments (
     lost_at timestamp with time zone,
     lost_by uuid,
     loss_missing boolean DEFAULT false NOT NULL,
+    native_incarnation uuid,
     CONSTRAINT environments_check CHECK (((placement <> 'managed'::text) OR (template_id IS NOT NULL))),
     CONSTRAINT environments_placement_check CHECK ((placement = ANY (ARRAY['managed'::text, 'connected'::text]))),
     CONSTRAINT environments_removal_phase_check CHECK (((removal_phase = ANY (ARRAY['scheduled'::text, 'removing'::text, 'kept'::text, 'restoring'::text, 'purging'::text, 'purged'::text])) OR (removal_phase = ANY ('{lost}'::text[])))),
@@ -292,6 +294,7 @@ ALTER TABLE snapshots ADD CONSTRAINT snapshots_environment_id_fkey FOREIGN KEY (
 CREATE TABLE hosts (
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
+    bundled_with_server boolean DEFAULT false NOT NULL,
     owner_id uuid,
     org_id uuid,
     home_id uuid,
@@ -306,6 +309,7 @@ CREATE TABLE hosts (
     load jsonb DEFAULT '{}'::jsonb NOT NULL,
     load_at timestamp with time zone,
     storages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    mount_sizes jsonb DEFAULT '[]'::jsonb NOT NULL,
     schedulable boolean DEFAULT true NOT NULL,
     disabled boolean DEFAULT false NOT NULL,
     when_full text,
@@ -546,6 +550,7 @@ CREATE TABLE mount_kept_data (
 CREATE INDEX mount_kept_data_mount_idx ON mount_kept_data USING btree (mount_id, machine_id);
 
 CREATE TABLE mount_locations (
+    membership_id uuid DEFAULT gen_random_uuid() NOT NULL UNIQUE,
     mount_id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
@@ -563,6 +568,9 @@ CREATE TABLE mount_locations (
     CONSTRAINT mount_locations_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
     CONSTRAINT mount_locations_mount_id_fkey FOREIGN KEY (mount_id) REFERENCES mounts(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER mount_location_membership BEFORE UPDATE ON mount_locations
+    FOR EACH ROW EXECUTE FUNCTION orch_mount_location_membership();
 
 CREATE TABLE mount_lost_locations (
     id uuid NOT NULL,
@@ -726,6 +734,20 @@ CREATE TABLE runtimes (
     CONSTRAINT runtimes_template_id_fkey FOREIGN KEY (template_id) REFERENCES env_templates(id)
 );
 
+-- Native source identities are factual and never confer control of a runtime.
+CREATE TABLE runtime_incarnations (
+    id uuid PRIMARY KEY,
+    runtime_id uuid NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
+    host_id uuid NOT NULL REFERENCES hosts(id),
+    closed boolean DEFAULT false NOT NULL,
+    CONSTRAINT runtime_incarnations_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
+);
+
+CREATE INDEX runtime_incarnations_runtime_idx ON runtime_incarnations(runtime_id);
+
+ALTER TABLE runtimes ADD CONSTRAINT runtimes_native_incarnation_fkey
+    FOREIGN KEY (native_incarnation) REFERENCES runtime_incarnations(id) ON DELETE SET NULL;
+
 CREATE INDEX runtimes_custody_waiting_idx ON runtimes USING btree (host_id) INCLUDE (state, remove_at) WHERE ((lost_at IS NULL) AND (state <> 'removed'::text));
 
 CREATE UNIQUE INDEX runtimes_env_key ON runtimes USING btree (environment_id) WHERE ((kind = 'environment'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
@@ -797,3 +819,16 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- Native openings are ordered independently from wall clocks and logical segment numbers.
+CREATE SEQUENCE native_session_openings AS bigint;
+
+-- One accepted writer owns a mount destination until publication or joined compensation.
+CREATE TABLE mount_copy_claims (
+    mount_id uuid NOT NULL REFERENCES mounts(id),
+    machine_id uuid NOT NULL REFERENCES machines(id),
+    job_id uuid NOT NULL REFERENCES jobs(id),
+    decision jsonb NOT NULL,
+    PRIMARY KEY(mount_id,machine_id)
+);
+CREATE INDEX mount_copy_claims_job ON mount_copy_claims(job_id,mount_id,machine_id);

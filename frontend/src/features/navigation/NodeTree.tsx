@@ -22,6 +22,7 @@
  * the "+" of an org, a project or a folder are the lists of `NodeMenu`, made only for the row that is
  * asked; a document's are a document's own.
  */
+import { PathLink as RoutedPathLink } from '@/shell/TrailLink';
 import { useGroupActions } from '@/features/chat/groupActions';
 import { linkTo } from '@/lib/links';
 import { Link } from '@tanstack/react-router';
@@ -111,7 +112,7 @@ export const chatPath = (node: Pick<TreeNode, 'id' | 'kind' | 'address'>): strin
 function PathLink({ path, className, label, children }: { path: string; className: string; label?: string; children: ReactNode }) {
   const open = useOpenPath();
   return (
-    <a
+    <RoutedPathLink
       href={path}
       tabIndex={-1}
       className={className}
@@ -124,7 +125,7 @@ function PathLink({ path, className, label, children }: { path: string; classNam
       }}
     >
       {children}
-    </a>
+    </RoutedPathLink>
   );
 }
 

@@ -89,7 +89,10 @@ fn verify_directory(
         let metadata = std::fs::metadata(&directory.path).map_err(io_error)?;
         if !metadata.is_dir()
             || directory.device != Some(metadata.dev())
-            || directory.inode != Some(metadata.ino())
+            || directory.inode
+                != Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    metadata.ino(),
+                ))
         {
             return Err(DriverError::InvalidSpec("the existing directory changed after environment.roots was checked; recreate with an allowed directory".into()));
         }

@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test provider_runtime --test lifecycle --test restart
+test -p orch-node-core --lib
+test -p orch-node-core --test runtimes --test reconciliation --test resource_inventory
+test -p orch-api-core --test real_connector --features test-support

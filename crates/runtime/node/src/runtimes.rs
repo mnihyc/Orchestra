@@ -84,25 +84,35 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The runtimes a command is being carried out for. The reconciliation leaves these alone: the command
-/// tells the system what became of them when it ends.
+/// In-flight changes suppress transient observations; a stop still permits a terminal observation.
 #[derive(Debug, Default)]
 pub struct Busy {
-    running: Mutex<BTreeMap<Id, usize>>,
+    running: Mutex<BTreeMap<Id, InFlight>>,
+}
+
+#[derive(Debug, Default)]
+struct InFlight {
+    changing: usize,
+    stopping: usize,
 }
 
 /// A runtime counts as busy until this is dropped.
 pub struct BusyGuard {
     busy: Arc<Busy>,
     runtime_id: Id,
+    stopping: bool,
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         let mut running = lock(&self.busy.running);
         if let Some(count) = running.get_mut(&self.runtime_id) {
-            *count -= 1;
-            if *count == 0 {
+            if self.stopping {
+                count.stopping -= 1;
+            } else {
+                count.changing -= 1;
+            }
+            if count.stopping == 0 && count.changing == 0 {
                 running.remove(&self.runtime_id);
             }
         }
@@ -119,11 +129,32 @@ impl Busy {
     /// Counts the runtime as busy until the guard is dropped.
     #[must_use]
     pub fn enter(self: &Arc<Self>, runtime_id: Id) -> BusyGuard {
-        *lock(&self.running).entry(runtime_id).or_default() += 1;
+        self.enter_kind(runtime_id, false)
+    }
+
+    fn enter_stopping(self: &Arc<Self>, runtime_id: Id) -> BusyGuard {
+        self.enter_kind(runtime_id, true)
+    }
+
+    fn enter_kind(self: &Arc<Self>, runtime_id: Id, stopping: bool) -> BusyGuard {
+        let mut running = lock(&self.running);
+        let count = running.entry(runtime_id).or_default();
+        if stopping {
+            count.stopping += 1;
+        } else {
+            count.changing += 1;
+        }
         BusyGuard {
             busy: Arc::clone(self),
             runtime_id,
+            stopping,
         }
+    }
+
+    pub(crate) fn blocks_observation(&self, runtime: Id, terminal: bool) -> bool {
+        lock(&self.running)
+            .get(&runtime)
+            .is_some_and(|count| count.changing > 0 || !terminal)
     }
 
     /// The runtimes that are busy now.
@@ -679,6 +710,7 @@ impl Runtimes {
                 host,
                 Record {
                     runtime_id,
+                    incarnation: crate::ledger::Incarnation::Untracked,
                     kind: unit.kind,
                     driver,
                     unit,
@@ -698,6 +730,16 @@ impl Runtimes {
     /// Tells the system the state the driver finds a runtime's unit in now, if it is not what it was last
     /// told.
     async fn tell(&self, runtime_id: Id, host: &HostDriver, unit: &UnitRef) {
+        let original = self.inner.ledger.get(runtime_id);
+        if original.as_ref().is_some_and(|record| &record.unit != unit) {
+            return;
+        }
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: original.as_ref().and_then(|record| record.incarnation.id()),
+        };
+        let original_identity = original
+            .as_ref()
+            .map(|record| (record.unit.clone(), record.incarnation));
         let state = match host.contract().inspect(unit).await {
             Ok(state) => state,
             Err(error) => {
@@ -705,10 +747,20 @@ impl Runtimes {
                 return;
             }
         };
+        if self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .map(|record| (record.unit, record.incarnation))
+            != original_identity
+        {
+            return;
+        }
         self.inner
             .reports
             .runtime_if_changed(
                 runtime_id,
+                source,
                 state_name(state.state),
                 self.inner
                     .ledger
@@ -939,6 +991,13 @@ impl Runtimes {
         let first_record = before.is_none();
         let record = Record {
             runtime_id: spec.runtime_id,
+            incarnation: before
+                .as_ref()
+                .filter(|before| before.unit == unit)
+                .map_or_else(
+                    || crate::ledger::Incarnation::Tracked(orch_types::new_id()),
+                    |before| before.incarnation,
+                ),
             kind: spec.kind,
             driver: spec.driver.clone(),
             unit: unit.clone(),
@@ -1071,6 +1130,73 @@ impl Runtimes {
         let serial = self.lock_of(runtime_id);
         let _one_at_a_time = serial.lock().await;
         let (host, record) = self.require(runtime_id).await?;
+        self.start_locked(runtime_id, &host, &record, None).await
+    }
+
+    /// Starts only the accepted original after its queue; a genuine reuse keeps its old
+    /// physical identity and a new start installs the admitted candidate before native IO.
+    pub async fn start_original(
+        &self,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+    ) -> Result<bool, CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject};
+        if !target.coherent_for(LifecycleAction::Start) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime start target is invalid",
+            ));
+        }
+        let LifecycleSubject::Runtime { runtime_id } = &target.subject else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original start target is not a runtime",
+            ));
+        };
+        let runtime_id = *runtime_id;
+        let _resources = self.inner.resource_changes.read().await;
+        let serial = self.lock_of(runtime_id);
+        let _one = serial.lock().await;
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Start)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(false);
+        }
+        let Some(expected) = target.observed else {
+            return Ok(false);
+        };
+        let actual = self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .and_then(|record| record.incarnation.id())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::Conflict,
+                    "the host cannot confirm the original native runtime identity",
+                )
+            })?;
+        if actual != expected {
+            return Ok(false);
+        }
+        let (host, record) = self.require(runtime_id).await?;
+        if record.incarnation.id() != Some(expected) {
+            return Ok(false);
+        }
+        let _busy = self.inner.busy.enter(runtime_id);
+        self.start_locked(runtime_id, &host, &record, target.opening)
+            .await?;
+        Ok(true)
+    }
+
+    async fn start_locked(
+        &self,
+        runtime_id: Id,
+        host: &HostDriver,
+        record: &Record,
+        opening: Option<Id>,
+    ) -> Result<(), CommandError> {
         crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1100,13 +1226,13 @@ impl Runtimes {
                 ));
             }
         }
-        self.recover_interrupted_mounts(runtime_id, &host, &record)
+        self.recover_interrupted_mounts(runtime_id, host, record)
             .await?;
-        let _volume_holds = self.hold_start_volumes(&record).await;
-        self.keep_off_shared_volumes(&record).await?;
+        let _volume_holds = self.hold_start_volumes(record).await;
+        self.keep_off_shared_volumes(record).await?;
         let policy = self.inner.ledger.network(runtime_id).unwrap_or_default();
         let network = self
-            .install_network(runtime_id, &host, &record.unit, &policy)
+            .install_network(runtime_id, host, &record.unit, &policy)
             .await;
         if !network.is_ready_for(&policy) {
             self.unwatch(runtime_id);
@@ -1114,7 +1240,7 @@ impl Runtimes {
                 .contract()
                 .stop(&record.unit, self.inner.settings.stop_grace)
                 .await;
-            self.tell(runtime_id, &host, &record.unit).await;
+            self.tell(runtime_id, host, &record.unit).await;
             return Err(CommandError {
                 code: "network.restricted_unavailable".to_owned(),
                 detail: network
@@ -1126,21 +1252,21 @@ impl Runtimes {
         }
         // The operator's up hooks run around a start that brings the unit up, never around one that finds it
         // running; they fail closed.
-        let hooked = self.inner.hooks.any() && !self.runs(&host, &record).await;
+        let hooked = self.inner.hooks.any() && !self.runs(host, record).await;
         let reason = UnitAbout::up_reason(
             self.inner.ledger.about(runtime_id).as_ref(),
             record.started_at.is_none(),
         );
         if hooked
             && let Some(run) = self
-                .hook(HookEvent::PreUp, reason, false, &host, &record)
+                .hook(HookEvent::PreUp, reason, false, host, record)
                 .await
             && run.failed
         {
-            self.tell(runtime_id, &host, &record.unit).await;
+            self.tell(runtime_id, host, &record.unit).await;
             return Err(hook_failure(&run));
         }
-        self.start_capabilities(&host, &record).await?;
+        self.start_capabilities(host, record, opening).await?;
         crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1149,15 +1275,15 @@ impl Runtimes {
             self.inner.clock.time(),
         )
         .await?;
-        self.restore_live_mounts(runtime_id, &host, &record).await;
+        self.restore_live_mounts(runtime_id, host, record).await;
         if hooked {
             if let Some(run) = self
-                .hook(HookEvent::PostUp, reason, false, &host, &record)
+                .hook(HookEvent::PostUp, reason, false, host, record)
                 .await
                 && run.failed
             {
-                self.close_after_failed_up(&host, &record).await;
-                self.tell(runtime_id, &host, &record.unit).await;
+                self.close_after_failed_up(host, record).await;
+                self.tell(runtime_id, host, &record.unit).await;
                 return Err(hook_failure(&run));
             }
             self.note_phase(runtime_id, HookPhase::Up);
@@ -1167,11 +1293,11 @@ impl Runtimes {
             .inner
             .ledger
             .update(runtime_id, |record| record.started_at = Some(now));
-        self.report_addresses(runtime_id, &host, &record, &policy)
+        self.report_addresses(runtime_id, host, record, &policy)
             .await;
-        self.tell(runtime_id, &host, &record.unit).await;
+        self.tell(runtime_id, host, &record.unit).await;
         if !record.enrolled {
-            self.watch(runtime_id, self.enroll_time(&record));
+            self.watch(runtime_id, self.enroll_time(record));
         }
         Ok(())
     }
@@ -1185,10 +1311,78 @@ impl Runtimes {
         reason: Option<UnitReason>,
     ) -> Result<(), CommandError> {
         let _resources = self.inner.resource_changes.read().await;
-        let _busy = self.inner.busy.enter(runtime_id);
+        let _busy = self.inner.busy.enter_stopping(runtime_id);
         let serial = self.lock_of(runtime_id);
         let _one_at_a_time = serial.lock().await;
         let (host, record) = self.require(runtime_id).await?;
+        self.stop_locked(runtime_id, reason, &host, &record).await
+    }
+
+    /// Stops only the accepted original after the native runtime lock. The caller retains
+    /// its actual original operation/authority; the target and ordering marker grant nothing.
+    /// False means the admitted absence or superseded original caused no native stop.
+    pub async fn stop_original(
+        &self,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+        reason: Option<UnitReason>,
+    ) -> Result<bool, CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject};
+        if !target.coherent_for(LifecycleAction::Stop) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime stop target is invalid",
+            ));
+        }
+        let LifecycleSubject::Runtime { runtime_id } = &target.subject else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original stop target is not a runtime",
+            ));
+        };
+        let runtime_id = *runtime_id;
+        let _resources = self.inner.resource_changes.read().await;
+        let serial = self.lock_of(runtime_id);
+        let _one = serial.lock().await;
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Stop)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(false);
+        }
+        let Some(expected) = target.observed else {
+            return Ok(false);
+        };
+        let actual = self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .and_then(|record| record.incarnation.id())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::Conflict,
+                    "the host cannot confirm the original native runtime identity",
+                )
+            })?;
+        if actual != expected {
+            return Ok(false);
+        }
+        let (host, record) = self.require(runtime_id).await?;
+        if record.incarnation.id() != Some(expected) {
+            return Ok(false);
+        }
+        let _busy = self.inner.busy.enter_stopping(runtime_id);
+        self.stop_locked(runtime_id, reason, &host, &record).await?;
+        Ok(true)
+    }
+
+    async fn stop_locked(
+        &self,
+        runtime_id: Id,
+        reason: Option<UnitReason>,
+        host: &HostDriver,
+        record: &Record,
+    ) -> Result<(), CommandError> {
         let occupied = crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1199,23 +1393,34 @@ impl Runtimes {
         .await?;
         self.unwatch(runtime_id);
         let reason = reason.unwrap_or(UnitReason::Stop);
-        let running = self.inner.hooks.any() && self.runs(&host, &record).await;
+        let running = self.inner.hooks.any() && self.runs(host, record).await;
         let came_up = running || self.came_up(runtime_id);
         if running {
             let _ = self
-                .hook(HookEvent::PreDown, reason, false, &host, &record)
+                .hook(HookEvent::PreDown, reason, false, host, record)
                 .await;
         }
-        host.contract()
-            .stop(&record.unit, self.inner.settings.stop_grace)
+        let before = host
+            .contract()
+            .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
+        let attempt = if before.state == UnitStateKind::Running {
+            host.contract()
+                .stop(&record.unit, self.inner.settings.stop_grace)
+                .await
+        } else {
+            Ok(())
+        };
         let actual = host
             .contract()
             .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
-        if actual.state != UnitStateKind::Stopped {
+        if actual.state == UnitStateKind::Running {
+            if let Err(error) = attempt {
+                return Err(failure(&error));
+            }
             return Err(CommandError::new(
                 ErrorCode::Conflict,
                 "the host did not confirm that the unit stopped",
@@ -1227,11 +1432,11 @@ impl Runtimes {
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         if came_up {
             let _ = self
-                .hook(HookEvent::PostDown, reason, false, &host, &record)
+                .hook(HookEvent::PostDown, reason, false, host, record)
                 .await;
             self.note_phase(runtime_id, HookPhase::Down);
         }
-        self.tell(runtime_id, &host, &record.unit).await;
+        self.tell(runtime_id, host, &record.unit).await;
         Ok(())
     }
 
@@ -1248,6 +1453,72 @@ impl Runtimes {
             self.forget(runtime_id).await;
             return Ok(());
         };
+        self.remove_locked(runtime_id, &host, &record).await
+    }
+
+    /// Removes only the accepted original after its native queue, retaining volumes and
+    /// leaving a later physical instance or an unconfirmed original untouched.
+    pub async fn remove_original(
+        &self,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+    ) -> Result<bool, CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject};
+        if !target.coherent_for(LifecycleAction::Remove) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime removal target is invalid",
+            ));
+        }
+        let LifecycleSubject::Runtime { runtime_id } = &target.subject else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original removal target is not a runtime",
+            ));
+        };
+        let runtime_id = *runtime_id;
+        let _resources = self.inner.resource_changes.read().await;
+        let serial = self.lock_of(runtime_id);
+        let _one = serial.lock().await;
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Remove)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(false);
+        }
+        let Some(expected) = target.observed else {
+            return Ok(false);
+        };
+        let actual = self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .and_then(|record| record.incarnation.id())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::Conflict,
+                    "the host cannot confirm the original native runtime identity",
+                )
+            })?;
+        if actual != expected {
+            return Ok(false);
+        }
+        let (host, record) = self.require(runtime_id).await?;
+        if record.incarnation.id() != Some(expected) {
+            return Ok(false);
+        }
+        let _busy = self.inner.busy.enter(runtime_id);
+        self.unwatch(runtime_id);
+        self.remove_locked(runtime_id, &host, &record).await?;
+        Ok(true)
+    }
+
+    async fn remove_locked(
+        &self,
+        runtime_id: Id,
+        host: &HostDriver,
+        record: &Record,
+    ) -> Result<(), CommandError> {
         let occupied = crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1256,30 +1527,18 @@ impl Runtimes {
             self.inner.clock.time(),
         )
         .await?;
-        let running = self.inner.hooks.any() && self.runs(&host, &record).await;
+        let running = self.inner.hooks.any() && self.runs(host, record).await;
         let came_up = running || self.came_up(runtime_id);
         if running {
             let _ = self
-                .hook(
-                    HookEvent::PreDown,
-                    UnitReason::Delete,
-                    false,
-                    &host,
-                    &record,
-                )
+                .hook(HookEvent::PreDown, UnitReason::Delete, false, host, record)
                 .await;
         }
         // Built before the unit and its networks go, so that the hook is told what it is to undo.
         let after = if came_up && self.inner.hooks.wants(HookEvent::PostDown) {
             Some(
-                self.hook_document(
-                    HookEvent::PostDown,
-                    UnitReason::Delete,
-                    false,
-                    &host,
-                    &record,
-                )
-                .await,
+                self.hook_document(HookEvent::PostDown, UnitReason::Delete, false, host, record)
+                    .await,
             )
         } else {
             None
@@ -1573,6 +1832,9 @@ impl Runtimes {
                         .reports
                         .runtime(
                             record.runtime_id,
+                            orch_link_contract::native_target::RuntimeSource {
+                                incarnation: record.incarnation.id(),
+                            },
                             state_name(UnitStateKind::Stopped),
                             Some(run.why()),
                         )
@@ -1617,13 +1879,20 @@ impl Runtimes {
 
     /// Takes a runtime out of the node's memory and tells the system its unit is gone.
     async fn forget(&self, runtime_id: Id) {
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: self
+                .inner
+                .ledger
+                .get(runtime_id)
+                .and_then(|record| record.incarnation.id()),
+        };
         if let Err(error) = self.inner.ledger.remove(runtime_id) {
             tracing::warn!(%runtime_id, %error, "a removed runtime could not be taken out of the ledger");
         }
         lock(&self.inner.locks).remove(&runtime_id);
         self.inner
             .reports
-            .runtime_if_changed(runtime_id, state_name(UnitStateKind::Absent), None)
+            .runtime_if_changed(runtime_id, source, state_name(UnitStateKind::Absent), None)
             .await;
     }
 
@@ -1899,6 +2168,9 @@ impl Runtimes {
             .reports
             .runtime_if_changed(
                 runtime_id,
+                orch_link_contract::native_target::RuntimeSource {
+                    incarnation: record.incarnation.id(),
+                },
                 state_name(UnitStateKind::Failed),
                 Some(why.to_owned()),
             )
