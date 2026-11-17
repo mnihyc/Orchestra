@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 
 import { linkRoute } from '@/api/notifications';
 import { onUserEvent } from '@/realtime/stores/user';
+import { useReadAgain } from '@/lib/useReadAgain';
 import type { NotificationChannel } from '@/generated/api-types';
 import { useNow } from '@/lib/time';
 import { Button } from '@/ui/Button';
@@ -59,6 +60,8 @@ export function ConnectDialog({
 
   const made = link.data;
   const ranOut = made !== undefined && Date.parse(made.expires_at) <= now;
+  // The link is told over the live connection, once: while the dialog waits, the page reads the channels again by itself.
+  useReadAgain(open && made !== undefined && !ranOut, onLinked);
   const bot = made === undefined ? null : botOf(made.url);
 
   return (

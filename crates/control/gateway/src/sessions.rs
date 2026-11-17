@@ -27,6 +27,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// One session that stands.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionEntry {
+    pub(crate) tools_synced: bool,
     pub(crate) capabilities: Vec<String>,
     pub(crate) purpose: orch_link_contract::gateways::SessionPurpose,
     pub(crate) session_id: Id,
@@ -138,6 +139,37 @@ impl Sessions {
         self.primary_sender_of(machine).is_some()
     }
 
+    pub(crate) fn tool_control(
+        &self,
+        control: orch_link_contract::tool_sessions::ToolSessionControl,
+    ) {
+        let mut registry = self.lock();
+        let senders = registry
+            .by_machine
+            .values_mut()
+            .filter_map(|entry| {
+                if !entry.purpose.is_primary() {
+                    return None;
+                }
+                let send = !control.available || entry.tools_synced;
+                if !control.available {
+                    entry.tools_synced = false;
+                }
+                send.then(|| entry.sender.clone())
+            })
+            .collect::<Vec<_>>();
+        drop(registry);
+        for sender in senders {
+            let _ = sender.send(Frame::ToolSessionControl(control.clone()));
+        }
+    }
+
+    pub(crate) fn tool_sync(&self, machine: Id, available: bool) {
+        if let Some(entry) = self.lock().by_machine.get_mut(&machine) {
+            entry.tools_synced = available;
+        }
+    }
+
     /// The machine a session token was given to, and the fingerprint of the
     /// certificate that session was opened with.
     pub(crate) fn machine_of_token(&self, token: &str) -> Option<(Id, String)> {
@@ -239,6 +271,7 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
     let replaced = inner.sessions.install(
         machine,
         SessionEntry {
+            tools_synced: false,
             capabilities: auth.capabilities.clone(),
             purpose,
             session_id,
@@ -279,6 +312,10 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
         )
     });
     if purpose.is_primary() {
+        let mut control = inner.relay.with(|relay| relay.tool_control_snapshot());
+        control.available = false;
+        control.refreshing = true;
+        let _ = sender.send(Frame::ToolSessionControl(control));
         inner.backplane.send(BackplaneFrame::MachineUp(MachineUp {
             capabilities: auth.capabilities.clone(),
             purpose,

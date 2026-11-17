@@ -42,8 +42,10 @@ for (const locale of ['en', 'zh-CN'] as const) it(`sets up the imported thread w
   await setLocale(locale);
   const thread = imported(), close = vi.fn();
   show(<SetUpThread thread={thread} onClose={close} />);
-  expect(screen.getByRole('combobox', { name: i18n.t('start.provider.title') })).toHaveValue('Provider p1');
-  expect(screen.getByRole('combobox', { name: i18n.t('start.agent.title') })).toHaveValue('Agent a1');
+  // The provider is the model's, and the agent has a control of its own.
+  expect(screen.getByRole('button', { name: new RegExp(`^${i18n.t('start.model.model')}`) })).toBeVisible();
+  expect(screen.getByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}`) })).toHaveTextContent('Agent a1');
+  expect(screen.queryByRole('combobox', { name: i18n.t('change.runs.provider') })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('button', { name: locale === 'en' ? 'Set up' : '设置' }));
   await waitFor(() => expect(close).toHaveBeenCalledOnce());
   expect(io.place).toHaveBeenCalledExactlyOnceWith(thread.id, { use: 'e1' });
@@ -106,7 +108,7 @@ it('does not place an imported thread in the old environment while asking for an
   io.asking = true;
   const user = userEvent.setup();
   show(<SetUpThread thread={imported()} onClose={vi.fn()} />);
-  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.moreTitle') }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
   await user.click(screen.getByRole('option', { name: 'Env e2' }));
   const save = screen.getByRole('button', { name: 'Set up' });
   expect(save).toBeDisabled();

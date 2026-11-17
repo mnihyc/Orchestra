@@ -133,6 +133,7 @@ async fn wrapped_import_ack_checks_the_actual_native_frame_and_sealed_budget_wit
         .dispatcher()
         .issue_stored_before(
             StoredCommand {
+                native_target: command.native_target.clone(),
                 id: Some(command.id),
                 machine,
                 kind: command.kind.as_str().into(),
