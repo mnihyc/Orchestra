@@ -44,19 +44,19 @@ beforeEach(() => {
   server.rows = [row('agent.model', 'alpha', 1), row('agent.effort', null, 0), row('agent.params', {}, 0)];
 });
 
-it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('names each model once with one help entrance and a short search (%s, %s)', async (locale, theme) => {
+it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('names each model once, without a sentence under it (%s, %s)', async (locale, theme) => {
   const previousLocale = currentLocale();
   const previousTheme = document.documentElement.getAttribute('data-theme');
   await setLocale(locale); document.documentElement.setAttribute('data-theme', theme);
-  const view = show(<ModelEffort thread={thread} variant="composer" open />);
+  const view = show(<ModelEffort thread={thread} variant="composer" open="model" />);
   try {
-    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.title') });
-    const list = await within(picker).findByRole('menu', { name: i18n.t('composer.model.list') });
+    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+    const list = await within(picker).findByRole('menu', { name: i18n.t('composer.model.chip') });
     expect(within(list).getAllByText('Alpha', { exact: true })).toHaveLength(1);
     expect(within(list).getAllByText('Bravo', { exact: true })).toHaveLength(1);
     expect(within(picker).queryByText(/Use this model in this thread\.|在(?:这|此)(?:个)?会话中使用(?:此|该|这个)?模型[。.]?/u)).not.toBeInTheDocument();
-    expect(within(picker).getByRole('textbox')).toHaveAttribute('placeholder', locale === 'en' ? 'Find a model' : '查找模型');
-    await waitFor(() => expect(picker.querySelectorAll('button[data-help-guide]')).toHaveLength(1));
+    // Two models need no search.
+    expect(within(picker).queryByRole('textbox')).not.toBeInTheDocument();
   } finally {
     view.unmount(); await setLocale(previousLocale);
     if (previousTheme === null) document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', previousTheme);
@@ -65,8 +65,8 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
 
 it.each([false, true])('keeps the current model selected, names only its confirmed changer, and guards the next click (a later write overtakes the refusal: %s)', async (overtaken) => {
   const user = userEvent.setup();
-  show(<ModelEffort thread={thread} variant="composer" open />);
-  const picker = await screen.findByRole('dialog', { name: 'Model and effort' });
+  show(<ModelEffort thread={thread} variant="composer" open="model" />);
+  const picker = await screen.findByRole('dialog', { name: 'Model' });
   const alpha = await within(picker).findByRole('menuitemradio', { name: /^Alpha/, checked: true });
   await waitFor(() => expect(alpha).toBeEnabled());
   // The other page's write is committed but its feed has not reached this page yet.
@@ -87,7 +87,7 @@ it.each([false, true])('keeps the current model selected, names only its confirm
   const notice = await within(picker).findByRole('status');
   if (overtaken) { expect(notice).toHaveTextContent('The current model is Bravo.'); expect(notice).not.toHaveTextContent('Ada'); }
   else expect(notice).toHaveTextContent('Ada switched to Bravo just now.');
-  expect(screen.getByRole('dialog', { name: 'Model and effort' })).toBeVisible();
+  expect(screen.getByRole('dialog', { name: 'Model' })).toBeVisible();
   expect(within(picker).getByRole('menuitemradio', { name: /^Bravo/, checked: true })).toBeVisible();
   expect(server.write).toHaveBeenCalledTimes(1);
   expect(server.write).toHaveBeenLastCalledWith(thread.id, 'agent.model', { value: 'alpha', expected_revision: 1 });

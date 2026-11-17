@@ -51,6 +51,7 @@ use crate::volumes::Volumes;
 
 /// The kinds of command the role takes.
 pub const NODE_KINDS: &[CommandKind] = &[
+    CommandKind::NodeServerUpdate,
     CommandKind::NodeResourcesList,
     CommandKind::NodeResourcesRemove,
     CommandKind::NodeRuntimeCreate,
@@ -189,6 +190,7 @@ struct Inner {
     skills: Option<crate::skill_fetch::SkillFetch>,
     /// Opens the source address sealed to this machine for a fetch command.
     keys: Arc<Keys>,
+    link: orch_link::machine::MachineLink,
     link_connected: std::sync::atomic::AtomicBool,
     stop: CancellationToken,
 }
@@ -298,6 +300,7 @@ impl NodeRole {
                 skills: crate::skill_fetch::SkillFetch::new(Some(Arc::clone(&services.policy)))
                     .ok(),
                 keys: Arc::clone(&services.keys),
+                link: services.link.clone(),
                 link_connected: std::sync::atomic::AtomicBool::new(false),
                 stop: CancellationToken::new(),
             }),
@@ -362,6 +365,24 @@ impl Inner {
                     self.link_connected
                         .load(std::sync::atomic::Ordering::SeqCst),
                 );
+            }
+        }
+        for (_, driver) in self.drivers.all() {
+            if let Some(command) = driver.extras().pending_server_update()
+                && self
+                    .link
+                    .command_succeeded(command, CommandKind::NodeServerUpdate)
+            {
+                driver.extras().server_update_answered(command);
+            }
+            match driver.extras().server_update_observation().await {
+                Ok(Some(report)) => {
+                    self.reports.server_update(report).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "the server updater's phase could not be read")
+                }
             }
         }
         self.facts.report_if_changed().await;
@@ -445,6 +466,12 @@ impl Inner {
 
 #[async_trait]
 impl RoleHandler for NodeRole {
+    fn answered(&self, id: orch_types::Id) {
+        for (_, driver) in self.inner.drivers.all() {
+            driver.extras().server_update_answered(id);
+        }
+    }
+
     async fn interrupted(&self, id: orch_types::Id, command: &Command) -> Result<(), CommandError> {
         let driver = match command {
             Command::NodeMountMeasure(body) => Some(body.driver.clone()),
@@ -496,6 +523,12 @@ impl RoleHandler for NodeRole {
         });
         // A node reports its actual driver storages through the same machine facts as a directory role.
         facts.storages = self.inner.facts.current().storages;
+        facts.server_update = self
+            .inner
+            .drivers
+            .all()
+            .into_iter()
+            .find_map(|(_, driver)| driver.extras().server_update_support());
     }
 
     fn role(&self) -> Role {
@@ -745,6 +778,35 @@ impl RoleHandler for NodeRole {
                     .await
                     .map(CommandResult::NodeToolCheck)
                     .map_err(CommandError::from)
+            }
+            Command::NodeServerUpdate(body) => {
+                let mut result = Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "the bundled installation has no host Docker access",
+                ));
+                for (_, driver) in node.drivers.all() {
+                    if driver.extras().server_update_support().is_some() {
+                        if let Some(previous) = driver
+                            .extras()
+                            .server_update_observation()
+                            .await
+                            .map_err(|error| failure(&error))?
+                            && previous.job_id != body.job_id
+                            && previous.observation.stage.terminal()
+                            && !node.reports.server_update(previous).await
+                        {
+                            return Err(CommandError::new(ErrorCode::Internal, "the previous updater outcome could not be kept in the node's spool").retryable());
+                        }
+                        result = driver
+                            .extras()
+                            .server_update(id, &body)
+                            .await
+                            .map(CommandResult::NodeServerUpdate)
+                            .map_err(|error| failure(&error));
+                        break;
+                    }
+                }
+                result
             }
             Command::NodeToolConformance(body) => {
                 let _resources = node.runtimes.hold_resources().await;

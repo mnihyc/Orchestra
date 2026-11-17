@@ -203,3 +203,92 @@ async fn cancellation_while_waiting_keeps_the_running_unit_and_queued_input_orde
     assert_eq!(current.id, runtime);
     world.engine().stop();
 }
+
+#[tokio::test]
+async fn a_newer_control_ends_a_waiting_restart_without_interrupting_its_turn_or_unit() {
+    let world = World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "superseded-wait", 16384).await;
+    let template = hosting::template(&world).await;
+    let (environment, runtime, _) =
+        hosting::running(&world, &host, template, "Keep current work").await;
+    let thread = world.thread("Current work").await;
+    hosting::bind(&world, thread, environment).await;
+    let (turn, _) = world.running_turn(thread, "keep running").await;
+    let restart = request(&world, environment, EnvironmentRestartMode::Wait).await;
+    eventually("the original restart to wait for its turn", || async {
+        hosting::job(&world, restart.id).await.1["phase"] == "waiting"
+    })
+    .await;
+    let mut tx = world.pool.begin().await.unwrap();
+    envs::lock_environment(&mut tx, environment).await.unwrap();
+    let later = orch_db::queries::runtime_controls::accept(&mut tx, runtime, orch_types::new_id())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world.engine().kick();
+    let (outcome, _, error) = hosting::wait_over(&world, restart.id).await;
+    assert_eq!(outcome, "failed", "{error:?}");
+    assert_eq!(world.turn_state(turn.turn_id).await, "running");
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    assert!(
+        orch_db::queries::runtime_controls::is_current(
+            &mut world.pool.acquire().await.unwrap(),
+            &later
+        )
+        .await
+        .unwrap()
+    );
+    world.engine().stop();
+}
+
+#[tokio::test]
+async fn a_newer_control_during_restart_stop_prevents_the_old_start_and_cleanup_stop() {
+    let world = World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "superseded-stopping", 16384).await;
+    let template = hosting::template(&world).await;
+    let (environment, runtime, _) =
+        hosting::running(&world, &host, template, "Keep the later control").await;
+    let before = envs::runtime(&mut world.pool.acquire().await.unwrap(), runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    let restart = request(&world, environment, EnvironmentRestartMode::Wait).await;
+    host.wait_began(K::NodeRuntimeStop, 1).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    envs::lock_environment(&mut tx, environment).await.unwrap();
+    let later = orch_db::queries::runtime_controls::accept(&mut tx, runtime, orch_types::new_id())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    host.added.machine.handler.release();
+    let (outcome, _, error) = hosting::wait_over(&world, restart.id).await;
+    assert_eq!(outcome, "failed", "{error:?}");
+    assert_eq!(
+        host.count(K::NodeRuntimeStop),
+        1,
+        "the old admitted effect is joined but no cleanup retargets the later control"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    let mut conn = world.pool.acquire().await.unwrap();
+    assert!(
+        orch_db::queries::runtime_controls::is_current(&mut conn, &later)
+            .await
+            .unwrap()
+    );
+    let current = envs::runtime(&mut conn, runtime).await.unwrap().unwrap();
+    assert_eq!(current.volumes, before.volumes);
+    assert_eq!(
+        current.state, "stopping",
+        "the old reply cannot publish another control's state"
+    );
+    assert_eq!(hosting::status(&world, environment).await.0, "running");
+    world.engine().stop();
+}
