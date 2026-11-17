@@ -173,6 +173,7 @@ async fn close(fixture: &Fixture) -> Proof<Close> {
 
 fn legacy(command: &Outgoing) -> StoredCommand {
     StoredCommand {
+        native_target: command.native_target.clone(),
         authority: None,
         id: Some(command.id),
         machine: command.machine,

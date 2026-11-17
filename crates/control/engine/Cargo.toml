@@ -32,6 +32,7 @@ orch-agent-programs.workspace = true
 orch-api-contract.workspace = true
 orch-authz.workspace = true
 orch-blob-contract.workspace = true
+orch-build-info.workspace = true
 orch-config.workspace = true
 orch-db.workspace = true
 orch-driver-contract.workspace = true

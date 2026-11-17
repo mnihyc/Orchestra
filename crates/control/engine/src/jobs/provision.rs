@@ -1951,7 +1951,12 @@ impl Provision {
         }
         let fresh = plan.get("fresh").and_then(Json::as_bool).unwrap_or(false);
         if left.is_empty() {
-            left.extend(crate::mount_copies::undo(job).await);
+            match crate::mount_copies::undo(job).await {
+                Ok(copies) => left.extend(copies),
+                Err(_) => {
+                    return Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into());
+                }
+            }
         }
         if (fresh || plan.get("recovery").is_some()) && left.is_empty() {
             for (role, volume) in placed.runtime.volumes.as_object().into_iter().flatten() {

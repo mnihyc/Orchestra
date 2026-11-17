@@ -22,6 +22,926 @@ use orch_testkit::doubles::driver::{MemoryDriver, Operation};
 use orch_types::new_id;
 use serde_json::json;
 
+async fn send_original_stop(
+    rig: &Rig,
+    runtime: orch_types::Id,
+    target: orch_link_contract::native_target::LifecycleTarget,
+) -> Progress {
+    let mut frame = orch_link_contract::commands::Cmd::new(
+        new_id(),
+        &SerialKey::Runtime(runtime),
+        rig.deadline(),
+        &NodeRuntimeStop {
+            runtime_id: runtime,
+            reason: None,
+        },
+    )
+    .unwrap();
+    frame.native_target = Some(orch_link_contract::native_target::NativeTarget::Lifecycle(
+        target,
+    ));
+    let mut handle = rig.controller.link().commands().issue(frame);
+    tokio::time::timeout(PATIENCE, handle.wait()).await.unwrap()
+}
+
+async fn send_original_start(
+    rig: &Rig,
+    runtime: orch_types::Id,
+    target: orch_link_contract::native_target::LifecycleTarget,
+) -> Progress {
+    let mut frame = orch_link_contract::commands::Cmd::new(
+        new_id(),
+        &SerialKey::Runtime(runtime),
+        rig.deadline(),
+        &NodeRuntimeStart {
+            runtime_id: runtime,
+        },
+    )
+    .unwrap();
+    frame.native_target = Some(orch_link_contract::native_target::NativeTarget::Lifecycle(
+        target,
+    ));
+    let mut handle = rig.controller.link().commands().issue(frame);
+    tokio::time::timeout(PATIENCE, handle.wait()).await.unwrap()
+}
+
+#[tokio::test]
+async fn the_native_role_starts_only_the_original_unit_with_its_admitted_candidate_identity() {
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget};
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "role-original-start");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        let original = rig
+            .role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        let opening = new_id();
+        let start = LifecycleTarget {
+            subject: LifecycleSubject::Runtime {
+                runtime_id: spec.runtime_id,
+            },
+            observed: Some(original),
+            opening: Some(opening),
+            revision: 1,
+        };
+        assert!(matches!(
+            send_original_start(&rig, spec.runtime_id, start.clone()).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation
+                .id(),
+            Some(opening)
+        );
+        let reused = LifecycleTarget {
+            observed: Some(opening),
+            opening: Some(new_id()),
+            revision: 2,
+            ..start.clone()
+        };
+        assert!(matches!(
+            send_original_start(&rig, spec.runtime_id, reused).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation
+                .id(),
+            Some(opening)
+        );
+        assert!(matches!(
+            rig.stop_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let started = rig.driver.targets_of(Operation::Start).len();
+        let stale = LifecycleTarget {
+            opening: Some(new_id()),
+            revision: 3,
+            ..start
+        };
+        assert!(
+            matches!(send_original_start(&rig, spec.runtime_id, stale).await,
+            Progress::Failed(error) if error.known() == Some(orch_link_contract::commands::ErrorCode::Conflict))
+        );
+        assert_eq!(rig.driver.targets_of(Operation::Start).len(), started);
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Stopped);
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn the_native_role_never_ignores_an_old_or_foreign_runtime_target() {
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget};
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "role-original-stop");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let original = rig
+            .role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        let old = LifecycleTarget {
+            subject: LifecycleSubject::Runtime {
+                runtime_id: spec.runtime_id,
+            },
+            observed: Some(original),
+            opening: None,
+            revision: 1,
+        };
+        assert!(matches!(
+            rig.stop_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let replacement = rig
+            .role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        assert_ne!(replacement, original);
+        let stopped = rig.driver.targets_of(Operation::Stop).len();
+        assert!(
+            matches!(send_original_stop(&rig, spec.runtime_id, old.clone()).await,
+            Progress::Failed(error) if error.known() == Some(orch_link_contract::commands::ErrorCode::Conflict))
+        );
+        assert_eq!(rig.driver.targets_of(Operation::Stop).len(), stopped);
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+        let foreign = LifecycleTarget {
+            subject: LifecycleSubject::Runtime {
+                runtime_id: new_id(),
+            },
+            observed: Some(replacement),
+            revision: 2,
+            ..old.clone()
+        };
+        assert!(
+            matches!(send_original_stop(&rig, spec.runtime_id, foreign).await,
+            Progress::Failed(error) if error.known() == Some(orch_link_contract::commands::ErrorCode::Conflict))
+        );
+        assert_eq!(rig.driver.targets_of(Operation::Stop).len(), stopped);
+        let current = LifecycleTarget {
+            observed: Some(replacement),
+            revision: 3,
+            ..old
+        };
+        assert!(matches!(
+            send_original_stop(&rig, spec.runtime_id, current).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Stopped);
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_created_units_reply_keeps_its_actual_native_identity_across_reuse_and_node_restart() {
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "created-native-source");
+        let Progress::Succeeded(created) = rig.create(&spec).await else {
+            panic!("the actual unit must be created");
+        };
+        let original = rig
+            .role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        assert_ne!(original, spec.runtime_id);
+        assert_eq!(created["source"]["incarnation"], json!(original));
+        let Progress::Succeeded(reused) = rig.create(&spec).await else {
+            panic!("the same stopped unit must be reused");
+        };
+        assert_eq!(reused["unit"], created["unit"]);
+        assert_eq!(reused["source"], created["source"]);
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let running = rig
+            .role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        assert_ne!(running, original);
+        let Progress::Succeeded(reused_running) = rig.create(&spec).await else {
+            panic!("the genuinely running unit must be reused");
+        };
+        assert_eq!(reused_running["unit"], created["unit"]);
+        assert_eq!(reused_running["source"]["incarnation"], json!(running));
+        rig.stop().await;
+        rig.start().await;
+        let Progress::Succeeded(after_restart) = rig.create(&spec).await else {
+            panic!("node restart keeps the original recorded unit");
+        };
+        assert_eq!(after_restart["unit"], created["unit"]);
+        assert_eq!(after_restart["source"], reused_running["source"]);
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_removed_runtime_reports_its_original_native_identity_after_its_local_record_is_gone() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "removed-original-source");
+    rig.made(&spec).await;
+    let original = rig
+        .role()
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation
+        .id()
+        .unwrap();
+    assert!(matches!(
+        rig.remove_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    rig.wait_told("the original removed native source", |events| {
+        events.iter().any(|event| {
+            event.kind == "node.runtime"
+                && event.body["runtime_id"] == json!(spec.runtime_id)
+                && event.body["state"] == "absent"
+                && event.body["source"]["incarnation"] == json!(original)
+        })
+    })
+    .await;
+    assert!(rig.role().ledger().get(spec.runtime_id).is_none());
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn an_original_native_start_keeps_its_proposed_identity_and_cannot_override_a_newer_stop_or_retarget_reuse()
+ {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "original-native-start");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        let role = rig.role();
+        let original = role
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        let fences = NativeFences::new(rig.data.path().join("original-native-start"));
+        let subject = LifecycleSubject::Runtime {
+            runtime_id: spec.runtime_id,
+        };
+        let stop = LifecycleTarget {
+            subject: subject.clone(),
+            observed: Some(original),
+            opening: None,
+            revision: 2,
+        };
+        assert!(
+            fences
+                .observe_lifecycle(&stop, LifecycleAction::Stop)
+                .unwrap()
+        );
+        let opening = new_id();
+        let old = LifecycleTarget {
+            opening: Some(opening),
+            revision: 1,
+            ..stop.clone()
+        };
+        assert!(!role.runtimes().start_original(&old, &fences).await.unwrap());
+        assert!(rig.driver.targets_of(Operation::Start).is_empty());
+        let current = LifecycleTarget { revision: 3, ..old };
+        rig.driver.hold(Operation::Start);
+        struct Release(std::sync::Arc<MemoryDriver>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release(Operation::Start);
+            }
+        }
+        let release = Release(rig.driver.clone());
+        let starting = role.runtimes().start_original(&current, &fences);
+        tokio::pin!(starting);
+        tokio::time::timeout(PATIENCE, async {
+            loop {
+                let before = rig.driver.targets_of(Operation::Start).len();
+                assert!(futures::poll!(&mut starting).is_pending());
+                if rig.driver.targets_of(Operation::Start).len() > before {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation.id(),
+            Some(opening)
+        );
+        drop(release);
+        assert!(starting.await.unwrap());
+        let reuse = LifecycleTarget {
+            subject: subject.clone(),
+            observed: Some(opening),
+            opening: Some(new_id()),
+            revision: 4,
+        };
+        assert!(
+            role.runtimes()
+                .start_original(&reuse, &fences)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation.id(),
+            Some(opening)
+        );
+        let stale = LifecycleTarget {
+            observed: Some(original),
+            opening: Some(new_id()),
+            revision: 5,
+            ..reuse
+        };
+        assert!(
+            !role
+                .runtimes()
+                .start_original(&stale, &fences)
+                .await
+                .unwrap()
+        );
+        let absent = LifecycleTarget {
+            subject,
+            observed: None,
+            opening: Some(new_id()),
+            revision: 6,
+        };
+        assert!(
+            !role
+                .runtimes()
+                .start_original(&absent, &fences)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation.id(),
+            Some(opening)
+        );
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn removing_an_original_runtime_after_its_queue_never_removes_a_later_start_or_its_data() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget};
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "queued-original-remove");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let role = rig.role();
+        let original = role
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        assert!(matches!(
+            rig.stop_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        rig.driver.hold(Operation::Inspect);
+        struct Release(std::sync::Arc<MemoryDriver>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release(Operation::Inspect);
+            }
+        }
+        let release = Release(rig.driver.clone());
+        let starting = role.runtimes().start(spec.runtime_id);
+        tokio::pin!(starting);
+        tokio::time::timeout(PATIENCE, async {
+            loop {
+                let before = rig.driver.targets_of(Operation::Inspect).len();
+                assert!(futures::poll!(&mut starting).is_pending());
+                if rig.driver.targets_of(Operation::Inspect).len() > before {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation.id(),
+            Some(original)
+        );
+        let target = LifecycleTarget {
+            subject: LifecycleSubject::Runtime {
+                runtime_id: spec.runtime_id,
+            },
+            observed: Some(original),
+            opening: None,
+            revision: 1,
+        };
+        let fences = NativeFences::new(rig.data.path().join("native-original-remove"));
+        let removing = role.runtimes().remove_original(&target, &fences);
+        tokio::pin!(removing);
+        assert!(futures::poll!(&mut removing).is_pending());
+        drop(release);
+        starting.await.unwrap();
+        let current = role.ledger().get(spec.runtime_id).unwrap().incarnation;
+        assert_ne!(current.id(), Some(original));
+        assert!(!removing.await.unwrap());
+        assert!(rig.driver.targets_of(Operation::Remove).is_empty());
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation,
+            current
+        );
+        for volume in spec.volumes.values() {
+            assert!(rig.driver.volume(&volume.name).is_some());
+        }
+        let current_target = LifecycleTarget {
+            observed: current.id(),
+            revision: 2,
+            ..target.clone()
+        };
+        assert!(
+            role.runtimes()
+                .remove_original(&current_target, &fences)
+                .await
+                .unwrap()
+        );
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Absent);
+        assert!(role.ledger().get(spec.runtime_id).is_none());
+        for volume in spec.volumes.values() {
+            assert!(rig.driver.volume(&volume.name).is_some());
+        }
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn an_absent_runtime_removal_never_adopts_a_later_unit_and_lost_original_identity_keeps_the_unit_unconfirmed()
+ {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget};
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "absent-original-remove");
+    let target = LifecycleTarget {
+        subject: LifecycleSubject::Runtime {
+            runtime_id: spec.runtime_id,
+        },
+        observed: None,
+        opening: None,
+        revision: 1,
+    };
+    rig.made(&spec).await;
+    rig.driver.set_enrolled(&spec.name, Some(true));
+    assert!(matches!(
+        rig.start_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    let role = rig.role();
+    let fences = NativeFences::new(rig.data.path().join("native-absent-remove"));
+    assert!(
+        !role
+            .runtimes()
+            .remove_original(&target, &fences)
+            .await
+            .unwrap()
+    );
+    let original = role
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation
+        .id()
+        .unwrap();
+    role.ledger().remove(spec.runtime_id).unwrap();
+    let unknown = LifecycleTarget {
+        observed: Some(original),
+        revision: 2,
+        ..target
+    };
+    assert!(
+        role.runtimes()
+            .remove_original(&unknown, &fences)
+            .await
+            .is_err()
+    );
+    assert!(rig.driver.targets_of(Operation::Remove).is_empty());
+    assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_stop_for_an_original_runtime_cannot_stop_its_later_start_after_waiting_for_the_native_lock()
+ {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget};
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "queued-original-stop");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let role = rig.role();
+        let original = role
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        assert!(matches!(
+            rig.stop_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let stopped = rig.driver.targets_of(Operation::Stop).len();
+        rig.driver.hold(Operation::Inspect);
+        struct Release(std::sync::Arc<MemoryDriver>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release(Operation::Inspect);
+            }
+        }
+        let release = Release(rig.driver.clone());
+        let starting = role.runtimes().start(spec.runtime_id);
+        tokio::pin!(starting);
+        tokio::time::timeout(PATIENCE, async {
+            loop {
+                let before = rig.driver.targets_of(Operation::Inspect).len();
+                assert!(futures::poll!(&mut starting).is_pending());
+                if rig.driver.targets_of(Operation::Inspect).len() > before {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the newer start must hold its actual runtime lock inside the driver inspection");
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation.id(),
+            Some(original)
+        );
+        let target = LifecycleTarget {
+            subject: LifecycleSubject::Runtime {
+                runtime_id: spec.runtime_id,
+            },
+            observed: Some(original),
+            opening: None,
+            revision: 1,
+        };
+        let fences = NativeFences::new(rig.data.path().join("native-original-stop"));
+        let ending = role.runtimes().stop_original(&target, &fences, None);
+        tokio::pin!(ending);
+        assert!(futures::poll!(&mut ending).is_pending());
+        drop(release);
+        starting.await.unwrap();
+        let current = role.ledger().get(spec.runtime_id).unwrap().incarnation;
+        assert_ne!(current.id(), Some(original));
+        assert!(!ending.await.unwrap());
+        assert_eq!(rig.driver.targets_of(Operation::Stop).len(), stopped);
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation,
+            current
+        );
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_newer_control_during_native_inspection_prevents_an_old_stop_of_the_same_start() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "superseded-inspecting-stop");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let role = rig.role();
+        let original = role
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation
+            .id()
+            .unwrap();
+        let target = LifecycleTarget {
+            subject: LifecycleSubject::Runtime {
+                runtime_id: spec.runtime_id,
+            },
+            observed: Some(original),
+            opening: None,
+            revision: 1,
+        };
+        let fences = NativeFences::new(rig.data.path().join("inspecting-original-stop"));
+        let stopped = rig.driver.targets_of(Operation::Stop).len();
+        rig.driver.hold(Operation::Inspect);
+        struct Release(std::sync::Arc<MemoryDriver>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release(Operation::Inspect);
+            }
+        }
+        let release = Release(rig.driver.clone());
+        let stopping = role.runtimes().stop_original(&target, &fences, None);
+        tokio::pin!(stopping);
+        tokio::time::timeout(PATIENCE, async {
+            loop {
+                let before = rig.driver.targets_of(Operation::Inspect).len();
+                assert!(futures::poll!(&mut stopping).is_pending());
+                if rig.driver.targets_of(Operation::Inspect).len() > before {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            fences
+                .observe_lifecycle(
+                    &LifecycleTarget {
+                        revision: 2,
+                        ..target.clone()
+                    },
+                    LifecycleAction::Stop
+                )
+                .unwrap()
+        );
+        drop(release);
+        assert!(
+            matches!(stopping.await, Err(error) if error.known() == Some(orch_link_contract::commands::ErrorCode::Conflict))
+        );
+        assert_eq!(rig.driver.targets_of(Operation::Stop).len(), stopped);
+        assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+        assert_eq!(
+            role.ledger().get(spec.runtime_id).unwrap().incarnation.id(),
+            Some(original)
+        );
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_runtime_stop_admitted_as_absent_never_selects_a_later_unit_and_a_stale_order_cannot_stop_an_unchanged_start()
+ {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "absent-original-stop");
+    let subject = LifecycleSubject::Runtime {
+        runtime_id: spec.runtime_id,
+    };
+    let absent = LifecycleTarget {
+        subject: subject.clone(),
+        observed: None,
+        opening: None,
+        revision: 1,
+    };
+    rig.made(&spec).await;
+    rig.driver.set_enrolled(&spec.name, Some(true));
+    assert!(matches!(
+        rig.start_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    let role = rig.role();
+    let fences = NativeFences::new(rig.data.path().join("native-absent-stop"));
+    assert!(
+        !role
+            .runtimes()
+            .stop_original(&absent, &fences, None)
+            .await
+            .unwrap()
+    );
+    let original = role
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation
+        .id()
+        .unwrap();
+    let newer = LifecycleTarget {
+        subject,
+        observed: Some(original),
+        opening: Some(new_id()),
+        revision: 3,
+    };
+    assert!(
+        fences
+            .observe_lifecycle(&newer, LifecycleAction::Start)
+            .unwrap()
+    );
+    let stale = LifecycleTarget {
+        opening: None,
+        revision: 2,
+        ..newer
+    };
+    assert!(
+        !role
+            .runtimes()
+            .stop_original(&stale, &fences, None)
+            .await
+            .unwrap()
+    );
+    assert!(rig.driver.targets_of(Operation::Stop).is_empty());
+    assert_eq!(rig.driver.state_of(&spec.name), UnitStateKind::Running);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_new_native_start_gets_its_own_persistent_identity_while_a_running_unit_keeps_its_original_one()
+ {
+    for kind in [RuntimeKind::Environment, RuntimeKind::Provider] {
+        let mut rig = Rig::new();
+        rig.have_connector();
+        rig.start().await;
+        let spec = rig.spec(kind, "native-identity");
+        rig.made(&spec).await;
+        rig.driver.set_enrolled(&spec.name, Some(true));
+        let made = rig.role().ledger().get(spec.runtime_id).unwrap();
+        assert!(made.incarnation.id().is_some());
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let first = rig.role().ledger().get(spec.runtime_id).unwrap();
+        assert_ne!(first.incarnation, made.incarnation);
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation,
+            first.incarnation
+        );
+        assert!(matches!(
+            rig.stop_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation,
+            first.incarnation
+        );
+        assert!(matches!(
+            rig.start_runtime(spec.runtime_id).await,
+            Progress::Succeeded(_)
+        ));
+        let next = rig.role().ledger().get(spec.runtime_id).unwrap();
+        assert_ne!(next.incarnation, first.incarnation);
+        assert_eq!(
+            next.started_at, first.started_at,
+            "the unchanged test clock is not the physical identity"
+        );
+        rig.stop().await;
+        rig.start().await;
+        assert_eq!(
+            rig.role()
+                .ledger()
+                .get(spec.runtime_id)
+                .unwrap()
+                .incarnation,
+            next.incarnation
+        );
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn the_original_native_start_identity_is_saved_before_a_held_driver_start_can_finish() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "held-native-identity");
+    rig.made(&spec).await;
+    let before = rig
+        .role()
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation;
+    rig.driver.hold(Operation::Start);
+    struct Release(std::sync::Arc<MemoryDriver>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release(Operation::Start);
+        }
+    }
+    let release = Release(rig.driver.clone());
+    let command = new_id();
+    rig.controller.issue_with_id(
+        command,
+        &SerialKey::Runtime(spec.runtime_id),
+        rig.deadline(),
+        &NodeRuntimeStart {
+            runtime_id: spec.runtime_id,
+        },
+    );
+    rig.wait_call(Operation::Start, &spec.name).await;
+    let accepted = rig
+        .role()
+        .ledger()
+        .get(spec.runtime_id)
+        .unwrap()
+        .incarnation;
+    assert_ne!(accepted, before);
+    drop(release);
+    assert!(matches!(
+        tokio::time::timeout(PATIENCE, rig.controller.wait_command(command))
+            .await
+            .unwrap(),
+        Progress::Succeeded(_)
+    ));
+    assert_eq!(
+        rig.role()
+            .ledger()
+            .get(spec.runtime_id)
+            .unwrap()
+            .incarnation,
+        accepted
+    );
+    rig.stop().await;
+}
+
 #[tokio::test]
 async fn an_unavailable_driver_reports_its_schema_without_a_schedulable_descriptor() {
     use orch_node_core::drivers::{DriverHost, Factory, Registrations};
@@ -804,6 +1724,28 @@ async fn a_runtime_the_node_never_heard_of_cannot_be_started_or_stopped_and_is_a
         rig.remove_runtime(nobody).await,
         Progress::Succeeded(_)
     ));
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn stopping_a_known_unit_that_has_already_gone_succeeds_and_keeps_its_volume_records() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "missing-workspace");
+    rig.made(&spec).await;
+    rig.start_runtime(spec.runtime_id).await;
+    let unit = rig.driver.unit(&spec.name).unwrap().unit;
+    EnvironmentDriver::remove(rig.driver.as_ref(), &unit)
+        .await
+        .unwrap();
+    assert!(matches!(
+        rig.stop_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    rig.wait_state(spec.runtime_id, "absent").await;
+    assert!(rig.role().ledger().get(spec.runtime_id).is_some());
+    assert!(rig.driver.targets_of(Operation::RemoveVolume).is_empty());
     rig.stop().await;
 }
 
