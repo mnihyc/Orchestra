@@ -270,6 +270,7 @@ impl FileMkdirCommand {
         self.current_issue(
             conn,
             &NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

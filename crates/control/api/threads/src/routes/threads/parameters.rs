@@ -8,7 +8,9 @@
 //!
 //! **Only what exists for the thread is listed.** A parameter is shown when it is eligible for the thread's
 //! model, provider and place and its feature is on; a speed, an access program or a context that the
-//! thread's model does not have open is not there, whatever the harness supports. Each parameter carries its
+//! thread's model does not have open is not there, whatever the harness supports. A speed, an access
+//! program or a context that the model's managers did open and that the thread cannot use is not a
+//! parameter either: it is named in `withheld`, with the reason. Each parameter carries its
 //! definition, with the range of a number (the most of a context is what the model's managers opened) and
 //! where its options and its start come from. The value is what was chosen for the thread; what it runs with
 //! when nothing was chosen, or when the choice is no longer open, is what the model starts with, which the
@@ -372,6 +374,16 @@ pub(super) async fn parameters_in(
                 .is_some_and(|eligibility| def.is_shown(eligibility, &settings.features))
         })
         .collect();
+    // What the model's managers opened and this thread cannot use stays in the read, with why, so that a
+    // screen can show the choice off and say what stands in its way.
+    let withheld = match (descriptor, eligibility.as_ref()) {
+        (Some(descriptor), Some(eligibility)) => orch_agent_contract::parameters::withheld(
+            &descriptor.parameters,
+            eligibility,
+            &settings.features,
+        ),
+        _ => Vec::new(),
+    };
     let values = params.value.clone().unwrap_or(Value::Null);
     let mut parameters: Vec<ParameterView> = declared
         .into_iter()
@@ -592,6 +604,7 @@ pub(super) async fn parameters_in(
             supported,
         },
         parameters,
+        withheld,
         approval_mode: serde_json::to_value(settings.approval_mode)
             .map_err(ApiError::internal)?
             .as_str()

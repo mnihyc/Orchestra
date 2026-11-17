@@ -44,16 +44,58 @@ async fn docker(args: &[&str]) -> Result<String, String> {
 
 async fn request(world: &World, environment: Id, mode: EnvironmentRestartMode) -> jobs::JobRow {
     let mut tx = world.pool.begin().await.unwrap();
-    let principal = Principal::load(
+    let token = orch_types::new_id();
+    let hash = orch_types::Hash::of(token.as_bytes());
+    let expires = Time::new(world.clock.now() + chrono::Duration::hours(1));
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"environment","id":environment,"reach":"self"},
+            "allow":[{"operation":"EnvironmentRestart","actions":["manage"]}]
+        }]}))
+        .unwrap();
+    assert!(policy.validate().is_empty());
+    orch_db::queries::identity::create_api_token_scoped(
         &mut tx,
-        Caller::session(world.ada),
-        Time::new(world.clock.now()),
+        &orch_db::queries::identity::NewApiToken {
+            id: token,
+            user_id: world.ada,
+            name: "Native restart origin",
+            token_hash: hash.as_bytes(),
+            scopes: &[],
+            node_id: None,
+            at: world.clock.now(),
+            expires_at: Some(expires.get()),
+        },
+        Some(&json!(policy.clone())),
     )
     .await
     .unwrap();
-    let job = world
-        .engine()
-        .queue_restart(&mut tx, &principal, environment, mode)
+    let caller = Caller::token(
+        world.ada,
+        orch_authz::TokenGrant::from_stored_scope(&[], None, Some(policy), Some(expires))
+            .unwrap()
+            .for_token(token),
+    );
+    let caller = orch_engine::jobs::restart::operation::admit(&mut tx, &caller, environment)
+        .await
+        .unwrap();
+    let principal = Principal::load(&mut tx, caller.clone(), Time::new(world.clock.now()))
+        .await
+        .unwrap();
+    let http = orch_engine::operation_scope::http_origin::HttpOrigin::capture(
+        orch_authz::CapturedOperation::capture(&caller).unwrap(),
+        orch_engine::operation_scope::request_origin::Credential::Token {
+            id: token,
+            hash: hash.as_bytes().to_vec(),
+        },
+        false,
+        principal.has_system_admin_standing(),
+        Some(expires),
+    )
+    .unwrap();
+    let engine = world.engine();
+    let job = http
+        .scope(engine.queue_restart(&mut tx, &principal, environment, mode))
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -201,5 +243,245 @@ async fn cancellation_while_waiting_keeps_the_running_unit_and_queued_input_orde
         .unwrap()
         .unwrap();
     assert_eq!(current.id, runtime);
+    world.engine().stop();
+}
+
+#[tokio::test]
+async fn a_newer_control_ends_a_waiting_restart_without_interrupting_its_turn_or_unit() {
+    let world = World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "superseded-wait", 16384).await;
+    let template = hosting::template(&world).await;
+    let (environment, runtime, _unit) =
+        hosting::running(&world, &host, template, "Keep current work").await;
+    let thread = world.thread("Current work").await;
+    hosting::bind(&world, thread, environment).await;
+    let (turn, _) = world.running_turn(thread, "keep running").await;
+    let restart = request(&world, environment, EnvironmentRestartMode::Wait).await;
+    eventually("the original restart to wait for its turn", || async {
+        hosting::job(&world, restart.id).await.1["phase"] == "waiting"
+    })
+    .await;
+    let mut tx = world.pool.begin().await.unwrap();
+    envs::lock_environment(&mut tx, environment).await.unwrap();
+    let later = orch_db::queries::runtime_controls::accept(&mut tx, runtime, orch_types::new_id())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world.engine().kick();
+    let (outcome, _, error) = hosting::wait_over(&world, restart.id).await;
+    assert_eq!(outcome, "failed", "{error:?}");
+    assert_eq!(world.turn_state(turn.turn_id).await, "running");
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    assert!(
+        orch_db::queries::runtime_controls::is_current(
+            &mut world.pool.acquire().await.unwrap(),
+            &later
+        )
+        .await
+        .unwrap()
+    );
+    world.engine().stop();
+}
+
+#[tokio::test]
+async fn a_newer_control_during_restart_stop_prevents_the_old_start_and_cleanup_stop() {
+    let world = World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "superseded-stopping", 16384).await;
+    let template = hosting::template(&world).await;
+    let (environment, runtime, _unit) =
+        hosting::running(&world, &host, template, "Keep the later control").await;
+    let before = envs::runtime(&mut world.pool.acquire().await.unwrap(), runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    let restart = request(&world, environment, EnvironmentRestartMode::Wait).await;
+    host.wait_began(K::NodeRuntimeStop, 1).await;
+    let forward = orch_engine::ids::derived("restart.unit.stop", &[restart.id.as_bytes()]);
+    assert!(
+        world
+            .commands
+            .issued_commands("node.runtime.stop")
+            .iter()
+            .any(|(_, command)| command.id == forward),
+        "the held native effect must be the forward Stop, rather than cleanup after an earlier failure"
+    );
+    assert_eq!(
+        envs::runtime(&mut world.pool.acquire().await.unwrap(), runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "stopping",
+        "the actual forward phase must have committed before accepting another control"
+    );
+    let mut tx = world.pool.begin().await.unwrap();
+    envs::lock_environment(&mut tx, environment).await.unwrap();
+    let later = orch_db::queries::runtime_controls::accept(&mut tx, runtime, orch_types::new_id())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    host.added.machine.handler.release();
+    let (outcome, _, error) = hosting::wait_over(&world, restart.id).await;
+    assert_eq!(outcome, "failed", "{error:?}");
+    assert_eq!(
+        host.count(K::NodeRuntimeStop),
+        1,
+        "the old admitted effect is joined but no cleanup retargets the later control"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    let mut conn = world.pool.acquire().await.unwrap();
+    assert!(
+        orch_db::queries::runtime_controls::is_current(&mut conn, &later)
+            .await
+            .unwrap()
+    );
+    let current = envs::runtime(&mut conn, runtime).await.unwrap().unwrap();
+    assert_eq!(current.volumes, before.volumes);
+    assert_eq!(
+        current.state, "stopping",
+        "the old reply cannot publish another control's state"
+    );
+    assert_eq!(hosting::status(&world, environment).await.0, "running");
+    world.engine().stop();
+}
+
+#[tokio::test]
+async fn a_restart_only_key_keeps_its_original_source_across_its_own_stop_phase_progress() {
+    let world = World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "restart-source-phases", 16384).await;
+    let template = hosting::template(&world).await;
+    let (environment, runtime, unit) =
+        hosting::running(&world, &host, template, "Restart the admitted unit").await;
+    world.engine().stop();
+    let accepted = request(&world, environment, EnvironmentRestartMode::Wait).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let row = jobs::job(&mut tx, accepted.id).await.unwrap().unwrap();
+    let check = orch_engine::jobs::lifecycle_commands::environment::principal(
+        &mut tx,
+        &row,
+        world.clock.as_ref(),
+        world.access.as_ref(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        check.principal.caller().admitted_operation(),
+        Some("EnvironmentRestart")
+    );
+    jobs::merge_plan(&mut tx, row.id, &json!({
+        "restart_stop_requested":true,
+        "active_command":{"id":orch_engine::ids::derived("restart.env.detach", &[row.id.as_bytes()]),
+            "machine":unit.id,"kind":"env.detach","phase":"stopping"}
+    }), world.clock.now()).await.unwrap();
+    let changed = jobs::job(&mut tx, row.id).await.unwrap().unwrap();
+    let check = orch_engine::jobs::lifecycle_commands::environment::principal(
+        &mut tx,
+        &changed,
+        world.clock.as_ref(),
+        world.access.as_ref(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        check.principal.caller().admitted_operation(),
+        Some("EnvironmentRestart")
+    );
+    assert!(
+        envs::set_runtime_state(
+            &mut tx,
+            runtime,
+            &["running"],
+            "stopping",
+            None,
+            world.clock.now()
+        )
+        .await
+        .unwrap()
+    );
+    let changed = jobs::job(&mut tx, row.id).await.unwrap().unwrap();
+    let check = orch_engine::jobs::lifecycle_commands::environment::principal(
+        &mut tx,
+        &changed,
+        world.clock.as_ref(),
+        world.access.as_ref(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        check.principal.caller().admitted_operation(),
+        Some("EnvironmentRestart")
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+}
+
+#[tokio::test]
+async fn a_restart_whose_original_source_disappears_never_falls_back_to_its_actors_broadened_key() {
+    let world = World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "closed-restart-source", 16384).await;
+    let template = hosting::template(&world).await;
+    let (environment, runtime, _unit) =
+        hosting::running(&world, &host, template, "Keep the original source").await;
+    let thread = world.thread("Work before source closure").await;
+    hosting::bind(&world, thread, environment).await;
+    let (turn, _) = world.running_turn(thread, "keep running").await;
+    let restart = request(&world, environment, EnvironmentRestartMode::Wait).await;
+    eventually("the exact original restart to wait", || async {
+        hosting::job(&world, restart.id).await.1["phase"] == "waiting"
+    })
+    .await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let row = jobs::job(&mut tx, restart.id).await.unwrap().unwrap();
+    let original: orch_engine::operation_scope::http_origin::HttpOrigin =
+        serde_json::from_value(row.plan["environment_lifecycle"]["accepted"].clone()).unwrap();
+    assert_eq!(original.origin().operation(), "EnvironmentRestart");
+    let orch_engine::operation_scope::request_origin::Credential::Token { id, .. } =
+        original.credential()
+    else {
+        panic!("the fixture must keep its real original key");
+    };
+    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['*'],operation_scope=NULL WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE jobs SET plan=plan-'environment_lifecycle'-'environment_lifecycle_version'-'environment_lifecycle_required' WHERE id=$1")
+        .bind(restart.id).execute(&mut *tx).await.unwrap();
+    let stripped = jobs::job(&mut tx, restart.id).await.unwrap().unwrap();
+    assert!(
+        orch_engine::jobs::restart::Restarting::of(&stripped).is_err(),
+        "a known source cannot become an ordinary restart when its marker is gone"
+    );
+    tx.commit().await.unwrap();
+    world.engine().kick();
+    let (outcome, _, error) = hosting::wait_over(&world, restart.id).await;
+    assert_eq!(outcome, "failed", "{error:?}");
+    assert_eq!(world.turn_state(turn.turn_id).await, "running");
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    assert_eq!(
+        envs::runtime(&mut world.pool.acquire().await.unwrap(), runtime)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "running"
+    );
     world.engine().stop();
 }

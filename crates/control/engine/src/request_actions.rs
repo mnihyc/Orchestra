@@ -365,7 +365,7 @@ impl Engine {
     {
         let environment = request.environment;
         let interrupt = request.interrupt;
-        let state = environments::environment(&mut tx, environment)
+        let state = environments::lock_environment(&mut tx, environment)
             .await?
             .filter(|state| state.deleted_at.is_none())
             .ok_or(StopError::NotFound)?;
@@ -396,6 +396,23 @@ impl Engine {
         entry.details =
             json!({"environment": environment, "interrupt": interrupt, "decision": "accepted"});
         let runtime = environments::live_runtime(&mut tx, environment).await?;
+        let runtime_source = if let Some(runtime) = &runtime {
+            orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+        } else {
+            None
+        };
+        let control = if let Some(runtime) = &runtime {
+            Some(
+                orch_db::queries::runtime_controls::accept(
+                    &mut tx,
+                    runtime.id,
+                    orch_types::new_id(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         before()?;
         audit::append(&mut tx, &entry, origin, principal.now().get()).await?;
         before_commit()?;
@@ -407,6 +424,8 @@ impl Engine {
             machine: state.machine_id,
             generation: state.generation,
             runtime: runtime.map(|runtime| runtime.id),
+            runtime_source,
+            control,
         })
     }
 }
