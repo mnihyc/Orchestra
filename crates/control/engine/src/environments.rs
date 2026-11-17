@@ -560,15 +560,16 @@ pub async fn start(
     if state.remove_at.is_some() {
         return Err(StartError::BeingRemoved);
     }
-    if rows::live_runtime(conn, environment)
-        .await?
+    let runtime = rows::live_runtime(conn, environment).await?;
+    if runtime
+        .as_ref()
         .is_some_and(|runtime| runtime.state == "stopping")
     {
         return Err(StartError::Unavailable(
             "the host has not confirmed the previous stop".to_owned(),
         ));
     }
-    if let Some(runtime) = rows::live_runtime(conn, environment).await?
+    if let Some(runtime) = &runtime
         && let Some(blocked) = crate::network::blocked(conn, runtime.id).await?
     {
         return Err(StartError::Unavailable(
@@ -579,7 +580,10 @@ pub async fn start(
         status::RUNNING => return Ok(Starting::Up),
         status::NONE | status::FAILED => Mode::Make,
         status::STOPPED => {
-            if rows::live_runtime(conn, environment).await?.is_some() {
+            if runtime
+                .as_ref()
+                .is_some_and(|runtime| !runtime.loss_missing)
+            {
                 Mode::Start
             } else {
                 Mode::Make
@@ -694,6 +698,8 @@ pub struct AcceptedStop {
     pub(crate) machine: Option<Id>,
     pub(crate) generation: i32,
     pub(crate) runtime: Option<Id>,
+    pub(crate) runtime_source: Option<orch_link_contract::native_target::RuntimeSource>,
+    pub(crate) control: Option<orch_db::queries::runtime_controls::Intent>,
 }
 
 #[derive(Clone, Copy)]
@@ -1133,6 +1139,70 @@ impl Engine {
                 return Ok(());
             }
         }
+        let (runtime, source, control) = {
+            let mut tx = self.inner.db.begin().await?;
+            let registered = rows::lock_environment(&mut tx, environment)
+                .await?
+                .filter(|current| current.deleted_at.is_none())
+                .ok_or(StopError::NotFound)?;
+            if registered.owner_id != state.owner_id
+                || registered.home_node_id != state.home_node_id
+                || registered.machine_id != state.machine_id
+                || registered.generation != state.generation
+            {
+                return Err(StopError::Unavailable(
+                    "the original environment registration changed".into(),
+                ));
+            }
+            let runtime = rows::live_runtime(&mut tx, environment).await?;
+            let source = if let Some(runtime) = &runtime {
+                orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+            } else {
+                None
+            };
+            if accepted.is_some_and(|accepted| {
+                runtime.as_ref().map(|runtime| runtime.id) != accepted.runtime
+                    || source != accepted.runtime_source
+            }) {
+                return Err(StopError::Unavailable(
+                    "the accepted environment native start changed".into(),
+                ));
+            }
+            let control = if let Some(accepted) = accepted {
+                accepted.control.clone()
+            } else if let Some(runtime) = &runtime {
+                let pending =
+                    orch_db::queries::runtime_incarnations::stop(&mut tx, runtime.id).await?;
+                if let Some(pending) = pending
+                    && runtime.state == runtime_state::STOPPING
+                    && Some(pending.source) == source
+                    && orch_db::queries::runtime_controls::is_current(&mut tx, &pending.control)
+                        .await?
+                {
+                    Some(pending.control)
+                } else {
+                    Some(
+                        orch_db::queries::runtime_controls::accept(
+                            &mut tx,
+                            runtime.id,
+                            orch_types::new_id(),
+                        )
+                        .await?,
+                    )
+                }
+            } else {
+                None
+            };
+            if let Some(control) = &control
+                && !orch_db::queries::runtime_controls::is_current(&mut tx, control).await?
+            {
+                return Err(StopError::Unavailable(
+                    "a newer environment control superseded this stop".into(),
+                ));
+            }
+            tx.commit().await.map_err(DbError::from)?;
+            (runtime, source, control)
+        };
         self.clear_turns(environment, interrupt, reason).await?;
         // A credential that was handed over is brought home before the unit stops, as the first thing
         // that is done; one that cannot be leaves the environment as it is (the part that keeps
@@ -1148,22 +1218,36 @@ impl Engine {
                 }
                 other => StopError::CredentialReturnFailed(other.to_string()),
             })?;
-        let runtime = {
-            let mut conn = self.inner.db.acquire().await?;
-            rows::live_runtime(&mut conn, environment).await?
-        };
-        if accepted
-            .is_some_and(|accepted| runtime.as_ref().map(|runtime| runtime.id) != accepted.runtime)
+        let mut tx = self.inner.db.begin().await?;
+        let current_state = rows::lock_environment(&mut tx, environment)
+            .await?
+            .filter(|current| current.deleted_at.is_none())
+            .ok_or(StopError::NotFound)?;
+        if current_state.owner_id != state.owner_id
+            || current_state.home_node_id != state.home_node_id
+            || current_state.machine_id != state.machine_id
+            || current_state.generation != state.generation
         {
             return Err(StopError::Unavailable(
-                "the accepted environment unit changed".into(),
+                "the original environment registration changed during stop preparation".into(),
+            ));
+        }
+        let current = rows::live_runtime(&mut tx, environment).await?;
+        let current_source = if let Some(current) = &current {
+            orch_db::queries::runtime_incarnations::current(&mut tx, current.id).await?
+        } else {
+            None
+        };
+        if current.as_ref().map(|row| row.id) != runtime.as_ref().map(|row| row.id)
+            || current_source != source
+        {
+            return Err(StopError::Unavailable(
+                "the original environment native start changed during stop preparation".into(),
             ));
         }
         let Some(runtime) = runtime else {
-            // No unit: only the record stands.
-            let mut conn = self.inner.db.acquire().await?;
             rows::set_status(
-                &mut conn,
+                &mut tx,
                 environment,
                 &[status::RUNNING, status::OFFLINE],
                 status::STOPPED,
@@ -1171,23 +1255,27 @@ impl Engine {
                 self.inner.clock.now(),
             )
             .await?;
+            tx.commit().await.map_err(DbError::from)?;
             return Ok(());
         };
-        let began = {
-            let mut conn = self.inner.db.acquire().await?;
-            rows::set_runtime_state(
-                &mut conn,
-                runtime.id,
-                &[runtime_state::RUNNING, runtime_state::STOPPING],
-                runtime_state::STOPPING,
-                None,
-                self.inner.clock.now(),
-            )
-            .await?
+        let Some(control) = control else {
+            return Err(StopError::Unavailable(
+                "the original runtime is gone".into(),
+            ));
         };
-        if !began {
-            return Err(StopError::Unavailable(runtime.state));
+        if !orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            runtime.id,
+            &control,
+            self.inner.clock.now(),
+        )
+        .await?
+        {
+            return Err(StopError::Unavailable(
+                "the original stop was superseded or the runtime no longer accepts it".into(),
+            ));
         }
+        tx.commit().await.map_err(DbError::from)?;
         self.finish_stop(environment, runtime.id).await
     }
 
@@ -1202,15 +1290,31 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
         let Some(host) = host else {
             return Err(StopError::Host("the host is gone".to_owned()));
         };
-        let stamp = row.updated_at.timestamp_micros().to_le_bytes();
-        let command = Outgoing::new(
-            ids::derived(
-                "node.runtime.stop",
-                &[runtime.as_bytes().as_slice(), &stamp],
-            ),
+        let stop = {
+            let mut conn = self.inner.db.acquire().await?;
+            let stop = orch_db::queries::runtime_incarnations::stop(&mut conn, runtime)
+                .await?
+                .ok_or_else(|| {
+                    StopError::Unavailable("the stop has no original native source".into())
+                })?;
+            if orch_db::queries::runtime_incarnations::current(&mut conn, runtime).await?
+                != Some(stop.source)
+                || !orch_db::queries::runtime_controls::is_current(&mut conn, &stop.control).await?
+            {
+                return Err(StopError::Unavailable(
+                    "the original native start changed".into(),
+                ));
+            }
+            stop
+        };
+        let mut command = Outgoing::new(
+            stop.id,
             host.machine_id,
             SerialKey::Runtime(runtime),
             &NodeRuntimeStop {
@@ -1219,6 +1323,20 @@ impl Engine {
             },
         )
         .map_err(EngineError::from)?;
+        if let Some(incarnation) = stop.source.incarnation {
+            command = command.with_native_target(
+                orch_link_contract::native_target::NativeTarget::Lifecycle(
+                    orch_link_contract::native_target::LifecycleTarget {
+                        subject: orch_link_contract::native_target::LifecycleSubject::Runtime {
+                            runtime_id: runtime,
+                        },
+                        observed: Some(incarnation),
+                        opening: None,
+                        revision: stop.revision,
+                    },
+                ),
+            );
+        }
         let id = command.id;
         self.inner
             .commands
@@ -1231,11 +1349,36 @@ impl Engine {
         )
         .await;
         let now = self.inner.clock.now();
-        let mut conn = self.inner.db.acquire().await?;
+        let mut tx = self.inner.db.begin().await?;
+        rows::lock_environment(&mut tx, environment).await?;
+        let current = rows::runtime(&mut tx, runtime).await?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        if orch_db::queries::runtime_incarnations::current(&mut tx, runtime).await?
+            != Some(stop.source)
+            || !orch_db::queries::runtime_controls::is_current(&mut tx, &stop.control).await?
+        {
+            return Err(StopError::Unavailable(
+                "the old stop reply does not confirm the current native start".into(),
+            ));
+        }
+        if current.state != runtime_state::STOPPING || current.updated_at != row.updated_at {
+            return Ok(());
+        }
+        if orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+            .await?
+            .as_ref()
+            != Some(&stop)
+        {
+            return Err(StopError::Unavailable(
+                "the old stop reply does not confirm the current stop".into(),
+            ));
+        }
         match waited {
             Ok(Ok(crate::commands::Outcome::Succeeded(_))) => {
                 rows::set_runtime_state(
-                    &mut conn,
+                    &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
                     runtime_state::STOPPED,
@@ -1244,7 +1387,7 @@ impl Engine {
                 )
                 .await?;
                 rows::set_status(
-                    &mut conn,
+                    &mut tx,
                     environment,
                     &[status::RUNNING, status::OFFLINE],
                     status::STOPPED,
@@ -1252,12 +1395,13 @@ impl Engine {
                     now,
                 )
                 .await?;
-                rows::close_shells(&mut conn, environment, now).await?;
+                rows::close_shells(&mut tx, environment, now).await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Ok(())
             }
             Ok(Ok(crate::commands::Outcome::Failed(error))) => {
                 rows::set_runtime_state(
-                    &mut conn,
+                    &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
                     runtime_state::RUNNING,
@@ -1265,6 +1409,7 @@ impl Engine {
                     now,
                 )
                 .await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Err(StopError::Host(format!("{}: {}", error.code, error.detail)))
             }
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
@@ -1365,6 +1510,9 @@ pub(crate) struct AttachWith {
     /// Whether the machine indexes the whole tree for use while it is offline, or only lists it when asked:
     /// the resolved `workspace.index`.
     pub(crate) index: IndexMode,
+    /// What the index, the recordings and the listings of the workspace leave out: the resolved
+    /// `workspace.ignore`, patterns written as in a gitignore file.
+    pub(crate) ignore: Vec<String>,
 }
 
 impl Default for AttachWith {
@@ -1382,6 +1530,7 @@ impl Default for AttachWith {
             executors: Vec::new(),
             // The same fallback as attach_with when workspace.index has not been set.
             index: IndexMode::Full,
+            ignore: Vec::new(),
         }
     }
 }
@@ -1430,6 +1579,13 @@ pub(crate) async fn attach_with(
     )
     .await?
     .unwrap_or(IndexMode::Full);
+    let ignore = setting::<Vec<String>>(
+        conn,
+        SettingsPlace::Environment(environment),
+        keys::WORKSPACE_IGNORE,
+    )
+    .await?
+    .unwrap_or_default();
     let sources = orch_settings::resolve(
         conn,
         SettingsPlace::Environment(environment),
@@ -1479,6 +1635,7 @@ pub(crate) async fn attach_with(
         secrets,
         executors,
         index,
+        ignore,
     })
 }
 
@@ -1542,7 +1699,7 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
         data_sources,
         environment_id: environment,
         workspace_root: root.map(str::to_owned),
-        ignore: Vec::new(),
+        ignore: with.ignore.clone(),
         index: with.index,
         mounts: root.map(|_| with.mounts.clone()),
         variables: with.variables.clone(),
@@ -1783,6 +1940,7 @@ impl Engine {
         &self,
         command: Outgoing,
     ) -> Result<Option<Outcome>, EngineError> {
+        let command = crate::mount_copies::location::preparation::observe(self, command).await?;
         let command = crate::jobs::environment_move::preparation::command(self, command).await?;
         let id = command.id;
         self.inner.commands.issue(command).await?;
@@ -1920,6 +2078,17 @@ mod storage_tests {
         assert!(
             check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
         );
+    }
+
+    #[test]
+    fn attaching_carries_the_ignored_paths_of_the_workspace_to_the_machine() {
+        let id = orch_types::new_id();
+        let with = AttachWith {
+            ignore: vec!["bulk/".to_owned(), "target/".to_owned()],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(attach_body(id, None, &with)).unwrap();
+        assert_eq!(wire["ignore"], serde_json::json!(["bulk/", "target/"]));
     }
 
     #[test]

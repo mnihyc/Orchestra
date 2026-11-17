@@ -210,6 +210,256 @@ async fn places_mounts(world: &World, host: &ScriptedHost) {
 }
 
 #[tokio::test]
+async fn a_location_copy_uses_its_reviewed_destination_choice_and_keeps_displaced_data() {
+    use orch_api_contract::forks::CopyInto;
+    let world = World::new().await;
+    serve(&world);
+    let source = ScriptedHost::on(&world, "Copy source", 16_384).await;
+    let target = ScriptedHost::on(&world, "Copy target", 16_384).await;
+    places_mounts(&world, &source).await;
+    places_mounts(&world, &target).await;
+    let mount = mount_on(&world, &source, "reviewed-data", "copy").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let original = rows::locations(&mut conn, &[mount])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let previous = "orch-mount-existing-target";
+    rows::set_location(
+        &mut conn,
+        &LocationRow {
+            mount_id: mount,
+            machine_id: target.machine,
+            host_id: Some(target.id),
+            host_name: None,
+            kind: "volume".into(),
+            source: previous.into(),
+            storage: None,
+            data_kind: Some("own".into()),
+            created_by: world.ada,
+            created_at: world.clock.now(),
+        },
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    for into in [CopyInto::Replace, CopyInto::NewLocation] {
+        let latest = std::sync::Mutex::new(None);
+        common::eventually(
+            "the actual source and destination counts settle",
+            || async {
+                let mut conn = world.pool.acquire().await.unwrap();
+                let principal = orch_authz::Principal::load(
+                    &mut conn,
+                    Caller::session(world.ada),
+                    world.clock.time(),
+                )
+                .await
+                .unwrap();
+                let decided = orch_engine::mount_copies::decide_location_copy(
+                    &world.engine(),
+                    &mut conn,
+                    &principal,
+                    &original,
+                    target.machine,
+                    Some(into),
+                    world.clock.now(),
+                )
+                .await
+                .unwrap();
+                let ready = decided.blockers.is_empty()
+                    && decided
+                        .fated
+                        .first()
+                        .and_then(|row| row.copy.as_ref())
+                        .is_some_and(|copy| copy.measured);
+                if ready {
+                    *latest.lock().unwrap() = Some(decided);
+                }
+                ready
+            },
+        )
+        .await;
+        let decided = latest.into_inner().unwrap().unwrap();
+        let copy = decided.decisions.copies.first().unwrap();
+        assert_eq!(copy.from.source, original.source);
+        assert_eq!(copy.kept.as_ref().unwrap().previous.source, previous);
+        if into == CopyInto::Replace {
+            assert_eq!(copy.to.source, previous);
+            assert!(!copy.made);
+            assert!(copy.kept.as_ref().unwrap().copied_into.is_some());
+        } else {
+            assert_ne!(copy.to.source, previous);
+            assert!(copy.made);
+            assert!(copy.kept.as_ref().unwrap().copied_into.is_none());
+        }
+        let mut conn = world.pool.acquire().await.unwrap();
+        let unchanged = rows::locations(&mut conn, &[mount])
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.machine_id == target.machine)
+            .unwrap();
+        assert_eq!(
+            unchanged.source, previous,
+            "reviewing a copy starts no data mutation"
+        );
+    }
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_copy_review_cannot_follow_a_recreated_location_even_when_its_visible_values_match() {
+    use orch_engine::mount_copies::location::Review;
+    let world = World::new().await;
+    let source = ScriptedHost::on(&world, "Reviewed source", 16_384).await;
+    let target = ScriptedHost::on(&world, "Reviewed destination", 16_384).await;
+    places_mounts(&world, &source).await;
+    places_mounts(&world, &target).await;
+    let mount = mount_on(&world, &source, "membership-copy", "copy").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let absent = Review::capture(&mut conn, mount, source.machine, target.machine)
+        .await
+        .unwrap();
+    assert!(absent.current(&mut conn).await.unwrap());
+    let mut destination = absent.source().row();
+    destination.machine_id = target.machine;
+    destination.host_id = Some(target.id);
+    destination.source = "orch-mount-reviewed-target".into();
+    destination.kind = "volume".into();
+    rows::set_location(&mut conn, &destination).await.unwrap();
+    assert!(
+        !absent.current(&mut conn).await.unwrap(),
+        "a new destination needs its own review"
+    );
+
+    for machine in [source.machine, target.machine] {
+        let reviewed = Review::capture(&mut conn, mount, source.machine, target.machine)
+            .await
+            .unwrap();
+        let original = rows::locations(&mut conn, &[mount])
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.machine_id == machine)
+            .unwrap();
+        rows::remove_location(&mut conn, mount, machine)
+            .await
+            .unwrap();
+        rows::set_location(&mut conn, &original).await.unwrap();
+        assert!(
+            !reviewed.current(&mut conn).await.unwrap(),
+            "a different membership at the same name is not the reviewed data"
+        );
+    }
+    drop(conn);
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_copy_review_keeps_its_actual_data_makers_instead_of_accepting_the_same_driver_name() {
+    use orch_engine::mount_copies::location::Review;
+    let world = World::new().await;
+    let source = ScriptedHost::on(&world, "Original reader", 16_384).await;
+    let target = ScriptedHost::on(&world, "Original writer", 16_384).await;
+    places_mounts(&world, &source).await;
+    places_mounts(&world, &target).await;
+    let mount = mount_on(&world, &source, "maker-copy", "copy").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    for host in [source.id, target.id] {
+        let reviewed = Review::capture(&mut conn, mount, source.machine, target.machine)
+            .await
+            .unwrap();
+        let original: serde_json::Value =
+            sqlx::query_scalar("SELECT drivers FROM hosts WHERE id=$1")
+                .bind(host)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE hosts SET drivers=jsonb_set(drivers,'{docker,data_storage,existing_directory}','false'::jsonb) WHERE id=$1")
+            .bind(host).execute(&mut *conn).await.unwrap();
+        assert!(
+            rows::data_driver(
+                &mut conn,
+                if host == source.id {
+                    source.machine
+                } else {
+                    target.machine
+                }
+            )
+            .await
+            .unwrap()
+            .is_some(),
+            "the old name is still offered"
+        );
+        assert!(
+            !reviewed.current(&mut conn).await.unwrap(),
+            "changed native data support needs a fresh review"
+        );
+        sqlx::query("UPDATE hosts SET drivers=$2 WHERE id=$1")
+            .bind(host)
+            .bind(original)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(reviewed.current(&mut conn).await.unwrap());
+    }
+    drop(conn);
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_copy_review_survives_space_usage_and_storage_reordering_but_not_a_changed_destination() {
+    use orch_engine::mount_copies::location::Review;
+    let world = World::new().await;
+    let source = ScriptedHost::on(&world, "Storage reader", 16_384).await;
+    let target = ScriptedHost::on(&world, "Storage writer", 16_384).await;
+    let mount = mount_on(&world, &source, "stable-storage", "copy").await;
+    let first = json!([
+        {"name":"fast","default":true,"capacity_gb":100,"free_gb":80,"private_views":true},
+        {"name":"archive","default":false,"capacity_gb":200,"free_gb":150,"private_views":false}
+    ]);
+    let changed_space = json!([
+        {"name":"archive","default":false,"capacity_gb":200,"free_gb":120,"private_views":false},
+        {"name":"fast","default":true,"capacity_gb":100,"free_gb":70,"private_views":true}
+    ]);
+    let mut conn = world.pool.acquire().await.unwrap();
+    sqlx::query("UPDATE hosts SET storages=$2 WHERE id=ANY($1)")
+        .bind([source.id, target.id].as_slice())
+        .bind(&first)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let reviewed = Review::capture(&mut conn, mount, source.machine, target.machine)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hosts SET storages=$2 WHERE id=ANY($1)")
+        .bind([source.id, target.id].as_slice())
+        .bind(&changed_space)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        reviewed.current(&mut conn).await.unwrap(),
+        "ordinary writes, including this copy, change free space without replacing its data maker"
+    );
+    sqlx::query(
+        "UPDATE hosts SET storages=jsonb_set(storages,'{1,default}','false'::jsonb) WHERE id=$1",
+    )
+    .bind(target.id)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    assert!(
+        !reviewed.current(&mut conn).await.unwrap(),
+        "changing the selected native default requires a new review"
+    );
+    drop(conn);
+    world.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_synced_target_is_compared_on_request_and_keeps_the_time_without_changing_its_fate() {
     use orch_api_contract::forks::ForkRequest;
     use orch_link_contract::commands::{CommandKind, CommandResult, NodeMountFingerprintResult};
@@ -625,6 +875,7 @@ async fn a_live_content_check_can_stop_either_read_and_a_replan_never_restarts_i
         orch_db::queries::link::insert_command(
             &mut conn,
             &orch_db::queries::link::NewCommand {
+                native_target: None,
                 id: command,
                 machine_id: reading.machine,
                 kind: "node.mount.fingerprint",

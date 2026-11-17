@@ -505,10 +505,13 @@ impl Engine {
             let live = rows::live_runtime(&mut tx, provider).await?;
             if renew
                 && live.as_ref().is_none_or(|runtime| {
-                    !matches!(
-                        runtime.state.as_str(),
-                        runtime_state::RUNNING | runtime_state::STOPPED | runtime_state::CREATING
-                    )
+                    runtime.loss_missing
+                        || !matches!(
+                            runtime.state.as_str(),
+                            runtime_state::RUNNING
+                                | runtime_state::STOPPED
+                                | runtime_state::CREATING
+                        )
                 })
             {
                 return Err(RuntimeError::Unavailable(
@@ -531,7 +534,9 @@ impl Engine {
                     }
                 }
                 Some(runtime_state::STOPPED) => {
-                    if renew {
+                    if live.as_ref().is_some_and(|runtime| runtime.loss_missing) {
+                        Mode::Make
+                    } else if renew {
                         Mode::Renew
                     } else {
                         Mode::Start
@@ -891,6 +896,10 @@ impl Engine {
             .await?
             .filter(|runtime| runtime.provider_id == Some(provider))
             .ok_or(RuntimeError::NotFound)?;
+        let original_source =
+            orch_db::queries::runtime_incarnations::current(&mut conn, runtime.id)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
         if runtime.state == runtime_state::RETIRED {
             let host = host_rows::host(&mut conn, runtime.host_id)
                 .await?
@@ -959,19 +968,90 @@ impl Engine {
         if why == StopWhy::Idle && !self.runtime_is_idle(&state, &runtime).await? {
             return Ok(());
         }
+        let control = {
+            let mut tx = self.inner.db.begin().await?;
+            let registered = rows::lock(&mut tx, provider)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
+            if registered.owner_id != state.owner_id
+                || registered.home_id != state.home_id
+                || registered.org_id != state.org_id
+                || registered.machine_id != state.machine_id
+                || registered.agent_id != state.agent_id
+                || registered.harness_kind != state.harness_kind
+                || rows::live_runtime(&mut tx, provider)
+                    .await?
+                    .is_none_or(|current| current.id != runtime.id)
+                || orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+                    != Some(original_source)
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider registration or native start changed".into(),
+                ));
+            }
+            if !interrupt {
+                let running = rows::busy(&mut tx, provider).await?.turns;
+                if running > 0 {
+                    return Err(RuntimeError::Busy(running));
+                }
+            }
+            let pending = orch_db::queries::runtime_incarnations::stop(&mut tx, runtime.id).await?;
+            let control = if let Some(pending) = pending
+                && pending.source == original_source
+                && orch_db::queries::runtime_controls::is_current(&mut tx, &pending.control).await?
+            {
+                pending.control
+            } else {
+                orch_db::queries::runtime_controls::accept(
+                    &mut tx,
+                    runtime.id,
+                    orch_types::new_id(),
+                )
+                .await?
+            };
+            tx.commit().await.map_err(DbError::from)?;
+            control
+        };
         self.clear_provider_turns(provider, interrupt, why).await?;
         let began = {
             let mut tx = self.inner.db.begin().await?;
-            rows::lock(&mut tx, provider).await?;
-            let changed = env_rows::set_runtime_state(
+            let registered = rows::lock(&mut tx, provider)
+                .await?
+                .ok_or(RuntimeError::NotFound)?;
+            if registered.owner_id != state.owner_id
+                || registered.home_id != state.home_id
+                || registered.org_id != state.org_id
+                || registered.machine_id != state.machine_id
+                || registered.agent_id != state.agent_id
+                || registered.harness_kind != state.harness_kind
+                || rows::live_runtime(&mut tx, provider)
+                    .await?
+                    .is_none_or(|current| current.id != runtime.id)
+                || orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+                    != Some(original_source)
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider registration or native start changed during stop preparation".into(),
+                ));
+            }
+            let changed = orch_db::queries::runtime_incarnations::begin_stop(
                 &mut tx,
                 runtime.id,
-                &[runtime_state::RUNNING, runtime_state::STOPPING],
-                runtime_state::STOPPING,
-                Some(why.detail()),
+                &control,
                 self.inner.clock.now(),
             )
             .await?;
+            if changed {
+                env_rows::set_runtime_state(
+                    &mut tx,
+                    runtime.id,
+                    &[runtime_state::STOPPING],
+                    runtime_state::STOPPING,
+                    Some(why.detail()),
+                    self.inner.clock.now(),
+                )
+                .await?;
+            }
             tx.commit().await.map_err(DbError::from)?;
             changed
         };
@@ -999,15 +1079,33 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
         let Some(host) = host else {
             return Err(RuntimeError::Host("the host is gone".to_owned()));
         };
-        let stamp = row.updated_at.timestamp_micros().to_le_bytes();
-        let command = Outgoing::new(
-            ids::derived(
-                "node.runtime.stop",
-                &[runtime.as_bytes().as_slice(), &stamp],
-            ),
+        let stop = {
+            let mut conn = self.inner.db.acquire().await?;
+            let stop = orch_db::queries::runtime_incarnations::stop(&mut conn, runtime)
+                .await?
+                .ok_or_else(|| {
+                    RuntimeError::Unavailable(
+                        "the provider stop has no original native source".into(),
+                    )
+                })?;
+            if orch_db::queries::runtime_incarnations::current(&mut conn, runtime).await?
+                != Some(stop.source)
+                || !orch_db::queries::runtime_controls::is_current(&mut conn, &stop.control).await?
+            {
+                return Err(RuntimeError::Unavailable(
+                    "the original provider native start or control changed".into(),
+                ));
+            }
+            stop
+        };
+        let mut command = Outgoing::new(
+            stop.id,
             host.machine_id,
             SerialKey::Runtime(runtime),
             &NodeRuntimeStop {
@@ -1016,6 +1114,20 @@ impl Engine {
             },
         )
         .map_err(EngineError::from)?;
+        if let Some(incarnation) = stop.source.incarnation {
+            command = command.with_native_target(
+                orch_link_contract::native_target::NativeTarget::Lifecycle(
+                    orch_link_contract::native_target::LifecycleTarget {
+                        subject: orch_link_contract::native_target::LifecycleSubject::Runtime {
+                            runtime_id: runtime,
+                        },
+                        observed: Some(incarnation),
+                        opening: None,
+                        revision: stop.revision,
+                    },
+                ),
+            );
+        }
         let id = command.id;
         self.inner
             .commands
@@ -1030,6 +1142,31 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
         rows::lock(&mut tx, provider).await?;
+        let current = env_rows::runtime(&mut tx, runtime).await?;
+        if current.is_some()
+            && (orch_db::queries::runtime_incarnations::current(&mut tx, runtime).await?
+                != Some(stop.source)
+                || !orch_db::queries::runtime_controls::is_current(&mut tx, &stop.control).await?)
+        {
+            return Err(RuntimeError::Unavailable(
+                "the old stop reply does not confirm the current provider native start or control"
+                    .into(),
+            ));
+        }
+        if current.as_ref().is_none_or(|current| {
+            current.state != runtime_state::STOPPING || current.updated_at != row.updated_at
+        }) {
+            return Ok(());
+        }
+        if orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+            .await?
+            .as_ref()
+            != Some(&stop)
+        {
+            return Err(RuntimeError::Unavailable(
+                "the old reply does not confirm the current provider stop".into(),
+            ));
+        }
         match waited {
             Ok(Ok(Outcome::Succeeded(_))) => {
                 let detail = env_rows::runtime(&mut tx, runtime)

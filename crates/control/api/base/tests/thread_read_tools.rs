@@ -93,6 +93,7 @@ async fn publish(scene: &rig::Scene, thread: Id, reference: &str, body: Json) ->
         .link
         .dispatcher()
         .issue_stored(StoredCommand {
+            native_target: None,
             id: Some(id),
             machine: scene.rig.machine_id,
             kind: "orch.tool_result".into(),

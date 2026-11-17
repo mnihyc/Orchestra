@@ -313,6 +313,7 @@ impl Opening {
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    native_target: entry.command.native_target.clone(),
                     id: Some(entry.command.id),
                     machine: entry.command.machine,
                     kind: entry.command.kind.as_str().into(),

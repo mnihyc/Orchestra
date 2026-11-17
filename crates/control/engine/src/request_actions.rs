@@ -55,6 +55,190 @@ async fn provider_decision(
 }
 
 impl Engine {
+    /// A host's Stop names its selected unit, including a kept one, rather than another live unit.
+    pub async fn stop_host_environment_unit_in(
+        &self,
+        mut tx: Tx,
+        principal: &Principal,
+        origin: &Origin,
+        host: Id,
+        runtime: Id,
+        interrupt: bool,
+    ) -> Result<(), StopError> {
+        let selected = environments::runtime(&mut tx, runtime)
+            .await?
+            .filter(|row| row.host_id == host && row.kind == "environment")
+            .ok_or(StopError::NotFound)?;
+        let environment = selected.environment_id.ok_or(StopError::NotFound)?;
+        let registered = environments::lock_environment(&mut tx, environment)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(StopError::NotFound)?;
+        let selected = environments::runtime(&mut tx, runtime)
+            .await?
+            .filter(|row| row.host_id == host && row.environment_id == Some(environment))
+            .ok_or(StopError::NotFound)?;
+        if environments::live_runtime(&mut tx, environment)
+            .await?
+            .is_some_and(|row| row.id == runtime)
+        {
+            return self
+                .stop_environment_in(
+                    tx,
+                    principal,
+                    origin,
+                    environment,
+                    interrupt,
+                    StopReason::Person(principal.user()),
+                )
+                .await;
+        }
+        let source = orch_db::queries::runtime_incarnations::current(&mut tx, runtime)
+            .await?
+            .filter(|source| source.incarnation.is_some())
+            .ok_or_else(|| StopError::Unavailable(
+                "the host cannot confirm the selected unit's original native start; its files were kept".into(),
+            ))?;
+        let host_row = orch_db::queries::resources::hosting::host(&mut tx, host)
+            .await?
+            .ok_or(StopError::NotFound)?;
+        let node = host_row.machine_id;
+        let control =
+            orch_db::queries::runtime_controls::accept(&mut tx, runtime, orch_types::new_id())
+                .await?;
+        if control.source() != source {
+            return Err(StopError::Unavailable(
+                "the selected native start changed".into(),
+            ));
+        }
+        let command = orch_types::new_id();
+        let revision = orch_db::queries::runtime_controls::phase(
+            &mut tx,
+            &control,
+            command,
+            &json!({"kind":"node.runtime.stop","runtime_id":runtime,"source":source,
+                "body":{"runtime_id":runtime}}),
+        )
+        .await?
+        .ok_or_else(|| StopError::Unavailable("a newer control owns the selected unit".into()))?;
+        let target = orch_link_contract::native_target::LifecycleTarget {
+            subject: orch_link_contract::native_target::LifecycleSubject::Runtime {
+                runtime_id: runtime,
+            },
+            observed: source.incarnation,
+            opening: None,
+            revision,
+        };
+        let input =
+            crate::commands::host_unit::Input::capture(&mut tx, host, runtime, &control, &target)
+                .await?;
+        let mut entry = Entry::new(
+            Actor::User(principal.user()),
+            AuditAction::HostUpdated.as_str(),
+            "host",
+            Some(host),
+            "A host manager asked to stop the selected kept unit",
+        );
+        entry.history = true;
+        entry.node_id = host_row.home_id;
+        entry.org_id = host_row.org_id;
+        entry.details = json!({"host":host,"runtime":runtime,"environment":environment,
+            "interrupt":interrupt,"decision":"accepted"});
+        audit::append(&mut tx, &entry, origin, principal.now().get()).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        let mut outgoing = crate::commands::Outgoing::new(
+            command,
+            node,
+            orch_link_contract::commands::SerialKey::Runtime(runtime),
+            &orch_link_contract::commands::NodeRuntimeStop {
+                runtime_id: runtime,
+                reason: None,
+            },
+        )
+        .map_err(EngineError::from)?
+        .with_native_target(orch_link_contract::native_target::NativeTarget::Lifecycle(
+            target,
+        ))
+        .by(orch_types::Time::new(
+            self.inner.clock.now()
+                + chrono::Duration::seconds(i64::from(
+                    orch_link_contract::commands::CommandKind::NodeRuntimeStop.deadline_secs(),
+                )),
+        ));
+        let http = crate::operation_scope::http_origin::active().ok_or_else(|| {
+            StopError::Unavailable("the selected unit Stop has no original HTTP operation".into())
+        })?;
+        let mut checked = self.inner.db.begin().await?;
+        let native = crate::commands::host_unit::Command::capture(
+            &mut checked,
+            self.inner.clock.as_ref(),
+            input,
+            &outgoing,
+        )
+        .await?;
+        checked.commit().await.map_err(DbError::from)?;
+        outgoing.authority = Some(http.command_source(
+            &outgoing,
+            crate::operation_scope::http_command_source::CommandEvidence::HostUnitStop(Box::new(
+                native,
+            )),
+        )?);
+        let outcome = tokio::time::timeout(
+            self.inner.config.hosting.stop_wait,
+            crate::commands::run(self.inner.commands.as_ref(), outgoing),
+        )
+        .await;
+        let mut tx = self.inner.db.begin().await?;
+        let current = environments::lock_environment(&mut tx, environment)
+            .await?
+            .ok_or(StopError::NotFound)?;
+        if orch_db::queries::runtime_incarnations::current(&mut tx, runtime).await? != Some(source)
+            || !orch_db::queries::runtime_controls::is_current(&mut tx, &control).await?
+        {
+            return Err(StopError::Unavailable("the original selected unit or registration changed; its old reply was not published".into()));
+        }
+        match outcome {
+            Ok(Ok(crate::commands::Outcome::Succeeded(_))) => {
+                if !orch_db::queries::runtime_incarnations::observe(
+                    &mut tx, host, runtime, source, true,
+                )
+                .await?
+                {
+                    return Err(StopError::Unavailable(
+                        "the original selected start could not be confirmed".into(),
+                    ));
+                }
+                if environments::live_runtime(&mut tx, environment)
+                    .await?
+                    .is_none()
+                    && current.owner_id == registered.owner_id
+                    && current.home_node_id == registered.home_node_id
+                    && current.generation == registered.generation
+                    && selected.successor_of.is_none()
+                    && selected.generation == current.generation
+                {
+                    environments::set_status(
+                        &mut tx,
+                        environment,
+                        &["running", "offline"],
+                        "stopped",
+                        None,
+                        self.inner.clock.now(),
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(DbError::from)?;
+                Ok(())
+            }
+            Ok(Ok(crate::commands::Outcome::Failed(error))) => {
+                Err(StopError::Host(format!("{}: {}", error.code, error.detail)))
+            }
+            _ => Err(StopError::Host(
+                "the host did not confirm the selected unit stopped; its files were kept".into(),
+            )),
+        }
+    }
+
     /// Accepts the exact provider unit a host manager selected, including an older kept unit.
     pub async fn stop_host_provider_unit_in(
         &self,
@@ -365,7 +549,7 @@ impl Engine {
     {
         let environment = request.environment;
         let interrupt = request.interrupt;
-        let state = environments::environment(&mut tx, environment)
+        let state = environments::lock_environment(&mut tx, environment)
             .await?
             .filter(|state| state.deleted_at.is_none())
             .ok_or(StopError::NotFound)?;
@@ -396,6 +580,23 @@ impl Engine {
         entry.details =
             json!({"environment": environment, "interrupt": interrupt, "decision": "accepted"});
         let runtime = environments::live_runtime(&mut tx, environment).await?;
+        let runtime_source = if let Some(runtime) = &runtime {
+            orch_db::queries::runtime_incarnations::current(&mut tx, runtime.id).await?
+        } else {
+            None
+        };
+        let control = if let Some(runtime) = &runtime {
+            Some(
+                orch_db::queries::runtime_controls::accept(
+                    &mut tx,
+                    runtime.id,
+                    orch_types::new_id(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         before()?;
         audit::append(&mut tx, &entry, origin, principal.now().get()).await?;
         before_commit()?;
@@ -407,6 +608,8 @@ impl Engine {
             machine: state.machine_id,
             generation: state.generation,
             runtime: runtime.map(|runtime| runtime.id),
+            runtime_source,
+            control,
         })
     }
 }

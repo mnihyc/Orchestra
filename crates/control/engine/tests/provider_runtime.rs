@@ -17,7 +17,7 @@ use orch_db::queries::resources::provider_runtime as rows;
 use orch_engine::jobs::provider_provision::Mode;
 use orch_engine::provider_runtime::{RuntimeError, RuntimeStart, StopWhy};
 use orch_link_contract::commands::{CommandError, CommandKind as K, ErrorCode};
-use orch_types::{Id, Time, new_id};
+use orch_types::{Id, Json, Time, new_id};
 use runtimes::{
     enrol, made, managed_subscription, managed_world_provider, provider_template, queue,
 };
@@ -64,6 +64,182 @@ async fn wait_provider_runtime_job(world: &World) {
     drop(conn);
     let (state, _, error) = wait_over(world, job.id).await;
     assert_eq!(state, "succeeded", "{error:?}");
+}
+
+async fn record_provider_native_start(world: &World, host: Id, runtime: Id, incarnation: Id) {
+    let mut tx = world.pool.begin().await.unwrap();
+    rows::lock(&mut tx, world.provider).await.unwrap().unwrap();
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(
+            &mut tx,
+            host,
+            runtime,
+            orch_link_contract::native_target::RuntimeSource {
+                incarnation: Some(incarnation)
+            },
+            false,
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_provider_stop_waiting_for_a_turn_never_adopts_a_later_native_start() {
+    let world = World::observed().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Preparing provider stop", 16_384).await;
+    let template = provider_template(&world).await;
+    let runtime = managed_world_provider(&world, &host, template).await;
+    record_provider_native_start(&world, host.id, runtime, new_id()).await;
+    let thread = world.thread("Keep the replacement runtime").await;
+    let (turn, _) = world.running_turn(thread, "work before stop").await;
+    world.machine.handler.hold(K::TurnInterrupt);
+    let engine = world.engine();
+    let provider = world.provider;
+    let by = world.ada;
+    let stopping = tokio::spawn(async move {
+        engine
+            .stop_provider_runtime(provider, true, StopWhy::Person(by))
+            .await
+    });
+    eventually(
+        "the original provider stop to wait for its actual turn",
+        || async { world.ran(K::TurnInterrupt) == 1 },
+    )
+    .await;
+    let replacement = new_id();
+    record_provider_native_start(&world, host.id, runtime, replacement).await;
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::TurnCompleted(
+                orch_link_contract::events::TurnCompleted {
+                    turn_id: turn.turn_id,
+                    status: orch_link_contract::events::TurnOutcome::Interrupted,
+                    error: None,
+                },
+            ),
+        )
+        .await;
+    world.machine.handler.release_kind(K::TurnInterrupt);
+    let stopped = stopping.await.unwrap();
+    assert!(
+        matches!(stopped, Err(RuntimeError::Unavailable(_))),
+        "{stopped:?}"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(runtime_state(&world, runtime).await, "running");
+    assert_eq!(machine_of(&world, provider).await, Some(world.machine_id));
+    let actual: Option<Id> =
+        sqlx::query_scalar("SELECT native_incarnation FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(actual, Some(replacement));
+}
+
+#[tokio::test]
+async fn an_old_provider_stop_reply_keeps_a_later_native_start_and_its_serving_machine() {
+    for changed_stamp in [false, true] {
+        let world = World::observed().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "Original provider stop", 16_384).await;
+        let template = provider_template(&world).await;
+        let runtime = managed_world_provider(&world, &host, template).await;
+        record_provider_native_start(&world, host.id, runtime, new_id()).await;
+        host.added.machine.handler.hold(K::NodeRuntimeStop);
+        let engine = world.engine();
+        let provider = world.provider;
+        let by = world.ada;
+        let stopping = tokio::spawn(async move {
+            engine
+                .stop_provider_runtime(provider, false, StopWhy::Person(by))
+                .await
+        });
+        host.wait_began(K::NodeRuntimeStop, 1).await;
+        let replacement = new_id();
+        record_provider_native_start(&world, host.id, runtime, replacement).await;
+        let mut tx = world.pool.begin().await.unwrap();
+        rows::lock(&mut tx, provider).await.unwrap().unwrap();
+        sqlx::query("UPDATE runtimes SET state='running',updated_at=updated_at+CASE WHEN $2 THEN interval '1 second' ELSE interval '0' END WHERE id=$1")
+            .bind(runtime).bind(changed_stamp).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        host.added.machine.handler.release();
+        let stopped = stopping.await.unwrap();
+        assert!(
+            matches!(stopped, Err(RuntimeError::Unavailable(_))),
+            "{stopped:?}; changed timestamp: {changed_stamp}"
+        );
+        let actual: (String, Option<Id>) =
+            sqlx::query_as("SELECT state,native_incarnation FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert_eq!(actual, ("running".into(), Some(replacement)));
+        assert_eq!(machine_of(&world, provider).await, Some(world.machine_id));
+        assert_eq!(host.count(K::NodeRuntimeStop), 1);
+        assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+        assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_matching_provider_stop_sends_its_original_native_target_and_keeps_every_volume() {
+    let world = World::observed().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Matching provider stop", 16_384).await;
+    let template = provider_template(&world).await;
+    let runtime = managed_world_provider(&world, &host, template).await;
+    let incarnation = new_id();
+    record_provider_native_start(&world, host.id, runtime, incarnation).await;
+    let volumes: Json = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    world
+        .engine()
+        .stop_provider_runtime(world.provider, false, StopWhy::Person(world.ada))
+        .await
+        .unwrap();
+    let sent = world.commands.issued_commands("node.runtime.stop");
+    assert_eq!(sent.len(), 1);
+    let (machine, command) = &sent[0];
+    assert_eq!(*machine, host.machine);
+    let Some(orch_link_contract::native_target::NativeTarget::Lifecycle(target)) =
+        &command.native_target
+    else {
+        panic!("the provider stop must reach the native role with its original physical operand");
+    };
+    assert_eq!(
+        target.subject,
+        orch_link_contract::native_target::LifecycleSubject::Runtime {
+            runtime_id: runtime
+        }
+    );
+    assert_eq!(target.observed, Some(incarnation));
+    assert_eq!(target.opening, None);
+    let revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM runtime_control_phases WHERE id=$1")
+            .bind(command.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(target.revision, revision);
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+    assert_eq!(machine_of(&world, world.provider).await, None);
+    let kept: Json = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, volumes);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
 }
 
 #[tokio::test]
@@ -840,12 +1016,30 @@ async fn a_runtime_with_a_turn_running_on_its_provider_is_not_stopped_unless_the
     let runtime = managed_world_provider(&world, &host, template).await;
     let thread = world.thread("work").await;
     let (start, _) = world.running_turn(thread, "go").await;
+    let control_before: (Option<Id>, i64) = sqlx::query_as(
+        "SELECT native_control_intent,native_control_revision FROM runtimes WHERE id=$1",
+    )
+    .bind(runtime)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
     let refused = world
         .engine()
         .stop_provider_runtime(world.provider, false, StopWhy::Person(world.ada))
         .await
         .unwrap_err();
     assert!(matches!(refused, RuntimeError::Busy(1)), "{refused:?}");
+    let control_after: (Option<Id>, i64) = sqlx::query_as(
+        "SELECT native_control_intent,native_control_revision FROM runtimes WHERE id=$1",
+    )
+    .bind(runtime)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        control_after, control_before,
+        "a refused busy stop accepts no new native control"
+    );
     assert_eq!(runtime_state(&world, runtime).await, "running");
     assert_eq!(host.count(K::NodeRuntimeStop), 0);
     let removal = remove_from_host(&world, host.id, runtime, true)
@@ -1094,51 +1288,60 @@ async fn a_deleted_providers_runtime_is_retired_and_the_reaper_removes_its_unit_
 #[tokio::test]
 async fn a_unit_that_its_host_finds_gone_leaves_the_provider_without_a_machine_and_the_next_start_makes_it_again()
  {
-    let world = World::new().await;
-    serve(&world);
-    let host = ScriptedHost::on(&world, "host-1", 16_384).await;
-    let _template = provider_template(&world).await;
-    let provider = managed_subscription(&world, "Crashes").await;
-    let (runtime, _unit) = made(&world, &host, provider).await;
-    // This control exercises an explicit start; the separate scheduled-recovery case makes reads due.
-    sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
-        .bind(provider)
-        .bind(world.clock.now())
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
-    host.tell(runtime, "absent", Some("the unit is gone")).await;
-    eventually("the runtime to be marked failed", || async {
-        runtime_state(&world, runtime).await == "failed"
-    })
-    .await;
-    assert!(machine_of(&world, provider).await.is_none());
-    let RuntimeStart::Job(job) = world
-        .engine()
-        .start_provider_runtime(provider, Some(world.ada))
-        .await
-        .unwrap()
-    else {
-        panic!("a failed runtime is made again by a job");
-    };
-    host.wait_for(K::NodeRuntimeStart, 2).await;
-    let second = host.started().unwrap();
-    assert_ne!(second, runtime, "a new unit is made on the same volume");
-    let _unit = enrol(&world, second).await;
-    let (state, progress, error) = wait_over(&world, job.id).await;
-    assert_eq!(state, "succeeded", "{error:?}");
-    assert_eq!(phases(&progress)[0].0, "schedule");
-    assert_eq!(
-        host.count(K::NodeVolumeEnsure),
-        2,
-        "the volume is ensured again and not made over"
-    );
-    assert_eq!(runtime_state(&world, runtime).await, "retired");
-    assert_eq!(
-        host.count(K::NodeVolumeRemove),
-        0,
-        "a failed unit's volume is the new unit's"
-    );
+    for stopping in [false, true] {
+        let world = World::new().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "host-1", 16_384).await;
+        let _template = provider_template(&world).await;
+        let provider = managed_subscription(&world, "Crashes").await;
+        let (runtime, _unit) = made(&world, &host, provider).await;
+        // This control exercises an explicit start; the separate scheduled-recovery case makes reads due.
+        sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
+            .bind(provider)
+            .bind(world.clock.now())
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        if stopping {
+            sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+                .bind(runtime)
+                .execute(world.pool.pool())
+                .await
+                .unwrap();
+        }
+        host.tell(runtime, "absent", Some("the unit is gone")).await;
+        eventually("the runtime to be marked failed", || async {
+            runtime_state(&world, runtime).await == if stopping { "stopped" } else { "failed" }
+        })
+        .await;
+        assert!(machine_of(&world, provider).await.is_none());
+        let RuntimeStart::Job(job) = world
+            .engine()
+            .start_provider_runtime(provider, Some(world.ada))
+            .await
+            .unwrap()
+        else {
+            panic!("a failed runtime is made again by a job");
+        };
+        host.wait_for(K::NodeRuntimeStart, 2).await;
+        let second = host.started().unwrap();
+        assert_ne!(second, runtime, "a new unit is made on the same volume");
+        let _unit = enrol(&world, second).await;
+        let (state, progress, error) = wait_over(&world, job.id).await;
+        assert_eq!(state, "succeeded", "{error:?}");
+        assert_eq!(phases(&progress)[0].0, "schedule");
+        assert_eq!(
+            host.count(K::NodeVolumeEnsure),
+            2,
+            "the volume is ensured again and not made over"
+        );
+        assert_eq!(runtime_state(&world, runtime).await, "retired");
+        assert_eq!(
+            host.count(K::NodeVolumeRemove),
+            0,
+            "a failed unit's volume is the new unit's"
+        );
+    }
 }
 
 #[tokio::test]

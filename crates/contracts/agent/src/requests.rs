@@ -320,6 +320,8 @@ impl UsageRequest {
 /// The first-class adapter event, routed identically for a built-in adapter and an external JSON line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelRequestReport {
+    /// The physical producer, absent only for unscoped history or discovery.
+    pub native_opening_id: Option<Id>,
     /// The thread.
     pub thread_id: Id,
     /// The session segment.
@@ -359,7 +361,7 @@ mod tests {
 
     #[test]
     fn an_external_adapter_and_a_builtin_report_the_same_request_with_nullable_counts() {
-        let body = json!({"thread_id":"00000000-0000-4000-8000-000000000001","segment_id":"00000000-0000-4000-8000-000000000002","turn_id":"00000000-0000-4000-8000-000000000003",
+        let body = json!({"native_opening_id":null,"thread_id":"00000000-0000-4000-8000-000000000001","segment_id":"00000000-0000-4000-8000-000000000002","turn_id":"00000000-0000-4000-8000-000000000003",
             "request":{"id":"request-1","model":"model-a","asked":"2026-10-15T00:00:00.000Z","first_output":"2026-10-15T00:00:01.000Z","end":"2026-10-15T00:00:03.000Z",
             "tokens":{"input_tokens":100,"cached_input_tokens":0,"cache_write_tokens":null,"output_tokens":64,"reasoning_tokens":null,"total_tokens":164},"reasoning_hidden":false,"output_streamed":true,"outcome":{"status":"done"}}});
         let event = AdapterEvent::from_wire(MODEL_REQUEST_EVENT, body.clone()).unwrap();
