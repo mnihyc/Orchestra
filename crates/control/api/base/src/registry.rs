@@ -756,6 +756,7 @@ pub(crate) fn changes_authority(route: &Route) -> bool {
         "AgentUpdate" | "AgentDelete" |
         "TemplateUpdate" | "TemplateDelete" |
         "McpServerUpdate" | "McpServerDelete" | "McpServerReimport" |
+        "MountDelete" |
         "SkillUpdate" | "SkillDelete" |
         "HostEnrollmentTokenCreate" | "HostUpdate" | "HostDelete" | "HostDeleteCreate" | "LossDeclare" | "EnvironmentRecoverCreate" | "McpOfferingUse" |
         "MachineRevoke" | "MachinePolicyUpdate" | "MachineProbe" |
@@ -798,6 +799,7 @@ pub(crate) fn changes_one_place(route: &Route) -> bool {
                 | "ThreadForkCreate"
                 | "ForkBatchCreate"
                 | "InvitationAccept"
+                | "MountDelete"
         )
 }
 

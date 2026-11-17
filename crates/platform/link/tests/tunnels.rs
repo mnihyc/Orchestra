@@ -48,6 +48,7 @@ async fn world(grace: Duration) -> World {
     let hub = Hub::new(Arc::clone(&clock), pki.certificate());
     let signer = TicketSigner::generate();
     hub.set_ticket_verifier(signer.verifier());
+    hub.admit_test_tool_sessions();
     hub.set_relay_grace(grace);
     let gauge = Arc::new(Gauge::new());
     let spec = |roles: Vec<Role>| MachineSpec {
@@ -114,8 +115,9 @@ impl World {
         executor: &str,
         lasts: chrono::Duration,
     ) -> String {
-        self.signer
-            .issue(&TicketRequest {
+        orch_testkit::doubles::link::session_ticket(
+            &self.signer,
+            &TicketRequest {
                 src,
                 dst,
                 service: Service::Exec {
@@ -124,8 +126,10 @@ impl World {
                 thread_id: None,
                 tool_set: None,
                 expires_at: Time::new(self.clock.now() + lasts),
-            })
-            .unwrap()
+            },
+            Some((new_id(), 0)),
+        )
+        .unwrap()
     }
 
     fn ticket(&self) -> String {

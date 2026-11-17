@@ -2,7 +2,7 @@
 import { expect, type Page, test } from '@playwright/test';
 
 import { ACME, changeTree, dropConnections, endTokens, PEOPLE, scenario, signIn, screenAddress } from './support.ts';
-import { showWorkbenchView } from './workbench-support.ts';
+import { restAtEdge, showHiddenBarsOnHover, showWorkbenchView } from './workbench-support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -237,6 +237,7 @@ test('choosing Code sets its frame and adds Files without closing or moving the 
 
 test('the bars are shown and hidden by their keys and by the switches in the title, and a view that was closed is added again', async ({ page }) => {
   await signIn(page);
+  await showHiddenBarsOnHover(page);
   await page.goto(`/thread/${ACME.mainThread}`);
   await showWorkbenchView(page, 'Terminal');
   await page.getByRole('button', { name: 'Bottom panel', exact: true }).click();
@@ -258,7 +259,7 @@ test('the bars are shown and hidden by their keys and by the switches in the tit
   await expect(temporary).toHaveCount(0);
   await page.keyboard.press('Control+Shift+Period');
   await expect(side).toHaveCount(0);
-  await page.locator('[data-bar-edge="right"]').hover();
+  await restAtEdge(page, 'right');
   await expect(temporary).toBeVisible();
   await temporary.getByRole('button', { name: 'Keep open as a bar', exact: true }).click();
   await expect(temporary).toHaveCount(0);

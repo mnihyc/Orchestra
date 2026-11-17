@@ -714,6 +714,7 @@ pub(crate) async fn show_inventory_prepared(
                 .cloned()
                 .unwrap_or_else(|| amounts(&row.declared));
             Ok(Host {
+                bundled_with_server: row.bundled_with_server,
                 provenance: orch_api_contract::resource_groups::ResourceProvenance {
                     origin_machine: machines.get(&row.machine_id).cloned(),
                     availability: Vec::new(),
@@ -922,8 +923,8 @@ async fn token_create(
     (): (),
     body: api::HostEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    let (installation, name_hint) = enrollment::validate(&ctx, &body)?;
     let (ctx, mut conn, principal) = begin_mutation(&ctx).await?;
+    let (_, name_hint) = enrollment::validate(&ctx, &mut conn, &body).await?;
     if let Some(home) = body.home_id {
         let (_, kind) = placed(&mut conn, home).await?;
         if kind != NodeKind::Org {
@@ -1031,6 +1032,7 @@ async fn token_create(
     current
         .check_deadline(ctx.app.clock.as_ref())
         .map_err(enrollment::mapped)?;
+    let installation = super::machines::installation_config(&ctx, &mut conn).await?;
     conn.commit().await.map_err(DbError::from)?;
     current
         .check_deadline(ctx.app.clock.as_ref())

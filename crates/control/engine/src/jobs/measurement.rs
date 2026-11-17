@@ -181,7 +181,17 @@ impl Engine {
         request: Request,
         source: Option<&Preparation>,
     ) -> Result<Count, EngineError> {
-        let count = if source.is_none()
+        let copy = if source.is_none() {
+            crate::mount_copies::location::preparation::active()
+                .map(|copy| copy.measurement())
+                .transpose()?
+        } else {
+            None
+        };
+        let count = if let Some(copy) = &copy {
+            self.measure_request_from(request.clone(), Some(copy))
+                .await?
+        } else if source.is_none()
             && let Some(planning) = crate::jobs::lifecycle_commands::planning::active()
         {
             planning.reuse_measurement(self, &request).await?

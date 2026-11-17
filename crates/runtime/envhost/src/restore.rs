@@ -663,7 +663,7 @@ pub struct PathVersion {
     /// The device on which the path was observed.
     pub device: u64,
     /// Its filesystem identity, where the platform has one.
-    pub inode: u64,
+    pub inode: crate::platform::FileNumber,
     /// The last metadata/content change time, where the platform has one.
     pub changed_at: i64,
 }

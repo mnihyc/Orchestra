@@ -2,7 +2,7 @@
 import { cleanup, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
-import { ActivityCount, BindingCount } from '@/features/storage/Impact';
+import { ActivityCount, BindingCount, MountEffects } from '@/features/storage/Impact';
 import type { ActivityGroup } from '@/generated/api-types';
 import { setLocale } from '@/i18n';
 import { Checkbox } from '@/ui/Checkbox';
@@ -53,4 +53,17 @@ it('a notification count opens the shared people list without changing its indep
   expect(screen.getByText('and 2 more')).toBeVisible();
   expect(choice).toBeChecked();
   expect(changed).not.toHaveBeenCalled();
+});
+
+it('a long mount consequence list searches visible names and keeps hidden uses as a count', async () => {
+  const user = userEvent.setup();
+  const visible = Array.from({ length: 11 }, (_, index) => ({ object: { kind: 'environment' as const, id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}` }, name: `Dataset ${index}`, relation: 'attachment' as const, until: null }));
+  show(<MountEffects facts={{ subject: { kind: 'resource', object: { kind: 'mount', id: 'mount' } }, as_of: '2026-10-01T00:00:00Z', uses: null, dependents_complete: true, dependents: [{ relation: 'attachment', count: 14, visible, hidden: 3, until: null }] }} />);
+  await user.click(screen.getByRole('button', { name: '14 environments detach at next start' }));
+  const search = await screen.findByRole('textbox', { name: 'Find names' });
+  await user.click(search);
+  await user.paste('Dataset 10');
+  expect(screen.getByText('Dataset 10')).toBeVisible();
+  expect(screen.queryByText('Dataset 0')).not.toBeInTheDocument();
+  expect(screen.getByText('and 3 you cannot see')).toBeVisible();
 });
