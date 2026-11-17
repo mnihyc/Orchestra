@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { LibraryCounts } from '@/features/resources/Library';
 import type { ResourceFacts } from '@/generated/api-types';
-import { setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 vi.mock('@/features/people/NamedChip',()=>({KnownNodeChip:({node}:{node:{name:string}})=><span>{node.name}</span>}));
@@ -64,4 +64,10 @@ it('keeps only 50 Given names in the DOM across a 100000-name result and can rea
  await user.click(screen.getByRole('button',{name:'Back to beginning'}));
  expect(await screen.findByText('Visible place 1')).toBeVisible();
  expect(screen.getAllByRole('listitem')).toHaveLength(50);
+ const search=screen.getByRole('searchbox',{name:i18n.t('library.search')});
+ await user.type(search,'100000');
+ expect(await screen.findByText('Visible place 100000')).toBeVisible();
+ expect(screen.getAllByRole('listitem')).toHaveLength(1);
+ await user.clear(search);
+ expect(await screen.findByText('Visible place 1')).toBeVisible();
 });

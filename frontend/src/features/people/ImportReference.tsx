@@ -1,4 +1,5 @@
 /** A report's named object opens the shared reference card, which checks current access on demand. */
+import { PathLink } from '@/shell/TrailLink';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { FileText, Folder, MessageSquare } from 'lucide-react';
@@ -39,7 +40,7 @@ export function ImportReference({ id, kind, name, onOpen }: { id: string; kind: 
   const reference: TypedReference = { id, kind: kind === 'document' ? 'document' : kind === 'chat' ? 'chat' : 'node', label: name };
   const icon = kind === 'document' ? <FileText aria-hidden className="size-4 shrink-0" /> : kind === 'chat' ? <MessageSquare aria-hidden className="size-4 shrink-0" /> : <NodeIcon kind={kind} className="size-4 shrink-0" />;
   const path = kind === 'document' ? `/doc/${encodeURIComponent(id)}` : kind === 'chat' ? `/chat/${encodeURIComponent(id)}` : `/${kind}/${encodeURIComponent(id)}`;
-  return <ReferenceCard reference={reference} label={name} onOpen={onOpen} cacheScope={scope}>{(keep) => <a href={path} onClick={(event) => { if (isPlainClick(event)) { event.preventDefault(); keep(); } }} title={name} className={REFERENCE_CHIP_CLASS}>
+  return <ReferenceCard reference={reference} label={name} onOpen={onOpen} cacheScope={scope}>{(keep) => <PathLink href={path} onClick={(event) => { if (isPlainClick(event)) { event.preventDefault(); keep(); } }} title={name} className={REFERENCE_CHIP_CLASS}>
     {icon}<span className="min-w-0 truncate">{name}</span>
-  </a>}</ReferenceCard>;
+  </PathLink>}</ReferenceCard>;
 }

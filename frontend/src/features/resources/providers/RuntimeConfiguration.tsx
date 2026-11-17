@@ -16,7 +16,7 @@ import { Button } from '@/ui/Button';
 import { AdminActNotice, adminSpec } from '@/ui/AdminAct';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { PasswordInput } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { jobQuery } from '@/api/forks';
 import { ProviderGuideLink } from '@/features/help/ProviderGuideLink';
@@ -38,12 +38,16 @@ function RuntimeJob({ id }: { id:string }) {
 function RuntimeSecret({ provider, name }: { provider: Provider; name: string }) {
   const { t } = useTranslation();
   const [value, setValue] = useState('');
+  // A new field after each write, so that a secret that is set shows as dots again, not as the empty box it was typed in.
+  const [written, setWritten] = useState(0);
+  const set = provider.secrets_set.includes(`runtime:${name}`);
   const save = useMutation({ mutationFn: () => setProviderSecret(provider.id, `runtime:${name}`, value), onSuccess: () => {
     setValue('');
+    setWritten((count) => count + 1);
   } });
   return <form className="flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
-    <div className="flex flex-wrap items-end gap-2"><PasswordInput label={name} value={value} onChange={(event) => setValue(event.target.value)} autoComplete="new-password" disabled={save.isPending} /><Button admin={adminSpec(provider, 'provider.manage')} type="submit" pending={save.isPending} disabled={value === ''}>{t('resources.edit.save')}</Button></div>
-    <p className="text-xs text-text-muted">{t(provider.secrets_set.includes(`runtime:${name}`) ? 'providerRuntime.secretSet' : 'providerRuntime.secretMissing')}</p>
+    <div className="flex flex-wrap items-end gap-2"><SecretField key={written} label={name} set={set} value={value} onValueChange={setValue} disabled={save.isPending} fieldClassName="min-w-0 flex-1 basis-[12rem]" /><Button admin={adminSpec(provider, 'provider.manage')} type="submit" pending={save.isPending} disabled={value === ''}>{t('resources.edit.save')}</Button></div>
+    {!set && <p className="text-xs text-text-muted">{t('providerRuntime.secretMissing')}</p>}
     {save.error && <ErrorAlert error={save.error} />}
   </form>;
 }

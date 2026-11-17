@@ -538,6 +538,19 @@ fn stored(progress: &JobProgress, log: Option<&str>) -> Json {
     value
 }
 
+/// Keeps the public failure reason beside the native output, including after cleanup overwrites a tail.
+fn keep_failure_log(progress: &JobProgress, log: &mut Option<String>, failure: &Failure) {
+    let reason = format!("{} · {}: {}", progress.phase, failure.code, failure.message);
+    let tail = log.get_or_insert_with(String::new);
+    if tail.contains(reason.as_str()) {
+        return;
+    }
+    if !tail.is_empty() && !tail.ends_with('\n') {
+        tail.push('\n');
+    }
+    tail.push_str(&reason);
+}
+
 /// A job's progress as the row holds it, and the end of what a phase printed.
 #[must_use]
 pub fn read_progress(row: &JobRow) -> (JobProgress, Option<String>) {
@@ -1043,6 +1056,7 @@ impl Job {
         let Some(mut row) = self.lock_owned(&mut tx).await? else {
             return Ok(None);
         };
+        let first = abort_reason(&row)?.is_none();
         let reason = if let Some(reason) = abort_reason(&row)? {
             reason
         } else {
@@ -1051,7 +1065,22 @@ impl Job {
             row.plan["abort"] = value;
             why.clone()
         };
+        if first && let Stop::Failed(failure) = &reason {
+            let (progress, mut log) = read_progress(&row);
+            if failure.log.is_some() {
+                log.clone_from(&failure.log);
+            }
+            keep_failure_log(&progress, &mut log, failure);
+            row.progress = stored(&progress, log.as_deref());
+            rows::save_progress(&mut tx, self.id, &row.progress, self.now()).await?;
+        }
         tx.commit().await.map_err(orch_db::DbError::from)?;
+        if first && let Stop::Failed(failure) = &reason {
+            let (progress, _) = read_progress(&row);
+            tracing::warn!(job = %self.id, kind = %row.kind, environment = ?row.environment_id,
+                provider = ?row.provider_id, phase = %progress.phase, code = %failure.code,
+                reason = %failure.message, "a job failed");
+        }
         Ok(Some((row, reason)))
     }
 
@@ -1559,6 +1588,7 @@ impl Job {
             .await?;
         super::retained::operation::decorate(self, &mut command, !respect_cancel).await?;
         super::lifecycle_commands::decorate(self, &mut command, respect_cancel).await?;
+        super::mount_copy::command::decorate(self, &mut command, respect_cancel).await?;
         let update_boundary = if respect_cancel
             && super::recreate::environment_authority::is_restricted(&self.row().await?)
         {
@@ -1713,6 +1743,11 @@ impl Engine {
     pub(crate) async fn run_jobs(&self) -> Result<(), EngineError> {
         self.expire_measurements().await?;
         self.run_document_notice_jobs().await?;
+        crate::mount_copies::claims::reap_finished(
+            &mut *self.db().acquire().await?,
+            self.inner.config.sweep_batch,
+        )
+        .await?;
         let now = self.inner.clock.now();
         let lease =
             chrono::Duration::from_std(self.inner.config.hosting.job_lease).unwrap_or_default();
@@ -1724,6 +1759,8 @@ impl Engine {
                     kind::ENVIRONMENT_PROVISION,
                     kind::ENVIRONMENT_RESTART,
                     crate::jobs::mcp_restart::KIND,
+                    crate::jobs::server_update::KIND,
+                    crate::jobs::mount_copy::KIND,
                     crate::jobs::capability_change::KIND,
                     crate::jobs::kept_images::KIND,
                     crate::jobs::cleanup::KIND,
@@ -1913,6 +1950,12 @@ impl Engine {
     /// The phased work of a job of this kind.
     async fn phased_for(&self, row: &JobRow) -> Result<Option<Box<dyn Phased>>, EngineError> {
         Ok(match row.kind.as_str() {
+            crate::jobs::mount_copy::KIND => {
+                Some(Box::new(crate::jobs::mount_copy::Copying::of(row)?))
+            }
+            crate::jobs::server_update::KIND => {
+                Some(Box::new(crate::jobs::server_update::Updating::of(row)?))
+            }
             crate::jobs::continuation::KIND => {
                 Some(Box::new(crate::jobs::continuation::Continuing::of(row)?))
             }
@@ -2281,6 +2324,9 @@ impl Engine {
         let (progress, mut log) = read_progress(&row);
         if failure.log.is_some() {
             log.clone_from(&failure.log);
+        }
+        if to == state::FAILED {
+            keep_failure_log(&progress, &mut log, &failure);
         }
         let error = json!({
             "code": failure.code,

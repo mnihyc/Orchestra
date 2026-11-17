@@ -43,7 +43,7 @@ fn unavailable() -> CommandError {
     )
 }
 
-fn target(command: &Command) -> Option<Id> {
+pub(crate) fn target(command: &Command) -> Option<Id> {
     match command {
         Command::EnvAttach(body) => Some(body.environment_id),
         Command::EnvDetach(body) => Some(body.environment_id),

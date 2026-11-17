@@ -154,6 +154,17 @@ impl HttpOrigin {
     }
 }
 impl HttpCommand {
+    pub(crate) fn operation(&self) -> &str {
+        self.original.origin().operation()
+    }
+    pub(crate) fn native_source(
+        &self,
+    ) -> Option<&crate::operation_scope::http_command_source::CommandEvidence> {
+        match &self.native {
+            Native::Source(source) => Some(source.as_ref()),
+            Native::Channel(_) => None,
+        }
+    }
     /// Accepted native mkdir coordinates, without restoring its original sender.
     pub(crate) fn file_mkdir_receipt(
         &self,
@@ -173,6 +184,7 @@ impl HttpCommand {
                 .or_else(|| self.deadline.map(Time::get))
                 != Some(row.deadline_at)
             || !self.matches(&NewCommand {
+                native_target: None,
                 id: row.id,
                 machine_id: row.machine_id,
                 kind: &row.kind,
@@ -270,6 +282,7 @@ impl HttpCommand {
                 .or_else(|| self.deadline.map(Time::get))
                 != Some(row.deadline_at)
             || !self.matches(&NewCommand {
+                native_target: None,
                 id: row.id,
                 machine_id: row.machine_id,
                 kind: &row.kind,
@@ -438,6 +451,7 @@ impl HttpCommand {
         self.checked(
             conn,
             &NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -465,6 +479,7 @@ impl HttpCommand {
         let row = link::command(conn, id).await?.ok_or_else(closed)?;
         let (origin, previous) = self.retained(conn, id, row.deadline_at).await?;
         if !self.matches(&NewCommand {
+            native_target: None,
             id: row.id,
             machine_id: row.machine_id,
             kind: &row.kind,

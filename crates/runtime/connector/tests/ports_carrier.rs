@@ -144,6 +144,7 @@ fn ticket_for(
             tool_environment_id: None,
             tool_environment_generation: None,
             tool_executor_version: None,
+            tool_session: None,
             exp: rig.deadline().unix_millis() / 1000,
             port: Some(PortTicketClaims {
                 environment_id: rig.environment,

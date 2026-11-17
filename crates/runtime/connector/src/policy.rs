@@ -173,7 +173,9 @@ pub fn inspect_environment_path(
             return Ok(orch_driver_contract::runtime::DirectoryBinding {
                 path: real.to_string_lossy().into_owned(),
                 device: Some(stat.st_dev),
-                inode: Some(stat.st_ino),
+                inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    stat.st_ino,
+                )),
             });
         }
     }
@@ -997,6 +999,30 @@ impl PolicyStore {
     #[must_use]
     pub fn config(&self) -> ConnectorConfig {
         self.state().config.clone()
+    }
+
+    /// Keep gateway selection in the same locked configuration as policy, roles and programs.
+    pub fn change_gateway(
+        &self,
+        choice: &orch_link_contract::gateways::GatewayChoice,
+    ) -> Result<bool, PolicyFault> {
+        let mut state = self.state();
+        if state.config.connector.gateway == *choice {
+            return Ok(false);
+        }
+        let mut config = state.config.clone();
+        config.connector.gateway = choice.clone();
+        orch_config::loader::Validate::validate(&config)
+            .map_err(|error| PolicyFault::Config(error.to_string()))?;
+        let next = State {
+            config,
+            policy: state.policy.clone(),
+            active_roles: state.active_roles.clone(),
+        };
+        self.persist(&next)?;
+        *state = next;
+        self.changed.send_modify(|count| *count += 1);
+        Ok(true)
     }
 
     /// The one file owns both policy provenance and runtime program registrations; a policy save

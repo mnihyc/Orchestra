@@ -70,7 +70,7 @@ pub(crate) struct DirectoryLocation {
     /// Canonical workspace-relative directory, after the ordinary path/ignore checks.
     pub(crate) path: RelPath,
     device: u64,
-    node: u64,
+    node: crate::platform::FileNumber,
 }
 
 /// Directory identity and stat evidence collected around a streamed metadata observation.
@@ -950,7 +950,7 @@ impl Files {
             // same file under a new spelling, and that is allowed.
             // Where the system numbers no files, the same directory and the same name but for case
             // is the same file.
-            let same_file = if there.ino != 0 {
+            let same_file = if there.ino != crate::platform::FileNumber::ZERO {
                 there.dev == source_meta.dev && there.ino == source_meta.ino
             } else {
                 source.real.parent() == target.real.parent()

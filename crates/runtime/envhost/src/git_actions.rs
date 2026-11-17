@@ -527,7 +527,7 @@ pub async fn run(
 #[serde(deny_unknown_fields)]
 struct Identity {
     device: u64,
-    inode: u64,
+    inode: crate::platform::FileNumber,
 }
 
 impl Identity {
