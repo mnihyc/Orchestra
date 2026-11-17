@@ -212,6 +212,7 @@ impl Commands for DispatchCommands {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         let stored = StoredCommand {
+            native_target: command.native_target.clone(),
             authority: command.authority,
             id: Some(command.id),
             machine: command.machine,

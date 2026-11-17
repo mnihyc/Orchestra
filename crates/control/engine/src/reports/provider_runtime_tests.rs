@@ -5,6 +5,7 @@ use super::*;
 use crate::{EngineParts, test_common::World};
 use orch_db::queries::environments::{changes, hosting as runtime_rows};
 use orch_db::queries::resources::{provider_runtime as provider_rows, testing::insert_machine};
+use orch_link_contract::native_target::RuntimeSource;
 use orch_types::new_id;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -125,6 +126,15 @@ impl Fixture {
     }
 
     async fn failed_report(&self, runtime: Id) -> TestResult {
+        self.report(runtime, "failed").await
+    }
+
+    async fn report(&self, runtime: Id, state: &str) -> TestResult {
+        self.report_from(runtime, state, RuntimeSource::untracked())
+            .await
+    }
+
+    async fn report_from(&self, runtime: Id, state: &str, source: RuntimeSource) -> TestResult {
         let mut tx = self.world.pool.begin().await?;
         let mut unit = Unit::new(&mut tx, self.world.clock.now());
         self.engine
@@ -132,8 +142,9 @@ impl Fixture {
                 &mut unit,
                 self.host,
                 &NodeRuntime {
+                    source,
                     runtime_id: runtime,
-                    state: "failed".into(),
+                    state: state.into(),
                     detail: Some("synthetic provider unit failure".into()),
                 },
             )
@@ -142,6 +153,76 @@ impl Fixture {
         tx.commit().await?;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn a_host_that_confirms_a_provider_stop_finishes_it_without_waiting_for_the_command_reply()
+-> TestResult {
+    for state in ["absent", "stopped", "failed"] {
+        let s = Fixture::new(true).await?;
+        let reason = provider_rows::STOPPED_PERSON;
+        sqlx::query("UPDATE runtimes SET state='stopping',state_detail=$2 WHERE id=$1")
+            .bind(s.old)
+            .bind(reason)
+            .execute(s.world.pool.pool())
+            .await?;
+        sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+            .bind(s.world.provider)
+            .execute(s.world.pool.pool())
+            .await?;
+        s.report(s.old, state).await?;
+        s.report(s.old, state).await?;
+        let mut conn = s.world.pool.acquire().await?;
+        let stopped = runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        assert_eq!(stopped.state, "stopped", "host report: {state}");
+        assert_eq!(stopped.state_detail.as_deref(), Some(reason));
+        let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+            .bind(s.old)
+            .fetch_one(&mut *conn)
+            .await?;
+        assert_eq!(missing, state == "absent");
+        let provider = provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?;
+        assert_eq!(provider.status, "disabled");
+        assert_eq!(provider.machine_id, None);
+        let candidate = runtime_rows::runtime(&mut conn, s.candidate)
+            .await?
+            .ok_or("candidate absent")?;
+        assert_eq!(candidate.state, "creating");
+        s.engine.stop();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stopped_successor_report_keeps_the_current_provider_and_its_connector() -> TestResult {
+    let s = Fixture::new(false).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.candidate)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report(s.candidate, "absent").await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let candidate = runtime_rows::runtime(&mut conn, s.candidate)
+        .await?
+        .ok_or("candidate absent")?;
+    assert_eq!(candidate.state, "stopped");
+    let current = provider_rows::live_runtime(&mut conn, s.world.provider)
+        .await?
+        .ok_or("current absent")?;
+    assert_eq!((current.id, current.state.as_str()), (s.old, "running"));
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    s.engine.stop();
+    Ok(())
 }
 
 #[tokio::test]
@@ -302,6 +383,193 @@ async fn failed_unadopted_provider_successor_preserves_the_current_connector_and
         (provider_machine, harness, session_open),
         (Some(s.world.machine_id), ("online".to_owned(), 1), true),
         "an unadopted successor must preserve the current provider connector, harness and observed session"
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_reports_from_an_old_native_start_leave_its_replacement_serving() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let first = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    let replacement = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", first).await?;
+    s.report_from(s.old, "running", replacement).await?;
+    for state in ["failed", "absent", "stopped"] {
+        s.report_from(s.old, state, first).await?;
+        let mut conn = s.world.pool.acquire().await?;
+        let current = runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        assert_eq!(current.state, "running", "late original report: {state}");
+        let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+            .bind(s.old)
+            .fetch_one(&mut *conn)
+            .await?;
+        assert!(
+            !missing,
+            "an old absent report must not describe the replacement"
+        );
+        assert_eq!(
+            provider_rows::state(&mut conn, s.world.provider)
+                .await?
+                .ok_or("provider absent")?
+                .machine_id,
+            Some(s.world.machine_id)
+        );
+    }
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_terminal_native_start_cannot_clear_its_absence_with_a_late_running_report() -> TestResult
+{
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.old)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report_from(s.old, "absent", source).await?;
+    s.report_from(s.old, "running", source).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(current.state, "stopped");
+    let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+        .bind(s.old)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert!(
+        missing,
+        "a closed physical start cannot become present again"
+    );
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        None
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_untracked_native_report_does_not_confirm_a_tracked_stop() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let source = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", source).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.old)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report(s.old, "absent").await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(current.state, "stopping");
+    let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+        .bind(s.old)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert!(!missing);
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    drop(conn);
+    s.report_from(s.old, "absent", source).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    assert_eq!(
+        runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?
+            .state,
+        "stopped"
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_native_source_of_another_runtime_cannot_fail_the_serving_unit() -> TestResult {
+    let s = Fixture::new(true).await?;
+    let foreign = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.candidate, "running", foreign).await?;
+    s.report_from(s.old, "failed", foreign).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(current.state, "running");
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_different_native_starts_terminal_report_cannot_complete_the_original_stop() -> TestResult
+{
+    let s = Fixture::new(true).await?;
+    let original = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    let replacement = RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    s.report_from(s.old, "running", original).await?;
+    let mut tx = s.world.pool.begin().await?;
+    provider_rows::lock(&mut tx, s.world.provider).await?;
+    assert!(
+        orch_db::queries::runtime_incarnations::begin_stop(
+            &mut tx,
+            s.old,
+            original,
+            s.world.clock.now()
+        )
+        .await?
+    );
+    tx.commit().await?;
+    s.report_from(s.old, "running", replacement).await?;
+    s.report_from(s.old, "absent", replacement).await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let current = runtime_rows::runtime(&mut conn, s.old)
+        .await?
+        .ok_or("runtime absent")?;
+    assert_eq!(
+        current.state, "stopping",
+        "no terminal report confirmed the admitted original"
+    );
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
     );
     s.engine.stop();
     Ok(())
