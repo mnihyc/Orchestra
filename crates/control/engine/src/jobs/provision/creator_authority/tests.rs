@@ -198,6 +198,48 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn lifecycle_evidence_is_not_mistaken_for_missing_creator_evidence_and_still_requires_its_own_source()
+-> TestResult {
+    let s = Fixture::new().await?;
+    let mut row = s.job.row().await?;
+    row.plan = json!({"environment_lifecycle_required":true});
+    assert!(
+        is_retained(&row),
+        "the shared command writer still requires original authority"
+    );
+    assert!(
+        read(&row)?.is_none(),
+        "a different evidence family is not a damaged creator payload"
+    );
+    let mut tx = s.world.pool.begin().await?;
+    assert!(
+        lock_parent(
+            &mut tx,
+            &row,
+            s.world.clock.as_ref(),
+            s.world.access.as_ref()
+        )
+        .await
+        .is_err(),
+        "a missing lifecycle payload must remain closed at its actual shared source guard"
+    );
+    tx.rollback().await?;
+    for member in [VERSION, COMMANDS] {
+        row.plan[member] = json!(null);
+        assert!(
+            read(&row).is_err(),
+            "known creator evidence cannot disappear behind another source family"
+        );
+        row.plan
+            .as_object_mut()
+            .ok_or("plan is not an object")?
+            .remove(member);
+    }
+    s.engine.stop();
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_original_flat_creator_record_stays_readable_but_known_missing_sources_never_become_native()
 -> TestResult {
     let s = Fixture::new().await?;
@@ -267,6 +309,7 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
             .is_some_and(|value| value > 0)
     );
     let canonical = Outgoing {
+        native_target: None,
         id,
         machine: s.world.machine_id,
         kind: CommandKind::FsSnapshot,

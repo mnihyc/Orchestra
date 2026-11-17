@@ -663,6 +663,7 @@ pub fn program(extra: Json) -> AcpProgram {
 pub fn spec_in(work: &Path, agent_id: Id, provider: Id, mode: SessionMode) -> SessionSpec {
     let directory = work.display().to_string();
     SessionSpec {
+        opening_id: orch_types::new_id(),
         settings: SessionSettings {
             native_model: None,
             agent_id,

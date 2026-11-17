@@ -450,6 +450,9 @@ pub struct CleanupPlan {
     pub other_people: i64,
     /// The resolved operation-notice default.
     pub notify: bool,
+    /// The same shared dependency facts, restricted to the consequences of this act.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<crate::resource_facts::ResourceFacts>,
 }
 
 /// Accepted native choices without existing storage names, people or sizes.
