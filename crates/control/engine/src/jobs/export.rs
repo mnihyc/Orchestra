@@ -430,6 +430,7 @@ fn hash_opened(mut file: std::fs::File) -> std::io::Result<(Hash, i64)> {
 
 /// The phased work of one job that writes an archive.
 pub struct Exporting {
+    source: orch_api_contract::package::PackageSource,
     engine: Engine,
     export: Id,
     user: Id,
@@ -465,6 +466,12 @@ impl Exporting {
                 (scopes, text_id(each, "subtree"))
             });
         Ok(Self {
+            source: serde_json::from_value(
+                row.plan
+                    .get("source")
+                    .cloned()
+                    .ok_or_else(|| missing("source"))?,
+            )?,
             engine,
             export: text_id(&row.plan, "export").ok_or_else(|| missing("archive"))?,
             user: text_id(&row.plan, "user").ok_or_else(|| missing("person"))?,

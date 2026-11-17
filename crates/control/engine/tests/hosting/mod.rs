@@ -327,6 +327,7 @@ impl ScriptedHost {
                     ),
                     Command::NodeRuntimeCreate(request) => {
                         CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+                            source: orch_link_contract::native_target::RuntimeSource::untracked(),
                             unit: orch_driver_contract::units::UnitRef {
                                 reference: "unit".to_owned(),
                                 name: request.0.name.clone(),
@@ -335,7 +336,7 @@ impl ScriptedHost {
                             },
                         })
                     }
-                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(Empty {}),
+                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(orch_link_contract::commands::NodeRuntimeStartResult {source:orch_link_contract::native_target::RuntimeSource::untracked(),reused:false}),
                     Command::NodeRuntimeStop(_) => CommandResult::NodeRuntimeStop(Empty {}),
                     Command::NodeRuntimeRemove(_) => CommandResult::NodeRuntimeRemove(Empty {}),
                     Command::NodeResourcesApply(_)=>CommandResult::NodeResourcesApply(Empty {}),
@@ -466,6 +467,7 @@ impl ScriptedHost {
             .publish(
                 &Stream::Node,
                 &Event::NodeRuntime(NodeRuntime {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
                     runtime_id: runtime,
                     state: state.to_owned(),
                     detail: detail.map(str::to_owned),

@@ -103,6 +103,30 @@ async fn name_search_filters_native_candidates_before_its_limit_and_binds_contex
     assert_eq!(answer["items"].as_array().unwrap().len(), 1);
     assert_eq!(answer["items"][0]["id"], json!(target));
     assert_eq!(answer["items"][0]["name"], "Needle row selected");
+    let exact = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={target}&kinds=project"))
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(exact["items"].as_array().unwrap().len(), 1);
+    assert_eq!(exact["items"][0]["name"], "Needle row selected");
+    let outside = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={org}&kinds=org"))
+            .send_bytes()
+            .await,
+    );
+    assert!(
+        outside["items"].as_array().unwrap().is_empty(),
+        "an exact identity never widens the key's selected targets"
+    );
     let path = answer["items"][0]["path"].as_array().unwrap();
     assert!(
         path.iter().any(|step| step["id"] == json!(org)),

@@ -680,3 +680,6 @@ async fn another_installation_or_older_pair_cannot_advance_the_imported_success(
     );
     assert!(backups::publish_pair(records.path(), &dump, &manifest, &system).is_err());
 }
+
+#[path = "installation_records/server_update.rs"]
+mod server_update;

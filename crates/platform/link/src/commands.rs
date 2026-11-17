@@ -6,7 +6,10 @@
 //! [`CommandServer`] is the machine's end. It writes a command down before it
 //! says that it has it, runs commands that share a serial key one at a time in
 //! the order they arrived and the rest side by side, does not start one whose
-//! deadline has passed, writes the result down before it says how the command
+//! deadline had passed when it came, does not count the time one waited between
+//! reaching the machine and starting (the disk writing it down, the line of its
+//! key behind other commands) against its deadline (a deadline is for the
+//! work), writes the result down before it says how the command
 //! ended, and answers a command it has seen before from what it wrote down
 //! instead of running it again.
 //! A transport-only session rebind retains the same serial queue and in-flight ownership,
@@ -19,6 +22,7 @@
 //! handed to a machine expire at its deadline, and lets whoever issued a
 //! command wait for its result.
 
+use crate::framing::Refused;
 use crate::journal::{Entry, Journal, JournalError, Step};
 use crate::session::SessionSender;
 use async_trait::async_trait;
@@ -153,11 +157,51 @@ fn too_late() -> CommandError {
     )
 }
 
+/// How a command fails when it is larger than a message on the link may be: the system says so at once,
+/// with the size and the setting, instead of leaving the machine to never answer.
+#[must_use]
+pub fn command_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// How a command fails when its answer is larger than a message on the link may be.
+#[must_use]
+pub fn reply_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the answer to the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// What the system is told when the answer to a command cannot be sent.
+fn unsendable_reply(refused: Refused) -> CommandError {
+    match refused {
+        Refused::TooLarge { bytes, limit } => reply_too_large(bytes, limit),
+        Refused::SessionOver | Refused::Unwritable => CommandError::new(
+            ErrorCode::Internal,
+            "the answer to the command could not be written",
+        ),
+    }
+}
+
 // ---------------------------------------------------------------- the machine's end
 
 /// What a handler is told about the command it runs.
 #[derive(Debug, Clone)]
 pub struct CommandContext {
+    pub native_members: Option<Vec<orch_link_contract::tool_sessions::ToolSessionMember>>,
+    pub native_revision: Option<i64>,
+    /// Persistent native ordering facts; direct stateless test handlers need none.
+    pub native_fences: Option<Arc<crate::native_fences::NativeFences>>,
+    /// The original physical operand; it never grants an operation or a permission.
+    pub native_target: Option<orch_link_contract::commands::NativeTarget>,
     /// The command.
     pub id: Id,
     /// Its serial key.
@@ -172,6 +216,20 @@ pub struct CommandContext {
 /// Something that carries out the commands of a machine.
 #[async_trait]
 pub trait CommandHandler: Send + Sync {
+    /// Immediate restrictions take effect before the native marker waits for disk.
+    fn tool_session_restrict(
+        &self,
+        _update: &orch_link_contract::tool_sessions::ToolSessionUpdate,
+    ) {
+    }
+    /// Committed withdrawal facts may close local exchanges; they never install a route.
+    fn tool_session_update(&self, _update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {}
+    /// Losing API control suspends local tools while keeping native conversations.
+    fn tool_session_control(&self, _available: bool) {}
+    /// A primary refresh suspends local access while independent retained carriers may continue.
+    fn tool_session_refresh(&self) {
+        self.tool_session_control(false);
+    }
     /// Settles external work from a started journal entry before its interrupted result is sent.
     async fn interrupted(&self, _id: Id, _command: &Command) -> Result<(), CommandError> {
         Ok(())
@@ -234,11 +292,16 @@ struct InHand {
     /// A live transport replacement is acknowledged and executed entirely in memory.
     transport_only: bool,
     accepted: Instant,
+    /// The system's time when the command reached the machine: what passes from then until it starts (the
+    /// disk writing it down, the line of its key) is not counted against its deadline, which is for its work.
+    accepted_at: Time,
     finishing: bool,
     finalizer: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct ServerInner {
+    tool_available: Mutex<(bool, bool)>,
+    native_fences: Arc<crate::native_fences::NativeFences>,
     journal: Arc<Mutex<Journal>>,
     /// What carries commands out, once the machine has said what it is.
     handler: watch::Sender<Option<Arc<dyn CommandHandler>>>,
@@ -280,8 +343,13 @@ impl CommandServer {
     /// A server that writes its journal to `journal`.
     #[must_use]
     pub fn new(journal: Journal, clock: Arc<dyn Clock>, options: ServerOptions) -> Self {
+        let native_fences = Arc::new(crate::native_fences::NativeFences::new(
+            journal.native_fences_directory(),
+        ));
         Self {
             inner: Arc::new(ServerInner {
+                tool_available: Mutex::new((true, false)),
+                native_fences,
                 journal: Arc::new(Mutex::new(journal)),
                 handler: watch::channel(None).0,
                 clock,
@@ -303,7 +371,13 @@ impl CommandServer {
     /// Registers what carries commands out. A command that reached the machine before this was called
     /// waits for it.
     pub fn serve(&self, handler: Arc<dyn CommandHandler>) {
-        self.inner.handler.send_replace(Some(handler));
+        let available = lock(&self.inner.tool_available);
+        self.inner.handler.send_replace(Some(Arc::clone(&handler)));
+        if available.1 {
+            handler.tool_session_refresh();
+        } else {
+            handler.tool_session_control(available.0);
+        }
     }
 
     /// What carries commands out. A machine opens its link before it has built what carries them (the
@@ -312,7 +386,7 @@ impl CommandServer {
     /// as long as it is not cancelled and its deadline has not passed, and is not failed for good.
     async fn handler_for(
         &self,
-        cmd: &Cmd,
+        deadline: Time,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn CommandHandler>, CommandError> {
         let mut registered = self.inner.handler.subscribe();
@@ -320,7 +394,7 @@ impl CommandServer {
             if let Some(handler) = registered.borrow_and_update().clone() {
                 return Ok(handler);
             }
-            let left = (cmd.deadline.get() - self.system_now().get())
+            let left = (deadline.get() - self.system_now().get())
                 .to_std()
                 .unwrap_or_default();
             tokio::select! {
@@ -343,6 +417,16 @@ impl CommandServer {
         }
     }
 
+    /// A deferred native effect may recover only its own successfully completed command.
+    /// This reports a journal fact; it neither starts nor re-admits any command.
+    #[must_use]
+    pub fn succeeded(&self, id: Id, kind: CommandKind) -> bool {
+        lock(&self.inner.journal).get(id).is_some_and(|entry| {
+            entry.cmd.kind == kind.as_str()
+                && entry.result().is_some_and(|result| result.outcome.is_ok())
+        })
+    }
+
     /// Tells the server which session its answers go to, and how far the
     /// machine's clock is ahead of the system's.
     pub fn set_session(&self, session: Option<SessionSender>, clock_offset_ms: i64) {
@@ -350,6 +434,51 @@ impl CommandServer {
             .clock_offset_ms
             .store(clock_offset_ms, Ordering::Relaxed);
         lock(&self.inner.state).session = session;
+    }
+
+    pub fn on_tool_session_control(&self, available: bool) {
+        let mut saved = lock(&self.inner.tool_available);
+        *saved = (available, false);
+        self.inner.native_fences.set_tool_control(available);
+        if let Some(handler) = self.inner.handler.borrow().as_ref() {
+            handler.tool_session_control(available);
+        }
+    }
+
+    pub fn on_tool_session_refresh(&self) {
+        let mut saved = lock(&self.inner.tool_available);
+        *saved = (false, true);
+        self.inner.native_fences.set_tool_control(false);
+        if let Some(handler) = self.inner.handler.borrow().as_ref() {
+            handler.tool_session_refresh();
+        }
+    }
+
+    pub async fn on_tool_session_update(
+        &self,
+        update: orch_link_contract::tool_sessions::ToolSessionUpdate,
+    ) {
+        if let Some(handler) = self.inner.handler.borrow().as_ref() {
+            handler.tool_session_restrict(&update);
+        }
+        let fences = Arc::clone(&self.inner.native_fences);
+        let saved = tokio::task::spawn_blocking(move || {
+            if fences.observe_tools(&update)? {
+                fences.tools(update.thread_id)
+            } else {
+                Ok(None)
+            }
+        })
+        .await;
+        match saved {
+            Ok(Ok(Some(update))) => {
+                if let Some(handler) = self.inner.handler.borrow().as_ref() {
+                    handler.tool_session_update(&update);
+                }
+            }
+            Ok(Ok(None)) => {}
+            _ => self.on_tool_session_control(false),
+        }
     }
 
     /// How far this machine's clock is ahead of the system's, in milliseconds,
@@ -366,10 +495,55 @@ impl CommandServer {
         Time::new(self.inner.clock.now() - chrono::Duration::milliseconds(offset))
     }
 
+    /// Says a word to the system that is small by its kind: an acknowledgement.
     fn send(&self, frame: impl Into<Frame>) {
         let session = lock(&self.inner.state).session.clone();
-        if let Some(session) = session {
-            let _ = session.send(frame);
+        if let Some(session) = session
+            && let Err(refused @ (Refused::TooLarge { .. } | Refused::Unwritable)) =
+                session.send(frame)
+        {
+            tracing::error!(%refused, "a word to the system was not sent");
+        }
+    }
+
+    /// Says how a command ended. An answer that this session cannot carry is
+    /// not lost in silence: the system is told that the command cannot be
+    /// answered, and why, which is what its caller is shown.
+    fn send_result(&self, result: CmdRes) {
+        let session = lock(&self.inner.state).session.clone();
+        let Some(session) = session else {
+            return;
+        };
+        let id = result.id;
+        let refused = match session.send(result) {
+            Ok(()) | Err(Refused::SessionOver) => return,
+            Err(refused) => refused,
+        };
+        tracing::error!(command = %id, %refused, "the answer to a command was not sent as it was");
+        metrics::counter!("orch_link_replies_refused_total").increment(1);
+        self.send(CmdRes {
+            id,
+            outcome: Err(unsendable_reply(refused)),
+        });
+    }
+
+    /// What a command ended with, or, where the session it is to be answered
+    /// on cannot carry that answer, the failure that says so: this is what is
+    /// written down, so that a command asked for again is answered the same.
+    fn fitting(&self, id: Id, outcome: Result<Json, CommandError>) -> Result<Json, CommandError> {
+        let limit = lock(&self.inner.state)
+            .session
+            .as_ref()
+            .map(SessionSender::max_message_bytes);
+        let Some(limit) = limit else {
+            return outcome;
+        };
+        let result = CmdRes { id, outcome };
+        match orch_link_contract::frames::encode(&Frame::from(result.clone()), limit) {
+            Err(orch_link_contract::frames::FrameError::TooLarge { bytes, .. }) => {
+                Err(unsendable_reply(Refused::TooLarge { bytes, limit }))
+            }
+            _ => result.outcome,
         }
     }
 
@@ -458,7 +632,7 @@ impl CommandServer {
             }) => {
                 drop(state);
                 self.send(CmdAck { id });
-                self.send(result);
+                self.send_result(result);
                 return;
             }
             Some(Entry {
@@ -486,6 +660,7 @@ impl CommandServer {
                 written,
                 transport_only,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
                 finishing: false,
                 finalizer: None,
             },
@@ -539,7 +714,15 @@ impl CommandServer {
         drop(state);
         let keyed = cmd.key.is_some();
         let server = self.clone();
-        if written || transport_only {
+        if transport_only
+            || (written
+                && !matches!(
+                    &cmd.native_target,
+                    Some(orch_link_contract::native_target::NativeTarget::Lifecycle(
+                        _
+                    ))
+                ))
+        {
             self.send(CmdAck { id });
             if keyed {
                 let _ = admit.send(true);
@@ -577,8 +760,7 @@ impl CommandServer {
                 hand.cancel.clone()
             })
         };
-        self.send(CmdAck { id });
-        let refused = if cmd.deadline <= now {
+        let mut refused = if cmd.deadline <= now {
             Some(CommandError::new(
                 TIMEOUT,
                 "the deadline had passed when the command arrived",
@@ -591,6 +773,10 @@ impl CommandServer {
         } else {
             None
         };
+        if refused.is_none() {
+            refused = self.observe_lifecycle(&cmd).await.err();
+        }
+        self.send(CmdAck { id });
         if let Some(error) = refused {
             if let Some(admit) = admit {
                 let _ = admit.send(false);
@@ -603,6 +789,74 @@ impl CommandServer {
                 let _ = admit.send(true);
             }
             None => self.execute(cmd).await,
+        }
+    }
+
+    /// Commits the canonical command's factual control order before releasing its key queue.
+    /// The same check is repeated after the queue; roles still match identity after native waits.
+    async fn observe_lifecycle(&self, cmd: &Cmd) -> Result<(), CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, NativeTarget};
+        let action = match cmd.kind.as_str() {
+            "node.runtime.start" => Some(LifecycleAction::Start),
+            "node.runtime.stop" => Some(LifecycleAction::Stop),
+            "node.runtime.remove" => Some(LifecycleAction::Remove),
+            _ => None,
+        };
+        let Some(target) = &cmd.native_target else {
+            return Ok(());
+        };
+        let NativeTarget::Lifecycle(target) = target else {
+            return if action.is_some() {
+                Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native runtime control has another kind of target",
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        let invalid = || {
+            CommandError::new(
+                ErrorCode::Conflict,
+                "the native lifecycle target does not match the command's original operands",
+            )
+        };
+        let action = action.ok_or_else(invalid)?;
+        let LifecycleSubject::Runtime { runtime_id } = target.subject else {
+            return Err(invalid());
+        };
+        let key = SerialKey::Runtime(runtime_id).wire();
+        if !target.coherent_for(action)
+            || cmd.body.get("runtime_id") != Some(&serde_json::json!(runtime_id))
+            || cmd.key != key
+            || !cmd
+                .kind
+                .parse::<CommandKind>()
+                .map_err(|_| invalid())?
+                .addressee()
+                .serves(&self.inner.options.roles, self.inner.options.connected)
+        {
+            return Err(invalid());
+        }
+        let target = target.clone();
+        let fences = Arc::clone(&self.inner.native_fences);
+        let current =
+            tokio::task::spawn_blocking(move || fences.observe_lifecycle(&target, action))
+                .await
+                .map_err(|_| {
+                    CommandError::new(
+                        ErrorCode::Internal,
+                        "native control ordering could not be saved",
+                    )
+                })?
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        if current {
+            Ok(())
+        } else {
+            Err(CommandError::new(
+                ErrorCode::Conflict,
+                "a newer native control superseded this command; the current unit was unchanged",
+            ))
         }
     }
 
@@ -664,8 +918,23 @@ impl CommandServer {
         if let (Ok(kind), Some(accepted)) = (cmd.kind.parse::<CommandKind>(), accepted) {
             command_phase(kind, CommandPhase::KeyWait, accepted.elapsed());
         }
+        // A deadline is for the work: the time between a command reaching the machine and starting (the
+        // disk writing it down, the line of its key behind other commands) is not the command's. Measured
+        // in the system's time, as the deadline is.
+        let waited = lock(&self.inner.state)
+            .in_hand
+            .get(&id)
+            .map_or_else(chrono::Duration::zero, |hand| {
+                (self.system_now().get() - hand.accepted_at.get()).max(chrono::Duration::zero())
+            });
+        let deadline = Time::new(
+            cmd.deadline
+                .get()
+                .checked_add_signed(waited)
+                .unwrap_or_else(|| cmd.deadline.get()),
+        );
         let captured = Instant::now();
-        let execution = self.run(&cmd, cancel).await;
+        let execution = self.run(&cmd, cancel, deadline).await;
         if cmd.kind == CommandKind::FsRecord.as_str() {
             command_phase(
                 CommandKind::FsRecord,
@@ -718,10 +987,13 @@ impl CommandServer {
         }
     }
 
+    /// Starts a command. `deadline` is the command's own, moved later by the time it waited in the line
+    /// of its key.
     async fn run(
         &self,
         cmd: &Cmd,
         cancel: CancellationToken,
+        deadline: Time,
     ) -> Result<(CommandKind, CommandExecution), CommandError> {
         if cancel.is_cancelled() {
             return Err(CommandError::new(
@@ -729,7 +1001,7 @@ impl CommandServer {
                 "cancelled before it started",
             ));
         }
-        if cmd.deadline <= self.system_now() {
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let command = match cmd.command() {
@@ -754,10 +1026,11 @@ impl CommandServer {
                 format!("this machine does not take {kind} commands"),
             ));
         }
-        let handler = self.handler_for(cmd, &cancel).await?;
-        if cmd.deadline <= self.system_now() {
+        let handler = self.handler_for(deadline, &cancel).await?;
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
+        self.observe_lifecycle(cmd).await?;
         let id = cmd.id;
         if !is_transport_rebind(&cmd.kind, &cmd.body) && self.write_started(id).await.is_err() {
             return Err(CommandError::new(
@@ -766,9 +1039,13 @@ impl CommandServer {
             ));
         }
         let context = CommandContext {
+            native_members: cmd.native_members.clone(),
+            native_revision: cmd.native_revision,
+            native_fences: Some(Arc::clone(&self.inner.native_fences)),
+            native_target: cmd.native_target.clone(),
             id,
             key: cmd.key.clone(),
-            deadline: cmd.deadline,
+            deadline,
             cancel,
         };
         // On a task of its own, so that a handler that panics fails its
@@ -803,6 +1080,7 @@ impl CommandServer {
                 written: true,
                 transport_only: false,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
                 finishing: false,
                 finalizer: None,
             });
@@ -817,7 +1095,7 @@ impl CommandServer {
             return;
         }
         if transport_only {
-            self.send(CmdRes { id, outcome });
+            self.send_result(CmdRes { id, outcome });
             drop(hold);
             {
                 let mut state = lock(&self.inner.state);
@@ -846,7 +1124,7 @@ impl CommandServer {
                 "the live observation expired; read the current session again",
             ))
         } else {
-            outcome
+            self.fitting(id, outcome)
         };
         loop {
             match self.write_finished(id, outcome.clone()).await {
@@ -854,7 +1132,7 @@ impl CommandServer {
                     if let Some(kind) = kind {
                         command_phase(kind, CommandPhase::Finalization, started.elapsed());
                     }
-                    self.send(live.unwrap_or(result));
+                    self.send_result(live.unwrap_or(result));
                     drop(hold);
                     {
                         let mut state = lock(&self.inner.state);
