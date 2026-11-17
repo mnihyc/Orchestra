@@ -93,7 +93,7 @@ impl Office {
                 arch: Arch::X86_64,
             },
             connector_version: "0.1.0".into(),
-            protocol_versions: vec![1],
+            protocol_versions: vec![2],
             roles: vec![Role::Environment],
         }
     }

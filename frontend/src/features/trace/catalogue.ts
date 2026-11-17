@@ -33,6 +33,7 @@ export const ACTIONS: Record<AuditKind, readonly string[]> = {
     "workspace.worktree_created"
   ],
   "changed": [
+    "server.update_requested",
     "harness.changed",
     "host.ports_changed",
     "agent.disabled",

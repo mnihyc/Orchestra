@@ -6,6 +6,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Derives an independent secret from cryptographic key material with an application-specific context.
+#[must_use]
+pub fn derive_key(context: &str, key_material: &[u8]) -> [u8; 32] {
+    blake3::derive_key(context, key_material)
+}
+
 /// The BLAKE3-256 hash of some content.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash([u8; 32]);

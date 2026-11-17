@@ -1,6 +1,6 @@
 /** A resource's giving and reported use share one shape on its row and page. */
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api, ok } from '@/api/client';
 import { libraryQuery } from '@/api/resourceLibrary';
@@ -11,6 +11,7 @@ import { formatNumber } from '@/lib/format';
 import { DetailCard } from '@/ui/DetailCard';
 import { PeopleList } from '@/ui/PeopleList';
 import { Button } from '@/ui/Button';
+import { Input } from '@/ui/Input';
 import { EmptyState } from '@/ui/EmptyState';
 import { Hint } from '@/features/help/Hint';
 import { RelativeTime } from '@/ui/RelativeTime';
@@ -30,19 +31,22 @@ function Names({ group }: { group: ResourceFacts['dependents'][number] }) {
   const { t }=useTranslation();
   const {locale}=useFormatContext();
   const [offset,setOffset]=useState(0);
-  const page=group.visible.slice(offset,offset+RESOURCE_PAGE_SIZE);
-  return <div className="max-h-[min(20rem,var(--radix-popper-available-height,20rem))] w-72 max-w-full overflow-y-auto p-3"><ul className="flex min-w-0 flex-col gap-1">{page.map((row,index) => {
+  const [search,setSearch]=useState('');
+  const rows=useMemo(()=>{const needle=search.trim().toLocaleLowerCase();return needle===''?group.visible:group.visible.filter((row)=>row.name.toLocaleLowerCase().includes(needle));},[group.visible,search]);
+  const page=rows.slice(offset,offset+RESOURCE_PAGE_SIZE);
+  return <div className="max-h-[min(20rem,var(--radix-popper-available-height,20rem))] w-72 max-w-full overflow-y-auto p-3">{group.visible.length>10&&<Input type="search" label={t('library.search')} hideLabel value={search} onChange={(event)=>{setSearch(event.target.value);setOffset(0);}} />}<ul className="flex min-w-0 flex-col gap-1">{page.map((row,index) => {
     const object=row.object;
     const named=object===null?null:{...object,name:row.name};
     const resource=named === null ? null : resourceSubjectOf(named,row.name);
     return <li key={`${object?.id ?? ''}:${index}`} className="flex min-h-(--control-sm) min-w-0">{resource !== null ? <ResourceChip subject={resource} hint={false} /> : object !== null && ['thread','org','project','topic'].includes(object.kind) ? <KnownNodeChip node={{id:object.id,kind:object.kind as 'thread' | 'org' | 'project' | 'topic',name:row.name,redacted:false}} /> : <span className="truncate" title={row.name}>{row.name}</span>}</li>;
-  })}</ul>{group.hidden>0 && <p className="mt-2 text-sm text-text-muted">{t('library.more',{number:formatNumber(group.hidden,locale)})}</p>}{group.visible.length>RESOURCE_PAGE_SIZE&&<div className="mt-2 flex justify-between gap-2"><Button size="sm" disabled={offset===0} onClick={()=>setOffset(0)}>{t('documentFolders.beginning')}</Button><Button size="sm" disabled={offset+RESOURCE_PAGE_SIZE>=group.visible.length} onClick={()=>setOffset(offset+RESOURCE_PAGE_SIZE)}>{t('documentFolders.next')}</Button></div>}</div>;
+  })}</ul>{group.hidden>0 && <p className="mt-2 text-sm text-text-muted">{t('library.more',{number:formatNumber(group.hidden,locale)})}</p>}{rows.length>RESOURCE_PAGE_SIZE&&<div className="mt-2 flex justify-between gap-2"><Button size="sm" disabled={offset===0} onClick={()=>setOffset(0)}>{t('documentFolders.beginning')}</Button><Button size="sm" disabled={offset+RESOURCE_PAGE_SIZE>=rows.length} onClick={()=>setOffset(offset+RESOURCE_PAGE_SIZE)}>{t('documentFolders.next')}</Button></div>}</div>;
 }
 
 const unit = (kind: ResourceUseKind) => ({turn:'turns',mcp_call:'calls',skill_invocation:'invocations',environment_made:'environments',provider_made:'providers'} as const)[kind];
 function givenUnit(kind:string,relation:string,use:ResourceUseKind|undefined) {
   if(relation==='explicit_giving')return 'places';
   if(relation==='binding'||kind==='skill')return 'threads';
+  if(kind==='mcp_server')return 'attachments';
   if(kind==='host')return 'units';
   return use==='provider_made'?'providers':'environments';
 }

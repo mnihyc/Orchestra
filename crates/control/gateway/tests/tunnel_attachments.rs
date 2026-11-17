@@ -13,10 +13,8 @@ use orch_gateway_core::{Gateway, GatewayParts, Settings};
 use orch_link::tunnels::channel::{IncomingTunnels, OpenError, Tunnel};
 use orch_link_contract::gateways::TunnelPlan;
 use orch_link_contract::session::Role;
-use orch_link_contract::tunnels::{Service, TicketSource};
 use orch_pki::ca::Holder;
 use orch_pki::certificates::ServiceName;
-use orch_pki::tickets::TicketRequest;
 use orch_pki::verification::TlsIdentity;
 use orch_types::{Time, new_id};
 use std::sync::Arc;
@@ -163,22 +161,15 @@ async fn machines(world: &World) -> (Machine, Machine) {
     (source, destination)
 }
 
-fn ticket(world: &World, source: &Machine, destination: &Machine) -> String {
+async fn ticket(world: &World, source: &Machine, destination: &Machine) -> String {
     world
-        .api
-        .link
-        .tickets()
-        .issue(&TicketRequest {
-            src: TicketSource::Machine(source.id),
-            dst: destination.id,
-            service: Service::Exec {
-                executor: "carrier-fixture".into(),
-            },
-            thread_id: Some(new_id()),
-            tool_set: None,
-            expires_at: Time::new(world.clock.now() + chrono::Duration::hours(1)),
-        })
-        .unwrap()
+        .tool_ticket(
+            source.id,
+            destination.id,
+            "carrier-fixture",
+            Time::new(world.clock.now() + chrono::Duration::hours(1)),
+        )
+        .await
 }
 
 async fn planned_ticket(
@@ -186,7 +177,7 @@ async fn planned_ticket(
     source: &Machine,
     destination: &Machine,
 ) -> (String, TunnelPlan) {
-    let signed = ticket(world, source, destination);
+    let signed = ticket(world, source, destination).await;
     let plan = world
         .api
         .link
@@ -217,7 +208,7 @@ async fn open(
 async fn auxiliary_does_not_replace_primary_and_tool_bytes_use_only_the_executor_gateway() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -258,7 +249,7 @@ async fn auxiliary_does_not_replace_primary_and_tool_bytes_use_only_the_executor
 async fn only_unused_auxiliaries_close_after_the_operator_idle_interval() {
     let (mut world, regional) = world(1).await;
     let (source, destination) = machines(&world).await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -296,7 +287,7 @@ async fn only_unused_auxiliaries_close_after_the_operator_idle_interval() {
 async fn all_gateway_carriers_share_the_existing_channel_allowance() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -376,7 +367,7 @@ async fn a_third_common_gateway_preserves_both_hand_picked_primaries() {
         async move { link.gateway_of(s).is_some() && link.gateway_of(d).is_some() }
     })
     .await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -437,7 +428,7 @@ async fn no_common_gateway_refuses_with_labels_and_does_not_move_primaries() {
         async move { link.gateway_of(s).is_some() && link.gateway_of(d).is_some() }
     })
     .await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -472,11 +463,11 @@ async fn no_common_gateway_refuses_with_labels_and_does_not_move_primaries() {
 }
 
 #[tokio::test]
-async fn an_api_outage_preserves_existing_carriers_but_refuses_new_admission() {
+async fn an_api_outage_keeps_machine_sessions_but_closes_tool_channels_and_refuses_new_admission() {
     let (mut world, regional) = world(60).await;
     let late = world.enroll("late-machine").await;
     let (source, destination) = machines(&world).await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -492,17 +483,26 @@ async fn an_api_outage_preserves_existing_carriers_but_refuses_new_admission() {
         async move { !gateway.backplane_up() }
     })
     .await;
-    near.write_all(b"api offline").await.unwrap();
-    let mut bytes = [0; 11];
-    tokio::time::timeout(PATIENCE, far.read_exact(&mut bytes))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&bytes, b"api offline");
-    // A previously issued ticket can open another stream on a carrier that already stands.
-    let (extra, peer) = open(&source, &mut incoming, &ticket, &plan).await;
-    extra.closer().close();
-    peer.closer().close();
+    assert!(
+        tokio::time::timeout(PATIENCE, near.read_u8())
+            .await
+            .unwrap()
+            .is_err(),
+        "an existing tool channel loses its live authority"
+    );
+    assert!(
+        tokio::time::timeout(PATIENCE, far.read_u8())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(PATIENCE, source.link.open_routed_tunnel(&ticket, &plan))
+            .await
+            .unwrap()
+            .is_err(),
+        "the same retained carrier cannot bypass current tool admission"
+    );
     let late = world.start_machine_on_gateway(&late, "asia", vec![Role::Agent]);
     let mut status = late.link.status();
     tokio::time::timeout(PATIENCE, async {
@@ -537,7 +537,7 @@ async fn an_api_outage_preserves_existing_carriers_but_refuses_new_admission() {
 async fn a_restarted_gateway_can_rebuild_the_route_without_replacing_the_native_sockets() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -656,6 +656,8 @@ async fn an_auxiliary_cannot_publish_control_or_receive_a_content_token() {
 async fn an_api_restart_recovers_pairing_capabilities_without_moving_either_primary() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
+    let ticket = ticket(&world, &source, &destination).await;
+    let signing_key = world.api.link.tickets().public_key();
     let source_session = source.link.status().borrow().clone();
     let destination_session = destination.link.status().borrow().clone();
     world.restart_api().await;
@@ -668,7 +670,11 @@ async fn an_api_restart_recovers_pairing_capabilities_without_moving_either_prim
         }
     })
     .await;
-    let ticket = ticket(&world, &source, &destination);
+    assert_eq!(
+        world.api.link.tickets().public_key(),
+        signing_key,
+        "an API restart keeps the installation's signing identity; current scope is still checked live"
+    );
     let plan = world
         .api
         .link
@@ -698,7 +704,7 @@ async fn an_api_restart_recovers_pairing_capabilities_without_moving_either_prim
 async fn revocation_kicks_the_primary_and_every_auxiliary_without_an_auxiliary_routing_table() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
-    let ticket = ticket(&world, &source, &destination);
+    let ticket = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -742,8 +748,8 @@ async fn two_threads_share_one_cold_tunnel_attachment_without_changing_the_prima
     let (mut world, gateways) = world_with_gateways(60, false).await;
     let (source, destination) = machines(&world).await;
     let primary = source.link.status().borrow().clone();
-    let first_ticket = ticket(&world, &source, &destination);
-    let second_ticket = ticket(&world, &source, &destination);
+    let first_ticket = ticket(&world, &source, &destination).await;
+    let second_ticket = ticket(&world, &source, &destination).await;
     let first_plan = world
         .api
         .link
@@ -973,7 +979,7 @@ async fn fresh_two_sided_measurements_choose_one_common_gateway_without_moving_s
     use orch_api_contract::gateways::TunnelGatewayRule;
     let (mut world, regional) = world_with_count(60, 3).await;
     let (source, destination) = machines(&world).await;
-    let issued = ticket(&world, &source, &destination);
+    let issued = ticket(&world, &source, &destination).await;
     let missing = world
         .api
         .link
@@ -1075,7 +1081,7 @@ async fn the_normal_inherited_operator_setting_pins_a_measured_pair_to_the_execu
     let (source, destination) = machines(&world).await;
     gateway_samples(&world, &source, &[("us", 20)], world.clock.time()).await;
     gateway_samples(&world, &destination, &[("us", 20)], world.clock.time()).await;
-    let issued = ticket(&world, &source, &destination);
+    let issued = ticket(&world, &source, &destination).await;
     eventually("measured default before the pin", || {
         let link = world.api.link.clone();
         let ticket = issued.clone();
@@ -1142,7 +1148,7 @@ async fn automatic_moves_a_healthy_idle_primary_after_a_better_gateway_appears_a
     })
     .await;
     let original = source.link.status().borrow().clone();
-    let issued = ticket(&world, &source, &destination);
+    let issued = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link
@@ -1211,7 +1217,7 @@ async fn automatic_moves_a_healthy_idle_primary_after_a_better_gateway_appears_a
         world.api.link.gateway_of(destination.id).as_deref(),
         Some("asia")
     );
-    let next = ticket(&world, &source, &destination);
+    let next = ticket(&world, &source, &destination).await;
     let next_plan = world
         .api
         .link
@@ -1275,7 +1281,7 @@ async fn retained_process_loss(third: bool) {
     } else {
         machines(&world).await
     };
-    let issued = ticket(&world, &source, &destination);
+    let issued = ticket(&world, &source, &destination).await;
     let plan = world
         .api
         .link

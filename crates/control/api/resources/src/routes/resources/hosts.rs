@@ -148,8 +148,6 @@ use orch_db::DbError;
 
 use orch_engine::environments::StopError;
 
-use orch_engine::environments::StopReason;
-
 use orch_settings::Place;
 
 use orch_settings::get as setting;
@@ -714,6 +712,7 @@ pub(crate) async fn show_inventory_prepared(
                 .cloned()
                 .unwrap_or_else(|| amounts(&row.declared));
             Ok(Host {
+                bundled_with_server: row.bundled_with_server,
                 provenance: orch_api_contract::resource_groups::ResourceProvenance {
                     origin_machine: machines.get(&row.machine_id).cloned(),
                     availability: Vec::new(),
@@ -922,8 +921,8 @@ async fn token_create(
     (): (),
     body: api::HostEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    let (installation, name_hint) = enrollment::validate(&ctx, &body)?;
     let (ctx, mut conn, principal) = begin_mutation(&ctx).await?;
+    let (_, name_hint) = enrollment::validate(&ctx, &mut conn, &body).await?;
     if let Some(home) = body.home_id {
         let (_, kind) = placed(&mut conn, home).await?;
         if kind != NodeKind::Org {
@@ -1031,6 +1030,7 @@ async fn token_create(
     current
         .check_deadline(ctx.app.clock.as_ref())
         .map_err(enrollment::mapped)?;
+    let installation = super::machines::installation_config(&ctx, &mut conn).await?;
     conn.commit().await.map_err(DbError::from)?;
     current
         .check_deadline(ctx.app.clock.as_ref())
@@ -1463,22 +1463,21 @@ async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiRe
             .pop()
             .ok_or_else(|| ApiError::internal("a runtime was read and is not shown"));
     }
-    let Some(environment) = row.environment_id.filter(|_| row.kind == "environment") else {
+    if row.environment_id.is_none() || row.kind != "environment" {
         return Err(ApiError::new(
             ErrorCode::PlanBlocked,
             "this unit has no environment or provider",
         ));
-    };
-    let user = ctx.user()?.id();
+    }
     ctx.app
         .engine
-        .stop_environment_in(
+        .stop_host_environment_unit_in(
             tx,
             &principal,
             &crate::sign_in::origin(&ctx),
-            environment,
+            host,
+            runtime,
             body.interrupt,
-            StopReason::Person(user),
         )
         .await
         .map_err(|error| match error {

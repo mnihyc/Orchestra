@@ -106,6 +106,7 @@ pub async fn install(world: &World, host: &ScriptedHost) -> Arc<ClusterDriver> {
                                 failure(DriverError::InvalidSpec(error.to_string()))
                             })?;
                         CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+                            source: orch_link_contract::native_target::RuntimeSource::untracked(),
                             unit: driver.create(&spec).await.map_err(failure)?,
                         })
                     }

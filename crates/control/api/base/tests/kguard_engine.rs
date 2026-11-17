@@ -595,6 +595,30 @@ async fn a_host_manager_whose_body_outlasts_manage_stops_nothing_and_a_current_m
                     .unwrap();
                 (environment, runtime)
             };
+            // The native producer, including a kept unit, names the physical start it owns.
+            let mut facts = scene.world.db.pool.begin().await.unwrap();
+            hosting::lock_environment(&mut facts, environment)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE environments SET generation=1 WHERE id=$1")
+                .bind(environment)
+                .execute(&mut *facts)
+                .await
+                .unwrap();
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut facts,
+                    host,
+                    runtime,
+                    orch_link_contract::native_target::RuntimeSource {
+                        incarnation: Some(new_id())
+                    },
+                    false,
+                )
+                .await
+                .unwrap()
+            );
+            facts.commit().await.unwrap();
             let before: Json =
                 sqlx::query_scalar("SELECT to_jsonb(e) FROM environments e WHERE id = $1")
                     .bind(environment)
@@ -631,14 +655,164 @@ async fn a_host_manager_whose_body_outlasts_manage_stops_nothing_and_a_current_m
                 assert_eq!(current["status"], "stopped");
                 assert_eq!(
                     played.seen_of(CommandKind::NodeRuntimeStop).len(),
-                    usize::from(live)
+                    1,
+                    "a kept physical unit has the same exact Stop action"
                 );
                 let at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT at FROM audit_log WHERE object_id = $1 AND details->>'decision' = 'accepted'")
-                    .bind(environment).fetch_one(&scene.world.db.pool).await.unwrap();
+                    .bind(if live {environment}else{host}).fetch_one(&scene.world.db.pool).await.unwrap();
                 assert_eq!(at, scene.world.now());
             }
         }
     }
+}
+
+#[tokio::test]
+async fn a_host_manager_stops_its_selected_kept_environment_unit_without_following_its_replacement()
+{
+    let scene = Scene::new().await;
+    let old_host = scene
+        .resource(ResourceKind::Host, scene.home, scene.owner.id())
+        .await;
+    let new_host = scene
+        .resource(ResourceKind::Host, scene.home, scene.owner.id())
+        .await;
+    scene.grant("host", old_host, "host.manage", false).await;
+    let driver = json!({"test":{"name":"test","version":"1","title":"Test","spec_schemas":{"environment":{}}}});
+    sqlx::query("UPDATE hosts SET drivers=$2 WHERE id=ANY($1)")
+        .bind([old_host, new_host].as_slice())
+        .bind(&driver)
+        .execute(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let old_node: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(old_host)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let new_node: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(new_host)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let old_played = scene.play(old_node);
+    let new_played = scene.play(new_node);
+    let mut tx = scene.world.db.pool.begin().await.unwrap();
+    let environment = fixtures::insert_environment(
+        &mut tx,
+        scene.owner.id(),
+        Some(scene.home),
+        "Moved work",
+        "managed",
+    )
+    .await
+    .unwrap();
+    let template: Id = sqlx::query_scalar("SELECT template_id FROM environments WHERE id=$1")
+        .bind(environment)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let (old, current, original) = (new_id(), new_id(), new_id());
+    for (runtime, host, generation) in [(old, old_host, 1), (current, new_host, 2)] {
+        hosting::insert_runtime(
+            &mut tx,
+            &NewRuntime {
+                id: runtime,
+                host_id: host,
+                unit_name: if runtime == old {
+                    "old-environment-unit"
+                } else {
+                    "current-environment-unit"
+                },
+                environment_id: environment,
+                driver: "test",
+                template_id: template,
+                spec_hash: &[0; 32],
+                generation,
+                volumes: &json!({}),
+            },
+            scene.world.now(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE runtimes SET state=$2 WHERE id=$1")
+            .bind(runtime)
+            .bind(if runtime == old { "retired" } else { "running" })
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(
+                &mut tx,
+                host,
+                runtime,
+                orch_link_contract::native_target::RuntimeSource {
+                    incarnation: Some(if runtime == old { original } else { new_id() })
+                },
+                false
+            )
+            .await
+            .unwrap()
+        );
+    }
+    sqlx::query("UPDATE environments SET status='running',generation=2 WHERE id=$1")
+        .bind(environment)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let before: Json = sqlx::query_scalar("SELECT to_jsonb(r) FROM runtimes r WHERE id=$1")
+        .bind(current)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let (status, value) = delayed(
+        &scene,
+        "POST",
+        &format!("/hosts/{old_host}/runtimes/{old}/stop"),
+        json!({"interrupt":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let stopped = old_played.seen_of(CommandKind::NodeRuntimeStop);
+    assert_eq!(
+        stopped.len(),
+        1,
+        "the selected kept unit still has its Stop action"
+    );
+    assert_eq!(stopped[0].body["runtime_id"], json!(old));
+    assert!(
+        new_played.seen().is_empty(),
+        "the original host operation never reaches another host's replacement"
+    );
+    let after: Json = sqlx::query_scalar("SELECT to_jsonb(r) FROM runtimes r WHERE id=$1")
+        .bind(current)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    let environment_status: String =
+        sqlx::query_scalar("SELECT status FROM environments WHERE id=$1")
+            .bind(environment)
+            .fetch_one(&scene.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(environment_status, "running");
+    let wrong_history: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE object_id=$1 AND action='environment.stopped'",
+    )
+    .bind(environment)
+    .fetch_one(&scene.world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        wrong_history, 0,
+        "stopping a kept host unit never announces that its replacement environment stopped"
+    );
+    let accepted_host: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE object_id=$1 AND details->>'runtime'=$2 AND details->>'decision'='accepted'")
+        .bind(old_host).bind(old.to_string()).fetch_one(&scene.world.db.pool).await.unwrap();
+    assert_eq!(accepted_host, 1);
+    assert_eq!(value["id"], json!(old));
+    assert_eq!(value["state"], "retired");
 }
 
 #[tokio::test]
