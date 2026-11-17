@@ -303,3 +303,81 @@ async fn the_owner_who_places_their_own_thread_is_told_who_could_give_the_entry_
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_placement_is_asked_of_the_threads_first_owner_and_not_of_the_one_who_places_it() {
+    let rig = Rig::new(Can::default(), "fake", Can::default()).await;
+    let destination = rig.second_environment().await;
+    let thread = rig.thread_with_history("Placed by another").await;
+    let bob = rig.world.person("bob").await;
+    rig.world.give(bob, "admin").await;
+    manages(&rig, bob, rig.world.environment).await;
+    manages(&rig, bob, destination).await;
+    let request = into(&rig, destination, ForkResult::Replace);
+    // The placer may not use the model, and that is not what a placement asks: the thread goes on being
+    // carried by its first owner's use.
+    rig.world.access.deny_model(bob, MODEL);
+    let plan = rig.plan_for(bob, thread, &request).await;
+    assert!(!lacks_access(&plan), "{:?}", plan.blockers);
+    // The first owner's entry names only the environment the thread runs in: that is what blocks.
+    rig.world
+        .access
+        .use_only_in(rig.world.ada, &[rig.world.environment]);
+    let plan = rig.plan_for(bob, thread, &request).await;
+    assert!(lacks_access(&plan), "{:?}", plan.blockers);
+    // Naming the destination too lets it through.
+    rig.world
+        .access
+        .use_only_in(rig.world.ada, &[rig.world.environment, destination]);
+    let plan = rig.plan_for(bob, thread, &request).await;
+    assert!(!lacks_access(&plan), "{:?}", plan.blockers);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_job_of_a_placement_is_carried_out_on_the_first_owners_use_and_not_the_placers() {
+    let rig = Rig::new(Can::default(), "fake", Can::default()).await;
+    let destination = rig.second_environment().await;
+    let thread = rig.thread_with_history("Placed by another, by a job").await;
+    let bob = rig.world.person("bob").await;
+    rig.world.give(bob, "admin").await;
+    manages(&rig, bob, rig.world.environment).await;
+    manages(&rig, bob, destination).await;
+    let request = into(&rig, destination, ForkResult::Replace);
+    let plan = rig.plan_for(bob, thread, &request).await;
+    assert!(!lacks_access(&plan), "{:?}", plan.blockers);
+    // The placer may not use the model, which a placement does not ask: the job passes its checks of
+    // access (it holds the thread and makes ready the environment) and goes on to copy, where this rig,
+    // which has no store of content, stops it. It is not stopped for the placer's use of the provider.
+    rig.world.access.deny_model(bob, MODEL);
+    let job = rig.confirm_for(bob, thread, &plan).await;
+    let row = rig.wait_job_over(job.id, String::new).await;
+    let error = row.error.clone().unwrap_or_default();
+    assert_ne!(error["code"], "authz.denied", "{error}");
+    let phases = &row.progress["phases"];
+    for done in ["lock", "provision"] {
+        assert!(
+            phases
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|phase| phase["name"] == done && phase["state"] == "done"),
+            "{done}: {phases}"
+        );
+    }
+}
+
+/// `person` manages `environment`, as placing a thread into or out of it needs.
+async fn manages(rig: &Rig, person: Id, environment: Id) {
+    let mut conn = rig.world.pool.acquire().await.unwrap();
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("environment", environment, "live"),
+        "any",
+        "environment.manage",
+        ("user", Some(person), None),
+        None,
+        rig.world.clock.now(),
+    )
+    .await
+    .unwrap();
+}
