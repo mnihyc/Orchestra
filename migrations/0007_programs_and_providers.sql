@@ -258,6 +258,9 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_provider_id_fkey FOREIGN KEY (provider_id) 
 ALTER TABLE leases ADD CONSTRAINT leases_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id);
 
 CREATE TABLE summary_calls (
+    program_backend jsonb CHECK (program_backend IS NULL OR jsonb_typeof(program_backend)='object'),
+    delegated_program jsonb CHECK (delegated_program IS NULL OR jsonb_typeof(delegated_program)='object'),
+    delegated_result jsonb CHECK (delegated_result IS NULL OR jsonb_typeof(delegated_result)='object'),
     prepared_command jsonb CHECK (prepared_command IS NULL OR jsonb_typeof(prepared_command) = 'object'),
     entry_id uuid,
     issued_by uuid,

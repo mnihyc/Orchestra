@@ -3165,7 +3165,37 @@ impl EventMapper {
             self.clock.now(),
             &chrono::Local,
         );
-        self.complete_message(status == TurnOutcome::Completed, out);
+        let structured = frame
+            .get("structured_output")
+            .filter(|value| value.is_object());
+        self.complete_message(
+            status == TurnOutcome::Completed && structured.is_none(),
+            out,
+        );
+        if status == TurnOutcome::Completed
+            && let Some(structured) = structured
+        {
+            let text = structured.to_string();
+            let text_len = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+            let native_ref = format!("{turn_id}:structured-output");
+            out.push(SessionEvent::ItemStarted(ItemStarted {
+                turn_id,
+                native_ref: native_ref.clone(),
+                stream: MAIN_STREAM.into(),
+                parent_native_ref: None,
+                content: ItemContent::AgentMessage(AgentMessagePayload {
+                    text: text.clone(),
+                    text_len,
+                    phase: Some(AgentMessagePhase::Final),
+                }),
+            }));
+            out.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref,
+                status: ItemStatus::Completed,
+                payload: json!({"text":text,"text_len":text_len,"phase":"final"}),
+                output_blob: None,
+            }));
+        }
         // Whatever was left open is closed: a call the agent made and never saw the end of.
         self.close_open_items(
             if self.interrupted {
@@ -4114,6 +4144,47 @@ mod tests {
             panic!("completed")
         };
         assert_eq!(done.payload["phase"], "final");
+    }
+
+    #[test]
+    fn a_structured_program_reply_is_kept_as_one_final_main_message() {
+        let (mut mapper, _) = mapper(false);
+        let reply = json!({"text":"A checked answer.","tool_calls":[]});
+        let result = result_frame(json!({"structured_output":reply}));
+        let mut events = feed(
+            &mut mapper,
+            text_stream("preface", 0, &["Preparing the structured reply."]),
+        );
+        events.extend(feed(&mut mapper, vec![result.clone()]));
+        let answers: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ItemCompleted(item) if item.payload["phase"] == "final" => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.len(), 1);
+        let actual: Json =
+            serde_json::from_str(answers[0].payload["text"].as_str().unwrap()).unwrap();
+        assert_eq!(actual, reply);
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemStarted(item) if item.native_ref == answers[0].native_ref && item.stream == MAIN_STREAM && item.parent_native_ref.is_none())));
+        assert!(
+            feed(&mut mapper, vec![result]).is_empty(),
+            "repeating the same native completion cannot add another answer"
+        );
+    }
+
+    #[test]
+    fn a_failed_structured_program_reply_never_becomes_a_final_answer() {
+        let (mut mapper, _) = mapper(false);
+        let events = feed(
+            &mut mapper,
+            vec![result_frame(
+                json!({"subtype":"error_max_structured_output_retries","is_error":true,"structured_output":{"text":"Not accepted"}}),
+            )],
+        );
+        assert!(!events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.payload["phase"] == "final")));
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::TurnCompleted(turn) if turn.status == TurnOutcome::Failed)));
     }
 
     #[test]

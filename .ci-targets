@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-api-core --test resource_summaries -- native::
+test -p orch-api-core --test resource_summaries -- a_real_document_scoped_refresh_retains_its_original_http_token_and_closes_on_revocation
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --lib -- sessions::byte_stability_tests::
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
