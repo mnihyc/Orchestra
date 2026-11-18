@@ -26,6 +26,7 @@ by its indexes, triggers and comments. A reference to a table made in a later fi
 | `0014_usage.sql` | The usage ledger, its daily and monthly rollups, caps and their notices, bypasses, the rate catalogue and resource use. |
 | `0015_imports_and_exports.sql` | Packages exported and imported, what each import made (`import_origins`, so that a later import updates instead of duplicating and an import can be undone) and its report. |
 | `0016_metrics.sql` | Stored metric samples, in partitions by day, and the hours they fold into. |
+| `0017_command_blob_pins.sql` | The content that the commands of a job held for the job until it ends, so that another transfer's release of the same content does not remove what a transfer in flight needs. |
 
 ## Optional pieces
 
@@ -38,7 +39,7 @@ Two parts of search depend on what the database offers, and are decided when the
 
 ## Changing the schema
 
-At each release tag, the release integrator records `<SHA-384 hex>  <filename.sql>` for every released file in
+At each release tag, the release process records `<SHA-384 hex>  <filename.sql>` for every released file in
 `RELEASED`, and the `orch-db` regression checks those files' exact bytes. A released file is never edited: a later
 change to the schema goes into a new numbered file. New migrations must keep data, survive concurrent writers and
 recover from an interrupted upgrade, and their tests must prove it on a database with rows.

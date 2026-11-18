@@ -614,11 +614,17 @@ async fn default_source_admin_secrets_are_manager_only_sealed_and_independent_of
         .provider;
     let id = made.base.id;
     // Do not start an unavailable keeper as part of a secret-storage test.
-    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
-        .bind(id)
-        .execute(&world.db.pool)
-        .await
-        .unwrap();
+    let mut revision: i64 =
+        sqlx::query_scalar("UPDATE providers SET status='disabled' WHERE id=$1 RETURNING revision")
+            .bind(id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        revision,
+        made.revision + 1,
+        "deliberately disabling a provider changes an editable choice"
+    );
     let ordinary: Vec<u8> = sqlx::query_scalar(
         "SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='api_key'",
     )
@@ -627,9 +633,8 @@ async fn default_source_admin_secrets_are_manager_only_sealed_and_independent_of
     .await
     .unwrap();
     let denied = world.app.call(ProviderSourcesSet, &[&id]).token(&c.viewer.token)
-        .raw_body(&json!({"expected_revision":made.revision,"facts":{"by":"default","secrets":{"admin_key":"test-admin-first"}}})).send().await.problem();
+        .raw_body(&json!({"expected_revision":revision,"facts":{"by":"default","secrets":{"admin_key":"test-admin-first"}}})).send().await.problem();
     assert_eq!(denied.code, ErrorCode::AuthzDenied);
-    let mut revision = made.revision;
     for value in [
         Some("test-admin-first"),
         Some("test-admin-replacement"),

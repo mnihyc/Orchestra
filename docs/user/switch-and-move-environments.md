@@ -21,6 +21,6 @@ Move a build thread from a laptop environment to a larger environment. Choose wh
 
 ## What to expect
 
-The plan states which session closes, what remains on the old side, and whether any old unit is removed. Progress and the resulting timeline name the actual environments and machines. Copying does not transfer an imported MCP server's machine-local secrets.
+The plan states which session closes, what remains on the old side, and whether any old container is removed. Progress and the resulting timeline name the actual environments and machines. Copying does not transfer an imported MCP server's machine-local secrets.
 
-A template-made environment can use its supported machine-move path. A move involving a person's machine is a switch with a copy where the plan says so. Current permissions, machine availability and sandbox readiness still apply. Review unavailable choices and attention notices rather than treating a listed destination as ready. See [MCP import](mcp-import-and-use.md) and [running thread views](running-thread-views.md).
+A template-made environment can use its supported machine-move path. A move involving a person's machine is a switch with a copy where the plan says so. Current permissions, machine availability and tool access readiness still apply. Review unavailable choices and attention notices rather than treating a listed destination as ready. See [MCP import](mcp-import-and-use.md) and [running thread views](running-thread-views.md).

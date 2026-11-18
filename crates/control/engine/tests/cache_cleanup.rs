@@ -14,7 +14,7 @@ async fn operation_notification_defaults_follow_the_place_override_and_a_system_
     let mut conn = world.pool.acquire().await.unwrap();
     let place = orch_settings::Place::Node(world.topic);
     assert!(
-        orch_engine::notifications::operation_default(&mut conn, place, true)
+        !orch_engine::notifications::operation_default(&mut conn, place, true)
             .await
             .unwrap()
     );

@@ -611,6 +611,7 @@ impl Connector {
             facts
         });
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
+        dispatcher.clock(Arc::clone(&services.clock));
         dispatcher.local_harnesses(
             Arc::clone(&services.local_harnesses),
             Arc::clone(&services.publisher),

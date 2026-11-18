@@ -13,7 +13,7 @@ import { show } from './support';
 import { agentDescriptor } from '../doubles/agent-descriptor';
 
 const server = vi.hoisted(() => ({ detail: vi.fn<() => Promise<ProgramDetail>>(), builds: vi.fn<() => Promise<HarnessBuild[]>>(), legacy: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/programAdmin', async (original) => ({ ...await original<object>(),
   adminProgramQuery: (kind: string) => ({ queryKey: ['admin', 'programs', kind, 'detail'], queryFn: server.detail }),
   adminProgramBuildsQuery: (kind: string, cursor: string | undefined) => ({ queryKey: ['admin', 'programs', kind, 'builds', cursor ?? null],
@@ -82,7 +82,7 @@ it.each(['en', 'zh-CN'] as const)('keeps build metadata with its named row and o
 it.each(['en', 'zh-CN'] as const)('keeps a large descriptor folded in the shared inspector in %s', async (locale) => {
   await setLocale(locale);
   const user = userEvent.setup();
-  const label = locale === 'en' ? 'Research adapter metadata' : '研究代理元数据';
+  const label = locale === 'en' ? 'Research adapter metadata' : '研究智能体元数据';
   show(<JsonTree value={descriptor} label={label} preview />);
   const preview = screen.getByRole('region', { name: label });
   expect(preview).toHaveAttribute('tabindex', '0');

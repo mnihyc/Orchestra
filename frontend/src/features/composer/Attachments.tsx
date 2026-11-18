@@ -15,14 +15,14 @@ import { FileAttachment } from '@/features/files/FileChip';
 import { FileGuideHint } from '@/features/files/FileGuideHint';
 import { blobSource } from '@/features/files/source';
 import { FilePathAttachment } from '@/features/files/FileLink';
-import { Menu } from '@/ui/Menu';
+import { Menu, type MenuEntry } from '@/ui/Menu';
 import type { ChatPart, ContentPart } from '@/generated/api-types';
 import type { QueuedUpload } from '@/lib/useUploads';
 import { ByteSize } from '@/ui/ByteSize';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { useAppearance } from '@/lib/appearance';
-import { pasteDisplayKey, pasteKey, rememberedPaste, type PastedTextPart } from '@/lib/pastedText';
+import { pasteDisplayKey, pasteKey, rememberedPaste, type PastedTextPart, type PasteDeliveryReason } from '@/lib/pastedText';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import type { CodeViewHandle } from '@/ui/CodeView';
 import { useViewShown } from '@/features/workbench/viewOpening';
@@ -34,13 +34,15 @@ import { UploadHelp } from '@/features/composer/UploadHelp';
 import { JobActivityLine } from '@/features/change/Progress';
 export { carriesFiles } from '@/lib/drop';
 
-export function AttachButton({ onPress, label, disabled = false, onFile, onDocument, fileReason = false, help = 'message-files' }: { onPress: () => void; label?: string; disabled?: boolean; onFile?: () => void; onDocument?: () => void; fileReason?: string | false; help?: 'message-files' | 'documents' }) {
+/** The plus of the box: what is added to a message, and the other acts of the box that a slash command also opens (a goal, a side question), each entered here and by its command and by no third way. */
+export function AttachButton({ onPress, label, disabled = false, onFile, onDocument, fileReason = false, help = 'message-files', extras = [] }: { onPress: () => void; label?: string; disabled?: boolean; onFile?: () => void; onDocument?: () => void; fileReason?: string | false; help?: 'message-files' | 'documents'; extras?: readonly MenuEntry[] }) {
   const { t } = useTranslation();
   const name = label ?? t(onFile !== undefined && onDocument !== undefined ? 'composer.plus.label' : 'composer.attach');
   const button = onFile !== undefined && onDocument !== undefined ? <Menu label={name} side="top" trigger={<IconButton size="sm" label={name} icon={<Plus aria-hidden />} disabled={disabled} />} entries={[
     { id: 'upload', label: t('composer.plus.upload'), onSelect: onPress },
     { id: 'file', label: t('composer.plus.file'), disabled: fileReason, onSelect: onFile },
     { id: 'document', label: t('composer.plus.document'), onSelect: onDocument },
+    ...(extras.length === 0 ? [] : [{ type: 'separator', id: 'acts-separator' } as MenuEntry, ...extras]),
   ]} /> : <IconButton size="sm" label={name} icon={<Paperclip aria-hidden />} disabled={disabled} onClick={onPress} />;
   return <span className="inline-flex items-center gap-0.5">{button}<UploadHelp topic={help} /></span>;
 }
@@ -62,7 +64,7 @@ export function UploadChips({ queue }: { queue: UploadQueue }) {
   return (
     <ul aria-label={t('uploads.selected')} className="flex max-h-[min(20rem,50dvh)] flex-col gap-1 overflow-y-auto">
       {rows.map((row) => <QueuedAttachment key={row.id} row={row} queue={queue} />)}
-      <li role="status" className="text-sm text-text-muted tabular-nums">{queue.progress === undefined ? t('uploads.files', { count: rows.length, number: formatNumber(rows.length, locale) }) : <>{t('uploads.fileProgress', { done: formatNumber(queue.progress.completed, locale), total: formatNumber(queue.progress.total, locale) })} · {t('uploads.bytes', { received: formatBytes(queue.progress.received, locale), total: formatBytes(queue.progress.size, locale) })}</>}</li>
+      <li role="status" className="text-sm text-text-muted tabular-nums">{queue.progress === undefined ? t('uploads.files', { count: rows.length, number: formatNumber(rows.length, locale) }) : <>{t('uploads.fileProgress', { count: queue.progress.total, done: formatNumber(queue.progress.completed, locale), total: formatNumber(queue.progress.total, locale) })} · {t('uploads.bytes', { received: formatBytes(queue.progress.received, locale), total: formatBytes(queue.progress.size, locale) })}</>}</li>
     </ul>
   );
 }
@@ -119,6 +121,7 @@ interface AttachmentChipsProps {
   editing?: (paste: PastedTextPart) => boolean;
   pasteQueue?: { rows: QueuedUpload[]; retry: (id: string) => void };
   pasteMode?: (paste: PastedTextPart) => boolean | undefined;
+  pasteReason?: (paste: PastedTextPart) => PasteDeliveryReason | undefined;
   onPasteDelivery?: (paste: PastedTextPart, delivery: 'inline' | 'file') => void;
   pasteTokens?: (paste: PastedTextPart) => number | null;
 }
@@ -138,7 +141,7 @@ export function AttachmentChips({ parts, onRemove, imageIncompatible = false, im
 const CodeView = lazy(async () => ({ default: (await import('@/ui/CodeView')).CodeView }));
 type ReadyPart = Extract<ContentPart | ChatPart, { type: 'image' | 'file' | 'attachment' | 'pasted_text' }>;
 
-function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPasteAsText, onEditPaste, onPasteDirty, editText, editing, pasteQueue, pasteMode, pasteTokens, onPasteDelivery }: Omit<AttachmentChipsProps, 'parts'> & { part: ReadyPart; index: number }) {
+function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPasteAsText, onEditPaste, onPasteDirty, editText, editing, pasteQueue, pasteMode, pasteReason, pasteTokens, onPasteDelivery }: Omit<AttachmentChipsProps, 'parts'> & { part: ReadyPart; index: number }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const [open, setOpen] = useState(false);
@@ -161,6 +164,7 @@ function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPast
   const characterLabel = part.type === 'pasted_text' ? t('uploads.characters', { count: part.characters, number: formatNumber(part.characters, locale) }) : null;
   const estimatedTokens = part.type === 'pasted_text' ? pasteTokens?.(part) : null;
   const inlinePaste = part.type === 'pasted_text' ? part.delivery === 'inline' ? true : part.delivery === 'file' ? false : pasteMode?.(part) : undefined;
+  const deliveryReason = part.type === 'pasted_text' ? part.delivery !== undefined && part.delivery !== null ? 'chosen' : pasteReason?.(part) : undefined;
   return <li className={cx('flex max-w-full min-w-0 flex-col gap-1 rounded-md border border-border px-2 py-1 text-sm', part.type === 'pasted_text' && open && 'w-full')}>
     <div className={cx('flex min-w-0 flex-wrap items-center gap-y-1', part.type === 'pasted_text' ? 'gap-x-1' : 'gap-x-2')}>
       {part.type === 'pasted_text' ? <div className="flex w-full min-w-0 items-center gap-1"><FileText aria-hidden className="size-4 shrink-0 text-text-muted" /><button type="button" className="focus-inset min-w-0 truncate text-left" aria-expanded={open} onClick={() => setOpen(!open)}>{name}</button><UploadHelp topic="pasted-text" />
@@ -182,7 +186,7 @@ function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPast
     {saving !== undefined && <span className="text-sm text-text-muted" role="status">{t('uploads.savingText')} · {t('uploads.bytes', { received: formatBytes(saving.received, locale), total: formatBytes(saving.file.size, locale) })}</span>}
     {draftDirty && saving === undefined && <span className="text-sm text-text-muted" role="status">{t('uploads.savingText')}</span>}
     {saving?.phase === 'failed' && <ErrorAlert error={saving.error} action={<Button size="sm" onClick={() => pasteQueue?.retry(saving.id)}>{t('common.tryAgain')}</Button>} />}
-    {part.type === 'pasted_text' && !draftDirty && saving === undefined && edited === undefined && inlinePaste !== undefined && <span className="text-sm text-text-muted">{t(inlinePaste ? 'uploads.pasteInline' : 'uploads.pasteFile')}{estimatedTokens !== null && estimatedTokens !== undefined && <> · {t('uploads.estimatedTokens', { count: estimatedTokens, number: formatNumber(estimatedTokens, locale) })}</>}</span>}
+    {part.type === 'pasted_text' && !draftDirty && saving === undefined && edited === undefined && inlinePaste !== undefined && <span className="text-sm text-text-muted">{t(inlinePaste ? 'uploads.pasteInline' : 'uploads.pasteFile')}{deliveryReason !== undefined && <span> · <span>{t(`uploads.pasteReason.${deliveryReason}`)}</span></span>}{estimatedTokens !== null && estimatedTokens !== undefined && <span> · {t('uploads.estimatedTokens', { count: estimatedTokens, number: formatNumber(estimatedTokens, locale) })}</span>}</span>}
     {part.type === 'pasted_text' && open && <div className="h-[30dvh] min-h-24 min-w-0">
       {text.isError ? <ErrorAlert error={text.error} action={<Button size="sm" onClick={() => void text.refetch()}>{t('common.tryAgain')}</Button>} /> : text.data === undefined ? <SkeletonRows read={text} rows={3} /> : <Suspense fallback={<SkeletonRows read={text} rows={3} />}><CodeView ref={editor} text={text.data} version={part.blob} label={t('uploads.pastedText')} wrap readOnly={onEditPaste === undefined} flushOnUnmount={onEditPaste !== undefined}
         overlay={edited === undefined ? undefined : { version: part.blob, text: edited }}

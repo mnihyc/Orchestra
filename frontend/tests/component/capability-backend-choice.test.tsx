@@ -26,8 +26,8 @@ vi.mock('@/api/client', async (load) => {
     throw new Error(`Unexpected GET ${path}`);
   } } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
 
 const HOME = id(93, 11), PROVIDER = id(93, 12);
 const provider = planProvider({ id: PROVIDER, name: 'Picture plan', owner: userRef(me(1, 'ada', 'Ada')), org_id: HOME,
@@ -51,7 +51,7 @@ afterEach(async () => { cleanup(); await setLocale('en'); });
 
 it.each([
   ['en', ['Web search provider', 'Web search route', 'Page fetch provider', 'Page fetch route']],
-  ['zh-CN', ['网页搜索提供方', '网页搜索路径', '网页抓取提供方', '网页抓取路径']],
+  ['zh-CN', ['网络搜索提供方', '网络搜索路径', '网页抓取提供方', '网页抓取路径']],
 ] as const)('names both pairs in the shared web backend form in %s', async (locale, names) => {
   await setLocale(locale);
   show(<form><CapabilityBackendChoice settingKey="agents.web_search_backend" target={{ kind: 'node', id: HOME }}

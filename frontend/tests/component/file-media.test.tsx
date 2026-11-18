@@ -4,13 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
 import { FileAttachment, FileChip } from '@/features/files/FileChip';
+import { FileDetails } from '@/features/files/FileDetails';
 import { FilePreview } from '@/features/files/FilePreview';
-import { blobSource, documentSource, sourceBytes, type FilePreview as Preview } from '@/features/files/source';
+import { blobSource, documentSource, sourceBytes, workspaceSource, type FilePreview as Preview } from '@/features/files/source';
 import { FileChip as ChatFileChip } from '@/features/chat/Attachments';
 import { AttachmentChips } from '@/features/composer/Attachments';
 import { MessageFiles } from '@/features/files/MessageFiles';
 import { useWorkbench } from '@/features/workbench/store';
-import { i18n } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 import { ContextMenu } from '@/ui/ContextMenu';
 import { show } from './support';
 
@@ -182,7 +183,7 @@ it('shows a ready archive count as its preview without an unavailable warning', 
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'source.zip', 128, 'application/zip')} />);
   await userEvent.click(screen.getByRole('link', { name: 'source.zip' }));
   reveal();
-  expect(await screen.findByText('3 entries')).toBeInTheDocument();
+  expect(await screen.findByText('Entries: 3')).toBeInTheDocument();
   expect(screen.queryByText('Preview unavailable')).not.toBeInTheDocument();
 });
 
@@ -292,4 +293,16 @@ it('keeps a file row selection modifier and makes its native menu only when open
   await userEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
   expect(action).toHaveBeenCalledOnce();
   expect(calls.request).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps the observed manifest time distinct from a file whose bytes need its machine in ${locale}`, async () => {
+  await setLocale(locale);
+  try {
+    show(<FileDetails source={{ ...workspaceSource({ environmentId: 'env', threadId: null }, 'src/code.ts'), observation: { cached: false, at: '2026-11-14T09:12:34Z' } }} onOpen={() => undefined} showPreview={false} />);
+    expect(screen.getByText(locale === 'en' ? 'Needs machine' : '需要连接机器')).toBeVisible();
+    expect(document.querySelector('time[datetime="2026-11-14T09:12:34Z"]')).toBeVisible();
+    expect(screen.getByRole('button', { name: i18n.t('fileMedia.open') })).toBeEnabled();
+    expect(screen.getByRole('button', { name: i18n.t('fileMedia.download') })).toBeEnabled();
+    expect(calls.request).not.toHaveBeenCalled();
+  } finally { await setLocale('en'); }
 });

@@ -11,6 +11,8 @@ mod workspace;
 
 #[path = "workspace_snapshots/scope_helpers.rs"]
 mod keys;
+#[path = "workspace_files/preview_reach.rs"]
+mod preview_reach;
 #[path = "workspace_files/upload_creation.rs"]
 mod upload_creation;
 #[path = "workspace_files/upload_history.rs"]
@@ -829,7 +831,18 @@ async fn a_batch_that_failed_before_a_session_started_never_claims_an_upload_suc
     assert_eq!(details["upload"]["files"], json!([]));
 }
 
+/// A site whose place chose to cache: what a person read or wrote stays on the server as a cached
+/// version, which is what most of these cases are about.
 async fn live_site() -> Site {
+    let site = relayed_site().await;
+    site.world
+        .set("storage.relay_transfers", json!(false))
+        .await;
+    site
+}
+
+/// A site as it is shipped: the place relays, and keeps no copy of a file that passes through.
+async fn relayed_site() -> Site {
     let mut site = Site::new().await;
     site.disk.put("web/src/main.rs", b"fn main() {}\n");
     site.disk.put("web/src/lib.rs", b"pub fn lib() {}\n");
@@ -838,6 +851,98 @@ async fn live_site() -> Site {
     site.disk.put("web/apple.txt", b"fruit\n");
     site.power_on();
     site
+}
+
+#[tokio::test]
+async fn a_file_saved_in_a_place_that_relays_is_on_the_machine_and_leaves_no_copy_on_the_server() {
+    let site = relayed_site().await;
+    let stat = ask::write(
+        &site,
+        &site.ada,
+        "web/src/new.rs",
+        Some("none"),
+        b"// saved by an editor\n",
+    )
+    .await
+    .ok();
+    let hash = stat.hash.unwrap();
+    assert_eq!(
+        site.disk.read("web/src/new.rs").unwrap(),
+        b"// saved by an editor\n"
+    );
+    let app = &site.app().app;
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is cached for a place that relays"
+    );
+    assert!(
+        orch_db::queries::storage::blob(&mut conn, &hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "the bytes the request brought went with the write, not a day after it"
+    );
+    assert!(app.blobs.store().size(&hash).await.unwrap().is_none());
+    let listed = ask::list(&site, &site.ada, "web/src", None).await.ok();
+    assert!(listed.entries.iter().all(|entry| !entry.cached));
+}
+
+#[tokio::test]
+async fn a_file_uploaded_in_a_place_that_relays_is_written_and_its_copy_goes_with_the_write() {
+    let site = relayed_site().await;
+    let bytes = b"a file from the files view";
+    let blob = browser_upload(&site, bytes).await;
+    let id = new_id();
+    site.app().app.engine.start();
+    site.app()
+        .call(EnvironmentUploadWrite, &[&site.environment, &id])
+        .token(&site.ada.token)
+        .query(&ThroughThreadQuery::default())
+        .body(&EnvironmentUploadWriteBody {
+            path: "web/uploaded.txt".into(),
+            blob,
+            expected_hash: Some("none".into()),
+            upload_batch: new_id(),
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the upload is written", || async {
+        upload_job(&site, id).await.state == JobState::Succeeded
+    })
+    .await;
+    assert_eq!(site.disk.read("web/uploaded.txt").unwrap(), bytes);
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is cached for a place that relays"
+    );
+    drop(conn);
+    eventually("the upload's copy leaves the server", || async {
+        let mut conn = site.world.conn().await;
+        orch_db::queries::storage::blob(&mut conn, &blob)
+            .await
+            .unwrap()
+            .is_none()
+    })
+    .await;
+    assert!(
+        site.app()
+            .app
+            .blobs
+            .store()
+            .size(&blob)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------- listing
@@ -1100,6 +1205,7 @@ async fn the_environments_files_are_given_on_its_own_page_and_a_thread_named_giv
             .call(EnvironmentFileList, &[&site.environment])
             .token(token)
             .query(&EnvironmentFileListQuery {
+                prefix: None,
                 thread,
                 path: "web".to_owned(),
                 source: None,
@@ -1189,6 +1295,7 @@ async fn a_thread_that_runs_in_no_such_environment_lets_nobody_in() {
         .call(EnvironmentFileList, &[&new_id()])
         .token(&site.ada.token)
         .query(&EnvironmentFileListQuery {
+            prefix: None,
             thread: Some(site.thread),
             path: String::new(),
             source: None,
@@ -1209,15 +1316,9 @@ async fn a_thread_that_runs_in_no_such_environment_lets_nobody_in() {
 // ---------------------------------------------------------------- paths
 
 #[tokio::test]
-async fn a_path_outside_the_workspace_is_refused_without_the_machine_being_asked() {
+async fn a_relative_path_that_leaves_the_workspace_is_refused_without_the_machine_being_asked() {
     let site = live_site().await;
-    for path in [
-        "../secrets",
-        "web/../../etc/passwd",
-        "/etc/passwd",
-        "..",
-        "web/../..",
-    ] {
+    for path in ["../secrets", "web/../../etc/passwd", "..", "web/../.."] {
         let listed = ask::list(&site, &site.ada, path, None).await.problem();
         assert_eq!(listed.code, ErrorCode::NotFound, "list {path}");
         let stat = ask::stat(&site, &site.ada, path).await.problem();
@@ -1744,6 +1845,69 @@ async fn what_was_read_before_can_be_read_again_while_the_machine_is_away_and_wh
         .await
         .ok();
     assert_eq!(missing.reason, Some(FetchUnavailable::NotFound));
+}
+
+#[tokio::test]
+async fn in_a_place_that_relays_a_file_of_an_offline_machine_cannot_be_opened_once_its_hold_has_run_out()
+ {
+    let site = relayed_site().await;
+    site.world.set("storage.relay_hold_secs", json!(120)).await;
+    let readme = ask::fetch(&site, &site.ada, "web/README.md", Some(5))
+        .await
+        .ok()
+        .hash
+        .unwrap();
+    site.publish_manifest().await;
+    site.power_off().await;
+
+    // Its reading is not cut short: the version brought for it stays for the hold.
+    let soon = ask::fetch(&site, &site.ada, "web/README.md", None)
+        .await
+        .ok();
+    assert_eq!(
+        (soon.state, soon.hash),
+        (FetchStatus::Ready, Some(readme)),
+        "the opening that is under way goes on"
+    );
+
+    // Once the hold has run out the server keeps no copy, and the file waits for its machine.
+    let app = &site.app().app;
+    site.world.advance(Duration::minutes(3));
+    let purged =
+        orch_api_core::cache::purge_relayed_caches(&app.db, &app.blobs, app.clock.as_ref())
+            .await
+            .unwrap();
+    assert_eq!(purged.versions, 1);
+    let later = ask::fetch(&site, &site.ada, "web/README.md", None)
+        .await
+        .ok();
+    assert_eq!(later.state, FetchStatus::Unavailable);
+    assert_eq!(later.reason, Some(FetchUnavailable::Offline));
+    let listed = ask::list(&site, &site.ada, "web", None).await.ok();
+    assert!(
+        listed.entries.iter().any(|entry| entry.name == "README.md"),
+        "the listing stays: it is the server's own record of the tree"
+    );
+    assert!(listed.entries.iter().all(|entry| !entry.cached));
+}
+
+#[tokio::test]
+async fn reopening_an_unchanged_file_after_relay_cleanup_fetches_its_bytes_again() {
+    let site = relayed_site().await;
+    let path = "web/README.md";
+    let first = ask::fetch(&site, &site.ada, path, Some(5)).await.ok();
+    let hash = first.hash.unwrap();
+    site.world.advance(Duration::minutes(11));
+    let app = &site.app().app;
+    orch_api_core::cache::purge_relayed_caches(&app.db, &app.blobs, app.clock.as_ref())
+        .await
+        .unwrap();
+    assert!(!app.blobs.store().exists(&hash).await.unwrap());
+    let reopened = ask::fetch(&site, &site.ada, path, Some(5)).await.ok();
+    assert_eq!(reopened.hash, Some(hash));
+    let read = ask::content(&site, &site.ada, path, &hash, None, false).await;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(read.raw.as_ref(), b"# Web\n");
 }
 
 // ---------------------------------------------------------------- writing
@@ -2351,4 +2515,64 @@ async fn the_latest_list_of_the_tree_is_kept_pinned_and_the_one_it_replaces_is_l
     // The same list told again changes nothing.
     site.publish_manifest().await;
     assert_eq!(pins(second).await, 1);
+}
+
+#[tokio::test]
+async fn kept_machine_file_bytes_do_not_turn_into_roots_data_by_a_relative_alias() {
+    use orch_access_contract::permissions::FileReach;
+    use orch_db::queries::storage;
+    let site = Site::new().await;
+    let bytes = bytes::Bytes::from_static(b"outside content kept by an explicit machine read");
+    let blob = site.app().app.blobs.put_bytes(bytes).await.unwrap();
+    {
+        let mut conn = site.world.conn().await;
+        site.app()
+            .app
+            .blobs
+            .register(&mut conn, blob, site.world.now())
+            .await
+            .unwrap();
+        storage::record_cached(
+            &mut conn,
+            site.environment,
+            &storage::CachedFile {
+                path: "web/outside-link.txt".to_owned(),
+                size: blob.size,
+                mtime_ns: 1,
+                hash: blob.hash,
+                cached_at: site.world.now(),
+                minimum_reach: FileReach::Machine,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let refused = ask::content(
+        &site,
+        &site.vic,
+        "web/outside-link.txt",
+        &blob.hash,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::from_slice::<Json>(&refused.raw).unwrap()["code"],
+        "files.reach_denied"
+    );
+    let own = ask::content(
+        &site,
+        &site.ada,
+        "web/outside-link.txt",
+        &blob.hash,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(own.status, StatusCode::OK);
+    assert_eq!(
+        own.raw.as_ref(),
+        b"outside content kept by an explicit machine read"
+    );
 }
