@@ -327,6 +327,49 @@ impl FakeAdapter {
     }
 }
 
+async fn interrupt_shared(
+    shared: Arc<Shared>,
+    thread: ThreadId,
+    turn: TurnId,
+) -> Result<(), AdapterError> {
+    let session = shared.session(thread)?;
+    if let Some(active) = lock(&session.turn).as_ref()
+        && active.turn_id == turn
+    {
+        active.cancel.cancel();
+    }
+    let ids: Vec<_> = lock(&session.background)
+        .values()
+        .filter(|command| command.turn_id == Some(turn))
+        .map(|command| command.id.clone())
+        .collect();
+    let mut cleanup = orch_agent_contract::background::CommandCleanup::default();
+    for id in ids {
+        if scripted_background_end(&shared, &session, &id).await.state
+            == orch_agent_contract::background::BackgroundEndState::Ended
+        {
+            cleanup.ended += 1;
+        } else {
+            cleanup.unknown += 1;
+        }
+    }
+    Shared::end_turn(&session).await;
+    let _ = shared
+        .sink
+        .session(
+            thread,
+            session.segment_id,
+            orch_agent_contract::events::SessionEvent::TurnCommandCleanup(
+                orch_agent_contract::events::TurnCommandCleanup {
+                    turn_id: turn,
+                    result: cleanup,
+                },
+            ),
+        )
+        .await;
+    Ok(())
+}
+
 #[async_trait]
 impl AgentAdapter for FakeAdapter {
     fn kind(&self) -> &'static str {
@@ -504,6 +547,7 @@ impl AgentAdapter for FakeAdapter {
             .unwrap_or_default();
         shared.home.save(&file)?;
         let native_session_ref = file.native_session_ref.clone();
+        let supplied_mcp = spec.mcp.clone();
         let live = LiveSession::new(shared.home.clone(), file, spec, notes);
         lock(&shared.sessions).insert(live.thread_id, Arc::clone(&live));
         events::announce(
@@ -514,6 +558,7 @@ impl AgentAdapter for FakeAdapter {
         )
         .await;
         Ok(SessionOpened {
+            mcp: Some(supplied_mcp),
             native_session_ref,
             resumed,
             import_report: report,
@@ -579,44 +624,20 @@ impl AgentAdapter for FakeAdapter {
         Ok(())
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let shared = Arc::clone(&self.running.as_ref()?.shared);
+        Some(Arc::new(move |thread, turn| {
+            let shared = Arc::clone(&shared);
+            Box::pin(async move {
+                shared.running()?;
+                shared.faults.check("interrupt")?;
+                interrupt_shared(shared, thread, turn).await
+            })
+        }))
+    }
+
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
-        let shared = self.call("interrupt")?;
-        let session = shared.session(thread)?;
-        if let Some(active) = lock(&session.turn).as_ref()
-            && active.turn_id == turn
-        {
-            active.cancel.cancel();
-        }
-        let ids: Vec<_> = lock(&session.background)
-            .values()
-            .filter(|command| command.turn_id == Some(turn))
-            .map(|command| command.id.clone())
-            .collect();
-        let mut cleanup = orch_agent_contract::background::CommandCleanup::default();
-        for id in ids {
-            if scripted_background_end(&shared, &session, &id).await.state
-                == orch_agent_contract::background::BackgroundEndState::Ended
-            {
-                cleanup.ended += 1;
-            } else {
-                cleanup.unknown += 1;
-            }
-        }
-        Shared::end_turn(&session).await;
-        let _ = shared
-            .sink
-            .session(
-                thread,
-                session.segment_id,
-                orch_agent_contract::events::SessionEvent::TurnCommandCleanup(
-                    orch_agent_contract::events::TurnCommandCleanup {
-                        turn_id: turn,
-                        result: cleanup,
-                    },
-                ),
-            )
-            .await;
-        Ok(())
+        interrupt_shared(self.call("interrupt")?, thread, turn).await
     }
 
     async fn background_commands(
@@ -867,6 +888,7 @@ impl AgentAdapter for FakeAdapter {
             .map(|server| {
                 let definition = definition_of(server);
                 Ok(McpFound {
+                    profile: None,
                     definition_fingerprint: Some(definition.definition_fingerprint()),
                     name: server.name.clone(),
                     source: KIND.to_owned(),

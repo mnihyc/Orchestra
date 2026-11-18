@@ -1,0 +1,7 @@
+test -p orch-api-core --lib --test human_check --test forwarded_edge --test kfix_deploy
+test -p orch-api --bin orch-api
+test -p orchctl --bin orchctl -- commands::doctor::
+test -p orch-settings --lib
+test -p orch-api-contract --lib
+test -p orch-engine --lib -- --skip history_pages::
+web-e2e tests/e2e/admin.spec.ts tests/e2e/human-check-admin.spec.ts tests/e2e/human-check.spec.ts
