@@ -149,3 +149,17 @@ for (const locale of ['en', 'zh-CN'] as const) {
     } finally { view.unmount(); cache.clear(); }
   });
 }
+
+
+it.each(['en', 'zh-CN'] as const)('offers Switch instead of sign-in when a bound provider has been removed in %s', async (locale) => {
+  await setLocale(locale);
+  const world = familyLimit(null);
+  const thread = { ...world.thread, blocked: { reason: 'provider_unavailable' as const, detail: 'deleted', sandbox: null } };
+  const view = show(<QueryClientProvider client={world.cache}><BlockedBanner thread={thread} onProceed={() => undefined} /></QueryClientProvider>);
+  try {
+    expect(screen.getByText(i18n.t('resourceImpact.providerRemoved'))).toBeVisible();
+    expect(screen.getByRole('button', { name: i18n.t('change.banner.switchProvider') })).toBeVisible();
+    expect(screen.queryByRole('link', { name: i18n.t('providerPlan.recovery.signin') })).not.toBeInTheDocument();
+    expect(calls.read).not.toHaveBeenCalled();
+  } finally { view.unmount(); world.cache.clear(); }
+});

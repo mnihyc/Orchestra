@@ -1145,7 +1145,7 @@ export class Resources {
 
   private machinePrograms(person:Person|null,record:MachineRecord):MachinePrograms {
     const roles=record.roles ?? ['environment','agent','provider'];
-    return {entries:record.programs ?? [],config_file:this.installation(record).config_file,can_manage:record.owner===person?.me.username,
+    return {approvals:[],entries:record.programs ?? [],config_file:this.installation(record).config_file,can_manage:record.owner===person?.me.username,
       capabilities:(['agent','provider_source'] as const).map((kind)=>{
         const key=kind==='agent'?'agent.programs':'provider.programs';
         const supported=kind==='agent'?roles.includes('agent'):roles.includes('agent') || roles.includes('provider');
@@ -1509,7 +1509,7 @@ export class Resources {
     const running = stored.filter((environment) => environment.status !== 'removed').length;
     const access = this.held(person, 'host', record.owner, record.uses, record.manages);
     const keptData = access.permissions.includes('host.manage') ? this.world.trace.hostKeptData(person, record.id) : [];
-    return {
+    return { bundled_with_server: false,
       offline_since: record.online === false ? record.offlineSince ?? null : null,
       software_update: this.componentUpdates.get(record.id) ?? {running_version:'0.1.0',recommended_version:'0.1.0',behind:false,status:'current',detail:null,command:'orch-node update'},
       id: record.id,

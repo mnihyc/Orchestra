@@ -1,0 +1,4 @@
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test machines --test exec_version_overrides --test machine_program_admission --test machine_program_scopes --test machine_leaf_reader_scopes --test real_connector --test provider_duplicates --features test-support
+test -p orch-engine --test environment_moves
