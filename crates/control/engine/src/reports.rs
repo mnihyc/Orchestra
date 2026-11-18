@@ -43,6 +43,16 @@ impl Engine {
                 }
             };
             match decoded {
+                Event::NodeServerUpdate(report) => {
+                    crate::jobs::server_update::report(
+                        &mut *unit.conn,
+                        host,
+                        machine,
+                        &report,
+                        orch_types::Time::new(at),
+                    )
+                    .await?
+                }
                 Event::NodeRuntime(report) => self.on_node_runtime(unit, host, &report).await?,
                 Event::NodeNetwork(report) => self.on_node_network(unit, host, &report).await?,
                 Event::NodeFacts(facts) => {
@@ -101,9 +111,53 @@ impl Engine {
                 return Ok(());
             };
             current
+        } else if let Some(environment) = runtime.environment_id {
+            environments::lock_environment(&mut *unit.conn, environment).await?;
+            let Some(current) = environments::runtime(&mut *unit.conn, runtime.id).await? else {
+                return Ok(());
+            };
+            current
         } else {
             runtime
         };
+        let gone = matches!(report.state.as_str(), "absent" | "stopped" | "failed");
+        if !orch_db::queries::runtime_incarnations::observe(
+            &mut *unit.conn,
+            host,
+            runtime.id,
+            report.source,
+            gone,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let pending =
+            orch_db::queries::runtime_incarnations::stop(&mut *unit.conn, runtime.id).await?;
+        let original_stop = if let Some(stop) = &pending {
+            (stop.source == report.source
+                || report
+                    .source
+                    .incarnation
+                    .is_some_and(|id| stop.control.pending().contains(&id)))
+                && orch_db::queries::runtime_controls::is_current(&mut *unit.conn, &stop.control)
+                    .await?
+        } else {
+            false
+        };
+        if gone
+            && original_stop
+            && let Some(stop) = &pending
+            && !orch_db::queries::runtime_incarnations::pending_terminal(
+                &mut *unit.conn,
+                &stop.control,
+            )
+            .await?
+        {
+            // The ended source is recorded above. Its report cannot settle another
+            // admitted opening or declare the entire unit absent while that is unknown.
+            return Ok(());
+        }
         let missing_changed = sqlx::query(
             "UPDATE runtimes SET loss_missing=$2 WHERE id=$1 AND loss_missing IS DISTINCT FROM $2",
         )
@@ -119,7 +173,6 @@ impl Engine {
             let now = unit.now();
             orch_db::queries::jobs::stamp_environment(unit.conn, environment, now).await?;
         }
-        let gone = matches!(report.state.as_str(), "absent" | "stopped" | "failed");
         let detail = report
             .detail
             .clone()
@@ -129,6 +182,52 @@ impl Engine {
                 _ => "the unit failed".to_owned(),
             });
         let now = unit.now();
+        if gone
+            && (original_stop || (runtime.state == runtime_state::STOPPING && pending.is_none()))
+        {
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[
+                    runtime_state::RUNNING,
+                    runtime_state::CREATING,
+                    runtime_state::STOPPING,
+                    runtime_state::FAILED,
+                ],
+                runtime_state::STOPPED,
+                runtime.state_detail.as_deref(),
+                now,
+            )
+            .await?;
+            if moved && let Some(provider) = runtime.provider_id {
+                self.provider_unit_failed(
+                    &mut *unit.conn,
+                    provider,
+                    runtime.id,
+                    runtime.machine_id,
+                    now,
+                )
+                .await?;
+            }
+            if moved
+                && let Some(environment) = runtime.environment_id
+                && environments::live_runtime(&mut *unit.conn, environment)
+                    .await?
+                    .is_some_and(|current| current.id == runtime.id)
+            {
+                environments::set_status(
+                    &mut *unit.conn,
+                    environment,
+                    &[status::RUNNING, status::OFFLINE, status::PROVISIONING],
+                    status::STOPPED,
+                    None,
+                    now,
+                )
+                .await?;
+                environments::close_shells(&mut *unit.conn, environment, now).await?;
+            }
+            return Ok(());
+        }
         let fails = match runtime.state.as_str() {
             runtime_state::RUNNING => gone,
             runtime_state::CREATING => report.state == "failed",

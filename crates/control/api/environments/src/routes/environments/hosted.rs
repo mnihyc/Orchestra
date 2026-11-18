@@ -376,10 +376,24 @@ async fn finish_input(
 async fn restart(ctx: Ctx, (): (), body: api::EnvironmentRestartBody) -> ApiResult<Job> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let row = ctx
-        .app
-        .engine
-        .queue_restart(&mut tx, &principal, id, body.mode)
+    let caller = orch_engine::jobs::restart::operation::admit(&mut tx, principal.caller(), id)
+        .await
+        .map_err(ApiError::engine)?;
+    let principal = orch_authz::Principal::load(&mut tx, caller, principal.now())
+        .await
+        .map_err(orch_engine::EngineError::from)
+        .map_err(ApiError::engine)?;
+    let origin =
+        orch_authz::CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let http =
+        crate::key_operations::native::http_origin::capture_operation(&ctx, &mut tx, &origin)
+            .await?;
+    let row = http
+        .scope(
+            ctx.app
+                .engine
+                .queue_restart(&mut tx, &principal, id, body.mode),
+        )
         .await
         .map_err(|error| match error {
             orch_engine::jobs::restart::Error::NotFound => ApiError::not_found(),

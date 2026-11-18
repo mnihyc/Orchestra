@@ -150,3 +150,18 @@ it('shows a mixed failure in the field and the existing alert', async () => {
   expect(editor).toHaveAttribute('aria-invalid', 'true');
   expect(editor).toHaveAccessibleDescription(new RegExp(i18n.t('machines.policy.driverFaults.type')));
 });
+
+it('confirms only the system build currently reported by the machine and can revoke it', async () => {
+  const build = { os: 'windows', arch: 'x86_64', executable: 'a'.repeat(64) };
+  const key = { ...entry('exec.platform', ['machine'], { state: 'off' }), delegated: true, writable: true };
+  const initial: MachinePolicy = { ...policy(), keys: [key], platform_review: { build, approved: false, approval: null } };
+  read.mockResolvedValue(initial);
+  write.mockResolvedValue({ ...initial, platform_review: { build, approved: true, approval: null } });
+  const view = show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+  try {
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm this system' }));
+    expect(write).toHaveBeenCalledWith('machine', { 'exec.platform': { state: 'approved', build } });
+    await userEvent.click(await screen.findByRole('button', { name: 'Revoke confirmation' }));
+    expect(write).toHaveBeenCalledWith('machine', { 'exec.platform': { state: 'off' } });
+  } finally { view.unmount(); }
+});

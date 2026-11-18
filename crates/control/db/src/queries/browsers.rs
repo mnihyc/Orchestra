@@ -78,6 +78,8 @@ pub struct Site {
     pub generation: i32,
     /// Its current status.
     pub status: String,
+    /// Whether an accepted Stop withdraws this environment's current registration.
+    pub stopping: bool,
     /// Its own browser switch.
     pub browser: bool,
     /// Its own display switch.
@@ -98,7 +100,7 @@ pub struct Site {
 pub async fn site(conn: &mut Conn, id: Id) -> Result<Option<Site>, DbError> {
     // A restored directory has no managed unit to start. Its verified attachment permits a
     // subsequent explicit browser/display operation while restoration itself starts none.
-    Ok(sqlx::query_as("SELECT e.id,e.owner_id,e.org_id,e.home_node_id,e.name,e.placement,e.workspace_root,e.generation,CASE WHEN m.facts->'environment_descriptor'->>'lifecycle'='attach' AND e.status='stopped' AND e.attached_session IS NOT NULL AND e.attached_session IS NOT DISTINCT FROM COALESCE(m.session_started_at,m.last_seen_at) THEN 'running' ELSE e.status END AS status,COALESCE(e.browser,true) AS browser,COALESCE(e.vnc,true) AS vnc,e.machine_id,(m.online AND m.status='active' AND m.deleted_at IS NULL) AS machine_online,COALESCE(hm.facts,m.facts)->'policy'->'environment.browser' AS machine_allows_browser,COALESCE(hm.facts,m.facts)->'policy'->'environment.vnc' AS machine_allows_vnc,e.facts FROM environments e LEFT JOIN machines m ON m.id=e.machine_id LEFT JOIN LATERAL (SELECT r.host_id FROM runtimes r WHERE r.environment_id=e.id AND r.state NOT IN ('retired','removed') AND r.successor_of IS NULL LIMIT 1) policy_runtime ON true LEFT JOIN hosts policy_host ON policy_host.id=policy_runtime.host_id LEFT JOIN machines hm ON hm.id=policy_host.machine_id WHERE e.id=$1 AND e.deleted_at IS NULL").bind(id).fetch_optional(conn).await?)
+    Ok(sqlx::query_as("SELECT e.id,e.owner_id,e.org_id,e.home_node_id,e.name,e.placement,e.workspace_root,e.generation,CASE WHEN m.facts->'environment_descriptor'->>'lifecycle'='attach' AND e.status='stopped' AND e.attached_session IS NOT NULL AND e.attached_session IS NOT DISTINCT FROM COALESCE(m.session_started_at,m.last_seen_at) THEN 'running' ELSE e.status END AS status,EXISTS(SELECT 1 FROM runtime_withdrawals w WHERE w.environment_id=e.id) AS stopping, COALESCE(e.browser,true) AS browser,COALESCE(e.vnc,true) AS vnc,e.machine_id,(m.online AND m.status='active' AND m.deleted_at IS NULL) AS machine_online,COALESCE(hm.facts,m.facts)->'policy'->'environment.browser' AS machine_allows_browser,COALESCE(hm.facts,m.facts)->'policy'->'environment.vnc' AS machine_allows_vnc,e.facts FROM environments e LEFT JOIN machines m ON m.id=e.machine_id LEFT JOIN LATERAL (SELECT r.host_id FROM runtimes r WHERE r.environment_id=e.id AND r.state NOT IN ('retired','removed') AND r.successor_of IS NULL LIMIT 1) policy_runtime ON true LEFT JOIN hosts policy_host ON policy_host.id=policy_runtime.host_id LEFT JOIN machines hm ON hm.id=policy_host.machine_id WHERE e.id=$1 AND e.deleted_at IS NULL").bind(id).fetch_optional(conn).await?)
 }
 
 /// Orders profile handouts and limit checks within one environment until the transaction ends.

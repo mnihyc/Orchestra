@@ -38,7 +38,7 @@ async fn an_unmeasured_or_partial_link_stays_absent_through_report_and_machine_a
     )
     .await
     .unwrap();
-    for (rates, expected) in [
+    for (i, (rates, expected)) in [
         (MachineFactsRates::default(), json!({})),
         (
             MachineFactsRates {
@@ -48,23 +48,32 @@ async fn an_unmeasured_or_partial_link_stays_absent_through_report_and_machine_a
             },
             json!({"up_bps":0,"round_trip_ms":16}),
         ),
-    ] {
-        let facts = machine_facts(
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (processors, ram, disk) = [
+            (6, 42_764_201_984_i64, 267_000_000_000_i64),
+            (4, 41_696_751_616_i64, 300_000_000_000_i64),
+        ][i];
+        let mut facts = machine_facts(
             &Host {
                 hostname: "rate-presence".into(),
                 os_version: "fixture".into(),
-                cpus: 1,
-                memory_bytes: 1,
+                cpus: processors,
+                memory_bytes: ram,
             },
             FactsDraft::default(),
             None,
             rates,
             0,
         );
+        facts.data_volume_bytes = Some(disk);
         let body = serde_json::to_value(facts).unwrap();
         assert_eq!(body["rates"], expected);
         let mut receiver = StreamReceiver::new(BTreeMap::new(), vec![Role::Environment]);
         let delivery = match receiver.on_ev(Ev {
+            native_opening_id: None,
             stream: "machine".into(),
             seq: 1,
             at: world.app.app.clock.time(),
@@ -91,6 +100,9 @@ async fn an_unmeasured_or_partial_link_stays_absent_through_report_and_machine_a
             .await
             .ok();
         assert_eq!(shown.facts["rates"], expected);
+        assert_eq!(shown.facts["cpus"], json!(processors));
+        assert_eq!(shown.facts["memory_bytes"], json!(ram));
+        assert_eq!(shown.facts["data_volume_bytes"], json!(disk));
     }
 }
 #[cfg(any(test, feature = "test-support"))]

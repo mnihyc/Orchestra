@@ -1,6 +1,6 @@
 /** The same observed native settings update inherited host policy without another host read. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { applyChanges, findAct } from '@/api/acts';
@@ -10,8 +10,19 @@ import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { detailHost } from './resource-detail-fixtures';
 
-const reads = vi.hoisted(() => ({ hosts: vi.fn(), settings: vi.fn() }));
-vi.mock('@/api/admin', () => ({ settingsKey: ['admin', 'settings'], hostsQuery: { queryKey: ['admin', 'hosts'], queryFn: reads.hosts }, systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: reads.settings } }));
+const reads = vi.hoisted(() => ({
+  hosts: vi.fn(),
+  settings: vi.fn(),
+  enrollment: vi.fn((): Promise<string | null> => Promise.resolve(null)),
+  retry: vi.fn(() => Promise.resolve()),
+}));
+vi.mock('@/api/admin', () => ({
+  bundledNodeQuery: { queryKey: ['admin', 'bundled-node'], queryFn: reads.enrollment },
+  retryBundledNode: reads.retry,
+  settingsKey: ['admin', 'settings'],
+  hostsQuery: { queryKey: ['admin', 'hosts'], queryFn: reads.hosts },
+  systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: reads.settings },
+}));
 vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: () => <span>Keeper</span> }));
 const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -37,4 +48,14 @@ it('follows the accepted system value and threshold while retaining the host’s
   await accept('hosts.when_full', 'warn', 'DELETE'); await waitFor(() => expect(sharedRow).toHaveTextContent('Warns, and lets the host answer'));
   expect(reads.hosts).toHaveBeenCalledOnce(); expect(reads.settings).toHaveBeenCalledOnce();
   expect(cache.getQueryData(['admin', 'hosts'])).toEqual([shared, own]);
+});
+
+it('shows why the bundled node could not register and offers to retry its registration', async () => {
+  reads.hosts.mockResolvedValue([]); reads.settings.mockResolvedValue([]);
+  reads.enrollment.mockResolvedValue('registration_unavailable');
+  render(<QueryClientProvider client={cache}><TooltipProvider><Toaster><Hosts /></Toaster></TooltipProvider></QueryClientProvider>);
+  expect(await screen.findByText('The bundled host could not register with the database')).toBeVisible();
+  expect(screen.queryByText('No host yet')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry registration' }));
+  await waitFor(() => expect(reads.retry).toHaveBeenCalledOnce());
 });

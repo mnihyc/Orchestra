@@ -204,6 +204,9 @@ pub struct EnvironmentFactsBrowser {
 /// What the environment has to serve a display.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentFactsVnc {
+    /// The machine can share its current local desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
     /// Its display servers.
     pub servers: Vec<EnvironmentFactsProgram>,
     /// Its window manager, or null.

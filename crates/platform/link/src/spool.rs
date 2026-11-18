@@ -32,7 +32,7 @@
 //! The spool is plain, blocking file work and is owned by one task.
 
 use orch_link_contract::streams::{ResetReason, is_diagnostic};
-use orch_types::{Json, Seq, Time};
+use orch_types::{Id, Json, Seq, Time};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -41,7 +41,7 @@ use std::time::Duration;
 
 /// What begins every segment file, so that a file that is not one is not
 /// read as one.
-const MAGIC: &[u8; 8] = b"ORCHSPL1";
+const MAGIC: &[u8; 8] = b"ORCHSPL2";
 /// The bytes before the first record of a segment: the magic, and the number
 /// of the first event it holds.
 const SEGMENT_HEADER_BYTES: u64 = 16;
@@ -58,9 +58,8 @@ const RECORD_SENT: u8 = 2;
 const RECORD_ACKNOWLEDGED: u8 = 3;
 /// A cursor record holds its type byte and one little-endian 64-bit sequence.
 const CURSOR_PAYLOAD_BYTES: usize = 1 + 8;
-/// The bytes of an event record before its kind: the type, the moment, and
-/// the length of the kind.
-const EVENT_FIXED_BYTES: usize = 1 + 8 + 2;
+/// The type, moment, optional opening tag and UUID bytes, and length of the kind.
+const EVENT_FIXED_BYTES: usize = 1 + 8 + 1 + 16 + 2;
 /// The largest record the spool will read back, so that a damaged length
 /// cannot make it allocate the memory of the machine.
 const MAX_RECORD_BYTES: u32 = 64 * 1024 * 1024;
@@ -150,6 +149,8 @@ impl From<&orch_config::connector::Spool> for SpoolOptions {
 /// An event waiting to be spooled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpoolEvent {
+    /// The immutable physical producer retained with the bytes, including after a restart.
+    pub native_opening_id: Option<Id>,
     /// When it happened.
     pub at: Time,
     /// Its kind.
@@ -223,6 +224,8 @@ fn encode_event(event: &SpoolEvent) -> Vec<u8> {
     let mut payload = Vec::with_capacity(EVENT_FIXED_BYTES + kind.len() + body.len());
     payload.push(RECORD_EVENT);
     payload.extend_from_slice(&event.at.unix_millis().to_le_bytes());
+    payload.push(u8::from(event.native_opening_id.is_some()));
+    payload.extend_from_slice(event.native_opening_id.unwrap_or_default().as_bytes());
     payload.extend_from_slice(&u16::try_from(kind.len()).unwrap_or(u16::MAX).to_le_bytes());
     payload.extend_from_slice(kind);
     payload.extend_from_slice(&body);
@@ -234,12 +237,18 @@ fn decode_event(payload: &[u8]) -> Option<SpoolEvent> {
         return None;
     }
     let at = i64::from_le_bytes(payload[1..9].try_into().ok()?);
-    let kind_len = usize::from(u16::from_le_bytes(payload[9..11].try_into().ok()?));
+    let native_opening_id = match payload[9] {
+        0 if payload[10..26] == [0; 16] => None,
+        1 => Some(Id::from_slice(&payload[10..26]).ok()?),
+        _ => return None,
+    };
+    let kind_len = usize::from(u16::from_le_bytes(payload[26..28].try_into().ok()?));
     let kind =
         std::str::from_utf8(payload.get(EVENT_FIXED_BYTES..EVENT_FIXED_BYTES + kind_len)?).ok()?;
     let body = serde_json::from_slice(payload.get(EVENT_FIXED_BYTES + kind_len..)?).ok()?;
     let moment = chrono::DateTime::from_timestamp_millis(at)?;
     Some(SpoolEvent {
+        native_opening_id,
         at: Time::new(moment),
         kind: kind.to_owned(),
         body,
@@ -267,7 +276,16 @@ fn classify(event: &SpoolEvent) -> (Class, Option<Box<str>>) {
     let item = (class != Class::Other)
         .then(|| event.body.get("native_ref").and_then(Json::as_str))
         .flatten()
-        .map(Box::from);
+        .map(|reference| {
+            format!(
+                "{}:{reference}",
+                event
+                    .native_opening_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default()
+            )
+            .into_boxed_str()
+        });
     (class, item)
 }
 
@@ -1617,6 +1635,7 @@ mod raw_restarts {
                 .append(
                     "machine",
                     &SpoolEvent {
+                        native_opening_id: None,
                         at,
                         kind: "machine.facts".into(),
                         body: json!({}),
@@ -1629,6 +1648,7 @@ mod raw_restarts {
                     .append(
                         "machine",
                         &SpoolEvent {
+                            native_opening_id: None,
                             at,
                             kind: "raw.frame".into(),
                             body: json!({ "ordinal": ordinal }),

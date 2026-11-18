@@ -21,6 +21,12 @@ use serde::{Deserialize, Serialize};
     deny_unknown_fields
 )]
 pub enum CommandEvidence {
+    /// The actual logical Provider Stop and its original selected managed unit.
+    ProviderUnitStop(Box<crate::commands::provider_unit::Command>),
+    /// The actual Host Stop and exact physical unit, separate from Tenant permissions.
+    HostUnitStop(Box<crate::commands::host_unit::Command>),
+    /// The original administrator and exact bundled-node release update job.
+    ServerUpdate(Box<crate::jobs::server_update::command::Source>),
     /// The actual retained Ask model call and its still-current controller.
     Ask(Box<crate::ask::command::CommandSource>),
     Skill(super::skill_creation::CommandSource),
@@ -33,6 +39,9 @@ pub enum CommandEvidence {
 impl CommandEvidence {
     pub fn command_kind(&self) -> &'static str {
         match self {
+            Self::ProviderUnitStop(_) => "node.runtime.stop",
+            Self::HostUnitStop(_) => "node.runtime.stop",
+            Self::ServerUpdate(_) => "node.server.update",
             Self::Ask(_) => "provider.generate",
             Self::Skill(source) => source.command_kind(),
             Self::MountRemove(_) => "node.volume.remove",
@@ -44,6 +53,9 @@ impl CommandEvidence {
     }
     pub async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
         match self {
+            Self::ProviderUnitStop(source) => source.lock_source(conn).await,
+            Self::HostUnitStop(source) => source.lock_source(conn).await,
+            Self::ServerUpdate(source) => source.lock_source(conn).await,
             Self::Ask(source) => source.lock_source(conn).await,
             Self::Skill(source) => source.lock_source(conn).await,
             Self::MountEnsure(source) => source.lock_source(conn).await,
@@ -65,6 +77,9 @@ impl CommandEvidence {
             return Ok(None);
         }
         match self {
+            Self::ProviderUnitStop(source) => source.current_issue(conn, command, clock).await,
+            Self::HostUnitStop(source) => source.current_issue(conn, command, clock).await,
+            Self::ServerUpdate(source) => source.current_issue(conn, command, clock).await,
             Self::Ask(source) => source.current_issue_callers(conn, command, clock).await,
             Self::Skill(source) => source.current_issue(conn, command, clock).await,
             Self::MountEnsure(source) => source.current(conn, clock).await,
@@ -86,6 +101,9 @@ impl CommandEvidence {
             return Ok(None);
         }
         match self {
+            Self::ProviderUnitStop(source) => source.current_stored(conn, command, clock).await,
+            Self::HostUnitStop(source) => source.current_stored(conn, command, clock).await,
+            Self::ServerUpdate(source) => source.current_stored(conn, command, clock).await,
             Self::Ask(source) => source.current_callers(conn, command, clock).await,
             Self::Skill(source) => source.current_stored(conn, command, clock).await,
             Self::MountEnsure(source) => source.current(conn, clock).await,

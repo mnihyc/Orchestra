@@ -280,7 +280,7 @@ async fn list(
         let site = rows::site(&mut conn, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
-        if site.status == "running" && site.machine_online == Some(true) {
+        if !site.stopping && site.status == "running" && site.machine_online == Some(true) {
             drop(conn);
             ctx.app
                 .engine
@@ -339,20 +339,53 @@ async fn open(
         crate::routes::workspace::door::beside(&mut tx, guard.principal(), environment, thread)
             .await?;
     }
-    let row = ctx
-        .app
-        .engine
-        .displays()
-        .open(OpenDisplay {
-            environment,
-            requester: Requester::Person(caller.clone()),
-            thread: query.thread,
-            name: body.name,
-            geometry: body.geometry,
-            note: None,
-            origin: crate::sign_in::origin(&ctx),
-        })
-        .await;
+    let displays = ctx.app.engine.displays();
+    let requester = Requester::Person(caller.clone());
+    let origin = crate::sign_in::origin(&ctx);
+    use orch_link_contract::display::DisplayTarget;
+    let source = match (body.attach, body.desktop.unwrap_or(false)) {
+        (Some(_), true) => return Err(ApiError::invalid("attach", "Select one display source")),
+        (None, true) => Some((DisplayTarget::Desktop, None)),
+        (Some(server), false) => Some((
+            DisplayTarget::Endpoint(format!("127.0.0.1:{}", server.port)),
+            server.password,
+        )),
+        (None, false) => None,
+    };
+    let row = match source {
+        Some((target, password)) => {
+            if body.geometry.is_some() || body.name.is_some() {
+                return Err(ApiError::invalid(
+                    "attach",
+                    "An attached display gets its name and geometry from its VNC server",
+                ));
+            }
+            displays
+                .adopt(orch_engine::displays::AdoptDisplay {
+                    environment,
+                    requester,
+                    thread: query.thread,
+                    target,
+                    password,
+                    note: None,
+                    origin,
+                })
+                .await
+        }
+        None => {
+            displays
+                .open(OpenDisplay {
+                    environment,
+                    requester,
+                    thread: query.thread,
+                    name: body.name,
+                    geometry: body.geometry,
+                    note: None,
+                    origin,
+                })
+                .await
+        }
+    };
     tx.commit().await.map_err(orch_db::DbError::from)?;
     match row {
         Ok(row) => super::interactive_creation::display_created(&ctx, &caller, &row).await,

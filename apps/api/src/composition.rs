@@ -16,7 +16,7 @@ use orch_config::ServerConfig;
 use orch_db::Db;
 use orch_db::secrets::MasterKey;
 use orch_notifier_email::EmailNotifier;
-use orch_notifier_push::{PushNotifier, Vapid};
+use orch_notifier_push::{Contact, PushNotifier, Vapid};
 use orch_notifier_telegram::TelegramNotifier;
 use orch_notifier_webhook::WebhookNotifier;
 use orch_pki::ca::CaFiles;
@@ -37,10 +37,6 @@ const MASTER_KEY_FILE: &str = "orch_master_key";
 const NODE_TOKEN_FILE: &str = "node_enrollment_token";
 /// The file of the key that signs Web Push messages in the secrets directory.
 const VAPID_KEY_FILE: &str = "orch_vapid_private_key";
-/// How often the bundled node's token is tried again while there is nobody
-/// yet to make it in the name of: the first administrator is a person doing
-/// the first thing there is to do, and the try is one query.
-const NODE_TOKEN_RETRY: Duration = Duration::from_secs(10);
 /// How often the API writes its heartbeat: as often as the worker writes its
 /// own (its `heartbeat` job), so that one reading of staleness fits every part.
 const API_HEARTBEAT: Duration = Duration::from_secs(15);
@@ -95,14 +91,39 @@ fn read_secrets(dir: &Path) -> anyhow::Result<Secrets> {
 /// The notifiers of this deployment, which the requests that set channels up
 /// and try them know: the same ones the worker delivers through. Web Push is
 /// among them where the deployment has a key for it.
-fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifiers> {
+fn public_address_contact(db: &Db, config: &ServerConfig) -> Contact {
+    let db = db.clone();
+    let seed = config.system.address_seed();
+    Contact::new(move || {
+        let db = db.clone();
+        let seed = seed.clone();
+        async move {
+            let unavailable = |_| {
+                orch_notifier_contract::delivery::DeliverError::temporary(
+                    "message",
+                    "The effective public address cannot be read",
+                )
+            };
+            let mut conn = db.acquire().await.map_err(unavailable)?;
+            Ok(
+                orch_db::queries::public_addresses::read(&mut conn, &seed, SystemClock.now())
+                    .await
+                    .map_err(unavailable)?
+                    .addresses
+                    .public_url,
+            )
+        }
+    })
+}
+
+fn notifiers(secrets_dir: &Path, contact: Contact) -> anyhow::Result<Notifiers> {
     let mut notifiers = Notifiers::new();
     notifiers.register(Arc::new(EmailNotifier::new()))?;
     notifiers.register(Arc::new(WebhookNotifier::new()))?;
     notifiers.register(Arc::new(TelegramNotifier::new()))?;
     let key_file = secrets_dir.join(VAPID_KEY_FILE);
     if key_file.is_file() {
-        match web_push(config, &key_file) {
+        match web_push(&key_file, contact) {
             Ok(push) => {
                 // Meta tells browsers the public half; the private half stays with the notifier.
                 orch_api_core::routes::notifications::install_push_public_key(
@@ -131,13 +152,11 @@ fn builtin_sources() -> anyhow::Result<Arc<BuiltinSources>> {
     Ok(Arc::new(sources))
 }
 
-fn web_push(config: &ServerConfig, key_file: &Path) -> anyhow::Result<PushNotifier> {
+fn web_push(key_file: &Path, contact: Contact) -> anyhow::Result<PushNotifier> {
     let secret = orch_config::read_secret(key_file)?;
     let key = std::str::from_utf8(secret.expose()).context("the key is not text")?;
-    let vapid = Vapid::read(key, &config.system.public_url).context(
-        "the key, with [system] public_url as the sender's address, which must start with https://",
-    )?;
-    Ok(PushNotifier::new(vapid))
+    let vapid = Vapid::read(key).context("reading the Web Push signing key")?;
+    Ok(PushNotifier::new(vapid, contact))
 }
 
 /// Runs the service until it is asked to stop.
@@ -202,6 +221,13 @@ pub async fn run(
         orch_db::migrations::ensure_partitions(&mut conn, clock.now())
             .await
             .context("making partitions")?;
+        orch_db::queries::public_addresses::read(
+            &mut conn,
+            &config.system.address_seed(),
+            clock.now(),
+        )
+        .await
+        .context("reading the effective public addresses")?;
     }
 
     first_start(&db, clock.as_ref())
@@ -243,7 +269,8 @@ pub async fn run(
     ));
     // The ways out of the application that channels and destinations can be made from.
     orch_api_core::routes::notifications::install_notifiers(
-        notifiers(&config, launch.secrets_dir).context("the notifiers")?,
+        notifiers(launch.secrets_dir, public_address_contact(&db, &config))
+            .context("the notifiers")?,
     );
     let link = match &secrets {
         Some(secrets) => Link::new(LinkParts {
@@ -282,8 +309,14 @@ pub async fn run(
     ));
     if secrets.is_some() {
         let token_file = launch.secrets_dir.join(NODE_TOKEN_FILE);
-        if token_file.is_file() {
-            tokio::spawn(register_node_token(link.clone(), token_file, stop.clone()));
+        if !matches!(token_file.try_exists(), Ok(false)) {
+            let certificates = link.certificates().clone();
+            let cancelled = stop.clone();
+            tokio::spawn(async move {
+                certificates
+                    .register_bundled_node(&token_file, cancelled)
+                    .await
+            });
         }
     }
 
@@ -412,6 +445,7 @@ pub async fn run(
         app.link
             .certificates()
             .keep_frontend_certificate(&config)
+            .await
             .context("the web edge’s certificate")?;
     }
     // The API's own certificate as its listeners show it, renewed in place while it runs.
@@ -569,9 +603,6 @@ async fn heartbeat(
     }
 }
 
-/// Registers the token of the bundled node, and waits for the first
-/// administrator if there is none yet, so that a system that has just been
-/// started needs no second start to have its node.
 /// Keeps the API's own certificate current until `stop`: once two thirds of its life have passed,
 /// the API issues itself another from the authority beside it, which its listeners show from their
 /// next handshake while the connections that stand keep theirs. A failure is tried again at the
@@ -595,6 +626,7 @@ async fn keep_certificate(
                 .link
                 .certificates()
                 .keep_frontend_certificate(&app.config)
+                .await
         {
             tracing::warn!(%error, "the web edge’s certificate could not be renewed");
         }
@@ -616,29 +648,6 @@ async fn keep_certificate(
                 %error,
                 "the API's certificate could not be renewed; it tries again in an hour"
             ),
-        }
-    }
-}
-
-async fn register_node_token(link: Link, file: PathBuf, stop: CancellationToken) {
-    use orch_api_core::certificates::Adopted;
-    loop {
-        match link.certificates().adopt_token_file(&file).await {
-            Ok(Adopted::WaitingForAdministrator) => {
-                tracing::info!("the token of the bundled node waits for the first administrator");
-            }
-            Ok(adopted) => {
-                tracing::info!(?adopted, "the token of the bundled node");
-                return;
-            }
-            Err(fault) => {
-                tracing::warn!(%fault.detail, "the token of the bundled node was not registered");
-                return;
-            }
-        }
-        tokio::select! {
-            () = stop.cancelled() => return,
-            () = tokio::time::sleep(NODE_TOKEN_RETRY) => {}
         }
     }
 }
