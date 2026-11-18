@@ -5,6 +5,10 @@ finish what a power cut left half done. A source checkout includes deployment sc
 
 ## Updating
 
+Personal and service-account API keys from 0.1.2 stop working on upgrade. Issue replacement keys after updating, then replace the credentials used by your clients. Each new key has the form `opat_<key id>_<secret><checksum>`. The ID is a public UUID, the secret contains 32 random bytes in unpadded base64url, and the final six base62 characters encode a CRC32 checksum. Use the UUID to find its list or audit entry and to revoke it. Keep the whole bearer private. The one-time issuance response is the only place to copy it. [API key format and offline checksum](../development/api-surfaces.md#account-api-key-format)
+
+Browser push is set up automatically when its deployment key is usable; each person still chooses whether to enable notifications for their own browser.
+
 Management → System shows the running server version, the latest release from
 `[release] url` / `ORCH_RELEASE_URL` (this repository's GitHub releases by
 default), its notes and the exact host command. Lookups, including failures,
@@ -19,14 +23,13 @@ The server holds new turns and drains all work using the machine, including
 every unit on a node, before granting installation. Size and SHA-256 are
 checked before an atomic executable swap; the service manager restarts it.
 Updating remains visible until a new-version hello, or its refusal/failure.
-Local `update.auto = false` refuses web requests and names `orch-connector
-update` or `orch-node update`, which the operator can run as explicit local
-consent. Those commands leave the policy intact. A node below the accepted
-minimum still proves its certificate; its rejection carries an idle update
-grant only after the server has held new turns and drained all its units.
-It receives no ordinary session or lifecycle commands on the old build.
-A node with no common link protocol needs the local command; it never infers
-hosted-unit idleness locally.
+Explicit web Update remains available with Auto off and leaves `update.auto` unchanged.
+The operator can also run `orch-connector update` or `orch-node update` locally.
+An authenticated program below the accepted minimum can obtain its update grant without first
+establishing an ordinary connection, after the server has held new turns and drained all work
+using that machine, including every hosted unit. It receives no ordinary session or lifecycle
+commands on the old build. A program with no common link protocol needs its local update command;
+it never infers hosted-unit idleness from an empty local program list.
 Managed environment/provider connectors retain their own reviewed runtime
 Update workflow, which updates the image and connector together.
 
@@ -122,6 +125,16 @@ fails it loses native import; Carry names that build and uses neutral import
 where available. Otherwise, or when history will not
 fit, recent history goes in the handoff notice with the full transcript as a
 file. Profile overrides cannot restore the disabled import.
+
+A release may add native cases to a program's manifest. A build whose stored check passed every case it had stays
+Checked, with the new cases pending ("Checked · N checks pending"): nothing it had proved is taken away, and native import
+stays as the case that proves it left it. Within one look of the release schedule (every fifteen minutes; an interval of
+zero keeps this, like the reads, off) the background runs the pending cases of every kept build that was checked before,
+whatever its age. A host whose node is of an earlier release does not have the new cases: its check is not a failure, the
+build stays Checked, and the result says "not run by this node's version" until a host with the updated node runs them,
+so update standalone nodes with the server. A check that could not run at all (no host, a failed runner) leaves the last
+whole check as it was, and says that the later check did not run. A release's own pinned builds are not kept rows: the
+release certifies them with its manifest, and they show Checked from the day it is installed.
 
 Choose Shipped, Newest checked, Newest (untested), or Exact. Exact accepts a
 known version or fetches that exact vendor release with its checksum through

@@ -570,6 +570,7 @@ mod tests {
         };
         let manifest = crate::manifest::build(&parsed.header, parsed.entries.clone()).unwrap();
         let request = FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: orch_types::new_id(),
             job_id: Some(orch_types::new_id()),

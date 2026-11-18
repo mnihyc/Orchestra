@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-authz --test environments
+test -p orch-api-base --lib -- middleware::authentication::api_key::tests::
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-api-core --test me
+test -p orch-api-core --test service_accounts
+test -p orch-api-core --test key_activity
+test -p orch-api-core --test api_surfaces
+test -p orch-api-core --test kadmin_tokens
