@@ -4,7 +4,7 @@
  * screen's code is fetched.
  */
 import { matches as matchesQuery } from '@/features/finder/ranking';
-import type { ProviderListScope, ProviderStatus, UnitKind } from '@/generated/api-types';
+import type { EnvironmentStatus, ProviderListScope, ProviderStatus, UnitKind } from '@/generated/api-types';
 
 /** The one of `allowed` that `value` is, or nothing. */
 export function oneOf<Value extends string>(allowed: readonly Value[], value: unknown): Value | undefined {
@@ -25,6 +25,27 @@ export function matches(query: string, ...fields: readonly (string | null | unde
 }
 
 /** Whose providers the list shows. */
+export type AgentState = 'enabled' | 'disabled';
+
+export const AGENT_STATES: readonly AgentState[] = ['enabled', 'disabled'];
+
+export interface AgentsSearch {
+  q?: string;
+  state?: AgentState;
+  harness?: string;
+}
+
+export type EnvironmentKind = 'machine' | 'template';
+
+export const ENVIRONMENT_KINDS: readonly EnvironmentKind[] = ['machine', 'template'];
+export const ENVIRONMENT_STATUSES: readonly EnvironmentStatus[] = ['running', 'provisioning', 'recreating', 'moving', 'stopped', 'none', 'offline', 'failed', 'disabled', 'lost'];
+
+export interface EnvironmentsSearch {
+  q?: string;
+  kind?: EnvironmentKind;
+  status?: EnvironmentStatus;
+}
+
 export type ProviderView = ProviderListScope;
 
 export const PROVIDER_VIEWS: readonly ProviderView[] = ['mine', 'managed', 'usable', 'viewable', 'all'];

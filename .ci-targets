@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-config --lib
+test -p orch-api-core --lib -- backplane::reenrollment_tests::
+test -p orch-connector --test program -- platform_observations::a_machine_reviews_its_native_build_before_it_serves_a_shared_directory
+test -p orch-connector --test program -- platform_observations::a_connected_machine_completes_a_turn_with_its_own_registered_agent_program
+test -p orch-node --test program -- a_fresh_bundled_node_enrolls_and_comes_online_after_a_database_registration_failure

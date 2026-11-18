@@ -88,6 +88,8 @@ use orch_api_contract::binding::BindingAgent;
 
 use orch_api_contract::binding::BindingCanCreate;
 
+use orch_api_contract::binding::BindingDefaultEnvironment;
+
 use orch_api_contract::binding::BindingDefaults;
 
 use orch_api_contract::binding::BindingEnvironment;
@@ -1317,6 +1319,51 @@ fn environment_reason(
     }
 }
 
+/// The environment the nearest setting of `env.default_id` names for the threads started at `topic`, and the node
+/// whose setting it is: the topic itself, else its project, else its org.
+async fn named_default(conn: &mut Conn, topic: Id) -> ApiResult<Option<(Id, Option<Id>)>> {
+    let resolved = orch_settings::resolve(conn, Place::Node(topic), keys::ENV_DEFAULT_ID)
+        .await
+        .map_err(ApiError::internal)?
+        .resolved;
+    let Some(value) = resolved.value else {
+        return Ok(None);
+    };
+    let environment = serde_json::from_value::<Id>(value).map_err(ApiError::internal)?;
+    Ok(Some((environment, resolved.source.node)))
+}
+
+/// Why a thread cannot be started in the environment that is named the default, when it cannot: the reason its row
+/// carries, or that the caller may not see it at all.
+const ENVIRONMENT_NOT_SEEN: &str = "environment_not_seen";
+
+/// The environment that is named the default at `topic`, where its setting is when that is above the topic, and why
+/// the caller cannot use it when they cannot, so that a default that is passed over is said and not dropped in silence.
+async fn default_environment_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    listed: &[BindingEnvironment],
+    names: &crate::routes::access::page::NameBounds,
+) -> ApiResult<Option<BindingDefaultEnvironment>> {
+    let Some((environment, source)) = named_default(conn, topic).await? else {
+        return Ok(None);
+    };
+    let from = match source.filter(|node| *node != topic) {
+        Some(node) => names.refs(conn, principal, &[node]).await?.remove(&node),
+        None => None,
+    };
+    let reason = match listed.iter().find(|row| row.environment.id == environment) {
+        Some(row) => row.reason.clone(),
+        None => Some(ENVIRONMENT_NOT_SEEN.to_owned()),
+    };
+    Ok(Some(BindingDefaultEnvironment {
+        environment,
+        from,
+        reason,
+    }))
+}
+
 async fn environments_from(
     conn: &mut Conn,
     principal: &Principal,
@@ -1336,10 +1383,8 @@ async fn environments_from(
     let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let uses = history::environment_uses(conn, &ids, topic).await?;
     let hosts = environment_choice::hosts_of(conn, &ids).await?;
-    let default = environment_queries::default_for(conn, &ids)
+    let default = named_default(conn, topic)
         .await?
-        .into_iter()
-        .find(|(_, of)| *of == topic)
         .map(|(environment, _)| environment);
     let topic_name = thread_rows::node_name(conn, topic)
         .await?
@@ -1367,6 +1412,16 @@ async fn environments_from(
         .filter_map(|row| row.machine_id)
         .collect();
     let machines = machine_refs(app, conn, &machine_ids).await?;
+    let readable_ids: Vec<_> = machine_ids
+        .into_iter()
+        .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+        .collect();
+    let capacity = orch_api_base::routes::environments::places::machine_capacities(
+        conn,
+        principal,
+        &readable_ids,
+    )
+    .await?;
     let mut topic_ids: Vec<Id> = uses.iter().flat_map(|each| each.topics.clone()).collect();
     topic_ids.sort_unstable();
     topic_ids.dedup();
@@ -1401,9 +1456,15 @@ async fn environments_from(
         } else {
             2
         };
+        let machine = row
+            .machine_id
+            .filter(|_| row.placement == "connected")
+            .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+            .and_then(|id| machines.get(&id).cloned());
         listed.push((
             group,
             BindingEnvironment {
+                capacity: machine.as_ref().and_then(|m| capacity.get(&m.id)).cloned(),
                 owner: Some(environment.owner.clone()),
                 grouping: {
                     let mut metadata = grouped
@@ -1437,13 +1498,7 @@ async fn environments_from(
                         name: name.clone(),
                         address: host_addresses.get(host).cloned().unwrap_or_default(),
                     }),
-                machine: row
-                    .machine_id
-                    .filter(|_| row.placement == "connected")
-                    .filter(|machine| {
-                        projection.is_none_or(|projection| projection.machines.contains(machine))
-                    })
-                    .and_then(|machine| machines.get(&machine).cloned()),
+                machine,
                 threads: used_here.map_or(0, |used| used.threads),
                 usable: reason.is_none(),
                 reason: reason.map(str::to_owned),
@@ -1844,6 +1899,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
         providers,
         environments,
         environment_default,
+        default_environment: None,
         source,
         access,
         agent_access: None,

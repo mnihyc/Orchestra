@@ -221,10 +221,6 @@ const MILLIS_PER_SECOND: i64 = 1_000;
 /// The longest name a machine has.
 const MAX_NAME_CHARS: usize = 80;
 
-/// What the token the system made for its own node is called in the audit
-/// trail.
-const BOOTSTRAP_HINT: &str = "bundled node";
-
 /// What the certificates are made under.
 #[derive(Debug, Clone)]
 pub struct CertificateSettings {
@@ -243,8 +239,8 @@ pub struct CertificateSettings {
     pub endpoints: Vec<Endpoint>,
     /// What the system is called.
     pub system_name: String,
-    /// The address people reach it at.
-    pub public_url: String,
+    /// File addresses may seed the system store; enrollment replies read the current snapshot.
+    pub address_seed: orch_api_contract::public_addresses::PublicAddresses,
 }
 
 impl CertificateSettings {
@@ -259,7 +255,7 @@ impl CertificateSettings {
             token_ttl: Duration::from_secs(config.pki.enrollment_token_ttl_secs),
             endpoints: config.gateway.advertised_endpoints(),
             system_name: config.system.name.clone(),
-            public_url: config.system.public_url.clone(),
+            address_seed: config.system.address_seed(),
         }
     }
 }
@@ -474,6 +470,8 @@ struct Inner {
     authority: Arc<CertificateAuthority>,
     settings: CertificateSettings,
     catalogue: RwLock<Vec<orch_link_contract::gateways::GatewayInstance>>,
+    bundled_registration: RwLock<Option<orch_api_contract::admin::BundledNodeEnrollment>>,
+    bundled_retry: tokio::sync::Notify,
     catalogue_write: tokio::sync::Mutex<()>,
 }
 
@@ -662,6 +660,8 @@ impl CertificateService {
                 clock,
                 authority,
                 catalogue: RwLock::new(settings.gateways.clone()),
+                bundled_registration: RwLock::default(),
+                bundled_retry: tokio::sync::Notify::new(),
                 catalogue_write: tokio::sync::Mutex::new(()),
                 settings,
             }),
@@ -953,29 +953,24 @@ impl CertificateService {
     /// Registers the token that `compose-secrets` wrote for the bundled
     /// node, in the name of the first system administrator.
     pub async fn adopt_token_file(&self, path: &Path) -> Result<Adopted, LinkFault> {
-        let text = std::fs::read_to_string(path).map_err(|error| {
-            LinkFault::internal(&format!(
-                "the token file {} cannot be read: {error}",
-                path.display()
-            ))
-        })?;
-        let token: EnrollmentToken = text
-            .trim()
-            .parse()
-            .map_err(|_| LinkFault::invalid("the token file does not hold a token"))?;
-        if !token.pins(&self.inner.authority.pin()) {
-            return Err(LinkFault::invalid(
-                "the token file was made under another authority",
-            ));
-        }
+        let token = bundled::read_file(path, self)
+            .await
+            .map_err(|failure| failure.fault())?;
+        self.adopt_bundled_token(&token).await
+    }
+
+    async fn adopt_bundled_token(&self, token: &EnrollmentToken) -> Result<Adopted, LinkFault> {
         let hash = raw_hash(&token_digest(token.secret()));
         let expires_at = utc(self.inner.clock.time())
             + chrono::Duration::seconds(i64::try_from(BOOTSTRAP_TOKEN_SECS).unwrap_or(i64::MAX));
-        let mut conn = self.inner.db.acquire().await?;
-        if resources::extend_unused_token(&mut conn, &hash, expires_at).await? {
+        let mut tx = self.inner.db.begin().await?;
+        if resources::extend_unused_token(&mut tx, &hash, expires_at).await? {
+            sqlx::query("UPDATE enrollment_tokens SET bundled_with_server=true,access='only_me' WHERE token_hash=$1 AND purpose='host' AND again_machine_id IS NULL AND used_at IS NULL")
+                .bind(&hash).execute(&mut *tx).await.map_err(DbError::from)?;
+            tx.commit().await.map_err(DbError::from)?;
             return Ok(Adopted::AlreadyKnown);
         }
-        let Some(created_by) = resources::first_system_admin(&mut conn).await? else {
+        let Some(created_by) = resources::first_system_admin(&mut tx).await? else {
             return Ok(Adopted::WaitingForAdministrator);
         };
         let row = TokenRow {
@@ -983,13 +978,16 @@ impl CertificateService {
             created_by,
             purpose: "host".to_owned(),
             org_id: None,
-            name_hint: Some(BOOTSTRAP_HINT.to_owned()),
+            name_hint: None,
             expires_at,
             used_at: None,
             machine_id: None,
             again_machine_id: None,
         };
-        let stored = resources::insert_enrollment_token(&mut conn, &row).await?;
+        let stored = resources::insert_enrollment_token(&mut tx, &row).await?;
+        sqlx::query("UPDATE enrollment_tokens SET bundled_with_server=true,access='only_me' WHERE token_hash=$1 AND purpose='host' AND again_machine_id IS NULL AND used_at IS NULL")
+            .bind(&row.token_hash).execute(&mut *tx).await.map_err(DbError::from)?;
+        tx.commit().await.map_err(DbError::from)?;
         Ok(if stored {
             Adopted::Registered
         } else {
@@ -1099,7 +1097,18 @@ impl CertificateService {
         }
         let now = utc(inner.clock.time());
         let certificate = &enrolled.certificate;
-        let name: String = request.name.trim().chars().take(MAX_NAME_CHARS).collect();
+        // A runtime token describes a unit; its hint is internal provenance, not a name from Add.
+        let chosen = row
+            .name_hint
+            .as_deref()
+            .filter(|_| row.purpose != "runtime")
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let name: String = chosen
+            .unwrap_or(request.name.trim())
+            .chars()
+            .take(MAX_NAME_CHARS)
+            .collect();
         let roles: Vec<String> = request.roles.iter().map(wire).collect();
         let host = row.purpose == "host";
         let runtime = if row.purpose == "runtime" {
@@ -1140,7 +1149,7 @@ impl CertificateService {
                 platform_os: &wire(&request.platform.os),
                 platform_arch: &wire(&request.platform.arch),
                 connector_version: &request.connector_version,
-                protocol_version: i32::try_from(enrolled.protocol_version).unwrap_or(1),
+                protocol_version: i32::try_from(enrolled.protocol_version).unwrap_or(2),
                 cert_serial: &serial,
                 cert_fingerprint: &fingerprint,
                 cert_not_after: utc(certificate.not_after()),
@@ -1224,6 +1233,8 @@ impl CertificateService {
                 now,
             )
             .await?;
+            sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1 AND EXISTS(SELECT 1 FROM enrollment_tokens WHERE token_hash=$2 AND bundled_with_server)")
+                .bind(host_id).bind(&hash).execute(&mut *tx).await.map_err(DbError::from)?;
             // Its page keeps the token maker as first owner and applies only the choice bound to that token.
             ownership::start_resource(
                 &mut tx,
@@ -1261,6 +1272,14 @@ impl CertificateService {
         let advertisement = self.gateway_advertisement();
         let endpoints =
             endpoints_for_machine(&mut tx, enrolled.machine_id, &advertisement.endpoints).await?;
+        let public_url = orch_db::queries::public_addresses::read(
+            &mut tx,
+            &inner.settings.address_seed,
+            inner.clock.now(),
+        )
+        .await?
+        .addresses
+        .public_url;
         if let Some(boundary) = &host_frame {
             boundary
                 .check(inner.clock.as_ref())
@@ -1280,7 +1299,7 @@ impl CertificateService {
             endpoints,
             system: EnrollReplySystem {
                 name: inner.settings.system_name.clone(),
-                public_url: inner.settings.public_url.clone(),
+                public_url,
             },
             protocol_version: enrolled.protocol_version,
         })
@@ -1531,9 +1550,91 @@ impl CertificateService {
         )
     }
 
-    /// Keeps the web edge's certificate current under this system's existing authority.
-    pub fn keep_frontend_certificate(&self, config: &ServerConfig) -> Result<(), PkiError> {
-        frontend::keep(&self.inner.authority, config, self.inner.clock.as_ref())
+    /// Keeps the web edge's certificate current using the committed addresses, serialized with publication.
+    pub async fn keep_frontend_certificate(&self, config: &ServerConfig) -> Result<(), PkiError> {
+        let Some(mut publication) =
+            orch_db::queries::public_addresses::try_publication_lock(&self.inner.db)
+                .await
+                .map_err(|error| PkiError::Certificate(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let Some(_files) = frontend::lock(config)? else {
+            return Ok(());
+        };
+        let mut conn = self
+            .inner
+            .db
+            .acquire()
+            .await
+            .map_err(|error| PkiError::Certificate(error.to_string()))?;
+        let addresses = orch_db::queries::public_addresses::read(
+            &mut conn,
+            &self.inner.settings.address_seed,
+            self.inner.clock.now(),
+        )
+        .await
+        .map_err(|error| PkiError::Certificate(error.to_string()))?;
+        drop(conn);
+        publication
+            .check()
+            .await
+            .map_err(|error| PkiError::Certificate(error.to_string()))?;
+        frontend::keep(
+            &self.inner.authority,
+            config,
+            &addresses.addresses,
+            self.inner.clock.as_ref(),
+        )
+    }
+
+    /// Stage a complete generation covering the current and proposed browser origins.
+    pub fn prepare_frontend_certificate(
+        &self,
+        config: &ServerConfig,
+        current: &orch_api_contract::public_addresses::PublicAddresses,
+        candidate: &orch_api_contract::public_addresses::PublicAddresses,
+    ) -> Result<frontend::Generation, PkiError> {
+        let mut addresses = current.clone();
+        addresses.alternate_urls.push(candidate.public_url.clone());
+        addresses
+            .alternate_urls
+            .extend(candidate.alternate_urls.iter().cloned());
+        frontend::prepare(
+            &self.inner.authority,
+            config,
+            &addresses,
+            self.inner.clock.as_ref(),
+            true,
+        )
+    }
+
+    /// Request this complete generation through the frontend's own reload watcher.
+    pub fn activate_frontend_certificate(
+        &self,
+        config: &ServerConfig,
+        generation: &frontend::Generation,
+    ) -> Result<(), PkiError> {
+        frontend::activate(config, generation)
+    }
+
+    /// A domain-separated proof of this installation, derived from its existing private authority.
+    /// It neither signs a certificate nor supplies a credential to the probe caller.
+    pub fn public_address_proof(
+        &self,
+        challenge: Id,
+    ) -> Result<orch_api_contract::public_addresses::PublicAddressProof, PkiError> {
+        let material = format!(
+            "orch-public-address-key-v1\n{}",
+            self.inner.authority.key_pem()
+        );
+        let derived = orch_types::Hash::of(material.as_bytes());
+        let key = orch_db::secrets::MasterKey::new(*derived.as_bytes());
+        let message = format!("orch-public-address-proof-v1:{challenge}");
+        let proof = key.fingerprint(message.as_bytes()).map_err(|_| {
+            PkiError::Signature("the installation proof could not be made".to_owned())
+        })?;
+        Ok(orch_api_contract::public_addresses::PublicAddressProof { challenge, proof })
     }
 
     /// Checks that a certificate chains to the authority and names somebody
@@ -1781,6 +1882,9 @@ pub(crate) async fn endpoints_for_machine(
     }
     Ok(system.to_vec())
 }
+
+#[path = "certificates/bundled.rs"]
+mod bundled;
 
 #[path = "certificates/frontend.rs"]
 pub mod frontend;

@@ -333,3 +333,6 @@ async fn a_thread_reports_colocation_or_unknown_and_does_not_expose_it_to_a_stra
         404
     );
 }
+
+#[path = "gateways/public_addresses.rs"]
+mod public_addresses;

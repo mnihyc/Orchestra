@@ -228,6 +228,10 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     if (act.method === 'POST' && parts[4] === 'stop' && record(answer) && answer.id === parts[3]) {
       return [{ collection: { key, identity: 'id', id: parts[3], data: answer }, cancelPending: true }];
     }
+    if (act.method === 'POST' && parts[4] === 'stop' && record(answer) && answer.projection === 'receipt'
+      && answer.host_id === parts[1] && answer.runtime_id === parts[3]) {
+      return [{ missing: [{ key, exact: true }], cancelPending: true }];
+    }
     // Removal may be scheduled. Its acknowledgement cannot say which rows remain on the host.
     if (act.method === 'DELETE' && parts.length === 4) return [{ missing: [{ key, exact: true }], cancelPending: true }];
   }

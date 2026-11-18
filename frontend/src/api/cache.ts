@@ -2,7 +2,7 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { matches as matchesName } from '@/features/finder/ranking';
 import { ApiError } from '@/api/client';
-import type { Agent, Environment, Host, Machine, MachineProgram, MachineProgramCapability, MachinePrograms, McpServer, Mount, Provider, Skill, Template, Thread } from '@/generated/api-types';
+import type { Agent, Environment, Host, Machine, MachineProgram, MachineProgramCapability, MachineExecutionApproval, MachinePrograms, McpServer, Mount, Provider, Skill, Template, Thread } from '@/generated/api-types';
 import { isThreadForScreen } from '@/features/thread/cached';
 
 /** Cursors obtained with authoritative HTTP snapshots, cleared with the human session. */
@@ -75,13 +75,27 @@ function reportedCapability(value: unknown): value is MachineProgramCapability {
     && typeof value.policy_key === 'string' && textOrNull(value.reason);
 }
 
-/** The Programs API projects this same report; its authority comes only from the current authorized Machine row. */
-export function machineProgramsProjection(facts: unknown, access: unknown): MachinePrograms | null {
+function executionApproval(value: unknown): value is MachineExecutionApproval {
+  if (!record(value) || !record(value.subject)) return false;
+  const subject = value.subject;
+  const recognized = subject.kind === 'program'
+    ? typeof subject.harness_kind === 'string' && typeof subject.path === 'string'
+    : subject.kind === 'system' && record(subject.build) && typeof subject.build.os === 'string'
+      && typeof subject.build.arch === 'string' && typeof subject.build.executable === 'string';
+  return recognized && typeof value.at === 'string' && record(value.by) && typeof value.by.id === 'string'
+    && (value.by.kind === 'human' || value.by.kind === 'service') && typeof value.by.username === 'string'
+    && typeof value.by.display_name === 'string' && record(value.by.avatar)
+    && typeof value.by.avatar.text === 'string' && typeof value.by.avatar.color === 'number';
+}
+
+/** Native registry facts and server-verified people have separate inputs from the current Machine DTO. */
+export function machineProgramsProjection(facts: unknown, access: unknown, verified: unknown = []): MachinePrograms | null {
   if (!record(facts) || !record(facts.programs) || !record(access) || !strings(access.permissions)) return null;
   const report = facts.programs;
   if (!array(report.entries) || !report.entries.every(reportedProgram) || !array(report.capabilities) || !report.capabilities.every(reportedCapability)
     || !textOrNull(report.config_file) || typeof report.can_manage !== 'boolean') return null;
   return { entries: report.entries, capabilities: report.capabilities, config_file: report.config_file,
+    approvals: array(verified) && verified.every(executionApproval) ? verified : [],
     can_manage: access.permissions.some((permission) => permission === 'machine.manage' || permission === 'host.manage') };
 }
 
@@ -120,6 +134,28 @@ function overlay(before: Record<string, unknown>, row: Record<string, unknown>):
     next[key] = key !== 'access' && record(old) && record(value) ? overlay(old, value) : value;
   }
   return next;
+}
+
+/** The JSON type of a member: what tells one answer's shape from another's. */
+function memberType(value: unknown): string {
+  return value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+}
+
+/** Whether an object that carries a row's identifier is a view of that row, so that the row may be written over it.
+ *
+ * A row is found in the loaded data by its identifier alone, and other answers name the same thing in a shape of
+ * their own: a listing of what an agent reaches gives a thread a `path` of text, where the thread's own row has a
+ * `path` of references. Such an object belongs to its own answer and stays as the server gave it. A view of the row
+ * agrees with it on the type of every member both of them have, through the objects inside; a member that either
+ * side leaves empty decides nothing. */
+function viewOf(before: Record<string, unknown>, row: Record<string, unknown>): boolean {
+  return Object.keys(before).every((key) => {
+    if (!(key in row)) return true;
+    const old = before[key]; const value = row[key];
+    if (old === null || old === undefined || value === null || value === undefined) return true;
+    if (memberType(old) !== memberType(value)) return false;
+    return key === 'access' || !record(old) || !record(value) || viewOf(old, value);
+  });
 }
 
 /** References and node summaries may rename a thread, never overwrite its capabilities or binding. */
@@ -169,9 +205,9 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
       if (typeof before.state === 'string' && typeof state === 'string') next.state = state;
     } else next = before.kind === 'thread' && record(before.access)
       ? thread === undefined ? threadMetadata(before, change.value) : { ...thread }
-      : complete ? {...change.value} : overlay(before, change.value);
+      : complete ? {...change.value} : viewOf(before, change.value) ? overlay(before, change.value) : before;
     // References and inventory rows name the object kind; a rich provider/template DTO names its subtype.
-    if (typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
+    if (next !== before && typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
     // Everything wraps the native DTO in a tagged resource, with its own name/state columns.
     if (record(before.resource) && before.resource.kind === change.kind && change.partial !== true) {
       next = { ...next, resource: { ...before.resource, value: change.value } };
@@ -335,6 +371,107 @@ export function applyThread(cache: QueryClient, thread: Thread): void {
   writeRow(cache, { kind: 'thread', id: thread.id, value: { ...thread }, insert: true }, thread);
 }
 
+/** Only the declarations that can change directory choices; load samples do not change them. */
+function directoryDeclarations(kind: string, value: unknown): unknown {
+  if (!record(value)) return null;
+  if (kind === 'host') return [value.drivers, Array.isArray(value.storages)
+    ? value.storages.map((storage: unknown) => record(storage) ? [storage.name, storage.default] : storage) : value.storages, value.access];
+  const facts = record(value.facts) ? value.facts : {};
+  const descriptor = record(facts.environment_descriptor) ? facts.environment_descriptor.data_storage : null;
+  return [value.connector_version, value.roles, descriptor, facts.policy, value.access];
+}
+
+const projectionRefreshes = new WeakMap<object, object>();
+
+function refreshProjection(cache:QueryClient,key:QueryKey,removed:boolean):void {
+  const query=cache.getQueryCache().find({queryKey:key,exact:true});
+  if(query===undefined)return;
+  if(!query.isActive()){cache.removeQueries({queryKey:key,exact:true});return;}
+  const intent={};projectionRefreshes.set(query,intent);
+  const cancelled=query.cancel({revert:false,silent:true});
+  if(removed){query.setState({data:undefined,error:new ApiError({type:'orch:error:not_found',code:'not_found',title:'',detail:'',status:404,request_id:''},null),status:'error',fetchStatus:'idle'});return;}
+  query.setState({data:undefined,error:null,status:'pending',fetchStatus:'idle'});
+  void cancelled.then(()=>{
+    if(projectionRefreshes.get(query)!==intent||cache.getQueryCache().find({queryKey:key,exact:true})!==query)return;
+    if(!query.isActive()){cache.removeQueries({queryKey:key,exact:true});return;}
+    return cache.refetchQueries({queryKey:key,exact:true});
+  });
+}
+
+const machineOf=(value:unknown):string|null=>record(value)&&record(value.machine)&&typeof value.machine.id==='string'?value.machine.id:null;
+
+/** A resource row omits this independently authorized projection; refresh only the exact shown read. */
+function refreshDirectoryProjection(cache: QueryClient, change: RowChange['row'], previous: unknown): void {
+  if ((change.kind !== 'host' && change.kind !== 'machine') || change.partial === true) return;
+  if (change.value !== null && JSON.stringify(directoryDeclarations(change.kind, previous))
+    === JSON.stringify(directoryDeclarations(change.kind, change.value))) return;
+  const machines=change.kind==='machine'?[change.id]:[machineOf(previous),machineOf(change.value)];
+  for(const machine of new Set(machines))if(machine!==null)refreshProjection(cache,['machine-environment-data',machine],change.value===null);
+}
+
+function gatewaySource(kind:string,value:unknown):unknown {
+  if(!record(value))return null;
+  if(kind==='host')return [machineOf(value),record(value.machine)?value.machine.online:null,value.access];
+  return [value.online,record(value.facts)?value.facts.gateway:null,value.access];
+}
+
+/** Gateway presence and choice are native facts, independent of load and other resource edits. */
+function refreshGatewayProjection(cache:QueryClient,change:RowChange['row'],previous:unknown):void {
+  if((change.kind!=='host'&&change.kind!=='machine')||change.partial===true)return;
+  if(change.value!==null&&JSON.stringify(gatewaySource(change.kind,previous))===JSON.stringify(gatewaySource(change.kind,change.value)))return;
+  const machines=change.kind==='machine'?[change.id]:[machineOf(previous),machineOf(change.value)];
+  for(const machine of new Set(machines))if(machine!==null){
+    for(const query of cache.getQueryCache().findAll({queryKey:['machine-gateway',machine]}))refreshProjection(cache,query.queryKey,change.value===null);
+  }
+}
+
+/** Only rows for which the picker received a machine measurement may follow that machine. */
+export function measuredPlaces(head: unknown, data: unknown): Record<string, unknown>[] {
+  let rows: unknown;
+  if (head === 'places' || head === 'environment-move-places') rows = data;
+  else if ((head === 'start-options' || head === 'thread-binding-options') && record(data)) rows = data.environments;
+  if (!array(rows)) return [];
+  return rows.filter((row): row is Record<string, unknown> => record(row) && record(row.capacity) && machineOf(row) !== null);
+}
+
+const capacityFields = ['cpus', 'memory_bytes', 'data_volume_bytes', 'capacity_refresh_secs'] as const;
+
+function refreshMeasuredPlaces(cache: QueryClient, change: RowChange['row']): void {
+  if (change.kind !== 'machine' || change.partial === true) return;
+  const facts = change.value?.facts;
+  for (const query of cache.getQueryCache().getAll()) {
+    const shown = measuredPlaces(query.queryKey[0], query.state.data).find((row) => machineOf(row) === change.id);
+    if (shown === undefined || !record(shown.capacity)) continue;
+    if (change.value === null) {
+      // Clear the previous projection before checking what is still visible.
+      refreshProjection(cache, query.queryKey, false);
+      continue;
+    }
+    const capacity = shown.capacity;
+    if (record(facts) && capacityFields.some((field) => (facts[field] ?? null) !== (capacity[field] ?? null))) {
+      void cache.invalidateQueries({ queryKey: query.queryKey, exact: true });
+    }
+  }
+}
+
+function samePlatformBuild(one: unknown, other: unknown): boolean {
+  return record(one) && record(other) && ['os', 'arch', 'executable'].every((key) => typeof one[key] === 'string' && one[key] === other[key]);
+}
+
+/** A machine row signals a changed review. The policy's own read still decides what the viewer can inspect. */
+function refreshPlatformReview(cache: QueryClient, change: RowChange['row']): void {
+  if (change.kind !== 'machine' || change.partial === true) return;
+  const key = ['machine-policy', change.id], held = cache.getQueryData(key);
+  if (!record(held) || !record(held.platform_review)) return;
+  if (change.value === null) { refreshProjection(cache, key, true); return; }
+  const facts = change.value.facts;
+  if (!record(facts)) return;
+  const review = held.platform_review, build = facts.runtime_platform;
+  const choice = record(facts.policy) ? facts.policy['exec.platform'] : undefined;
+  const changedDecision = record(choice) && review.approved !== (choice.state === 'approved' && samePlatformBuild(choice.build, build));
+  if (!samePlatformBuild(review.build, build) || changedDecision) refreshProjection(cache, key, false);
+}
+
 function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread): void {
   const detail = DETAILS[change.kind] ?? change.kind;
   const held = cache.getQueryData([detail, change.id]);
@@ -348,6 +485,15 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
       }
     }
   }
+  if (change.kind === 'host' || change.kind === 'machine') {
+    const list = change.kind === 'host' ? 'hosts' : 'machines';
+    const directorySource = held ?? cache.getQueryCache().getAll().filter((query) => query.queryKey[0] === list)
+      .flatMap((query) => array(query.state.data) ? query.state.data : []).find((row: unknown) => record(row) && row.id === change.id);
+    refreshDirectoryProjection(cache, change, directorySource);
+    refreshGatewayProjection(cache, change, directorySource);
+    refreshMeasuredPlaces(cache, change);
+    refreshPlatformReview(cache, change);
+  }
   // A machine report carries its live registry too. Only update an already-open Programs
   // projection, using the API row's actual authority rather than the native report's flag.
   if(change.kind==='machine' && change.partial!==true) {
@@ -357,7 +503,7 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
         if(!query.isActive())cache.removeQueries({queryKey:query.queryKey,exact:true});
         else query.setState({data:undefined,error:new ApiError({type:'orch:error:not_found',code:'not_found',title:'',detail:'',status:404,request_id:''},null),status:'error',fetchStatus:'idle'});
       }else {
-        const programs=machineProgramsProjection(change.value.facts,change.value.access);
+        const programs=machineProgramsProjection(change.value.facts,change.value.access,change.value.execution_approvals);
         if(programs!==null) cache.setQueryData(query.queryKey,programs);
         else if(!query.isActive()) cache.removeQueries({queryKey:query.queryKey,exact:true});
         else {

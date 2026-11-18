@@ -953,7 +953,7 @@ it('applies program acknowledgements and live machine registry changes without a
   const cache=new QueryClient();
   const key=['machine-programs','machine'];
   cache.setQueryData(key,{entries:[],capabilities:[],config_file:null,can_manage:true});
-  const answer:MachinePrograms={entries:[{kind:'agent',name:'new-agent',command:['new-agent'],origin:'orch',ready:true,version:'1.0.0',
+  const answer:MachinePrograms={approvals:[],entries:[{kind:'agent',name:'new-agent',command:['new-agent'],origin:'orch',ready:true,version:'1.0.0',
     descriptor:{kind:'new-agent',harness:{name:'New agent'},sandbox_modes:['open'],approval_modes:['on_request']},models:null,detail:null}],
     capabilities:[],config_file:'/data/config.toml',can_manage:true};
   const acknowledged=findAct('POST','/machines/machine/programs',{answer,input:{action:'reload'}});

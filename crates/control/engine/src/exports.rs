@@ -1266,6 +1266,7 @@ pub struct Made {
 /// Immutable native creation operands selected on the writer's actual guarded connection.
 #[derive(Debug, Clone)]
 pub struct PreparedExportCreation {
+    source: orch_api_contract::package::PackageSource,
     selected: Selected,
     request: ExportRequest,
     user: Id,
@@ -1357,7 +1358,19 @@ impl Engine {
                 limit: self.inner.config.exports_per_user,
             });
         }
+        let deployment = &self.inner.config.deployment;
+        let addresses = orch_db::queries::public_addresses::read(
+            conn,
+            &deployment.address_seed,
+            self.inner.clock.now(),
+        )
+        .await?;
         Ok(PreparedExportCreation {
+            source: orch_api_contract::package::PackageSource {
+                name: deployment.name.clone(),
+                url: addresses.addresses.public_url,
+                version: deployment.version.clone(),
+            },
             selected,
             request: request.clone(),
             user: principal.user(),
@@ -1390,6 +1403,7 @@ impl Engine {
             serde_json::to_value(initial_progress(&the_job::PHASES)).map_err(EngineError::from)?;
         let plan = json!({
             "export": id,
+            "source": prepared.source,
             "user": user,
             "node": place,
             "credential": credential_of(caller),

@@ -14,8 +14,15 @@ Open **Resources → Machines → Add**, then choose its roles. **Environment** 
 you register; **Agent** runs agents; **Provider** keeps model credentials. These roles share
 one connector. **Node** is separate: it makes managed environments on a Linux host.
 Choose the home where you may add it. Connecting a machine does not share all its folders.
-Directory environments are available on Linux. macOS and Windows connectors can still connect
-for their other roles.
+On a fresh Linux connector, **Made by Orch** creates workspace and home directories in the connector’s private data storage. **Existing directory** offers the roots the machine owner has explicitly shared. Named storage or shared roots keep their configured locations.
+
+Linux directory environments work with the machine's ordinary policy. On macOS and Windows, go to **Machine → Policy → Native system review** to confirm the running connector build. Replacing the executable requires a fresh review. Revocation closes directory attachments and keeps their data. A registered agent program can run independently. On a reviewed Windows connector, shared-directory file operations and an existing loopback VNC server are available. Native process trees, terminals, mounts and listener forwarding have separate platform requirements. On macOS executors report the shell, installed program and sandbox modes they can actually use.
+
+The host installed with the server is marked **Server host** in the host list and overview.
+Its containers may share the server's kernel. Giving Host Use or handing over its ownership
+requires the server-host warning. `orchctl doctor --config <file> --only node` reports whether
+non-administrator accounts hold Host Use, including through higher permissions; an accepted
+sharing choice does not make the node's health check fail.
 
 ## Choose a gateway
 
@@ -29,9 +36,12 @@ on the primary and target attachment to finish; a selected primary never moves
 on its own.
 
 A selected gateway stays selected when it is unavailable or removed from the
-catalogue. Change that choice in the machine's local console or installer when
-you mean to replace it. Re-enrollment without a gateway flag retains the saved
-choice. The machine or Host overview's **Connector** card shows the reported
+catalogue. On a connected machine or Host overview, managers can use **Change gateway**
+in the **Connector** card, choose **Automatic** or an advertised gateway and **Save**.
+The enrolled identity stays the same; no new token or installer run is needed.
+The native answer is saved before reconnecting. The local console remains available,
+and a later local choice supersedes an older remote completion.
+Re-enrollment without a gateway flag retains the saved choice. The card shows the reported
 primary and selection. Automatic also shows the gateway measurements and when
 they were taken; **Not measured** is not a zero-latency result. **Refresh** reads
 the latest report with its original measurement time.

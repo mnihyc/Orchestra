@@ -927,7 +927,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 raw_events: false,
             },
             Arc::clone(&self.clock),
-            started.sink.clone(),
+            started.sink.for_opening(spec.opening_id),
             thread,
             spec.settings.segment_id,
             Some(home.join("outputs")),

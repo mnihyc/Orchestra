@@ -57,9 +57,9 @@ struct Journal {
     request: Hash,
     generation: i64,
     parent_device: u64,
-    parent_inode: u64,
+    parent_inode: crate::platform::FileNumber,
     stage_device: u64,
-    stage_inode: u64,
+    stage_inode: crate::platform::FileNumber,
     stage: String,
     base: String,
     created: bool,
@@ -125,7 +125,7 @@ struct Temporary {
     directory: platform::Dir,
     name: OsString,
     device: u64,
-    inode: u64,
+    inode: crate::platform::FileNumber,
 }
 impl Drop for Temporary {
     fn drop(&mut self) {

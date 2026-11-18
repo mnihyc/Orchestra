@@ -797,3 +797,49 @@ async fn an_executor_that_runs_a_harnesss_build_is_not_available_in_a_runtime_th
     );
     rig.stop().await;
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_fresh_connector_attaches_its_own_workspace_and_home_without_sharing_existing_directories()
+ {
+    let mut rig = EnvRig::new();
+    rig.config.environment.roots.clear();
+    rig.config.storage.clear();
+    rig.start().await;
+    let mut attach = attach_body(rig.environment, rig.data.path());
+    attach.data_sources = Some(Default::default());
+    attach.workspace_root = None;
+    attach.data_generation = Some(1);
+    let attached = rig.succeed(&attach).await;
+    let workspace = std::path::Path::new(attached["workspace_root"].as_str().unwrap());
+    let home = std::path::Path::new(attached["home"].as_str().unwrap());
+    assert!(workspace.starts_with(rig.data.path().join("environment-data")));
+    assert!(home.starts_with(rig.data.path().join("environment-data")));
+    assert_ne!(workspace, home);
+    std::fs::write(workspace.join("kept-note"), "keep").unwrap();
+    let listed = rig
+        .succeed(&FsList {
+            environment_id: rig.environment,
+            mount: None,
+            path: String::new(),
+            watch_id: None,
+            watch_instance: None,
+            page: None,
+        })
+        .await;
+    assert!(
+        listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "kept-note")
+    );
+    let other = attach_body(new_id(), workspace);
+    assert_eq!(
+        rig.fail(&other).await,
+        "policy.root_not_allowed",
+        "private storage cannot be claimed by another registration as a borrowed path"
+    );
+    assert_eq!(std::fs::read(workspace.join("kept-note")).unwrap(), b"keep");
+    rig.stop().await;
+}

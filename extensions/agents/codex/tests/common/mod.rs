@@ -724,6 +724,7 @@ pub fn plain_spec(
     native: Option<&str>,
 ) -> SessionSpec {
     SessionSpec {
+        opening_id: orch_types::new_id(),
         settings: SessionSettings {
             native_model: None,
             agent_id,

@@ -410,6 +410,9 @@ pub enum EnvironmentReason {
 /// An existing environment the caller manages, as a place to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaceEnvironment {
+    /// Capacity reported for a visible connected machine hosting this directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<MachineCapacity>,
     /// Stored home, protected origin and the native placement verdict.
     #[serde(default, flatten)]
     pub grouping: crate::resource_groups::ResourceGrouping,
@@ -472,15 +475,6 @@ pub struct ExecOffer {
     pub reason: Option<String>,
 }
 
-/// A manager's recorded consent for the current version of one machine program.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EnvironmentProgramApproval {
-    /// The person who allowed this program version.
-    pub by: crate::users::UserRef,
-    /// When the environment manager allowed it.
-    pub at: Time,
-}
-
 /// An executor supplied by a confirmed program on the connected machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMachineProgram {
@@ -491,7 +485,7 @@ pub struct EnvironmentMachineProgram {
     /// Its current probed version, or unknown.
     pub version: String,
     /// Consent matching this exact path and version, including a historical writer's reference.
-    pub approval: Option<EnvironmentProgramApproval>,
+    pub approval: Option<crate::machine_programs::ExecutionApproval>,
 }
 
 /// What an environment's exec node offers.
@@ -606,6 +600,9 @@ pub struct EnvironmentSupportBrowser {
 /// What an environment has to serve a display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentSupportVnc {
+    /// The machine can share its current local desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
     /// Programs found there that serve a display Orch can open.
     pub servers: Vec<EnvironmentSupportProgram>,
     /// The window manager that is started on a display Orch opens, where there is one.
@@ -638,6 +635,7 @@ impl EnvironmentSupport {
                 sandbox: None,
             },
             vnc: EnvironmentSupportVnc {
+                desktop: None,
                 servers: Vec::new(),
                 window_manager: None,
             },
@@ -1916,9 +1914,21 @@ pub struct EnvironmentMovePreflightBody {
     pub fingerprint_request_id: Option<Id>,
 }
 
+/// The latest machine capacity figures available to a placement reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineCapacity {
+    pub cpus: Option<i64>,
+    pub memory_bytes: Option<i64>,
+    pub data_volume_bytes: Option<i64>,
+    pub capacity_refresh_secs: Option<u64>,
+}
+
 /// A machine offering directory lifecycles, with its own policy and declared data-making support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MoveMachine {
+    /// Numbers from the current Machine facts, when the caller can read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<MachineCapacity>,
     /// Stored home and the same native directory-placement judgement.
     #[serde(default, flatten)]
     pub grouping: crate::resource_groups::ResourceGrouping,
