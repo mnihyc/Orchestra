@@ -255,6 +255,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         .call(NodeSettingSet, &[&c.acme, &"auto.summarizer"])
         .token(&c.admin.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: valid.clone(),
             locked: None,
             expected_revision: None,
@@ -273,6 +274,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
             .call(NodeSettingSet, &[&c.acme, &"auto.summarizer"])
             .token(&c.admin.token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value: invalid,
                 locked: Some(true),
                 expected_revision: Some(revision),
@@ -313,6 +315,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         .call(NodeSettingSet, &[&c.acme, &"auto.summarizer"])
         .token(&c.admin.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!({"kind":"no-such-producer","token":"do-not-echo"}),
             locked: None,
             expected_revision: Some(revision),
@@ -386,7 +389,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         "the built-in model uses its descriptor too"
     );
     let zero_budget = world.app.call(AdminSettingSet, &[&"auto.summarizer"]).token(&root.token)
-        .body(&AdminSettingSetBody { value: json!({"kind":"model","provider_id":Id::nil(),"model_name":"small","max_output_tokens":0}), locked: None, expected_revision: None }).send().await.problem();
+        .body(&AdminSettingSetBody { value: json!({"kind":"model","provider_id":Id::nil(),"model_name":"small","answer_max_output_tokens":0}), locked: None, expected_revision: None }).send().await.problem();
     assert_eq!(zero_budget.code, ErrorCode::RequestInvalid);
 }
 
@@ -416,6 +419,7 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
         .call(ProviderUpdate, &[&scene.on.provider])
         .token(&scene.ada.token)
         .body(&ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -440,6 +444,7 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
             .call(ProviderUpdate, &[&scene.on.provider])
             .token(&scene.ada.token)
             .body(&ProviderUpdateBody {
+                relay: None,
                 service_offerings: None,
                 model_group_options: None,
                 name: Some("Must not save".into()),

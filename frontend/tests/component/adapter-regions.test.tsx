@@ -12,9 +12,10 @@ import { JsonTree } from '@/ui/JsonTree';
 import { show } from './support';
 import { agentDescriptor } from '../doubles/agent-descriptor';
 
-const server = vi.hoisted(() => ({ detail: vi.fn<() => Promise<ProgramDetail>>(), builds: vi.fn<() => Promise<HarnessBuild[]>>(), legacy: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+const server = vi.hoisted(() => ({ detail: vi.fn<() => Promise<ProgramDetail>>(), builds: vi.fn<() => Promise<HarnessBuild[]>>(), legacy: vi.fn(), check: vi.fn<(build: HarnessBuild) => Promise<void>>() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/programAdmin', async (original) => ({ ...await original<object>(),
+  checkProgramBuild: server.check,
   adminProgramQuery: (kind: string) => ({ queryKey: ['admin', 'programs', kind, 'detail'], queryFn: server.detail }),
   adminProgramBuildsQuery: (kind: string, cursor: string | undefined) => ({ queryKey: ['admin', 'programs', kind, 'builds', cursor ?? null],
     queryFn: async () => ({ items: await server.builds(), next_cursor: null }) }),
@@ -54,6 +55,35 @@ beforeEach(async () => {
   server.builds.mockResolvedValue([build]);
 });
 afterEach(async () => { expect(server.legacy).not.toHaveBeenCalled(); cleanup(); vi.unstubAllGlobals(); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it.each(['checked', 'failed', 'untested'] as const)('shows the %s outcome beside the build after Check in ' + locale, async (status) => {
+    await setLocale(locale);
+    const error = status === 'untested' ? 'no host of linux x86_64 outside a personal home is online to check it on; it is checked when one is' : null;
+    server.check.mockImplementationOnce((asked) => {
+      server.builds.mockResolvedValue([{ ...asked, status, check: {
+        at: '2026-11-18T12:00:00Z', machine: error === null ? 'Build host' : null, stage: error === null ? 'complete' : 'interface', error, off: [], missing: [],
+        cases: status === 'untested' ? [] : [{ name: 'startup', feature: null, passed: status === 'checked', error: status === 'failed' ? 'The program exited before startup' : null, elapsed_ms: 1 }],
+      } }]);
+      return Promise.resolve();
+    });
+    show(<ProgramView />);
+    const table = await screen.findByRole('table', { name: i18n.t('admin.harnesses.buildsTitle') });
+    const row = within(table).getByRole('row', { name: new RegExp(name) });
+    await userEvent.click(within(row).getByRole('button', { name: i18n.t('admin.harnesses.check') }));
+    expect(server.check).toHaveBeenCalledWith(build);
+    if (status === 'untested') {
+      expect(await within(row).findByText(i18n.t('programVersions.couldNotCheck'))).toBeVisible();
+      expect(within(row).getByText(i18n.t('programVersions.checkNeedsHost', { os: i18n.t('admin.harnesses.systems.linux'), arch: 'x86_64' }))).toBeVisible();
+    } else if (status === 'failed') {
+      expect(await within(row).findByText(/The program exited before startup/u)).toBeVisible();
+      expect(row).toHaveTextContent(i18n.t('admin.harnesses.status.failed'));
+    } else {
+      expect(await within(row).findByText(i18n.t('admin.harnesses.status.checked'))).toBeVisible();
+    }
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+}
 
 it.each(['en', 'zh-CN'] as const)('keeps build metadata with its named row and opens the grouped capabilities in %s', async (locale) => {
   await setLocale(locale);

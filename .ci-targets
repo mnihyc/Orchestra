@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/adapter-regions.test.tsx tests/component/program-versions.test.tsx tests/component/harness-build-status.test.tsx tests/component/agent-profile-program-check.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts

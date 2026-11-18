@@ -970,7 +970,7 @@ impl Engine {
                 };
                 let hash = orch_types::Hash::of(bytes);
                 let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-                store
+                let publication = store
                     .put(
                         &hash,
                         Some(size),
@@ -983,6 +983,7 @@ impl Engine {
                 let name = entry.rel.rsplit('/').next().unwrap_or(&entry.rel);
                 let head = &bytes[..bytes.len().min(512)];
                 Ok(Ok(WorkspaceFile {
+                    _publication: Some(publication),
                     name: name.to_owned(),
                     size,
                     blob: hash,

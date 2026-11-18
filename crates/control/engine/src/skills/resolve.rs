@@ -48,6 +48,52 @@ impl Choice {
     }
 }
 
+/// Current delivered contexts configured to follow this skill's Latest version. The shared
+/// resolver retains place locks and personal-skill policy without a settings read per thread.
+pub async fn latest_followers(
+    conn: &mut Conn,
+    skill: Id,
+    threads: &[Id],
+) -> Result<HashSet<Id>, EngineError> {
+    if threads.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let choices = orch_settings::get_at_nodes::<Json>(conn, threads, keys::AGENTS_SKILLS).await?;
+    let allowed =
+        orch_settings::get_at_nodes::<bool>(conn, threads, keys::AGENTS_PERSONAL_SKILLS).await?;
+    let homes: Vec<(Id, Option<Id>, Id)> = sqlx::query_as(
+        "SELECT n.id,u.personal_org_id,k.org_id FROM nodes n JOIN threads t ON t.node_id=n.id LEFT JOIN users u ON u.id=n.created_by JOIN skills k ON k.id=$2 WHERE n.id=ANY($1) AND n.deleted_at IS NULL",
+    ).bind(threads).bind(skill).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let own = homes
+        .iter()
+        .filter_map(|(_, own, _)| *own)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let personal = orch_settings::get_at_nodes::<Json>(conn, &own, keys::AGENTS_SKILLS).await?;
+    let member = skill.to_string();
+    let choice = |values: &HashMap<Id, Option<Json>>, at: Id| {
+        values
+            .get(&at)
+            .and_then(Option::as_ref)
+            .and_then(|value| value.get(member.as_str()))
+            .and_then(Choice::read)
+    };
+    Ok(homes
+        .into_iter()
+        .filter_map(|(thread, own, org)| {
+            let selected = match choice(&choices, thread) {
+                Some(choice) => Some(choice),
+                None if allowed.get(&thread).copied().flatten().unwrap_or(true) => own
+                    .filter(|own| *own == org)
+                    .map(|own| choice(&personal, own).unwrap_or(Choice::Latest)),
+                None => None,
+            };
+            (selected == Some(Choice::Latest)).then_some(thread)
+        })
+        .collect())
+}
+
 /// One skill named for the thread, before it is checked.
 #[derive(Debug, Clone)]
 struct Named {
