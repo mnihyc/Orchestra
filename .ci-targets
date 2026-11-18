@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test users --test provider_models --test me --test personal_state_scope
+test -p orch-api-core --test documents --test document_discovery --test hidden_rows --test machine_leaf_reader_scopes --test admin_catalogue
+test -p orch-api-core --test thread_history_pages --test threads_read --test thread_continuation_search --test thread_history_scale
+test -p orch-db --test released_migrations

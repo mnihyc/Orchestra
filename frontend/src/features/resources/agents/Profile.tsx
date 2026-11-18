@@ -24,7 +24,8 @@ import { useAgentActs } from '@/features/resources/agents/acts';
 import { DescriptorOverrides } from '@/features/resources/agents/Overrides';
 import { type DescriptorView, harnessSupportWords, harnessVersionWords, humanize, readDescriptor, reportedHarnessName, versionPin } from '@/features/resources/agents/descriptor';
 import { Facts } from '@/features/resources/Facts';
-import { DetailPages, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
+import { CompleteCollection } from '@/ui/CompleteCollection';
+import { DETAIL_PAGE_ROWS, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { Hint } from '@/features/help/Hint';
 import { SourceSettingLink } from '@/features/settings/SourceSettingLink';
 import { useSay } from '@/features/settings/SettingRow';
@@ -205,13 +206,13 @@ function Parameters({ agent, descriptor }: { agent: Agent; descriptor: Descripto
   return (
     <Section id="agent-parameters" title={t('agents.parameters.title')}>
       <p className="text-sm text-text-muted">{t('resourceDetails.layout.parametersHere')}</p>
-      <DetailPages items={descriptor.parameters}>{(parameters) => <ul aria-label={t('agents.parameters.title')} className="divide-y divide-border rounded-lg border border-border">
+      <CompleteCollection label={t('agents.parameters.title')} items={descriptor.parameters} textOf={(parameter) => `${parameter.title} ${parameter.key} ${parameter.description}`} pageRows={DETAIL_PAGE_ROWS} scroll>{(parameters) => <ul aria-label={t('agents.parameters.title')} className="divide-y divide-border rounded-lg border border-border">
         {parameters.map((parameter) => <SettingRowLayout key={parameter.key} name={parameter.title} description={parameter.description} readOnly
           value={<ParameterDefault value={parameter.default} />}
           reason={<SourceSettingLink source={{ scope: agent.home?.kind ?? 'system', node: agent.home }} def={{ key: parameter.key, class: 'parameter' }}
             fallback={agent.home?.name ?? t('resourceDetails.system')} text={t('resourceDetails.layout.openDefaults')} />} />)}
-      </ul>}</DetailPages>
-      <ResourceDetails><Table label={t('agents.parameters.title')} columns={columns} rows={descriptor.parameters} rowKey={(parameter) => parameter.key} /></ResourceDetails>
+      </ul>}</CompleteCollection>
+      <ResourceDetails><CompleteCollection label={t('agents.parameters.title')} items={descriptor.parameters} textOf={(parameter) => `${parameter.title} ${parameter.key} ${parameter.description}`}>{(rows) => <Table virtual label={t('agents.parameters.title')} columns={columns} rows={rows} rowKey={(parameter) => parameter.key} />}</CompleteCollection></ResourceDetails>
     </Section>
   );
 }

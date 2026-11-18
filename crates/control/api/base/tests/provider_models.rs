@@ -11,12 +11,13 @@ mod places;
 mod resources;
 mod support;
 
-use orch_api_contract::common::ErrorCode;
+use orch_api_contract::common::{CollectionQuery, ErrorCode};
 use orch_api_contract::resources::{
-    CreateProvider, ModelParameters, ModelSource, Provider, ProviderCreate, ProviderGet,
-    ProviderModel, ProviderModelCreate, ProviderModelCreateBody, ProviderModelDelete,
-    ProviderModelList, ProviderModelSuggestionAccept, ProviderModelSuggestionAcceptBody,
-    ProviderModelSuggestionList, ProviderModelUpdate, ProviderModelUpdateBody, ProviderStatus,
+    CreateProvider, ModelParameters, ModelSource, ModelSuggestion, Provider, ProviderCreate,
+    ProviderFactsModelsGet, ProviderGet, ProviderModel, ProviderModelCreate,
+    ProviderModelCreateBody, ProviderModelDelete, ProviderModelList, ProviderModelSuggestionAccept,
+    ProviderModelSuggestionAcceptBody, ProviderModelSuggestionList,
+    ProviderModelSuggestionListQuery, ProviderModelUpdate, ProviderModelUpdateBody, ProviderStatus,
     ServiceTier, Upstream,
 };
 use orch_api_core::routes::resources::sealing::install_master_key;
@@ -136,7 +137,8 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         .token(&c.viewer.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -217,7 +219,8 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(left.len(), 1);
     let gone = world
         .app
@@ -415,8 +418,25 @@ async fn a_program_source_lists_models_before_any_is_enabled_and_acceptance_retu
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     native.await.unwrap();
+    // No second native response is supplied: filtered continuations read the accepted catalogue.
+    let cached = world
+        .app
+        .call(ProviderModelSuggestionList, &[&id])
+        .token(&c.boss.token)
+        .query(&ProviderModelSuggestionListQuery {
+            q: Some("GPU Large".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(cached.items.len(), 1);
+    assert_eq!(cached.items[0].model_name, "gpu-large");
+
     assert_eq!(
         suggestions
             .iter()
@@ -453,13 +473,16 @@ async fn a_program_source_lists_models_before_any_is_enabled_and_acceptance_retu
     assert_eq!(accepted.provider.models.len(), 2);
     assert_eq!(accepted.provider.base.status, ProviderStatus::Ready);
     assert!(accepted.provider.status_detail.is_none());
+    assert_eq!(accepted.provider.facts.models_count, Some(2));
+    let reported = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
     assert_eq!(
-        accepted
-            .provider
-            .facts
-            .models
-            .as_ref()
-            .unwrap()
+        reported
             .iter()
             .map(|model| model.display_name.as_str())
             .collect::<Vec<_>>(),
@@ -506,7 +529,8 @@ async fn discovery_asks_the_machine_that_holds_the_key_and_adds_nothing_by_itsel
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     machine_says.await.unwrap();
     assert_eq!(
         listed
@@ -522,7 +546,8 @@ async fn discovery_asks_the_machine_that_holds_the_key_and_adds_nothing_by_itsel
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(
         none.is_empty(),
         "suggestions never change the allowlist by themselves"
@@ -587,7 +612,8 @@ async fn a_provider_on_a_key_the_server_holds_is_started_on_its_machine_before_t
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     machine_says.await.unwrap();
     assert_eq!(
         listed
@@ -646,7 +672,8 @@ async fn accepting_two_reported_names_that_collide_refuses_the_batch_without_los
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(
         saved.is_empty(),
         "a collision rolls back the whole batch instead of blanking a reported name"
@@ -654,7 +681,7 @@ async fn accepting_two_reported_names_that_collide_refuses_the_batch_without_los
 }
 
 #[tokio::test]
-async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enabled() {
+async fn accepted_suggestions_are_added_with_what_they_offer_switched_on() {
     let world = world().await;
     let c = company(&world).await;
     let machine = machine_forwarding_to(&world, c.boss.id(), &["https://api.example.com/v1"]).await;
@@ -713,9 +740,22 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         Some(&["low".to_owned(), "high".to_owned()][..])
     );
     assert_eq!(sol.parameters.context_window, Some(400_000));
+    assert_eq!(
+        sol.parameters.service_tiers,
+        Some(vec![ServiceTier {
+            id: "fast".into(),
+            label: "Fast".into()
+        }]),
+        "the organization's shipped choice switches on what a suggestion offers"
+    );
+    assert_eq!(
+        sol.parameters.access_programs,
+        Some(vec!["early".to_owned()])
+    );
     assert!(
-        sol.parameters.service_tiers.is_none() && sol.parameters.access_programs.is_none(),
-        "none enabled"
+        sol.parameters.default_service_tier.is_none()
+            && sol.parameters.default_access_program.is_none(),
+        "a thread still starts with the ordinary speed and no program"
     );
     let offered = sol.parameters.offered.clone().unwrap();
     assert_eq!(
@@ -737,7 +777,8 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     for expected in &added {
         let persisted = saved.iter().find(|model| model.id == expected.id).unwrap();
         assert_eq!(
@@ -780,4 +821,226 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
     machine_says.await.unwrap();
     assert!(again.added.is_empty());
     assert_eq!(again.provider.models.len(), 2);
+}
+
+#[tokio::test]
+async fn model_names_are_searched_and_paged_on_the_server_beyond_a_thousand_entries() {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    sqlx::query(
+        "INSERT INTO provider_models(id,provider_id,model_name,display_name,source,created_by)
+        SELECT gen_random_uuid(),$1,'model-'||n::text,'Model '||lpad(n::text,4,'0'),'manual',$2
+        FROM generate_series(0,1000) AS n",
+    )
+    .bind(id)
+    .bind(c.boss.id())
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    let found = world
+        .app
+        .call(ProviderModelList, &[&id])
+        .token(&c.boss.token)
+        .query(&CollectionQuery {
+            q: Some("Model 1000".into()),
+            limit: Some(37),
+            cursor: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].model_name, "model-1000");
+    assert!(found.next_cursor.is_none());
+    let mut cursor = None;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(ProviderModelList, &[&id])
+            .token(&c.boss.token)
+            .query(&CollectionQuery {
+                q: None,
+                limit: Some(137),
+                cursor,
+            })
+            .send()
+            .await
+            .ok();
+        assert!(page.items.len() <= 137);
+        for item in page.items {
+            assert!(seen.insert(item.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 1001);
+}
+
+#[tokio::test]
+async fn model_choices_publish_the_same_declared_option_forms_that_threads_edit() {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    let parameters: ModelParameters = serde_json::from_value(json!({
+        "request_options": {"openai-responses": {
+            "type":"object", "additionalProperties":false,
+            "properties":{"temperature":{"type":"number","minimum":0,"maximum":1}}
+        }}
+    }))
+    .unwrap();
+    let _ = world
+        .app
+        .call(ProviderModelCreate, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "declared-model".to_owned(),
+            display_name: None,
+            parameters: Some(parameters),
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let listed = world
+        .app
+        .call(ProviderModelList, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    let shown = serde_json::to_value(listed.items).unwrap();
+    let form = &shown[0]["parameter_forms"]["openai-responses"];
+    assert_eq!(form["properties"]["temperature"]["minimum"], json!(0));
+    assert_eq!(form["properties"]["temperature"]["maximum"], json!(1));
+    assert_eq!(form["additionalProperties"], json!(false));
+    assert!(form["properties"].get("model").is_none());
+    assert!(shown[0]["parameter_forms"].get("native").is_none());
+}
+
+/// What the upstream of a provider lists: 96 models, each with the option schemas a vendor's list carries,
+/// stored as the last discovery left them.
+async fn the_upstream_lists_96_models(world: &World, id: Id) {
+    let listing: Vec<serde_json::Value> = (0..96)
+        .map(|n| {
+            let options: serde_json::Map<String, serde_json::Value> = (0..40)
+                .map(|k| {
+                    (
+                        format!("option_{k}"),
+                        json!({ "type": "string", "description": "x".repeat(80) }),
+                    )
+                })
+                .collect();
+            json!({
+                "model_name": format!("vendor-model-{n:02}"),
+                "display_name": format!("Vendor model {n:02}"),
+                "listed": true,
+                "parameters": {
+                    "efforts": ["low", "high"],
+                    "context_window": 200_000,
+                    "request_options": { "openai-responses": { "type": "object", "properties": options } }
+                }
+            })
+        })
+        .collect();
+    sqlx::query(
+        "UPDATE providers SET facts = facts || jsonb_build_object('models', $2::jsonb) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(serde_json::Value::Array(listing))
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+}
+
+/// The view of a provider as it goes over the wire: its status and its bytes.
+async fn the_view_on_the_wire(world: &World, id: Id, by: &Who) -> (u16, Vec<u8>) {
+    let reply = world
+        .app
+        .call(ProviderGet, &[&id])
+        .token(&by.token)
+        .send_bytes()
+        .await;
+    (reply.status.as_u16(), reply.raw.to_vec())
+}
+
+#[tokio::test]
+async fn a_providers_view_says_how_many_models_its_upstream_lists_and_not_the_list_which_is_read_apart()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    let (status, before) = the_view_on_the_wire(&world, id, &c.boss).await;
+    assert_eq!(status, 200);
+    the_upstream_lists_96_models(&world, id).await;
+    let (status, after) = the_view_on_the_wire(&world, id, &c.boss).await;
+    assert_eq!(status, 200);
+    assert!(
+        after.len() < before.len() + 64,
+        "a list of 96 models adds nothing to the view: {} bytes became {}",
+        before.len(),
+        after.len()
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&after).unwrap();
+    assert!(
+        shown["facts"].get("models").is_none(),
+        "the list is not a member of the facts"
+    );
+    assert_eq!(shown["facts"]["models_count"], 96);
+    assert_eq!(shown["facts_state"]["models"], "told");
+}
+
+#[tokio::test]
+async fn the_models_an_upstream_listed_are_read_apart_by_whoever_may_view_the_provider() {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    let none: Vec<ModelSuggestion> = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        none.is_empty(),
+        "a provider that was never read lists nothing"
+    );
+    the_upstream_lists_96_models(&world, id).await;
+    let listed = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(listed.len(), 96);
+    assert_eq!(listed[0].model_name, "vendor-model-00");
+    assert_eq!(listed[95].display_name, "Vendor model 95");
+    assert!(
+        listed[3].parameters.request_options.is_some(),
+        "each one comes with what the list said of it"
+    );
+    // A stranger is refused and told what is missing; a person given View reads the list.
+    let stranger = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(stranger.code, ErrorCode::AuthzDenied);
+    assert_eq!(missing_permissions(&stranger), ["provider.view"]);
+    name_person(&world, "provider", id, "provider.view", c.viewer.id()).await;
+    let seen = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.viewer.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(seen.len(), 96);
 }

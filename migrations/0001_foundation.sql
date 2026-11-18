@@ -937,6 +937,41 @@ BEGIN
 END
 $$;
 
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
+END
+$$;
+
 CREATE FUNCTION public.orch_item_internal_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1383,7 +1418,7 @@ BEGIN
   RETURN NEW;
 END $_$;
 
-CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust_mirror boolean, expected text[], cutoff timestamp with time zone, wanted_os text, wanted_arch text, wanted_status text, after_order text, after_version text, after_os text, after_arch text, take bigint) RETURNS TABLE(version text, os text, arch text, version_sort text, payload jsonb)
+CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust_mirror boolean, expected text[], cutoff timestamp with time zone, wanted_os text, wanted_arch text, wanted_status text, after_order text, after_version text, after_os text, after_arch text, take bigint, patterns text[]) RETURNS TABLE(version text, os text, arch text, version_sort text, payload jsonb)
     LANGUAGE sql STABLE
     AS $$
     WITH stored AS (
@@ -1391,6 +1426,7 @@ CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust
          FROM orch_program_stored_build_rows(wanted,shipped,trust_mirror,expected,cutoff) b
          WHERE wanted_status IS NULL AND (wanted_os IS NULL OR b.os=wanted_os)
            AND (wanted_arch IS NULL OR b.arch=wanted_arch)
+           AND concat_ws(' ',b.version,b.os,b.arch,b.payload->>'status') ILIKE ALL(patterns)
            AND (after_order IS NULL OR b.version_sort COLLATE "C"<=after_order COLLATE "C")
            AND (after_order IS NULL OR b.version_sort COLLATE "C"<after_order COLLATE "C"
              OR (b.version_sort=after_order AND b.version<after_version)
@@ -1404,6 +1440,7 @@ CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust
             FROM orch_program_stored_build_rows(wanted,shipped,trust_mirror,expected,cutoff) b
             WHERE wanted_status IS NOT NULL AND b.raw_status=state AND b.payload->>'status'=wanted_status
               AND (wanted_os IS NULL OR b.os=wanted_os) AND (wanted_arch IS NULL OR b.arch=wanted_arch)
+           AND concat_ws(' ',b.version,b.os,b.arch,b.payload->>'status') ILIKE ALL(patterns)
               AND (after_order IS NULL OR b.version_sort COLLATE "C"<=after_order COLLATE "C")
               AND (after_order IS NULL OR b.version_sort COLLATE "C"<after_order COLLATE "C"
                 OR (b.version_sort=after_order AND b.version<after_version)
@@ -1416,6 +1453,7 @@ CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust
         SELECT * FROM stored
         UNION ALL
         SELECT * FROM released r WHERE (wanted_os IS NULL OR r.os=wanted_os)
+          AND concat_ws(' ',r.version,r.os,r.arch,r.payload->>'status') ILIKE ALL(patterns)
           AND (wanted_arch IS NULL OR r.arch=wanted_arch) AND (wanted_status IS NULL OR r.payload->>'status'=wanted_status)
           AND (after_order IS NULL OR r.version_sort COLLATE "C"<after_order COLLATE "C"
             OR (r.version_sort=after_order AND r.version<after_version)

@@ -1,16 +1,29 @@
-/** One person chosen from bounded native name search; the committed identity never depends on the current hits. */
-import { useQuery } from '@tanstack/react-query';
+/** One person chosen from native name pages; the committed identity never depends on the current hits. */
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { type KeyboardEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { SEARCH_MIN_CHARS, searchPeopleQuery } from '@/api/access';
+import { personPickerQuery } from '@/api/access';
 import type { UserRef } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
 import { isComposing } from '@/lib/shortcuts';
 import { Avatar } from '@/ui/Avatar';
-import { Combobox } from '@/ui/Combobox';
+import { ResourcePickerLookup } from '@/ui/ResourcePicker';
+import { Button } from '@/ui/Button';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
+import { deviceChoiceOf } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceException, DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
+import { UserChip } from '@/ui/UserChip';
+
+function readablePerson(value: unknown): value is UserRef {
+  if (typeof value !== 'object' || value === null) return false;
+  const id: unknown = Reflect.get(value, 'id'), name: unknown = Reflect.get(value, 'display_name'), username: unknown = Reflect.get(value, 'username'), kind: unknown = Reflect.get(value, 'kind'), avatar: unknown = Reflect.get(value, 'avatar');
+  if (typeof avatar !== 'object' || avatar === null) return false;
+  const text: unknown = Reflect.get(avatar, 'text'), color: unknown = Reflect.get(avatar, 'color');
+  return typeof id === 'string' && typeof name === 'string' && typeof username === 'string' && (kind === 'human' || kind === 'service') && typeof text === 'string' && typeof color === 'number';
+}
 
 export function PersonLocator({ label, value, person, orgId = null, onChoose }: {
   label: string;
@@ -22,14 +35,18 @@ export function PersonLocator({ label, value, person, orgId = null, onChoose }: 
   const { t } = useTranslation();
   const [open, setOpen] = useState(false), [typed, setTyped] = useState('');
   const text = typed.trim(), settled = useDebounced(text), waiting = text !== settled;
-  // Native users/search counts Unicode characters, not UTF-16 code units, and never lists a catalogue.
-  const searchable = Array.from(text).length >= SEARCH_MIN_CHARS;
-  const people = useQuery({ ...searchPeopleQuery(settled, orgId), enabled: open && searchable && !waiting,
+  const options=personPickerQuery(settled,orgId);
+  const people = useInfiniteQuery({ ...options, enabled: open && !waiting,
     retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false });
-  const failed = searchable && !waiting && people.isError;
-  const hits = open && searchable && !waiting && !people.isError ? people.data ?? [] : [];
-  const choose = (person: UserRef | null) => { onChoose(person); setTyped(''); };
+  usePickerCursorRestart(people,options.queryKey);
+  const failed = !waiting && people.isError;
+  const hits = open && !waiting && !people.isError ? people.data?.pages.flatMap((page)=>page.items) ?? [] : [];
+  const choose = (person: UserRef | null) => {setOpen(false);onChoose(person);setTyped('');};
   const selected = value === null ? t('trace.anyPerson') : person?.id === value ? person.display_name : t('trace.selectedPerson');
+  const observation = deviceChoiceOf(onChoose);
+  const savedId: unknown = typeof observation?.saved === 'object' && observation.saved !== null ? Reflect.get(observation.saved, 'id') : undefined;
+  const known = readablePerson(person) ? person : null;
+  const savedPerson = known?.id === savedId ? known : hits.find((hit) => hit.id === savedId);
   const press = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || event.target.getAttribute('role') !== 'combobox') return;
     // IME commits text; every other Enter stays in this locator, including an empty or dismissed list.
@@ -37,11 +54,15 @@ export function PersonLocator({ label, value, person, orgId = null, onChoose }: 
   };
   return <div className="flex min-w-0 flex-col gap-1" onKeyDownCapture={press}>
     <div className="flex min-w-0 items-end gap-1">
-      <Combobox label={label} query={typed} onQueryChange={setTyped} onOpenChange={setOpen}
+      <ResourcePickerLookup pickerKey="person-locator" groupHomes={false} filterLocal={false} label={label} query={typed} onQueryChange={setTyped} onOpenChange={setOpen}
+        aside={observation === undefined ? undefined : <DeviceChoiceException observation={observation} />}
+        facts={observation === undefined ? undefined : <DeviceChoiceFacts observation={observation} current={value === null ? t('trace.anyPerson') : known === null ? undefined : <UserChip user={known} />} saved={observation.saved === null ? t('trace.anyPerson') : savedPerson === null || savedPerson === undefined ? undefined : <UserChip user={savedPerson} />} inline />}
         displayValue={selected} placeholder={t('finder.bare.people')} fieldClassName="min-w-0 flex-1"
-        loading={searchable && (waiting || people.isFetching)}
-        empty={failed ? undefined : t(searchable ? 'trace.noPeople' : 'finder.namesMinimum')}
-        groups={[{ id: 'people', label, options: hits.map((user) => ({ value: user.id, label: user.display_name,
+        loading={waiting || people.isFetching}
+        empty={failed ? undefined : t('trace.noPeople')}
+        initialActiveValue={value??undefined}
+        footer={people.hasNextPage?<Button size="sm" variant="ghost" pending={people.isFetchingNextPage} onClick={()=>{void people.fetchNextPage();}}>{t('ui.pagination.more')}</Button>:undefined}
+        groups={[{ id: 'people', label, options: hits.map((user) => ({ value: user.id, resource:{kind:'user',id:user.id},label: user.display_name,
           text: user.display_name, description: `@${user.username}`, icon: <Avatar text={user.avatar.text} color={user.avatar.color} size={24} /> })) }]}
         onSelect={(option) => { const found = hits.find((user) => user.id === option.value); if (found !== undefined) choose(found); }} />
       {value !== null && <IconButton size="sm" label={t('trace.clearPerson')} icon={<X aria-hidden />} onClick={() => choose(null)} />}

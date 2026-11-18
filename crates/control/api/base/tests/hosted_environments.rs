@@ -1187,7 +1187,7 @@ async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_r
     let making = make(&world, &t, &t.c.admin, "Committed before response");
     let inspect = async {
         rig::eventually("the response's blocked component update read", || async {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates%')")
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id%FROM component_updates%')")
                 .fetch_one(&world.db.pool).await.unwrap()
         }).await;
         let committed: (Id, Id) = sqlx::query_as(
@@ -1752,7 +1752,8 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         .token(&t.c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -1762,6 +1763,45 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         Some(&second.base.id),
         "the default first"
     );
+    let searched = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: Some("First".into()),
+            limit: Some(1),
+            cursor: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(searched.items.len(), 1);
+    assert_eq!(searched.items[0].base.id, first.base.id);
+    let one = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(one.items[0].base.id, second.base.id);
+    let rest = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            limit: Some(1),
+            cursor: one.next_cursor,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(rest.items[0].base.id, first.base.id);
     assert_ne!(first.base.id, second.base.id);
     // Only whoever manages the topic names its default, and nothing changes for the rest.
     let refused = set(Some(first.base.id), &t.c.viewer).await.problem();
@@ -1772,7 +1812,8 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         .token(&t.c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(still[0].base.id, second.base.id);
     let cleared = set(None, &t.c.admin).await.ok();
     assert_eq!(cleared.default_environment_id, None);
@@ -2006,10 +2047,12 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .token(&t.c.admin.token)
         .query(&HostRuntimeListQuery {
             kind: Some(UnitKind::Environment),
+            ..Default::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].unit_name, "orch-environment-0123456789ab");
     assert_eq!(listed[0].environment.as_ref().unwrap().id, made.base.id);
@@ -2020,10 +2063,12 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .token(&t.c.admin.token)
         .query(&HostRuntimeListQuery {
             kind: Some(UnitKind::Provider),
+            ..Default::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(providers.is_empty());
     // Somebody who does not manage the host sees nothing of it.
     let refused = world
@@ -2145,4 +2190,59 @@ async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_
         ErrorCode::EnvironmentNoneUsable,
         "{implicit:?}"
     );
+}
+
+#[tokio::test]
+async fn choosing_another_template_checks_the_agent_and_host_that_will_actually_start() {
+    use orch_api_contract::binding::NodeBindingOptionsGet;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let alternate = a_template(&world, &t.c.admin, t.c.acme, "Agent ready").await;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{exec,offers}','[]') WHERE id=$1")
+        .bind(t.template)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_types::new_id()),
+        )
+        .await;
+    for (template, host, automatic, ready) in [
+        (t.template, Some(t.host), false, false),
+        (alternate, Some(t.host), false, true),
+        (alternate, Some(orch_types::new_id()), false, false),
+        (alternate, None, false, false),
+        (alternate, None, true, true),
+    ] {
+        let mut query =
+            json!({ "environment_new": true, "template_id": template, "host_auto": automatic });
+        if let Some(host) = host {
+            query["host_id"] = json!(host);
+        }
+        let offered = world
+            .app
+            .call(NodeBindingOptionsGet, &[&t.topic])
+            .token(&t.c.admin.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        let agent = offered
+            .providers
+            .iter()
+            .find(|row| row.provider.id == binding.provider_id)
+            .unwrap()
+            .agents
+            .iter()
+            .find(|row| row.agent.id == binding.agent_id)
+            .unwrap();
+        assert_eq!(
+            agent.usable, ready,
+            "the exact chosen template and host decide readiness"
+        );
+    }
 }

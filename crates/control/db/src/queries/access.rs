@@ -97,7 +97,11 @@ pub struct HolderPlaceRow {
 }
 
 /// Places whose current names may match a locator; permissions are cut before anything is returned.
-pub async fn holder_places(conn: &mut Conn) -> Result<Vec<HolderPlaceRow>, DbError> {
+/// People-only fields need organization addresses, without traversing the project/topic inventory.
+pub async fn holder_places(
+    conn: &mut Conn,
+    orgs_only: bool,
+) -> Result<Vec<HolderPlaceRow>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, n.org_id AS root, n.kind, n.path, n.name AS leaf_name,
                 string_agg(p.name, ' > ' ORDER BY a.position) AS name,
@@ -105,9 +109,9 @@ pub async fn holder_places(conn: &mut Conn) -> Result<Vec<HolderPlaceRow>, DbErr
                 (array_agg(p.id ORDER BY a.position DESC) FILTER (WHERE p.kind = 'org'))[1] AS org
            FROM nodes n CROSS JOIN LATERAL unnest(n.path) WITH ORDINALITY a(id, position)
            JOIN nodes p ON p.id = a.id LEFT JOIN orgs o ON o.node_id = p.id
-          WHERE n.kind IN ('org','project','topic') AND n.deleted_at IS NULL
+          WHERE n.kind IN ('org','project','topic') AND n.deleted_at IS NULL AND (NOT $1::boolean OR n.kind='org')
           GROUP BY n.id ORDER BY n.org_id, n.id")
-        .fetch_all(conn).await?)
+        .bind(orgs_only).fetch_all(conn).await?)
 }
 
 /// Current person addresses with their domains; the API cuts domains before exposing their names.
