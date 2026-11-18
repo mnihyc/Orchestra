@@ -86,7 +86,7 @@ test.describe('a person’s own settings', () => {
     const dialog = page.getByRole('dialog', { name: 'Set up an authenticator app' });
     await dialog.getByLabel('Your password', { exact: true }).fill('not the password');
     await dialog.getByRole('button', { name: 'Continue' }).click();
-    await expect(dialog.getByText('That did not work. Check the name and the password or code.')).toBeVisible();
+    await expect(dialog.getByText('That did not work. Check the username and the password or code.')).toBeVisible();
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(dialog.getByRole('img', { name: 'Code to scan with your authenticator app' })).toBeVisible();
@@ -320,7 +320,7 @@ test.describe('a person’s own settings', () => {
     await dialog.getByLabel('New address').fill('ada@new.example');
     await dialog.getByLabel('Your password', { exact: true }).fill('not the password');
     await dialog.getByRole('button', { name: 'Change address' }).click();
-    await expect(dialog.getByText('That did not work. Check the name and the password or code.')).toBeVisible();
+    await expect(dialog.getByText('That did not work. Check the username and the password or code.')).toBeVisible();
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
     await dialog.getByRole('button', { name: 'Change address' }).click();
     await expect(page.getByText('Changing to ada@new.example: open the link we sent there.')).toBeVisible();
@@ -380,7 +380,7 @@ test.describe('a person’s own settings', () => {
     await expect(help.getByText('You closed 2 hints.')).toBeVisible();
     await help.getByRole('button', { name: 'Show again' }).click();
     await expect(help.getByText('You have not finished a tutorial.')).toBeVisible();
-    await help.getByRole('button', { name: 'Restore tips' }).click();
+    await help.getByRole('button', { name: 'Restore hints' }).click();
     await expect(help.getByText('You have not closed any hint.')).toBeVisible();
   });
 });
@@ -393,7 +393,7 @@ test.describe('an org’s settings', () => {
     await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'general'));
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
-    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Outside Orch']);
+    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Email and channels']);
     await expectAccessibleSettled(page);
 
     // The departments are listed with what each holds, and one opens its own settings.
@@ -507,7 +507,7 @@ test.describe('an org’s settings', () => {
     // Each resource she made is kept unless she is told otherwise; one is a subscription others work on.
     await expect(dialog.getByText('Dora’s API key')).toBeVisible();
     await expect(dialog.getByText('used by 2 people · in 1 thread')).toBeVisible();
-    await expect(dialog.getByText("Other people will go on working on Dora Developer's sign-in.")).toBeVisible();
+    await expect(dialog.getByText("Other people will go on using Dora Developer's sign-in.")).toBeVisible();
     await dialog.getByRole('radiogroup', { name: 'What becomes of Dora’s API key' }).getByRole('radio', { name: 'Remove' }).click();
     await expectAccessibleSettled(page, '[role="dialog"]');
     await dialog.getByRole('button', { name: 'Remove Dora Developer from Acme' }).click();
@@ -518,7 +518,7 @@ test.describe('an org’s settings', () => {
     await page.getByRole('button', { name: 'Actions for Grace Hopper' }).click();
     await page.getByRole('menuitem', { name: 'Remove from Acme…' }).click();
     const grace = page.getByRole('dialog', { name: 'Remove Grace Hopper from Acme' });
-    await expect(grace.getByText('What Grace Hopper owns alone: 1 topic and 1 thread. Each passes to the first owner of the org it lies in.')).toBeVisible();
+    await expect(grace.getByText('What Grace Hopper owns alone: 1 topic and 1 thread. Each passes to the first owner of the organization it lies in.')).toBeVisible();
     await grace.getByRole('button', { name: 'Cancel' }).click();
     await page.getByRole('button', { name: 'Actions for Ada Lovelace' }).click();
     await page.getByRole('menuitem', { name: 'Leave Acme…' }).click();
@@ -745,7 +745,7 @@ test.describe('an org’s settings', () => {
     await list.getByRole('button', { name: 'Tokens of Deploy bot' }).click();
     const tokens = page.getByRole('dialog', { name: 'Tokens of Deploy bot' });
     await expect(tokens).toBeVisible();
-    await tokens.getByRole('button', { name: 'Make token' }).click();
+    await tokens.getByRole('button', { name: 'Create token' }).click();
     await tokens.getByLabel('Name', { exact: true }).fill('prod');
     await chooseKeyRule(page, tokens, 'account');
     await tokens.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);

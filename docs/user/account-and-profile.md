@@ -8,6 +8,8 @@ summary: Manage your profile, sign-ins, account recovery, sessions and personal 
 
 # Manage your account and profile
 
+This page shows how to sign in and recover access, edit your profile, and manage your sign-ins and keys.
+
 ## Sign in and recover access
 
 Use the sign-in methods offered by your installation. Registration and
@@ -41,8 +43,8 @@ not expand existing keys. Choose an expiry and copy the secret when it is create
 Later lists show its policy and recent activity. Revoke keys you no longer need.
 
 A program uses the secret with `Authorization: Bearer <key>` on the same API.
-The key is limited by your current authority and its own rules. Administrative
-operations need your current administrative standing and an explicit selection;
+The key is limited by your current permissions and by its own rules. Administrative
+operations need your current standing as an administrator and a choice made on purpose;
 the browser's As admin private-access override is not delegated. A write-only
 operation returns an acknowledgement without existing content. A newly issued
 secret remains available once in that acknowledgement.

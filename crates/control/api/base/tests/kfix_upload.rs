@@ -58,6 +58,7 @@ async fn disk_room() -> (Room, TempDir) {
     let blobs = Blobs::new(store, directory.path());
     old.engine.attach_blobs(blobs.store());
     let state = Arc::new(AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: old.db.clone(),

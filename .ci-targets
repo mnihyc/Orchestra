@@ -1,0 +1,5 @@
+release-checks
+release-first-start
+web typecheck
+web lint
+web test

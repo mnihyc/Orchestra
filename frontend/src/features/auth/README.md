@@ -34,6 +34,7 @@ stays outside. Both invitation entry points open the returned readable node, per
 - `Login.tsx`: Sign-in: identity providers, a password, a code sent by mail where somebody may use one, the second step as the answer names it, and a refusal that says which proof is closed and until when.
 - `EmailCode.tsx`: The code sent by mail: asking for one, the one field for it, and the same sentence whatever the name.
 - `Register.tsx`: Registration as the system allows it: by an invitation, openly, or not at all; a personal link asking for the address it was sent to.
+- `HumanCheck.tsx`: The human check of these screens, where the system asks one: one widget and one token for each try, sent in `X-Human-Check` and counted as spent whatever came of it; a box made fresh with one short line that says why; the vendor's own sentence under the button. Where none is asked it adds nothing: no script, no request, no element.
 - `Recovery.tsx`: Mailed recovery where available; otherwise the administrator's next step.
 - `ResetPassword.tsx`: Reset with a token delivered by mail or an administrator.
 - `VerifyEmail.tsx`: Email verification.

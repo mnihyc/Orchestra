@@ -359,7 +359,7 @@ test('a timeline item quoted into a thread’s chat is a card that leads back to
   await expect(page.getByRole('heading', { name: 'Acme' })).toBeVisible();
   await page.goto(`/thread/${ACME.mainThread}`);
   await showWorkbenchView(page, 'Chat');
-  const quote = page.getByRole('link', { name: 'Go to the quoted item in the conversation' });
+  const quote = page.getByRole('link', { name: 'Go to the quoted item in the thread' });
   await expect(quote).toContainText('Agent message');
   await expect(quote).toContainText('The redirect loses the next parameter.');
   await quote.click();
@@ -380,7 +380,7 @@ test('an item of the conversation is brought to the thread’s chat from its men
   const item = page.locator('[data-item="u1"]');
   await expect(item).toContainText(question);
   await item.hover();
-  await item.getByRole('button', { name: 'More acts on this item' }).click();
+  await item.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Discuss in chat' }).click();
 
   // The thread's chat comes to the front with the item standing above its box; nothing has been sent.
@@ -396,7 +396,7 @@ test('an item of the conversation is brought to the thread’s chat from its men
   await box.press('Enter');
   const sent = messageSaying(page, 'Is this the line that matters?');
   await expect(sent).toBeVisible();
-  const quote = sent.getByRole('link', { name: 'Go to the quoted item in the conversation' });
+  const quote = sent.getByRole('link', { name: 'Go to the quoted item in the thread' });
   await expect(quote).toContainText(question);
   await quote.click();
   await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}\\?item=u1`));
@@ -414,7 +414,7 @@ test('items picked in the conversation are forwarded to the thread’s chat in o
   const first = page.locator('[data-item="u1"]');
   await expect(first).toContainText(question);
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   await page.locator('[data-item="a1"]').getByRole('checkbox', { name: 'Select this item' }).check();
 

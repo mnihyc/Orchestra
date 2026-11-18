@@ -16,6 +16,7 @@ members = [
     "crates/contracts/blob",
     "crates/contracts/driver",
     "crates/contracts/executor",
+    "crates/contracts/human-check",
     "crates/contracts/identity",
     "crates/contracts/link",
     "crates/contracts/model",
@@ -71,6 +72,7 @@ members = [
     "extensions/drivers/kubernetes",
     "extensions/executors/codex",
     "extensions/executors/orch",
+    "extensions/human-check/vendors",
     "extensions/identity/oidc",
     "extensions/notifiers/email",
     "extensions/notifiers/push",
@@ -78,6 +80,7 @@ members = [
     "extensions/notifiers/webhook",
     "extensions/protocols/anthropic-messages",
     "extensions/protocols/openai-responses",
+    "extensions/protocols/google-interactions",
     "extensions/providers/anthropic",
     "extensions/providers/builtins",
     "extensions/providers/openai",
@@ -139,6 +142,8 @@ orch-executor-contract = { path = "crates/contracts/executor" }
 orch-executor-orch = { path = "extensions/executors/orch" }
 orch-gateway = { path = "apps/gateway" }
 orch-gateway-core = { path = "crates/control/gateway" }
+orch-human-check = { path = "extensions/human-check/vendors" }
+orch-human-check-contract = { path = "crates/contracts/human-check" }
 orch-identity-contract = { path = "crates/contracts/identity" }
 orch-identity-oidc = { path = "extensions/identity/oidc" }
 orch-image-backends = { path = "extensions/capabilities/images" }
@@ -160,6 +165,7 @@ orch-plugin-contract = { path = "crates/contracts/plugin" }
 orch-provider-contract = { path = "crates/contracts/provider" }
 orch-protocol-anthropic-messages = { path = "extensions/protocols/anthropic-messages" }
 orch-protocol-openai-responses = { path = "extensions/protocols/openai-responses" }
+orch-protocol-google-interactions = { path = "extensions/protocols/google-interactions" }
 orch-provider-anthropic = { path = "extensions/providers/anthropic" }
 orch-provider-builtins = { path = "extensions/providers/builtins" }
 orch-provider-openai = { path = "extensions/providers/openai" }
@@ -221,6 +227,7 @@ toml = "1"                                                 # orch.toml and a con
 log = "0.4" # SQLx's warning level; already a transitive dependency.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "chrono", "migrate", "ipnetwork", "derive"] }  # PostgreSQL
 regex = "1"                                                # name rules and an agent's search
+regex-syntax = "=0.8.11"                                  # reuse the locked regex parser for safe native-stream overlap
 unicode-segmentation = "1"                                 # the first letter of a name, as a person reads it (an avatar)
 globset = "0.4"                                            # model patterns and ignore rules
 base64 = "0.23"                                            # cursors, keys and tokens on the wire
@@ -269,7 +276,7 @@ tempfile = "3"                                             # atomic writes and t
 rustix = { version = "1.1", default-features = false, features = ["std", "fs", "process", "param"] }  # file operations relative to a directory, signals and pidfds, without unsafe code
 nix = { version = "0.31", default-features = false, features = ["sched", "mount", "fs", "user"] }  # the node helper's namespace, chroot and device operations
 tar = { version = "0.4", default-features = false }        # what a tar archive holds, read without unpacking it
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }  # what a zip archive holds, read without unpacking it
+zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2"] }  # pin the iterable index API used to keep archive readers bounded
 flate2 = "1"                                               # looking into a tar.gz
 bzip2 = "0.6"                                              # looking into a tar.bz2
 liblzma = "0.4"                                            # looking into a tar.xz

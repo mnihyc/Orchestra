@@ -8,7 +8,7 @@ import {ProviderRuntime} from '@/features/resources/providers/Runtime';
 import {planProvider} from '../unit/provider-plan-fixtures';
 import {show} from './support';
 
-vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="#machine">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children}:{children:ReactNode})=><a href="#machine">{children}</a>}));
 vi.mock('@/features/resources/machines/Policy',()=>({MachineLimits:()=>null}));
 vi.mock('@/features/resources/providers/RuntimeConfiguration',()=>({RuntimeConfiguration:()=> <section aria-label="Runtime settings">Runtime variables and secrets</section>}));
 vi.mock('@/api/provider-runtime',()=>({startRuntime:vi.fn(),stopRuntime:vi.fn()}));
@@ -20,8 +20,8 @@ it.each(['managed','connected'] as const)('shows a directory runtime and its sep
     runtime_support:{lifecycle:'attach',commands_after_start:{supported:true,reason:null},after_up:false}})} />);
   expect(screen.getByText(/Credential keeper: Account keeper/)).toBeVisible();
   expect(screen.getByRole('region',{name:'Runtime settings'})).toBeVisible();
-  expect(screen.getByRole('button',{name:'Detach runtime'})).toBeDisabled();
-  expect(screen.queryByRole('button',{name:'Start runtime'})).not.toBeInTheDocument();
-  await userEvent.click(screen.getByRole('button',{name:'Attach runtime'}));
+  expect(screen.getByRole('button',{name:'Detach container'})).toBeDisabled();
+  expect(screen.queryByRole('button',{name:'Start container'})).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button',{name:'Attach container'}));
   await waitFor(()=>expect(startRuntime).toHaveBeenCalledWith('plan-provider'));
 });
