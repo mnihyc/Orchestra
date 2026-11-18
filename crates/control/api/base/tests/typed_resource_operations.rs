@@ -231,7 +231,8 @@ async fn provider_readers_and_sealed_write_obey_the_same_provider_boundary() {
         .token(&read)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].model_name, "model-a");
     let date = world.now().date_naive().to_string();

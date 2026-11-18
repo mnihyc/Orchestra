@@ -96,8 +96,8 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     }
     const words = language === 'en' ? english : chinese;
     await page.goto(`/thread/${ACME.mainThread}`);
-    const footer = page.locator('[data-turn-cost-open="native-meter"]');
-    await footer.focus();
+    const figures = page.locator('[data-turn-figures="native-meter"]');
+    await figures.focus();
     await page.keyboard.press('Enter');
     const details = page.locator('[data-turn-cost="native-meter"]');
     await expect(details).toBeVisible();

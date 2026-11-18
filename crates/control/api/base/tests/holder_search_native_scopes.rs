@@ -235,7 +235,7 @@ async fn holder_account_scope_filters_before_thirty_and_membership_is_not_accoun
     .base
     .id;
     let mut people = Vec::new();
-    // The existing native holder window is thirty; the last allowed account is beyond it.
+    // Only the last matching account is in reach, even with a one-row result page.
     for index in 0..31 {
         let person = places::person(&world, &format!("holder-window-{index:02}")).await;
         places::join(&world, org, org, &person, "viewer", &owner).await;
@@ -250,6 +250,7 @@ async fn holder_account_scope_filters_before_thirty_and_membership_is_not_accoun
     .await;
     let query = HolderSearchQuery {
         q: "holder-window".into(),
+        limit: Some(1),
         org_id: Some(org),
         place_id: Some(org),
         ..Default::default()

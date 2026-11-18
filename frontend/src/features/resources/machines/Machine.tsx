@@ -213,7 +213,7 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
             panel: <DetailSections label={t('machines.tabs.registered')} value={registration} onValueChange={onTab} hrefOf={sectionHref} sections={[
               { value: 'registered', label: t('resourceDetails.layout.registered'), panel: <RegisteredHere machine={machine} /> },
               { value: 'programs', label: t('machinePrograms.title'), panel: <MachineProgramsTab machine={machine} /> },
-              ...(harnessesOfMachine(machine).length === 0 ? [] : [{ value: 'sessions' as const, label: t('adopt.tab'), panel: <HarnessSessions harnesses={harnessesOfMachine(machine)} /> }]),
+              ...(harnessesOfMachine(machine).length === 0 ? [] : [{ value: 'sessions' as const, label: t('adopt.tab'), panel: <HarnessSessions scopeKey={"machine:" + machine.id} harnesses={harnessesOfMachine(machine)} /> }]),
             ]} />,
           },
           { value: 'storage', label: t('resourceDetails.layout.storage'), panel: <DetailSections label={t('resourceDetails.layout.storage')} sections={[

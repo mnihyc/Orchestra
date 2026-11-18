@@ -417,6 +417,33 @@ async fn the_page_of_a_document_is_read_by_whoever_may_read_it_and_changed_by_th
 // ---------------------------------------------------------------- listing and reading
 
 #[tokio::test]
+async fn a_document_title_search_reaches_older_matches_before_paging_and_keeps_wildcards_literal() {
+    let desk = Desk::new().await;
+    let first = desk.make(&desk.ada, "Older%_ handbook").await;
+    let second = desk.make(&desk.ada, "Another older%_ handbook").await;
+    desk.make(&desk.ada, "OldersX is not a literal match").await;
+    desk.make(&desk.ada, "Newer unrelated page").await;
+    let list = |cursor: Option<String>| {
+        let call = desk.world.app.call(NodeDocumentList, &[&desk.topic]);
+        let call = call.token(&desk.ada.token).query(&NodeDocumentListQuery {
+            q: Some("older%_".to_owned()),
+            limit: Some(1),
+            cursor,
+            ..Default::default()
+        });
+        async move { call.send().await.ok() }
+    };
+    let page = list(None).await;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].as_visible().unwrap().id, second.base.id);
+    assert!(page.next_cursor.is_some());
+    let page = list(page.next_cursor).await;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].as_visible().unwrap().id, first.base.id);
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
 async fn the_documents_beside_a_node_are_listed_most_recently_changed_first_a_page_at_a_time() {
     let desk = Desk::new().await;
     let first = desk.make(&desk.ada, "First").await;
@@ -1523,5 +1550,31 @@ fn every_request_about_a_document_is_bound() {
     let bound: HashSet<&str> = registry.bound().iter().map(|route| route.name).collect();
     for route in orch_api_contract::documents::ROUTES {
         assert!(bound.contains(route.name), "{} is not bound", route.name);
+    }
+}
+
+#[tokio::test]
+async fn a_document_name_search_finds_a_late_title_before_the_page_fills() {
+    let desk = Desk::new().await;
+    for index in 0..13 {
+        desk.make(&desk.ada, &format!("Guide {index:02}")).await;
+    }
+    for title in ["Guide 00", "Guide 12"] {
+        let page = desk
+            .world
+            .app
+            .call(NodeDocumentList, &[&desk.topic])
+            .token(&desk.ada.token)
+            .query(&NodeDocumentListQuery {
+                q: Some(title.into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].as_visible().unwrap().title, title);
+        assert!(page.next_cursor.is_none());
     }
 }

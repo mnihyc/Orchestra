@@ -754,6 +754,10 @@ pub struct AgentDescriptor {
     /// What it claims to do.
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// Optional features declared by this program and whether each ships enabled.
+    /// Resolved settings override these values without changing the declaration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, bool>,
     /// The parameters its harness accepts.
     #[serde(default)]
     pub parameters: Vec<ParameterDef>,
@@ -771,6 +775,12 @@ pub struct AgentDescriptor {
 }
 
 impl AgentDescriptor {
+    /// This program's shipped features with the place's explicit settings laid over them.
+    #[must_use]
+    pub fn feature_values(&self, settings: &BTreeMap<String, bool>) -> BTreeMap<String, bool> {
+        crate::parameters::feature_values(&self.features, settings)
+    }
+
     /// Per-access capability facts owned by this program extension. Missing facts declare no support.
     /// The extension key is additive, so older stored descriptors keep their exact meaning.
     #[must_use]
@@ -1103,6 +1113,24 @@ fn merge_patch(target: &mut Json, patch: &Json) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn each_programs_feature_defaults_are_overlaid_by_explicit_place_choices() {
+        let mut declaration = codex();
+        declaration["features"] = json!({"example.extra_tools":true,"example.previews":false});
+        let descriptor: AgentDescriptor = serde_json::from_value(declaration).unwrap();
+        assert!(descriptor.feature_values(&BTreeMap::new())["example.extra_tools"]);
+        let values = descriptor.feature_values(&BTreeMap::from([
+            ("example.extra_tools".to_owned(), false),
+            ("example.previews".to_owned(), true),
+        ]));
+        assert!(!values["example.extra_tools"]);
+        assert!(values["example.previews"]);
+        assert!(
+            descriptor.features["example.extra_tools"],
+            "the declaration remains unchanged"
+        );
+    }
 
     /// A descriptor of the first built-in adapter, as it is published.
     fn codex() -> Json {
