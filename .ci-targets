@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib
+test -p orch-api-collaboration --lib -- a_small_defaults_section_keeps_its_native_problem_and_retry_delay
+test -p orch-api-core --test defaults_opening --test node_chat_opening_scopes

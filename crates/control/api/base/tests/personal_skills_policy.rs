@@ -131,6 +131,7 @@ async fn a_thread_viewer_reads_personal_policy_without_manage_or_private_ancesto
         .call(NodeSettingSet, &[&s.tree.project.base.id, &KEY])
         .token(&viewer.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -218,6 +219,7 @@ async fn knowledge_policy_metadata_adds_no_thread_write_scope_or_policy_lock() {
         .call(NodeSettingSet, &[&thread, &KEY])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
@@ -233,6 +235,7 @@ async fn knowledge_policy_metadata_adds_no_thread_write_scope_or_policy_lock() {
         .call(NodeSettingSet, &[&s.tree.project.base.id, &KEY])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: Some(true),
             expected_revision: None,

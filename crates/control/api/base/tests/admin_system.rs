@@ -42,6 +42,43 @@ fn component(parts: &[SystemComponent], name: SystemComponentName) -> &SystemCom
 }
 
 #[tokio::test]
+async fn the_api_keeps_serving_and_names_its_metrics_listener_when_the_bind_is_unavailable() {
+    let world = World::new().await;
+    let c = cast(&world).await;
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = held.local_addr().unwrap().to_string();
+    assert!(world.app.app.bind_metrics(&address).await.is_err());
+    let info = world
+        .app
+        .call(AdminSystemGet, &[])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    let api = component(&info.components, SystemComponentName::Api);
+    assert!(api.ok, "the optional listener does not stop the API");
+    assert_eq!(
+        serde_json::to_value(api.issue).unwrap(),
+        json!("metrics_listener_unavailable")
+    );
+    drop(held);
+    let listening = world.app.app.bind_metrics(&address).await.unwrap();
+    let info = world
+        .app
+        .call(AdminSystemGet, &[])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        component(&info.components, SystemComponentName::Api)
+            .issue
+            .is_none()
+    );
+    drop(listening);
+}
+
+#[tokio::test]
 async fn the_state_of_the_system_says_how_its_parts_fare_and_what_waits_in_its_queues() {
     let world = World::new().await;
     let c = cast(&world).await;

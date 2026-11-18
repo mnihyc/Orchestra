@@ -264,6 +264,7 @@ async fn resource_pages_use_stored_reports_on_one_connection_without_asking_the_
         live: Arc::new(orch_engine::live::Discard),
     });
     let app = Arc::new(AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: db.clone(),

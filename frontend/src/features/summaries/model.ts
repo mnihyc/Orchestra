@@ -1,5 +1,6 @@
 /** A summary view is supplied by its ordinary authorized page reader. */
 import type { ResourceSubject } from '@/features/resource-facts/facts';
+import type { RecordedModelSubject } from '@/features/resource-facts/ResourceFacts';
 
 export interface SummaryTarget {
   kind: 'thread' | 'topic' | 'document' | 'chat' | 'chat_title' | 'help' | 'search_results';
@@ -18,6 +19,7 @@ export type SummaryState = 'empty' | 'fresh' | 'stale' | 'scheduled' | 'updating
 export type SummaryProducer =
   | { kind: 'written' }
   | Extract<ResourceSubject, { kind: 'model' }>
+  | RecordedModelSubject
   | { kind: 'extension'; name: string };
 
 export interface SummarySnapshot {

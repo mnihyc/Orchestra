@@ -39,7 +39,6 @@ export const personActionsQuery = (thing: PersonThing, userId: string) => queryO
   // One bounded context read belongs to the query cache, including a StrictMode remount.
   // The session's cache fence and every mutation's current authority checks still apply.
   queryFn: () => readPersonActions(thing, userId),
-  staleTime: 0,
 });
 
 export function notifyPerson(thing: PersonThing, userId: string, note: string, key: string): Promise<void> {
