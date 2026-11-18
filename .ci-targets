@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-envhost --lib -- displays::
+test -p orch-api-core --test kvnc_core --features test-support -- a_manager_
+test -p orch-api-core --test interactive_creation_replays --test ports_core --features test-support
+web typecheck
+web lint
+web test -- tests/component/vnc-view.test.tsx tests/unit/vnc-viewer.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

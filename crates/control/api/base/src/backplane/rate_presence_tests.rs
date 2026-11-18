@@ -65,6 +65,7 @@ async fn an_unmeasured_or_partial_link_stays_absent_through_report_and_machine_a
         assert_eq!(body["rates"], expected);
         let mut receiver = StreamReceiver::new(BTreeMap::new(), vec![Role::Environment]);
         let delivery = match receiver.on_ev(Ev {
+            native_opening_id: None,
             stream: "machine".into(),
             seq: 1,
             at: world.app.app.clock.time(),

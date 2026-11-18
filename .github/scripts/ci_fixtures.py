@@ -26,7 +26,7 @@ HARNESS_PACKAGES = {"orch-adapter-codex", "orch-adapter-claude-code", "orch-exec
 NODE_LAB_TESTS = {"environment", "images", "isolation_enrollment", "lifecycle", "milestone", "uploads"}
 
 
-def includes_node_tests(planned, targets):
+def includes_package_tests(planned, targets, package):
     """Keep the package and target selection together, before libtest arguments."""
     for command in planned:
         if command[:2] != ["cargo", "test"]:
@@ -34,7 +34,7 @@ def includes_node_tests(planned, targets):
         arguments = command[2:command.index("--")] if "--" in command else command[2:]
         packages = {arguments[index + 1] for index, argument in enumerate(arguments[:-1])
                     if argument in {"-p", "--package"}}
-        if "orch-node" not in packages:
+        if package not in packages:
             continue
         tests = {arguments[index + 1] for index, argument in enumerate(arguments[:-1]) if argument == "--test"}
         other_targets = {"--lib", "--bin", "--bins", "--example", "--examples", "--bench", "--benches", "--doc"}
@@ -45,11 +45,11 @@ def includes_node_tests(planned, targets):
 
 
 def needs_conformance_runner(planned):
-    return includes_node_tests(planned, {"conformance"})
+    return includes_package_tests(planned, {"conformance"}, "orch-node")
 
 
 def needs_node_connector(planned):
-    return includes_node_tests(planned, NODE_LAB_TESTS)
+    return includes_package_tests(planned, NODE_LAB_TESTS, "orch-node")
 
 
 def fixture_plan(planned):
@@ -91,14 +91,14 @@ def executable_path(value):
     return str(path)
 
 
-def static_program(package, binary):
+def static_program(package, binary, kind="bin"):
     targets = {"x86_64": "x86_64-unknown-linux-musl", "amd64": "x86_64-unknown-linux-musl",
                "aarch64": "aarch64-unknown-linux-musl", "arm64": "aarch64-unknown-linux-musl"}
     target = targets.get(platform.machine().lower())
     if target is None:
         raise RuntimeError("native fixtures need a supported Linux musl target")
     command = ["cargo", "build", "--locked", "--target", target,
-               "-p", package, "--bin", binary, "--message-format=json"]
+               "-p", package, "--" + kind, binary, "--message-format=json"]
     environment = dict(os.environ)
     environment.setdefault("CC_" + target.replace("-", "_"), "musl-gcc")
     print("+", " ".join(command), flush=True)
@@ -119,7 +119,7 @@ def static_program(package, binary):
                 print(diagnostic.get("rendered") or diagnostic["message"], end="", flush=True)
             elif (message.get("reason") == "compiler-artifact"
                   and message.get("target", {}).get("name") == binary
-                  and message["target"].get("kind") == ["bin"]
+                  and message["target"].get("kind") == [kind]
                   and not message.get("profile", {}).get("test") and message.get("executable")):
                 runner = message["executable"]
         code = process.wait()
@@ -156,6 +156,14 @@ def prepare_fixtures(planned):
                         "--build-arg", f"CLAUDE_VERSION={versions['claude-code']}",
                         "--build-arg", f"HARNESS_UID={os.getuid()}", "images/harness-canary"], check=True)
     environment = {}
+    if includes_package_tests(planned, {"kvnc_core"}, "orch-api-core"):
+        image = "orch-display-test"
+        subprocess.run(["docker", "build", "--tag", "orch-display-fixture-base", "images/orch-env-base"], check=True)
+        subprocess.run(["docker", "build", "--tag", image, "--file",
+                        "crates/control/api/base/tests/displays_support/Dockerfile",
+                        "crates/control/api/base/tests/displays_support"], check=True)
+        environment["ORCH_BROWSER_PEER_IMAGE"] = image
+        environment["ORCH_BROWSER_PEER_PROGRAM"] = static_program("orch-envhost", "browser_peer", kind="example")
     if description["node_runner"]:
         environment["ORCH_TEST_CONFORMANCE_NODE"] = conformance_runner()
     if description["node_connector"]:

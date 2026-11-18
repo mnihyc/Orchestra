@@ -77,6 +77,7 @@ impl Commands for Stored {
         let deadline = command.deadline.ok_or(CommandsError::AuthorityMismatch)?;
         let key = command.key.wire();
         let proposed = link_queries::NewCommand {
+            native_target: None,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),

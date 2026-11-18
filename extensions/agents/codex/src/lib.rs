@@ -1003,6 +1003,7 @@ impl CodexAdapter {
         let resumed = matches!(mode, SessionMode::Resume | SessionMode::Adopt);
         let settings = &spec.settings;
         let mut mapper = Mapper::new(MapperConfig {
+            opening_id: spec.opening_id,
             thread_id: settings.thread_id,
             segment_id: settings.segment_id,
             native_thread: native.clone(),
@@ -1057,6 +1058,7 @@ impl CodexAdapter {
                 record,
                 settings.raw_events,
                 SessionEvent::SessionOpened(SessionOpenedEvent {
+                    opening_id: spec.opening_id,
                     native_session_ref: native.clone(),
                     resumed,
                 }),
@@ -1109,6 +1111,7 @@ impl CodexAdapter {
             (
                 record.mapper.native_thread().to_owned(),
                 MapperConfig {
+                    opening_id: record.mapper.opening_id(),
                     thread_id: record.mapper.thread_id(),
                     segment_id: record.mapper.segment_id(),
                     native_thread: record.mapper.native_thread().to_owned(),

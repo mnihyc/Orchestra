@@ -472,15 +472,6 @@ pub struct ExecOffer {
     pub reason: Option<String>,
 }
 
-/// A manager's recorded consent for the current version of one machine program.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EnvironmentProgramApproval {
-    /// The person who allowed this program version.
-    pub by: crate::users::UserRef,
-    /// When the environment manager allowed it.
-    pub at: Time,
-}
-
 /// An executor supplied by a confirmed program on the connected machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMachineProgram {
@@ -491,7 +482,7 @@ pub struct EnvironmentMachineProgram {
     /// Its current probed version, or unknown.
     pub version: String,
     /// Consent matching this exact path and version, including a historical writer's reference.
-    pub approval: Option<EnvironmentProgramApproval>,
+    pub approval: Option<crate::machine_programs::ExecutionApproval>,
 }
 
 /// What an environment's exec node offers.
@@ -606,6 +597,9 @@ pub struct EnvironmentSupportBrowser {
 /// What an environment has to serve a display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentSupportVnc {
+    /// The machine can share its current local desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
     /// Programs found there that serve a display Orch can open.
     pub servers: Vec<EnvironmentSupportProgram>,
     /// The window manager that is started on a display Orch opens, where there is one.
@@ -638,6 +632,7 @@ impl EnvironmentSupport {
                 sandbox: None,
             },
             vnc: EnvironmentSupportVnc {
+                desktop: None,
                 servers: Vec::new(),
                 window_manager: None,
             },

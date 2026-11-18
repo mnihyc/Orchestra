@@ -15,6 +15,17 @@ import ci_fixtures
 
 
 class NativeFixtures(unittest.TestCase):
+    def test_the_display_api_program_runs_with_its_real_shipped_image_peer(self):
+        cases = [["cargo", "test", "-p", "orch-api-core", "--test", "kvnc_core"]]
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(ci_fixtures, "static_program", return_value="/built/browser_peer") as build, \
+                patch.object(ci_fixtures.subprocess, "run") as run:
+            env = ci_fixtures.prepare_fixtures(cases)
+        self.assertEqual(env["ORCH_BROWSER_PEER_PROGRAM"], "/built/browser_peer")
+        self.assertTrue(any("images/orch-env-base" in invocation.args[0] for invocation in run.call_args_list))
+        self.assertIn("crates/control/api/base/tests/displays_support/Dockerfile", run.call_args.args[0])
+        build.assert_called_once_with("orch-envhost", "browser_peer", kind="example")
+
     def test_node_conformance_and_default_package_tests_need_a_static_runner_and_the_harness(self):
         for arguments in (("--test", "conformance"), (), ("--tests",), ("--all-targets",)):
             with self.subTest(arguments=arguments):

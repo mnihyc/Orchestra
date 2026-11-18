@@ -1325,3 +1325,43 @@ async fn an_oidc_link_rechecks_its_originating_key_at_callback_and_does_not_borr
         assert_eq!(credential.is_some(), loss == "scope");
     }
 }
+
+#[tokio::test]
+async fn an_admitted_identity_login_keeps_its_callback_when_the_public_address_changes() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let sso = sso().await;
+    sso.provider.sign_in_as(dana());
+    let mut browser = Browser::default();
+    let to_provider = sso.begin(&mut browser, None, None).await;
+    let callback_before = query_of(&to_provider)["redirect_uri"].clone();
+    let back = sso.provider.authorize(&to_provider).await.unwrap();
+    let seed = sso.world.app.app.config.system.address_seed();
+    let before = public_addresses::read(&mut *sso.world.conn().await, &seed, sso.world.now())
+        .await
+        .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *sso.world.conn().await,
+            &candidate,
+            before.revision,
+            None,
+            sso.world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    assert_eq!(sso.come_back(&mut browser, &back).await, "/");
+    assert!(browser.has("orch_session"));
+    let new_start = sso.begin(&mut Browser::default(), None, None).await;
+    assert_ne!(query_of(&new_start)["redirect_uri"], callback_before);
+    assert_eq!(
+        query_of(&new_start)["redirect_uri"],
+        "https://changed.example.test/api/v1/auth/oidc/acme/callback"
+    );
+}

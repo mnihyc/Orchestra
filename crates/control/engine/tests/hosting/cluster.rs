@@ -1,17 +1,19 @@
 //! A scripted node backed by the cluster-shaped driver rather than unconditional lifecycle successes.
 
-use super::{ScriptedHost, World};
+use super::{ScriptedHost, World, lock};
 use orch_driver_contract::driver::{DriverError, EnvironmentDriver};
 use orch_driver_contract::runtime::VolumeRole;
 use orch_driver_contract::volumes::{StorageInfo, VolumeRequest};
 use orch_link_contract::commands::{
-    Command, CommandError, CommandKind, CommandResult, Empty, NodeImageEnsureResult,
+    Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode, NodeImageEnsureResult,
     NodeRuntimeCreateResult,
 };
+use orch_link_contract::native_target::{NativeTarget, RuntimeSource};
 use orch_testkit::doubles::cluster::{ClusterDriver, ClusterMachine};
 use orch_types::Id;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 fn failure(error: DriverError) -> CommandError {
     CommandError {
@@ -59,6 +61,7 @@ pub async fn install(world: &World, host: &ScriptedHost) -> Arc<ClusterDriver> {
         .execute(world.pool.pool())
         .await
         .unwrap();
+    let sources = Arc::new(Mutex::new(HashMap::<Id, RuntimeSource>::new()));
     for kind in [
         CommandKind::NodeImageEnsure,
         CommandKind::NodeVolumeEnsure,
@@ -69,7 +72,8 @@ pub async fn install(world: &World, host: &ScriptedHost) -> Arc<ClusterDriver> {
         CommandKind::NodeRuntimeRemove,
     ] {
         let driver = driver.clone();
-        host.answer(kind, move |command| {
+        let sources = sources.clone();
+        host.answer_with_context(kind, move |context,command| {
             futures::executor::block_on(async {
                 Ok(match command {
                     Command::NodeImageEnsure(body) => {
@@ -101,27 +105,42 @@ pub async fn install(world: &World, host: &ScriptedHost) -> Arc<ClusterDriver> {
                             failure(DriverError::InvalidSpec(error.to_string()))
                         })?;
                         value["enroll_token"] = json!("scripted-driver-token");
-                        let spec: orch_driver_contract::runtime::RuntimeSpec =
+                        let mut spec: orch_driver_contract::runtime::RuntimeSpec =
                             serde_json::from_value(value).map_err(|error| {
                                 failure(DriverError::InvalidSpec(error.to_string()))
                             })?;
-                        CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
-                            unit: driver.create(&spec).await.map_err(failure)?,
-                        })
+                        let birth=match &context.native_target {
+                            Some(NativeTarget::Lifecycle(target)) if target.coherent_for(orch_link_contract::native_target::LifecycleAction::Create)=>target.opening,
+                            None=>None,
+                            _=>return Err(CommandError::new(ErrorCode::Conflict,"the fixture birth has no coherent original")),
+                        };
+                        if let Some(birth)=birth {spec.labels.insert(orch_driver_contract::runtime::LABEL_BIRTH.into(),birth.to_string());}
+                        let unit = driver.create(&spec).await.map_err(failure)?;
+                        let source = *lock(&sources).entry(spec.runtime_id)
+                            .or_insert_with(||RuntimeSource {incarnation:Some(birth.unwrap_or_else(orch_types::new_id))});
+                        CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {source,unit})
                     }
                     Command::NodeRuntimeStart(body) => {
-                        let unit = unit(&driver, body.runtime_id)?;
+                        let unit = unit(&driver,body.runtime_id)?;
+                        let actual = lock(&sources).get(&body.runtime_id).copied().ok_or_else(||CommandError::new(ErrorCode::NotFound,"the fixture native source is absent"))?;
+                        let target = match context.native_target.as_ref() {Some(NativeTarget::Lifecycle(target))=>Some(target),_=>None};
+                        if target.is_some_and(|target|!target.matches_source(actual.incarnation)) {
+                            return Err(CommandError::new(ErrorCode::Conflict,"the fixture native source changed"));
+                        }
+                        let reused = driver.inspect(&unit).await.map_err(failure)?.state == orch_driver_contract::units::UnitStateKind::Running;
                         driver.start(&unit).await.map_err(failure)?;
-                        CommandResult::NodeRuntimeStart(Empty {})
+                        let source = if reused {actual} else {RuntimeSource {incarnation:Some(target.and_then(|target|target.opening).unwrap_or_else(orch_types::new_id))}};
+                        lock(&sources).insert(body.runtime_id,source);
+                        CommandResult::NodeRuntimeStart(orch_link_contract::commands::NodeRuntimeStartResult {source,reused})
                     }
                     Command::NodeRuntimeStop(body) => {
-                        if let Ok(unit) = unit(&driver, body.runtime_id) {
-                            driver
-                                .stop(&unit, std::time::Duration::ZERO)
-                                .await
-                                .map_err(failure)?;
+                        let unit = unit(&driver,body.runtime_id)?;
+                        let source = lock(&sources).get(&body.runtime_id).copied().ok_or_else(||CommandError::new(ErrorCode::NotFound,"the fixture native source is absent"))?;
+                        if context.native_target.as_ref().is_some_and(|target|matches!(target,NativeTarget::Lifecycle(target) if !target.matches_source(source.incarnation))) {
+                            return Err(CommandError::new(ErrorCode::Conflict,"the fixture native source changed"));
                         }
-                        CommandResult::NodeRuntimeStop(Empty {})
+                        driver.stop(&unit,std::time::Duration::ZERO).await.map_err(failure)?;
+                        CommandResult::NodeRuntimeStop(orch_link_contract::commands::NodeRuntimeStopResult::Stopped {source})
                     }
                     Command::NodeRuntimeRemove(body) => {
                         if let Ok(unit) = unit(&driver, body.runtime_id) {

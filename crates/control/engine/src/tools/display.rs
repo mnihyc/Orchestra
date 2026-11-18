@@ -157,13 +157,17 @@ impl Engine {
             }
             "announce" => {
                 displays
-                    .adopt(
+                    .adopt(crate::displays::AdoptDisplay {
                         environment,
-                        thread.node_id,
-                        args.endpoint.unwrap_or_default(),
-                        args.password,
-                        args.note,
-                    )
+                        requester: Requester::Agent(thread.node_id),
+                        thread: Some(thread.node_id),
+                        target: orch_link_contract::display::DisplayTarget::Endpoint(
+                            args.endpoint.unwrap_or_default(),
+                        ),
+                        password: args.password,
+                        note: args.note,
+                        origin: Default::default(),
+                    })
                     .await
             }
             "close" => {
