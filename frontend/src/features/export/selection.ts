@@ -196,7 +196,7 @@ export function wantedOf(scope: Scope, ticks: Ticks, kinds: { chats: boolean; do
       return;
     }
     // Only a part of it: its own things as they are ticked, and then its parts.
-    if (here.on && kinds.chats && node.chat.seq > 0) chosen.chats.push(node.chat.id);
+    if (here.on && kinds.chats && node.chat.seq !== null && node.chat.seq > 0) chosen.chats.push(node.chat.id);
     if (kinds.documents) {
       const documents = scope.documents(id);
       if (here.on && !documents.complete) need.push(id);
