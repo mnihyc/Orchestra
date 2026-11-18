@@ -5,18 +5,95 @@ import { useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { initialChoices, requestOf, selectionOf, type Choices, type FileChoice } from '@/features/change/choices';
+import type * as ThreadsApi from '@/api/threads';
 import { FilesChoice } from '@/features/change/Files';
 import { HistoryChoices } from '@/features/change/History';
 import { Options } from '@/features/change/Options';
 import { HostChoices, Where } from '@/features/change/Where';
-import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Place, PlaceEnvironment, PlaceHost, Thread, UserRef } from '@/generated/api-types';
+import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Item, Place, PlaceEnvironment, PlaceHost, Thread, Turn, UserRef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 
 import { host as hostPlace, placeEnvironment } from '../unit/start-fixtures';
+import { turn, userMessage } from '../doubles/thread-rows';
 import { show } from './support';
 
-const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry' }));
+const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry', turns: [] as Turn[], items: [] as Item[],
+  historyPage: vi.fn<(before: number | null) => Promise<{ turns: { id: string; ordinal: number }[]; next_before: number | null }>>() }));
+
+for (const locale of ['en', 'zh-CN'] as const) for (const failed of [false, true]) it(`accepts a known ordinal directly in the paged history picker without held turns (${locale}, read failed=${String(failed)})`, async () => {
+  await setLocale(locale);
+  if (failed) fixture.historyPage.mockRejectedValue(new Error('History page unavailable'));
+  else fixture.historyPage.mockResolvedValue({ turns: [], next_before: null });
+  const choices = { ...initialChoices('replace'), history: { mode: 'upto' as const, fromTurn: null, toTurn: null } };
+  const changed = vi.fn();
+  show(<HistoryChoices threadId="thread" choices={choices} onChange={changed} />);
+  const user = userEvent.setup();
+  const picker = screen.getByRole('combobox', { name: i18n.t('change.history.upTo') });
+  await user.click(picker);
+  await user.type(picker, '1843');
+  await user.click(await screen.findByRole('option', { name: locale === 'en' ? 'Use turn 1,843' : '使用第 1,843 轮' }));
+  const patch = changed.mock.calls.at(-1)?.[0] as Partial<Choices> | undefined;
+  expect(patch?.history?.toTurn).toBe(1843);
+  expect(requestOf({ ...choices, ...patch })).toMatchObject({ history: { mode: 'range', to_turn: 1843 } });
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`names the planned history path in the control and withdraws it while another plan is pending (${locale})`, async () => {
+  await setLocale(locale);
+  const methods = [
+    ['same_session', 'Same session', '沿用会话'],
+    ['native_fork', 'Agent session fork', '分叉代理会话'],
+    ['native_transplant', 'Agent history transfer', '迁移代理历史'],
+    ['neutral_import', 'Conversation import', '导入对话'],
+    ['file_handoff', 'Recent turns + transcript file', '近期轮次和对话记录文件'],
+    ['summary_handoff', 'Summary handoff + transcript file', '摘要交接和对话记录文件'],
+    ['none', 'No history', '不带历史'],
+  ] as const;
+  const planned: ForkPlanHistory = { mode: 'all', method: 'same_session', turns: 2, source_available: true, archive_bytes: null,
+    report: { fidelity: 'lossless', items_total: 2, by_kind: {}, dropped: [], warnings: [] } };
+  const choices = initialChoices('replace');
+  const change = vi.fn();
+  const view = show(<HistoryChoices threadId="thread" choices={choices} planned={planned} onChange={change} />);
+  const history = screen.getByRole('combobox', { name: i18n.t('change.history.title') });
+  for (const [method, english, chinese] of methods) {
+    const mode = method === 'summary_handoff' ? 'summary' : method === 'none' ? 'none' : 'all';
+    view.rerender(<HistoryChoices threadId="thread" choices={{ ...choices, history: { ...choices.history, mode } }} planned={{ ...planned, mode, method }} onChange={change} />);
+    expect(history).toHaveTextContent(`${i18n.t(`changeCompact.history.${mode}`)} · ${locale === 'en' ? english : chinese}`);
+  }
+  view.rerender(<HistoryChoices threadId="thread" choices={choices} onChange={change} />);
+  expect(history).toHaveTextContent(i18n.t('changeCompact.history.all'));
+  expect(history.textContent).not.toContain(' · ');
+  view.rerender(<HistoryChoices threadId="thread" choices={choices} planned={{ ...planned, mode: 'summary' }} onChange={change} />);
+  expect(history.textContent).not.toContain(' · ');
+  expect(change).not.toHaveBeenCalled();
+});
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps native selection bounds and allowance in the history choice and retires an obsolete proposal (${locale})`, async () => {
+  await setLocale(locale);
+  const planned = { mode: 'all' as const, method: 'file_handoff' as const, turns: 30, source_available: false, archive_bytes: null,
+    report: { fidelity: 'structured' as const, items_total: 30, by_kind: {}, dropped: [], warnings: [] },
+    selected_range: { from: 5, through: 34 }, context_allowance: { share: 80, tokens: 6400, source: 'declared_model_window' as const } };
+  const changed = vi.fn();
+  const view = show(<HistoryChoices threadId="thread" choices={initialChoices('replace')} planned={planned} onChange={changed} />);
+  await userEvent.click(screen.getByRole('combobox', { name: i18n.t('change.history.title') }));
+  const body = document.querySelector('[data-fact-disclosure-body]');
+  expect(body).not.toBeNull();
+  expect(body).toHaveTextContent(locale === 'en' ? 'Selected turns' : '所选轮次');
+  expect(body).toHaveTextContent('5–34');
+  expect(body).toHaveTextContent('80%');
+  expect(screen.queryByRole('button', { name: i18n.t('common.details') })).not.toBeInTheDocument();
+  expect(fixture.historyPage).not.toHaveBeenCalled();
+  view.rerender(<HistoryChoices threadId="thread" choices={initialChoices('replace')} onChange={changed} />);
+  await waitFor(() => expect(document.querySelector('[data-fact-disclosure-body]')).toBeNull());
+  expect(changed).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('option', { name: i18n.t('changeCompact.history.upto') }));
+  expect(changed.mock.calls.at(-1)?.[0]).toMatchObject({ history: { mode: 'upto' } });
+});
+
+vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), turnChoicesQuery: () => ({
+  queryKey: ['compact-turn-choices'], enabled: true, initialPageParam: null as number | null,
+  queryFn: ({ pageParam }: { pageParam: number | null }) => fixture.historyPage(pageParam),
+  getNextPageParam: (page: { next_before: number | null }) => page.next_before ?? undefined,
+}) }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), placesQuery: (topic: string) => ({
   queryKey: ['compact-places', topic], initialData: fixture.places, queryFn: () => Promise.resolve(fixture.places),
 }) }));
@@ -26,7 +103,7 @@ vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), se
   ]),
 }) }));
 vi.mock('@/realtime/stores/thread', async (original) => ({ ...await original<object>(), useThreadView: () => ({
-  order: [], items: new Map(), turns: new Map(),
+  order: fixture.items.map((item) => item.id), items: new Map(fixture.items.map((item) => [item.id, item])), turns: new Map(fixture.turns.map((turn) => [turn.id, turn])),
 }) }));
 
 const owner: UserRef = { id: 'owner', kind: 'human', username: 'owner', display_name: 'Other Owner', avatar: { color: 1, text: 'O' } };
@@ -35,14 +112,54 @@ const place: PlaceEnvironment = placeEnvironment(environment.id, {
   environment, machine: { id: 'workstation', name: 'Workstation', online: true, placement: 'connected', platform_os: 'linux' },
   facts: { os: 'linux', cpus: 4, memory_mb: 8192 }, threads: 2,
 });
-// This editor reads only topic_id and the source environment; no unrelated thread fact is fabricated.
-const thread = { topic_id: 'topic', environment: { ...environment, id: 'source', name: 'Source workspace' } } as unknown as Thread;
+// This editor reads its source directory, topic and environment.
+const thread = { directory:'',topic_id: 'topic', environment: { ...environment, id: 'source', name: 'Source workspace' } } as unknown as Thread;
 
 beforeEach(() => {
   const declared = { ...place, kind: 'environment' as const };
   fixture.places = [declared];
   fixture.summary = true;
   fixture.history = 'carry';
+  fixture.turns = []; fixture.items = [];
+  fixture.historyPage.mockReset().mockResolvedValue({ turns: [], next_before: null });
+});
+
+it.each(['en', 'zh-CN'] as const)('finds a held turn by its prompt and preserves its native ordinal in the history choice in %s', async (locale) => {
+  await setLocale(locale);
+  fixture.turns = Array.from({ length: 12 }, (_, at) => turn(`turn-${at}`, { ordinal: at + 1, state: 'completed', inputId: `input-${at}` }));
+  fixture.items = fixture.turns.map((turn, at) => userMessage(`message-${at}`, `Question ${at}`, { turn: turn.id, author: owner }));
+  const initial = initialChoices('new');
+  const choices: Choices = { ...initial, history: { ...initial.history, mode: 'upto', toTurn: 1 } };
+  const changed = vi.fn();
+  show(<HistoryChoices threadId="thread" choices={choices} onChange={changed} />);
+  const picker = screen.getByRole('combobox', { name: i18n.t('change.history.upTo') });
+  await userEvent.click(picker);
+  await userEvent.type(picker, 'Question 11');
+  expect(changed).not.toHaveBeenCalled();
+  expect(screen.queryByRole('option', { name: /Question 10/ })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('option', { name: /Question 11/ }));
+  expect(changed).toHaveBeenCalledExactlyOnceWith({ history: { ...choices.history, toTurn: 12 } });
+});
+
+it.each(['en', 'zh-CN'] as const)('pages to an older empty turn after a failed page without losing the held choices in %s', async (locale) => {
+  await setLocale(locale);
+  fixture.turns = [turn('latest-turn', { ordinal: 21, state: 'completed', inputId: 'latest-input' })];
+  fixture.historyPage.mockResolvedValueOnce({ turns: [{ id: 'recent-turn', ordinal: 20 }], next_before: 20 })
+    .mockRejectedValueOnce(new Error('The earlier page did not arrive.'))
+    .mockResolvedValueOnce({ turns: [{ id: 'older-empty-turn', ordinal: 1 }], next_before: null });
+  const initial = initialChoices('new');
+  const choices: Choices = { ...initial, history: { ...initial.history, mode: 'upto', toTurn: 21 } };
+  const changed = vi.fn();
+  show(<HistoryChoices threadId="thread" choices={choices} onChange={changed} />);
+  expect(fixture.historyPage).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('combobox', { name: i18n.t('change.history.upTo') }));
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('ui.pagination.more') }));
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('common.tryAgain') }));
+  await userEvent.type(screen.getByRole('combobox', { name: i18n.t('change.history.upTo') }), i18n.t('change.history.turn', { n: 1 }));
+  await userEvent.click(await screen.findByRole('option', { name: i18n.t('change.history.turn', { n: 1 }) }));
+  expect(fixture.historyPage.mock.calls.map(([before]) => before)).toEqual([null, 20, 20]);
+  expect(changed).toHaveBeenCalledExactlyOnceWith({ history: { ...choices.history, toTurn: 1 } });
+  expect(fixture.turns.map((turn) => turn.id)).toEqual(['latest-turn']);
 });
 const appearance = useAppearance.getState();
 afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
@@ -50,7 +167,7 @@ afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'
 for (const locale of ['en', 'zh-CN'] as const) {
   const words = locale === 'en' ? {
     all: 'All files', patterns: 'By pattern', none: 'No files', include: 'Take these',
-    shared: 'Source workspace · share files', existing: 'Copy to existing', fresh: 'Copy to new', picker: 'Another environment', environment: 'Environment', historyLabel: 'History',
+    shared: 'Source workspace · share files', existing: 'Copy to an existing environment', fresh: 'Copy to a new environment', picker: 'Another environment', environment: 'Environment', historyLabel: 'History',
     original: 'Keep thread access', topic: 'Use topic access', private: 'Private to me',
     history: 'Carry', range: 'Carry some turns', summary: 'Summary', noHistory: 'None',
   } : {
@@ -199,7 +316,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 }
 
-it('keeps host capacity and policy refusals inside the open picker without weakening the gate', async () => {
+it('keeps the host refusal compact inside the open picker without weakening the gate', async () => {
   const host: PlaceHost = hostPlace('host', 'Build host', {
     host: { id: 'host', name: 'Build host', address: 'team.owner.build' }, owner,
     when_full: 'block', usable: false, policy_refusal: 'Machine policy forbids writes.',
@@ -212,7 +329,7 @@ it('keeps host capacity and policy refusals inside the open picker without weake
   const option = screen.getByRole('option', { name: 'Build host' });
   expect(option).toHaveAttribute('aria-disabled', 'true');
   expect(option).toHaveAccessibleDescription(/Machine policy forbids writes/);
-  expect(screen.getByRole('meter', { name: '2 of 8 GB declared' })).toBeVisible();
+  expect(within(option).queryByRole('meter')).toBeNull();
   await userEvent.click(option);
   expect(changed).not.toHaveBeenCalled();
 });

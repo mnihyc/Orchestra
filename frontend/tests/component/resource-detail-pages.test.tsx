@@ -58,7 +58,7 @@ vi.mock('@/api/resource-tools', async (load) => {
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, to, params, className }: { children: ReactNode; to: string; params?: Record<string, string>; className?: string }) => <a className={className} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
@@ -102,6 +102,18 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.agent = detailAgent;
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
+
+for(const locale of ['en','zh-CN'] as const) it(`names the idle reconnect beside automatic certificate renewal only for a valid identity (${locale})`,async()=>{
+  await setLocale(locale);
+  const renewal=locale==='en'?'Automatic · reconnects when idle':'自动续期 · 空闲时重新连接';
+  const view=draw(<Machine machineId={detailMachine.id} tab="certificate" onTab={vi.fn()} />);
+  expect(await screen.findByText(renewal)).toBeVisible();
+  expect(screen.getByText(i18n.t('machines.certificate.ends'))).toBeVisible();
+  act(()=>{view.client.setQueryData(machineKey(detailMachine.id),{...detailMachine,status:'revoked'});});
+  await waitFor(()=>expect(screen.queryByText(renewal)).not.toBeInTheDocument());
+  const certificate=screen.getByLabelText(i18n.t('machines.certificate.title'),{selector:'dl'});
+  expect(within(certificate).getByText(i18n.t('machines.certificate.revoked'))).toBeVisible();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
@@ -250,12 +262,12 @@ it('shows readable parameter defaults with the native Defaults destination and b
 
 it.each(['en', 'zh-CN'] as const)('uses the declared program name and translated parameter words in %s', async (locale) => {
   await setLocale(locale);
-  const english = 'How much of a conversation Example agent keeps, in tokens';
-  const chinese = '示例代理保留的对话长度，以词元计';
+  const english = 'How much of a thread Example agent keeps, in tokens';
+  const chinese = '示例智能体保留的对话长度，以词元计';
   records.agent = { ...detailAgent, descriptor: {
     harness: { name: 'Example agent', status: 'supported', version: '1.0.0' },
     parameters: [{ key: 'context', type: 'integer', title: 'Context', description: english, default: { from_model: 'default_context' } }],
-    text: { 'zh-CN': { 'harness.name': '示例代理', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
+    text: { 'zh-CN': { 'harness.name': '示例智能体', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
   } };
   draw(<AgentScreen agentId={detailAgent.id} tab="parameters" onTab={vi.fn()} />);
   const description = await screen.findByText(locale === 'en' ? english : chinese);

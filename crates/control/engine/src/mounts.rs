@@ -294,6 +294,7 @@ pub async fn resolve_for(
             .filter(|_| reason.is_none() && target.driver.is_some())
             .map(|location| {
                 json!({
+                    "resource_id": row.id,
                     "name": row.name, "kind": location.kind, "source": location.source,
                     "target": row.target, "mode": asked, "layer": layer,
                 })

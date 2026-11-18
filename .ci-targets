@@ -1,0 +1,8 @@
+release-checks
+fmt
+test -p orch-xtask --bin orch-xtask -- release::
+test -p orch-human-check-contract --lib
+test -p orch-human-check --lib --test edge_policy
+web typecheck
+web lint
+web test

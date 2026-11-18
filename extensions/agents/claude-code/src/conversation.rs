@@ -38,7 +38,9 @@ use crate::events::{EventMapper, MapperSettings};
 use crate::failure;
 use crate::process::{ExitInfo, Launcher, ProcessEvent, Running, spawn};
 use crate::provider::LOGIN_FILE;
-use crate::sessions::{HarnessSetup, Launch, Origin, TurnSettings, launch, through_executor};
+use crate::sessions::{
+    HarnessSetup, Launch, Origin, TurnSettings, launch_with_mcp, through_executor,
+};
 use crate::stream::{
     ControlOutcome, Frame, FrameKind, control_error, control_request, control_success, encode_line,
     text_block, user_message,
@@ -284,6 +286,7 @@ pub fn start_with_settler(
         },
         Arc::clone(&params.clock),
     );
+    mapper.set_output_capture_bytes(params.spec.settings.output_capture_bytes);
     mapper.set_retry_notice_attempt(params.setup.config.retry_notice_attempt);
     mapper.configure_native_counters(&params.spec.provider);
     if let Some(directory) = params.setup.outputs_directory() {
@@ -1098,7 +1101,6 @@ impl Conversation {
         let total = tasks.len();
         let items = tasks
             .into_iter()
-            .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
             .map(|task| NativeBackgroundCommand {
                 id: background_command_id(&task),
                 native_item_ref: Some(task.native_item_ref),
@@ -1116,12 +1118,10 @@ impl Conversation {
             supported: true,
             as_of: Some(self.params.clock.time()),
             state: BackgroundState::Live,
-            reason: (total > orch_agent_contract::background::SNAPSHOT_COMMANDS)
-                .then(|| "the owned native task list is partial".to_owned()),
+            reason: None,
             items,
             next_cursor: None,
-            total: (total <= orch_agent_contract::background::SNAPSHOT_COMMANDS)
-                .then(|| i64::try_from(total).unwrap_or(i64::MAX)),
+            total: Some(i64::try_from(total).unwrap_or(i64::MAX)),
         }
     }
 
@@ -1254,6 +1254,7 @@ impl Conversation {
         if self.process.is_some() {
             mapper.inherit_process_report(&self.mapper);
         }
+        mapper.set_output_capture_bytes(spec.settings.output_capture_bytes);
         mapper.set_retry_notice_attempt(self.params.setup.config.retry_notice_attempt);
         mapper.configure_native_counters(&spec.provider);
         if let Some(directory) = self.params.setup.outputs_directory() {
@@ -1562,7 +1563,7 @@ impl Conversation {
         if settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
             if !crate::descriptor::auto_proven() {
                 return Err(AdapterError::Unsupported(
-                    "Auto is unavailable until the integrator's real trial".to_owned(),
+                    "Auto is unavailable until its check has passed".to_owned(),
                 ));
             }
             if self.params.spec.settings.approval_mode != settings.approval_mode {
@@ -1751,7 +1752,7 @@ impl Conversation {
         }
         let reviewer =
             crate::sessions::approval_reviewer(&self.params.setup, &self.params.spec, settings)?;
-        let spec = launch(&Launch {
+        let (spec, definitions) = launch_with_mcp(&Launch {
             setup: &self.params.setup,
             spec: &self.params.spec,
             session_id: &session_id,
@@ -1781,6 +1782,10 @@ impl Conversation {
         // A process that begins the conversation counts its use from nothing; one that resumes or forks it
         // starts from what the harness restored.
         self.mapper.process_started(matches!(origin, Origin::New));
+        let configured = self
+            .mapper
+            .configure_mcp(definitions, self.params.spec.opening_command);
+        self.emit_all(configured).await;
         self.unadmitted_reply = UnadmittedReply::default();
         self.mapper
             .expect_process_resume(matches!(origin, Origin::Resume));
@@ -2468,6 +2473,8 @@ impl Conversation {
             return;
         }
         let ctx = ToolContext {
+            outputs: None,
+            output_capture_bytes: self.params.spec.settings.output_capture_bytes,
             directory: &self.params.spec.settings.directory,
             cwd: &self.params.spec.settings.cwd,
         };
@@ -2679,6 +2686,7 @@ impl Conversation {
         self.lose_session(&info.describe()).await;
         if !expected && !had_turn && was_live {
             self.emit(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: format!("the harness process ended: {}", info.describe()),
             }))
             .await;
@@ -2715,6 +2723,7 @@ impl Conversation {
             let events = self.mapper.abandon_turn();
             self.emit_all(events).await;
             self.emit(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: format!("the harness process ended: {why}"),
             }))
             .await;
@@ -2891,6 +2900,7 @@ mod outbox_tests {
     fn what_asks_or_takes_an_ask_back_passes_a_shut_gate_in_its_order_and_the_rest_waits() {
         let lost = || {
             event(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "gone".to_owned(),
             }))
         };

@@ -15,6 +15,7 @@ import { choiceOption, choiceCopy } from '@/i18n/choices';
 
 import { identityProvidersQuery } from '@/api/admin';
 import { metaQuery } from '@/api/auth';
+import { HumanCheckCard } from '@/features/admin/HumanCheck';
 import { IdentityProviders } from '@/features/admin/IdentityProviders';
 import { SettingChangeStatus, SwitchSetting, useSettingChange, useSystemSettings } from '@/features/admin/SettingRows';
 import { boxClasses, Section } from '@/shell/Page';
@@ -180,6 +181,10 @@ export function SignIn() {
           <Info aria-hidden className="mt-0.5 shrink-0" />
           {t('admin.signIn.tries')}
         </p>
+      </Section>
+
+      <Section id="admin-human-check" title={t('admin.signIn.humanCheck.title')} lead={t('admin.signIn.humanCheck.lead')}>
+        <HumanCheckCard />
       </Section>
 
       <Section id="admin-providers" title={t('admin.signIn.providers.title')} lead={t('admin.signIn.providers.lead')}>
