@@ -47,6 +47,7 @@ async fn a_machine_with_directory_data_facts_can_make_a_volume_attach_it_and_rem
     std::fs::write(path.join("hello"), "shared data").unwrap();
     let read = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: Some("data".into()),
             path: "hello".into(),

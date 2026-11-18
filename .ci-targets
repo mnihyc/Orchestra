@@ -1,0 +1,5 @@
+test -p orch-engine --test turns
+test -p orch-engine --lib -- source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-engine --lib -- database_retry::tests::
+fmt
+clippy
