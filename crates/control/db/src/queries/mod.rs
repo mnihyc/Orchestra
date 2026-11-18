@@ -62,6 +62,7 @@ pub mod search;
 pub mod second_step;
 pub mod semantic;
 pub mod session_dependencies;
+pub mod session_skills;
 pub mod settings;
 pub mod shared;
 pub mod shares;

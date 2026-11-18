@@ -124,6 +124,24 @@ pub async fn for_thread(
     thread: Id,
     at: Time,
 ) -> Result<ThreadSkills, EngineError> {
+    for_thread_inner(conn, thread, at, true).await
+}
+
+/// The same selection and giver checks for a read-only proposal, without material manifests.
+pub async fn metadata_for_thread(
+    conn: &mut Conn,
+    thread: Id,
+    at: Time,
+) -> Result<ThreadSkills, EngineError> {
+    for_thread_inner(conn, thread, at, false).await
+}
+
+async fn for_thread_inner(
+    conn: &mut Conn,
+    thread: Id,
+    at: Time,
+    material: bool,
+) -> Result<ThreadSkills, EngineError> {
     let mut named: Vec<Named> = named_at(conn, thread)
         .await?
         .into_iter()
@@ -175,19 +193,21 @@ pub async fn for_thread(
             Choice::Off => None,
         })
         .collect();
-    let versions: HashMap<Id, VersionRow> = rows::versions_by_id(conn, &wanted)
-        .await?
-        .into_iter()
-        .map(|row| (row.id, row))
-        .collect();
+    let found = if material {
+        rows::versions_by_id(conn, &wanted).await?
+    } else {
+        rows::version_metadata_by_id(conn, &wanted).await?
+    };
+    let versions: HashMap<Id, VersionRow> = found.into_iter().map(|row| (row.id, row)).collect();
     // The nearest place first, then by identifier, so that a name kept is always the same one.
     named.sort_by_key(|each| (each.personal, Reverse(each.depth), each.skill));
     let mut given: Vec<ThreadSkill> = Vec::new();
     let mut skipped: Vec<SkippedSkill> = Vec::new();
     let mut names: HashSet<String> = HashSet::new();
-    let mut usable: HashMap<(Id, Id), bool> = HashMap::new();
+    let usable = giver_use(conn, thread, &mut named, &skills, &versions, at).await?;
     for each in named {
         let skip = |reason: SkillSkip, name: Option<String>| SkippedSkill {
+            contributor: each.writer,
             skill_id: each.skill,
             name,
             reason,
@@ -222,19 +242,10 @@ pub async fn for_thread(
                 }
             },
         };
-        let may = match usable.get(&(each.writer, skill.id)) {
-            Some(may) => *may,
-            None => {
-                let may = if each.personal {
-                    // The starter's own skill is asked of the starter, wherever they are a member.
-                    own_use(conn, each.writer, skill.id, thread, at).await?
-                } else {
-                    crate::mcp::source_may_use(conn, each.writer, skill.id, thread, at).await?
-                };
-                usable.insert((each.writer, skill.id), may);
-                may
-            }
-        };
+        let may = usable
+            .get(&(each.writer, skill.id))
+            .copied()
+            .unwrap_or(false);
         if !may {
             skipped.push(skip(SkillSkip::NotUsable, name));
             continue;
@@ -245,6 +256,7 @@ pub async fn for_thread(
         }
         let files: Vec<SkillFile> = serde_json::from_value(version.files.clone())?;
         given.push(ThreadSkill {
+            contributor: each.writer,
             skill_id: skill.id,
             version_id: version.id,
             number: i64::from(version.number),
@@ -266,22 +278,68 @@ pub async fn for_thread(
 }
 
 /// Whether `user` may use the skill `skill` for the thread `thread` themself.
-async fn own_use(
+async fn giver_use(
     conn: &mut Conn,
-    user: Id,
-    skill: Id,
     thread: Id,
+    named: &mut [Named],
+    skills: &HashMap<Id, SkillRow>,
+    versions: &HashMap<Id, VersionRow>,
     at: Time,
-) -> Result<bool, EngineError> {
-    let principal = match Principal::load(conn, Caller::session(user), at).await {
-        Ok(principal) => principal,
-        Err(orch_authz::Error::NoSuchUser(_)) => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(matches!(
-        usable::usable(conn, &principal, skill, Some(thread), &Policies::default()).await?,
-        Usable::Yes(_)
-    ))
+) -> Result<HashMap<(Id, Id), bool>, EngineError> {
+    let mut custody = HashMap::new();
+    let mut groups: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for each in named {
+        let Some(skill) = skills
+            .get(&each.skill)
+            .filter(|skill| skill.enabled && skill.deleted_at.is_none())
+        else {
+            continue;
+        };
+        let version = match each.choice {
+            Choice::Pinned(id) => Some(id),
+            Choice::Latest => skill.latest_version_id,
+            Choice::Off => None,
+        };
+        if !version
+            .and_then(|id| versions.get(&id))
+            .is_some_and(|version| version.skill_id == skill.id)
+        {
+            continue;
+        }
+        if !each.personal {
+            each.writer = match custody.get(&each.writer) {
+                Some(writer) => *writer,
+                None => {
+                    let writer =
+                        orch_authz::ownership::owner_of_new(conn, each.writer, Some(thread))
+                            .await?;
+                    custody.insert(each.writer, writer);
+                    writer
+                }
+            };
+        }
+        groups.entry(each.writer).or_default().push(each.skill);
+    }
+    let mut result = HashMap::new();
+    for (writer, mut ids) in groups {
+        ids.sort_unstable();
+        ids.dedup();
+        let principal = match Principal::load(conn, Caller::session(writer), at).await {
+            Ok(principal) => principal,
+            Err(orch_authz::Error::NoSuchUser(_)) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let choices =
+            usable::usable_among(conn, &principal, &ids, Some(thread), &Policies::default())
+                .await?;
+        for id in ids {
+            result.insert(
+                (writer, id),
+                matches!(choices.get(&id), Some(Usable::Yes(_))),
+            );
+        }
+    }
+    Ok(result)
 }
 
 /// Records on the turn `turn` the versions of `skills` it was given when it started.

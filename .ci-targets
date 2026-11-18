@@ -1,0 +1,5 @@
+web typecheck
+web lint
+web test -- tests/component/settings-collection.test.tsx --maxWorkers=1
+web test -- tests/component/resource-environment-settings.test.tsx tests/component/summary-targets-editor.test.tsx tests/component/settings-frame-layout.test.tsx tests/component/everything.test.tsx tests/component/document-comment-device.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts
+web test

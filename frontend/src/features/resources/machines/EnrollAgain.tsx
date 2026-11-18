@@ -4,13 +4,14 @@
  * for that machine alone as the dialog opens; the command that uses it gives the machine a new certificate and
  * it is the same machine afterwards, so nothing registered from it is made again. A certificate of it that still
  * stood is revoked when the new one is first used, so that the old disk, if somebody has it, is out. The dialog
- * asks for the machine every few seconds and says when its certificate is new.
+ * reads the machine again every few seconds while it waits, and says when its certificate is new.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { LoaderCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { readAgain } from '@/api/readAgain';
 import { enrollMachineAgain, machineEnrollmentInfoQuery, machineKey, machineQuery, machinesKey } from '@/api/resources';
 import { CommandBox } from '@/features/resources/Facts';
 import { TaskGuideLink } from '@/features/help/TaskGuideLink';
@@ -62,7 +63,9 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
 
   const expiresAt = made === undefined ? null : Date.parse(made.expires_at);
   const expired = expiresAt !== null && expiresAt <= now;
-  const watch = useQuery({ ...machineQuery(machine.id), enabled: made !== undefined });
+  const watch = useQuery({ ...machineQuery(machine.id), enabled: made !== undefined,
+    // The machine's return is told over the live connection, once: until it has come back the dialog reads it again by itself.
+    refetchInterval: readAgain<Machine>((read) => !(read?.status === 'active' && (before.status !== 'active' || Date.parse(read.cert_not_after) > Date.parse(before.ends)))) });
   const current = watch.data;
   // A new certificate ends later than the one the machine had; a machine that was revoked is well again as soon as it is active.
   const enrolled = current?.status === 'active' && (before.status !== 'active' || Date.parse(current.cert_not_after) > Date.parse(before.ends));

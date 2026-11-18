@@ -12,7 +12,7 @@ import { World } from '../doubles/world';
 import { show } from './support';
 
 const ID='rate-limit-thread';
-const context:TimelineContext={threadId:ID,threadName:'Quota',detail:'steps',recent:new Set(),layout:'one',setLayout:()=>undefined,
+const context:TimelineContext={threadId:ID,threadName:'Quota',detail:'normal',layout:'one',setLayout:()=>undefined,
   meId:null,canInteract:false,canManage:false,live:true,lit:null,selection:NOT_PICKING};
 afterEach(async()=>{cleanup();threadWriter.evict(ID);await setLocale('en');});
 for(const locale of ['en','zh-CN'] as const) it(`keeps a native limit notice with the actual segment's provider (${locale})`,async()=>{

@@ -33,6 +33,8 @@ use orch_engine::inputs::InputError;
 use orch_engine::views::ReadError;
 
 use orch_types::Id;
+
+mod session_skills;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     make::mount(registry);
@@ -54,6 +56,7 @@ pub fn mount(registry: &mut Registry) {
     model_inputs::mount(registry);
     native::mount(registry);
     instructions::mount(registry);
+    session_skills::mount(registry);
     context::mount(registry);
     continuations::mount(registry);
 }
