@@ -285,4 +285,4 @@ export function TerminalScreen({ session, firstTicket, threadId, environmentName
 import { createStore } from 'zustand/vanilla';
 
 /** What a screen reads while it has no connection yet. */
-const EMPTY = createStore<{ phase: 'connecting'; reason: null; exitCode: null; roundTripMs: null }>(() => ({ phase: 'connecting', reason: null, exitCode: null, roundTripMs: null }));
+const EMPTY = createStore<{ phase: 'connecting'; reason: null; exitCode: null; roundTripMs: null; usualRoundTripMs: null; slow: false }>(() => ({ phase: 'connecting', reason: null, exitCode: null, roundTripMs: null, usualRoundTripMs: null, slow: false }));

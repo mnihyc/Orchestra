@@ -1,0 +1,4 @@
+test -p orch-engine --test turns -- a_second_queued_input_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-engine --lib -- source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+fmt
+clippy

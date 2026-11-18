@@ -121,7 +121,7 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
         .call(ThreadInterrupt, &[&id])
         .token(&s.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: active.turn_id,
+            turn_id: Some(active.turn_id),
         })
         .send()
         .await
@@ -129,10 +129,22 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
     s.rig
         .say(id, turn_ended(active.turn_id, TurnOutcome::Interrupted))
         .await;
-    s.rig.wait_turn(active.turn_id, "interrupted").await;
+    s.rig
+        .wait_for_terminal_facts(active.turn_id, "interrupted")
+        .await;
     s.rig.wait_state(id, "idle").await;
     let before = sync(&s, id).await;
     assert!(before.thread.queue.held);
+    assert_eq!(
+        before
+            .turns
+            .iter()
+            .find(|turn| turn.id == active.turn_id)
+            .and_then(|turn| turn.notice_decision.as_ref())
+            .and_then(|decision| decision.reason),
+        Some(orch_api_contract::notifications::NoticeSuppressionReason::Interrupted),
+        "the move preserves the completed interruption decision"
+    );
     let side = retained_side(&s, id).await;
     let to = destination(&s).await;
     let home: Id = sqlx::query_scalar("SELECT home_node_id FROM environments WHERE id=$1")

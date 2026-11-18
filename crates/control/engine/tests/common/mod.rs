@@ -72,11 +72,18 @@ pub const MODEL: &str = "fake-1";
 
 /// Runs one real case on default stacks even when the enclosing proof enlarges its own stacks.
 pub fn on_default_stack(case: &str) {
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([case, "--exact", "--test-threads=1"])
+    let executable = std::env::current_exe().unwrap();
+    let args = [case, "--exact", "--test-threads=1"];
+    let result = std::process::Command::new(&executable)
+        .args(args)
         .env_remove("RUST_MIN_STACK")
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    #[cfg(target_os = "linux")]
+    if !result.status.success() && stderr.contains("has overflowed its stack") {
+        report_stack_frames(&executable, &args);
+    }
     let one_case_ran = String::from_utf8_lossy(&result.stdout)
         .contains("test result: ok. 1 passed; 0 failed; 0 ignored;");
     assert!(
@@ -84,8 +91,70 @@ pub fn on_default_stack(case: &str) {
         "{case} must pass on default stacks: status {:?}, one case ran: {one_case_ran}\nstdout:\n{}\nstderr:\n{}",
         result.status,
         String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+        stderr
     );
+}
+
+/// A stack overflow aborts before Rust can unwind. Replay that one failed case to locate the native frames.
+#[cfg(target_os = "linux")]
+fn report_stack_frames(executable: &std::path::Path, args: &[&str]) {
+    let gdb: &[&str] = &[
+        "gdb",
+        "--batch",
+        "--nx",
+        "--quiet",
+        "-iex",
+        "set auto-load off",
+        "-iex",
+        "set debuginfod enabled off",
+        "-ex",
+        "set print frame-arguments none",
+        "-ex",
+        "run",
+        "-ex",
+        "bt",
+        "--args",
+    ];
+    let lldb: &[&str] = &[
+        "lldb",
+        "--batch",
+        "--no-lldbinit",
+        "-o",
+        "settings set target.disable-aslr false",
+        "-o",
+        r#"settings set frame-format "frame #${frame.index}: ${frame.pc} ${module.file.basename} ${function.name}\n""#,
+        "-o",
+        "run",
+        "-k",
+        "thread backtrace",
+        "--",
+    ];
+    for debugger in [gdb, lldb] {
+        let Ok(trace) = std::process::Command::new("timeout")
+            .arg(PATIENCE.as_secs().to_string())
+            .args(debugger)
+            .arg(executable)
+            .args(args)
+            .env_remove("RUST_MIN_STACK")
+            .output()
+        else {
+            return;
+        };
+        if trace.status.code() == Some(127) {
+            // GNU timeout returns 127 when the debugger is absent.
+            continue;
+        }
+        for line in String::from_utf8_lossy(&trace.stdout).lines() {
+            let frame = line.trim_start_matches([' ', '*']);
+            if frame.starts_with('#')
+                || frame.starts_with("frame #")
+                || line.contains(" received signal ")
+            {
+                eprintln!("{line}");
+            }
+        }
+        break;
+    }
 }
 
 /// Waits until `check` holds, looking again every few milliseconds.
@@ -251,6 +320,7 @@ impl ResourceAccess for TestAccess {
             None => None,
         };
         let wanted = orch_authz::options::Wanted {
+            purpose: ask.purpose,
             model: ask.model.map(|model| (model, &[][..])),
             effort: ask.effort,
             at: place.as_ref(),
@@ -426,6 +496,7 @@ impl LiveSink for Recorder {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     cmd: Cmd,
     machine: Id,
     handle: CommandHandle,
@@ -669,7 +740,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -690,6 +761,14 @@ impl Commands for Process {
         Ok(lock(&self.commands.issued)
             .get(&id)
             .map(|issued| issued.cmd.body.clone()))
+    }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.commands.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
     }
     async fn retained_command(
         &self,
@@ -726,6 +805,26 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        let before = if let Some(facts) = command.input_facts.as_deref() {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            orch_engine::commands::retain_input_facts(&mut tx, facts, command.id, &command.body)
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            None
+        } else {
+            before
+        };
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -755,6 +854,7 @@ impl Commands for Process {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 cmd,
                 machine: command.machine,
                 handle,
@@ -1193,6 +1293,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1738,6 +1839,7 @@ impl World {
                         descriptor: serde_json::from_value(lock(&declared).clone()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1746,6 +1848,13 @@ impl World {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: if matches!(
                                 open.session.mode,
                                 SessionMode::Resume | SessionMode::Adopt

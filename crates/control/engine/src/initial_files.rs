@@ -959,6 +959,7 @@ pub async fn command_authorized(
                     .ok_or_else(|| failure("the initial source connector disappeared"))?,
                 source.id,
                 json!(FsSnapshot {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: source.id,
                     job_id: owner.id,
@@ -972,6 +973,7 @@ pub async fn command_authorized(
                     .ok_or_else(|| failure("the initial source connector disappeared"))?,
                 source.id,
                 json!(FsRecordRead {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: source.id,
                     snapshot_id: plan
                         .snapshot
@@ -985,6 +987,7 @@ pub async fn command_authorized(
                 target_machine,
                 target.id,
                 json!(FsMaterialize {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: target.id,
                     job_id: Some(owner.id),
@@ -1062,6 +1065,7 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
                                 .ok_or_else(|| failure("the source connector is unavailable"))?,
                             SerialKey::Environment(source.id),
                             &FsRecordRead {
+                                access: orch_link_contract::commands::FsAccess::roots(),
                                 environment_id: source.id,
                                 snapshot_id: plan.snapshot.ok_or_else(|| {
                                     failure("the source snapshot identity is absent")
@@ -1091,6 +1095,7 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
                             .ok_or_else(|| failure("the source connector is unavailable"))?,
                         SerialKey::Environment(source.id),
                         &FsSnapshot {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             work: None,
                             environment_id: source.id,
                             job_id: job.id(),
@@ -1271,6 +1276,7 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
                 machine,
                 SerialKey::Environment(environment),
                 &FsMaterialize {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: environment,
                     job_id: Some(job.id()),

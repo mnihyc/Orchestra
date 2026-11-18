@@ -63,11 +63,14 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const picker = page.getByRole('dialog', { name: t('ask.model'), exact: true });
     await expect(picker.getByRole('menuitemradio').first()).toHaveAccessibleName(t('ask.defaultModel'));
     await expect(picker.getByRole('menuitemradio', { name: 'Excluded API model', exact: true })).toHaveCount(0);
-    await expect(picker.getByRole('group', { name: t('composer.model.efforts', { model: 'Readable API model' }) })).toHaveCount(0);
-    await picker.getByRole('group', { name: t('composer.model.efforts', { model: 'Second API model' }) })
-      .getByRole('menuitemradio', { name: t('choiceCatalog.effort.high.name'), exact: true }).click();
+    // The efforts are the effort control's, never rows of the model list: the model that does not list one has no effort control.
+    await expect(panel.getByRole('button', { name: new RegExp(`^${t('composer.effort.title')}`) })).toHaveCount(0);
+    await picker.getByRole('menuitemradio', { name: 'Second API model', exact: true }).click();
     await expect(trigger).toContainText('Second API model');
+    await panel.getByRole('button', { name: new RegExp(`^${t('composer.effort.title')}`) }).click();
+    await page.getByRole('menuitemradio', { name: t('choiceCatalog.effort.high.name'), exact: true }).click();
     if (!await picker.isVisible()) await trigger.click();
+    await picker.locator('summary').filter({ hasText: t('providerOptions.title') }).click();
     const temperature = picker.getByRole('spinbutton', { name: 'Temperature' });
     await expect(temperature).toHaveAttribute('min', '0'); await expect(temperature).toHaveAttribute('max', '1');
     await expect(picker.getByRole('combobox', { name: 'Effort', exact: true })).toHaveCount(0);
@@ -75,6 +78,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     for (const width of [1440, 400]) {
       await page.setViewportSize({ width, height: 900 });
       if (!await picker.isVisible()) await trigger.click();
+      if (!await temperature.isVisible()) await picker.locator('summary').filter({ hasText: t('providerOptions.title') }).click();
       await expect(temperature).toBeVisible();
       await expect(temperature).toHaveValue('0.5');
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

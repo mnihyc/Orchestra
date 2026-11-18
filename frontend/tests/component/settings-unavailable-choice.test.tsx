@@ -22,6 +22,26 @@ function Form({ schema, start, onChange, label, setting = 'approval.mode', disab
 }
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps an unverified or failed Auto setting visible with its check reason (${locale})`, async () => {
+  await setLocale(locale);
+  for (const [reason, english, chinese] of [
+    ['auto_not_proven', 'Not proven on this machine yet.', '尚未在此机器上验证。'],
+    ['auto_check_failed', 'Failed its check on this machine.', '未通过此机器上的检查。'],
+  ] as const) {
+    const changed = vi.fn<(value: unknown) => void>();
+    const view = show(<Form schema={unavailableSchema(reason)} start="auto" label={LABEL[locale]} onChange={changed} />);
+    const field = screen.getByRole('combobox', { name: LABEL[locale] });
+    expect(field).toHaveValue(i18n.t('choiceCatalog.approvalMode.auto.name'));
+    await userEvent.click(field);
+    const automatic = screen.getByRole('option', { name: i18n.t('choiceCatalog.approvalMode.auto.name') });
+    expect(automatic).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText(locale === 'en' ? english : chinese)).toBeVisible();
+    await userEvent.click(automatic);
+    expect(changed).not.toHaveBeenCalled();
+    view.unmount();
+  }
+});
+
 // EN: Settings → Approval mode → open the choice list → Auto remains disabled with its program reason.
 // 中文：设置 → 审批模式 → 展开选项 → 自动仍然显示，并因程序不支持而禁用。
 for (const locale of ['en', 'zh-CN'] as const) it(`keeps Auto visible with the declared program-support reason and never selects it (${locale})`, async () => {
