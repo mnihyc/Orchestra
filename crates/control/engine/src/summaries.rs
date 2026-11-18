@@ -6,6 +6,8 @@
 
 mod budget;
 mod completion;
+pub(crate) use completion::program::Source as ProgramSource;
+pub(crate) use completion::program::scope_checks as with_program_source_checks;
 mod estimate;
 pub(crate) mod goal_check;
 mod handoff;
@@ -14,7 +16,6 @@ pub mod resource;
 pub mod sources;
 
 pub(crate) use budget::InputBudget;
-pub(crate) use budget::UNKNOWN_WINDOW_TOKENS;
 pub(crate) use estimate::handoff_estimate;
 pub use handoff::{
     Carried, IndexedTranscript, handoff, indexed_transcript, notice as handoff_notice,
@@ -91,6 +92,9 @@ pub async fn due(
     event: &str,
     now: DateTime<Utc>,
 ) -> Result<(), EngineError> {
+    if event != "refresh" && orch_db::queries::capability_work::execution_only(conn, node).await? {
+        return Ok(());
+    }
     resource::node_event(conn, node, event, now).await?;
     let triggers: Option<Json> = setting(conn, Place::Node(node), keys::AUTO_TRIGGERS)
         .await
@@ -191,23 +195,26 @@ impl Engine {
             .and_then(|row| row.context["next_call"].as_str())
             .and_then(|value| value.parse::<Id>().ok())
             .unwrap_or(root);
-        if !self
+        let api_answer = self
             .inner
             .commands
             .status(reference)
             .await?
             .and_then(|status| status.outcome)
-            .is_some_and(|outcome| matches!(outcome, crate::commands::Outcome::Succeeded(_)))
-        {
+            .is_some_and(|outcome| matches!(outcome, crate::commands::Outcome::Succeeded(_)));
+        let native_answer = {
+            let mut conn = self.db().acquire().await?;
+            sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM summary_calls WHERE id=$1 AND delegated_result ? 'result')")
+                .bind(reference).fetch_one(&mut *conn).await.map_err(DbError::from)?
+        };
+        if !api_answer && !native_answer {
             return Ok(ModelFailure::Unobserved);
         }
-        let configured = chosen.config["provider_id"]
-            .as_str()
-            .and_then(|value| value.parse::<Id>().ok())
-            .ok_or_else(|| EngineError::unreadable("the model configuration has no provider"))?;
-        let model = chosen.config["model_name"]
-            .as_str()
-            .ok_or_else(|| EngineError::unreadable("the model configuration has no model"))?;
+        let config = orch_summarizer_model::descriptor::Config::read(&chosen.config)
+            .map_err(EngineError::unreadable)?;
+        let offering = config.offering().map_err(EngineError::unreadable)?;
+        let configured = offering.provider;
+        let model = offering.offering.as_str();
         let mut context = previous.map_or_else(|| json!({}), |row| row.context);
         context["author_id"] = json!(chosen.writer);
         context["provider_id"] = context
@@ -297,7 +304,7 @@ impl Engine {
         let mut conn = self.db().acquire().await?;
         completion::recover(self, &mut conn, SUMMARY_BATCH).await?;
         // Interval candidates rotate by last attempt; a large tree is not scanned by id forever.
-        let running: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id LEFT JOIN node_summary_state s ON s.node_id=t.node_id WHERE t.state IN ('running','waiting_approval') AND n.deleted_at IS NULL AND n.archived_at IS NULL ORDER BY s.last_at NULLS FIRST,t.node_id LIMIT $1")
+        let running: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id LEFT JOIN node_summary_state s ON s.node_id=t.node_id WHERE t.state IN ('running','waiting_approval') AND NOT delegated_execution_only(t.node_id) AND n.deleted_at IS NULL AND n.archived_at IS NULL ORDER BY s.last_at NULLS FIRST,t.node_id LIMIT $1")
             .bind(self.config().sweep_batch).fetch_all(&mut *conn).await.map_err(DbError::from)?;
         for thread in running {
             let triggers: Option<Json> =
@@ -971,7 +978,7 @@ async fn topic_activity(
     now: DateTime<Utc>,
     writer: Option<Id>,
 ) -> Result<Vec<ActivityItem>, SummarizeError> {
-    let ids: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE $1=ANY(n.path) AND t.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL)) ORDER BY n.updated_at DESC LIMIT $2")
+    let ids: Vec<Id> = sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE $1=ANY(n.path) AND t.side_of IS NULL AND NOT delegated_execution_only(t.node_id) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL)) ORDER BY n.updated_at DESC LIMIT $2")
         .bind(topic).bind(i64::from(count)).fetch_all(&mut *conn).await.map_err(DbError::from).map_err(internal)?;
     let mut out = Vec::new();
     let Some(writer) = writer else {

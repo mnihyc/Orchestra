@@ -2,7 +2,20 @@
 import declarations from '../../../../shared/capabilities.json';
 import type { BackendRef } from '@/generated/api-types';
 
+/** Native execution is declared by the selected route, independent of provider names. */
+export function programBackend(value: unknown): boolean {
+  return objectValue(value) && typeof value.route === 'string' && Object.entries(declarations.routes)
+    .some(([id, route]) => id === value.route && 'executor' in route && route.executor === 'program-session');
+}
+
 export const objectValue = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Exact route, offering and adapter options identify a choice; object member order does not. */
+export function backendIdentity(backend: BackendRef): string {
+  const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered) : objectValue(value)
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, ordered(value[key])])) : value;
+  return JSON.stringify(ordered(backend));
+}
 export function backendCapabilities(key: string): { id: string; title: string }[] {
   return Object.entries(declarations.capabilities).flatMap(([id, capability]) =>
     'backend_setting' in capability && capability.backend_setting === key ? [{ id, title: capability.title }] : []);

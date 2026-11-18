@@ -16,7 +16,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::OrgGroupCreate;
 use orch_api_contract::share::ShareAgentCreate;
 use orch_api_contract::threads::{
-    ItemPayload, OutputRef, RawCall, ThreadItemList, ThreadItemListQuery,
+    ItemPayload, OutputRef, RawCall, ThreadItemList, ThreadItemListQuery, ThreadItemRawGet,
 };
 use orch_api_core::dispatch::StoredCommand;
 use orch_engine::commands::Commands;
@@ -383,8 +383,22 @@ async fn sharing_requires_the_current_result_notice_keeps_raw_history_and_person
     assert!(
         visible.items.iter().any(|item| item.id == retained
             && matches!(&item.payload,ItemPayload::ToolCall(body)
-        if body.raw.output.as_ref().is_some_and(|output|output.inline==expected))),
-        "confirmed sharing keeps the raw result in ordinary history"
+        if body.raw.is_none())),
+        "ordinary history carries the retained call without repeating its raw result"
+    );
+    let raw = scene
+        .rig
+        .world
+        .app
+        .call(ThreadItemRawGet, &[&thread, &retained])
+        .token(&scene.cai.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        raw.output.as_ref().map(|output| output.inline.as_str()),
+        Some(expected.as_str()),
+        "confirmed sharing lets the viewer open the retained raw result"
     );
     assert!(
         !owner_alone(&scene, thread).await,
@@ -683,4 +697,219 @@ async fn sharing_confirmation_uses_a_new_http_key_and_never_repeats_native_creat
     let gifts:i64=sqlx::query_scalar("SELECT count(*) FROM permission_entries WHERE object_kind='node' AND object_id=$1 AND page='live' AND permission='thread.view' AND holder_kind='agents' AND holder_id=$2 AND removed_at IS NULL")
         .bind(thread).bind(recipient).fetch_one(scene.rig.db.pool()).await.unwrap();
     assert_eq!(gifts, 1, "a retry never adds a second native gift");
+}
+
+#[tokio::test]
+async fn sharing_an_image_helper_discloses_the_copy_and_keeps_source_protected_model_inputs() {
+    use orch_api_contract::model_inputs::{
+        ModelInputListQuery, NodeModelInputBlobGet, NodeModelInputList,
+    };
+    use orch_link_contract::{
+        commands::{AgentStartResult, CommandKind, CommandResult},
+        events::TurnOutcome,
+    };
+    use std::sync::Arc;
+    let (scene, source, turn) = setup(false).await;
+    let scene = Arc::new(scene);
+    let mut descriptor: Json = sqlx::query_scalar("SELECT descriptor FROM agents WHERE id=$1")
+        .bind(scene.on.agent)
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap();
+    descriptor["x_capability_program"] = json!({"title":"Fixture image program","access":{"native":{"orch_tools":true,"native":{
+        "generation":{"enabled":true,"modes":["native"],"default_mode":"native"},
+        "image_generation":{"enabled":true,"modes":["off","on"],"default_mode":"off","delegated_mode":"on",
+            "execution":[{"input":"image.request","result":"image.generated"}]}
+    }}}});
+    sqlx::query("UPDATE agents SET descriptor=$2 WHERE id=$1")
+        .bind(scene.on.agent)
+        .bind(&descriptor)
+        .execute(scene.rig.db.pool())
+        .await
+        .unwrap();
+    scene
+        .rig
+        .machine
+        .handler
+        .on(CommandKind::AgentStart, move |_| {
+            Ok(CommandResult::AgentStart(AgentStartResult {
+                reused: true,
+                harness_version: "1.0.0".into(),
+                descriptor: serde_json::from_value(descriptor.clone()).unwrap(),
+            }))
+        });
+    scene
+        .rig
+        .world
+        .set_at(
+            Target::Node(source),
+            "agents.image_generation",
+            json!("service"),
+        )
+        .await;
+    scene.rig.world.set_at(Target::Node(source), "agents.image_generation_backend",
+        json!({"route":"image_generation.delegation","offering":{"provider":scene.on.provider,"offering":rig::MODEL}})).await;
+    scene
+        .rig
+        .world
+        .set_at(
+            Target::Node(scene.tree.topic.base.id),
+            "calls.rules",
+            json!([]),
+        )
+        .await;
+    let work = scene.clone();
+    let call = tokio::spawn(async move {
+        work.rig
+            .engine
+            .answer_tool_call(&CallContext {
+                machine: work.rig.machine_id,
+                thread: source,
+                turn,
+                call_ref: "private-image-prompt".into(),
+                attempt: None,
+                tool: OrchTool::ImageGeneration,
+                arguments: json!({"prompt":"Private image source material. ".repeat(
+                usize::try_from(orch_api_contract::threads::OUTPUT_INLINE_MAX_BYTES).unwrap() / "Private image source material. ".len() + 1),
+                "output_paths":["out/private-image.png"]}),
+            })
+            .await
+    });
+    let request = orch_engine::ids::tool_result(source, "private-image-prompt");
+    rig::eventually("the actual image request creates its one helper", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM delegated_program_work WHERE request_id=$1 AND initial_input_id IS NOT NULL)")
+            .bind(request).fetch_one(scene.rig.db.pool()).await.unwrap()
+    }).await;
+    let helper: Id =
+        sqlx::query_scalar("SELECT helper_id FROM delegated_program_work WHERE request_id=$1")
+            .bind(request)
+            .fetch_one(scene.rig.db.pool())
+            .await
+            .unwrap();
+    let start = scene.rig.turn_start(helper, 0).await;
+    let owner_page = scene
+        .rig
+        .world
+        .app
+        .call(NodeModelInputList, &[&helper])
+        .token(&scene.ada.token)
+        .query(&ModelInputListQuery {
+            turn_id: Some(start.turn_id),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let prompt = owner_page
+        .items
+        .iter()
+        .find(|record| record.input_id.is_some())
+        .unwrap();
+    let blob = prompt
+        .blocks
+        .iter()
+        .find_map(|block| block.text.blob)
+        .unwrap();
+    let readable_blob = scene
+        .rig
+        .world
+        .app
+        .call(NodeModelInputBlobGet, &[&helper, &prompt.id, &blob])
+        .token(&scene.ada.token)
+        .send_bytes()
+        .await;
+    assert!(readable_blob.status.is_success());
+    assert_eq!(orch_types::Hash::of(&readable_blob.raw), blob);
+    let change = share(scene.cai.id());
+    let disclosure = scene
+        .rig
+        .world
+        .app
+        .call(SharePreviewCreate, &[&"nodes", &helper])
+        .token(&scene.ada.token)
+        .raw_body(&json!({"kind":"page","change":change}))
+        .send()
+        .await
+        .ok()
+        .owner_reads
+        .expect("a copied image prompt requires informed sharing");
+    assert_eq!((disclosure.count, disclosure.threads), (1, 1));
+    let refused = scene
+        .rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"nodes", &helper])
+        .token(&scene.ada.token)
+        .raw_body(&change)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictConfirmationRequired);
+    scene
+        .rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"nodes", &helper])
+        .token(&scene.ada.token)
+        .header("orch-owner-reads-confirmed", &disclosure.confirmation)
+        .raw_body(&change)
+        .send()
+        .await
+        .ok();
+    let other_page = scene
+        .rig
+        .world
+        .app
+        .call(NodeModelInputList, &[&helper])
+        .token(&scene.cai.token)
+        .query(&ModelInputListQuery {
+            id: Some(prompt.id),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        other_page.items.is_empty(),
+        "helper sharing does not grant source Read for model inputs"
+    );
+    let hidden = scene
+        .rig
+        .world
+        .app
+        .call(NodeModelInputBlobGet, &[&helper, &prompt.id, &blob])
+        .token(&scene.cai.token)
+        .send_bytes()
+        .await
+        .problem();
+    assert!(matches!(
+        hidden.code,
+        ErrorCode::NotFound | ErrorCode::AuthzDenied
+    ));
+    // Complete without generated-image evidence so this disclosure case performs no file write.
+    scene
+        .rig
+        .answer(
+            helper,
+            &start,
+            "no-generated-image",
+            "No image was generated.",
+        )
+        .await;
+    scene
+        .rig
+        .say(
+            helper,
+            rig::turn_ended(start.turn_id, TurnOutcome::Completed),
+        )
+        .await;
+    tokio::time::timeout(rig::PATIENCE, call)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    scene
+        .rig
+        .say(source, rig::turn_ended(turn, TurnOutcome::Completed))
+        .await;
 }

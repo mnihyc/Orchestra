@@ -165,6 +165,7 @@ mod tests {
             "workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace",
             "mounts":[],"model":"mock-large","effort":null,"params":{},"approval_mode":"auto",
             "available_models":["mock-large"],"sandbox_mode":"workspace","instructions":"","memory":null,
+            "web_action_wait_secs":120,
             "arrangement":"together","orch_tools":[],"raw_events":false
         }))?;
         assert!(
