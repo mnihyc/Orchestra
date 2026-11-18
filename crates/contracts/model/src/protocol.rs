@@ -14,13 +14,15 @@
 //! | `anthropic-messages` | `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models` | body member `model` | `Authorization: Bearer <key>`; `x-api-key: <key>` where the endpoint's `auth` says so |
 //! | `openai-embeddings` | `POST /embeddings`, `GET /models` | body member `model` | `Authorization: Bearer <key>` |
 //!
-//! All four formats have built-in pass-through relays. An agent still declares which it speaks; no agent speaks
+//! The built-in formats have pass-through relays. An agent still declares which it speaks; no agent speaks
 //! the embeddings format, which is for the requests Orch makes itself to search by meaning
 //! ([`WireProtocol::embedding_request`]).
 //! The tables are data here ([`OPENAI_RESPONSES_REQUESTS`] and the others), so that the protocols and the
 //! forwarder read one definition.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::{LazyLock, OnceLock};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -33,7 +35,7 @@ use url::Url;
 
 use crate::credentials::{Credential, WireError, issue_standard, standard_forms};
 use crate::endpoint::{
-    AuthMode, AuthorizeError, EndpointOptions, authorize_joined, standard_options,
+    AuthMode, AuthorizeError, EndpointOptions, OptionFault, authorize_joined, standard_options,
 };
 use crate::usage::UsageObserver;
 use orch_agent_contract::credentials::IssuedCredential;
@@ -50,12 +52,56 @@ pub const OPENAI_EMBEDDINGS: &str = "openai-embeddings";
 pub const EMBEDDINGS: &str = OPENAI_EMBEDDINGS;
 
 /// Every wire protocol a provider may be declared with, in the order the constraint catalogue lists them.
-pub const SUPPORTED: [&str; 4] = [
-    OPENAI_CHAT,
-    OPENAI_RESPONSES,
-    ANTHROPIC_MESSAGES,
-    OPENAI_EMBEDDINGS,
-];
+pub static SUPPORTED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut formats = vec![
+        OPENAI_CHAT,
+        OPENAI_RESPONSES,
+        ANTHROPIC_MESSAGES,
+        OPENAI_EMBEDDINGS,
+    ];
+    if let Some(declared) = protocol_data()
+        .get("protocols")
+        .and_then(serde_json::Value::as_object)
+    {
+        for name in declared.keys() {
+            if !formats.contains(&name.as_str()) {
+                formats.push(name.as_str());
+            }
+        }
+    }
+    formats
+});
+
+/// Canonical interface declarations are data, not vendor branches in shared code.
+fn protocol_data() -> &'static serde_json::Value {
+    static DATA: OnceLock<serde_json::Value> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../../shared/protocol-options.json"))
+            .unwrap_or(serde_json::Value::Null)
+    })
+}
+
+pub(crate) fn credential_headers() -> impl Iterator<Item = &'static str> {
+    protocol_data()
+        .get("protocols")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|protocols| protocols.values())
+        .filter_map(|entry| entry.get("auth_header").and_then(serde_json::Value::as_str))
+}
+
+/// Additional fields owned by an interface's request builder, independent of option values.
+pub(crate) fn owned_members(protocol: &str, member: &str) -> Vec<&'static str> {
+    protocol_data()
+        .get("protocols")
+        .and_then(|all| all.get(protocol))
+        .and_then(|format| format.get(member))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect()
+}
 
 /// The parameter field declarations of a wire format. Generic option resolution
 /// consumes these alongside the request allowlists rather than selecting a vendor.
@@ -87,6 +133,8 @@ pub(crate) struct ParameterFormat {
 pub(crate) struct CacheFormat {
     pub field: &'static str,
     pub lifetime: &'static str,
+    pub kind_field: &'static str,
+    pub kind: &'static str,
     pub ordinary: &'static str,
     pub lifetimes: &'static [&'static str],
     pub pointers: &'static [&'static str],
@@ -115,6 +163,8 @@ pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
             cache: Some(CacheFormat {
                 field: "cache_control",
                 lifetime: "ttl",
+                kind_field: "type",
+                kind: "ephemeral",
                 ordinary: "5m",
                 lifetimes: &["5m", "1h"],
                 pointers: &[
@@ -132,13 +182,33 @@ pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
             effort: Some(("output_config", Some("effort"))),
             ..Default::default()
         },
-        _ => ParameterFormat::default(),
+        _ => {
+            let Some(format) = protocol_data()
+                .get("protocols")
+                .and_then(|all| all.get(protocol))
+                .and_then(|entry| entry.get("parameter_format"))
+            else {
+                return ParameterFormat::default();
+            };
+            let pair = |name: &str| {
+                let values = format.get(name)?.as_array()?;
+                Some((values.first()?.as_str()?, values.get(1)?.as_str()?))
+            };
+            ParameterFormat {
+                web_search: format.get("web_search").and_then(serde_json::Value::as_str),
+                effort: pair("effort").map(|(field, member)| (field, Some(member))),
+                tier: pair("tier"),
+                ..Default::default()
+            }
+        }
     }
 }
 
 /// The requests that `openai-responses` lets through, below the upstream base.
-pub const OPENAI_RESPONSES_REQUESTS: [(&str, &str); 3] = [
+pub const OPENAI_RESPONSES_REQUESTS: [(&str, &str); 5] = [
     ("POST", "/responses"),
+    ("POST", "/responses/compact"),
+    ("POST", "/responses/input_tokens"),
     ("GET", "/models"),
     ("POST", "/alpha/search"),
 ];
@@ -298,6 +368,16 @@ pub fn model_candidates(
     Ok(names)
 }
 
+/// Why a completion ended before its answer was whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionStop {
+    /// The upstream's own word for it: a Responses `incomplete_details.reason`, a Messages `stop_reason`, a chat
+    /// `finish_reason`.
+    pub reason: String,
+    /// Whether the answer ran into its output allowance, the reasoning the model did before it answered included.
+    pub output_limit: bool,
+}
+
 /// One implementation per wire protocol, used by the provider role.
 pub trait WireProtocol: Send + Sync + 'static {
     /// Its name, such as `openai-responses`.
@@ -319,6 +399,11 @@ pub trait WireProtocol: Send + Sync + 'static {
         model_candidates(self.model_of(path, body), body, self.model_lists())
     }
 
+    /// Data bindings for vendor-neutral declarations on the existing common option layer.
+    fn request_features(&self) -> Vec<crate::features::FeatureBinding> {
+        crate::features::builtin(self.name())
+    }
+
     /// What an endpoint of this protocol may configure beyond its base URL, in the shape every form uses.
     /// The built-in protocols declare [`standard_options`].
     fn endpoint_options(&self) -> Vec<Field> {
@@ -328,6 +413,47 @@ pub trait WireProtocol: Send + Sync + 'static {
     /// How the key is presented when an endpoint's options say nothing about it.
     fn default_auth(&self) -> AuthMode {
         AuthMode::Bearer
+    }
+
+    /// The key header declared by this interface when its default mode is a named header.
+    fn default_key_header(&self) -> Option<&'static str> {
+        protocol_data()
+            .get("protocols")
+            .and_then(|all| all.get(self.name()))
+            .and_then(|entry| entry.get("auth_header"))
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Resolve declaration defaults without storing them as a person's endpoint override.
+    fn resolved_endpoint_options<'a>(
+        &self,
+        options: &'a EndpointOptions,
+    ) -> Cow<'a, EndpointOptions> {
+        if options.auth.is_none()
+            && options.auth_header.is_none()
+            && self.default_auth() == AuthMode::Header
+            && let Some(header) = self.default_key_header()
+        {
+            let mut resolved = options.clone();
+            resolved.auth_header = Some(header.to_owned());
+            return Cow::Owned(resolved);
+        }
+        Cow::Borrowed(options)
+    }
+
+    /// Validate the same effective header that the request presenter uses.
+    fn check_endpoint_options(&self, options: &EndpointOptions) -> Result<(), Vec<OptionFault>> {
+        self.resolved_endpoint_options(options)
+            .check(self.default_auth())
+    }
+
+    /// The effective credential header, from an explicit override or the interface declaration.
+    fn key_header<'a>(&'a self, options: &'a EndpointOptions) -> Option<&'a str> {
+        options.key_header(self.default_auth()).or_else(|| {
+            (options.auth.is_none() && self.default_auth() == AuthMode::Header)
+                .then(|| self.default_key_header())
+                .flatten()
+        })
     }
 
     /// Presents the credential the way the endpoint's options say, then the endpoint's headers and secret
@@ -340,10 +466,14 @@ pub trait WireProtocol: Send + Sync + 'static {
         options: &EndpointOptions,
         secrets: &SecretHeaders,
     ) -> Result<Vec<(String, String)>, AuthorizeError> {
+        if let Some(header) = self.default_key_header() {
+            headers.remove(header);
+        }
+        let options = self.resolved_endpoint_options(options);
         authorize_joined(
             headers,
             credential,
-            options,
+            &options,
             secrets,
             self.default_auth(),
             self.joined_headers(),
@@ -454,6 +584,13 @@ pub trait WireProtocol: Send + Sync + 'static {
         Err(WireError::Internal(
             "this protocol cannot read a text completion".to_owned(),
         ))
+    }
+
+    /// Why the upstream stopped a completion before its answer was whole, in the upstream's own word, read
+    /// from a reply that `completion_text` refused. `None` when the reply is not an answer that was cut short.
+    fn completion_stopped(&self, body: &[u8]) -> Option<CompletionStop> {
+        let _ = body;
+        None
     }
 
     /// Tool-capable dialogue generation. Protocols without generation, including
@@ -585,7 +722,8 @@ mod tests {
     fn only_the_requests_a_protocol_names_pass_through_and_the_query_is_no_part_of_the_path() {
         let p = Plain;
         assert!(p.allowed(&Method::POST, "/responses"));
-        assert!(!p.allowed(&Method::POST, "/responses/compact"));
+        assert!(p.allowed(&Method::POST, "/responses/compact"));
+        assert!(p.allowed(&Method::POST, "/responses/input_tokens"));
         assert!(p.allowed(&Method::GET, "/models"));
         assert!(p.allowed(&Method::GET, "/models?limit=5"));
         assert!(!p.allowed(&Method::GET, "/responses"), "the method counts");

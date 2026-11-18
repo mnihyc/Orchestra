@@ -19,6 +19,8 @@ const RECORDED_PARTS: &[&str] = &[
     "git",
     "roots",
     "manifests",
+    "end-patches",
+    "object-maps",
     "journals",
     "plans",
     "results",
@@ -153,6 +155,12 @@ mod tests {
             b"{\"phase\":\"complete\"}",
         )
         .unwrap();
+        std::fs::create_dir_all(from.path().join("end-patches")).unwrap();
+        std::fs::write(
+            from.path().join("end-patches/frozen"),
+            b"exact changed metadata",
+        )
+        .unwrap();
         std::fs::write(from.path().join("identity.key"), b"never carry").unwrap();
         std::fs::write(from.path().join(".orch_ignore"), b"git/\njournals/\n").unwrap();
         let source = files(from.path(), &workspace(from.path())).unwrap();
@@ -192,6 +200,10 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            std::fs::read(to.path().join("end-patches/frozen")).unwrap(),
+            b"exact changed metadata"
+        );
         assert_eq!(
             std::fs::read(to.path().join("git/objects/ab/object")).unwrap(),
             b"\0\xffrecorded bytes"

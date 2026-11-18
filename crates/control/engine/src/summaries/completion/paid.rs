@@ -46,6 +46,7 @@ pub(super) async fn journal(engine: &Engine, outgoing: Outgoing) -> Result<Outgo
     orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
     let key = outgoing.key.wire();
     let proposed = orch_db::queries::link::NewCommand {
+        content_transit: false,
         id: outgoing.id,
         machine_id: outgoing.machine,
         kind: outgoing.kind.as_str(),

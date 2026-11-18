@@ -4,6 +4,7 @@
  * invitation it first says what the invitation is. Without one it shows the form where anybody may
  * register, and otherwise says in one sentence how people get in here.
  */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useRouter } from '@tanstack/react-router';
 import { CircleCheck, DoorClosed, MailCheck, Ticket } from 'lucide-react';
@@ -108,7 +109,7 @@ export function Register({ invitation, acceptedTermsHash = null }: { invitation:
       <RegisterForm key={invitation ?? 'open'} invitation={good === null ? null : invitation} preview={good} onEnded={setEnded} termsReady={good === null || terms.ready} acceptedTermsHash={terms.hash} onTermsError={terms.handleError} />
       <IdentityProviders providers={meta.identity_providers} redirect="/" registration
         invitation={good === null ? null : invitation} acceptInvitation={good !== null && good.kind !== 'system'}
-        acceptedTermsHash={terms.hash} blocked={good !== null && !terms.ready} beforeStart={good === null || invitation === null ? undefined : async () => terms.review(await cache.query({ ...invitationQuery(invitation), staleTime: 0 }))} />
+        acceptedTermsHash={terms.hash} blocked={good !== null && !terms.ready} beforeStart={good === null || invitation === null ? undefined : async () => terms.review(await cache.query({ ...invitationQuery(invitation), ...READ_NOW }))} />
     </AuthCard>
   );
 }

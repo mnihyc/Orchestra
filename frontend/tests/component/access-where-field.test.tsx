@@ -10,7 +10,7 @@ import { askedOptions } from '@/features/access/model';
 import { EntryOptionFacts } from '@/features/access/ShareConsequences';
 import { MissingAccessList } from '@/ui/ErrorState';
 import type { Changes } from '@/features/access/changes';
-import type { Environment, Host, Machine, PermissionPage, PermissionRow, WhereName } from '@/generated/api-types';
+import type { Environment, Host, Machine, PermissionDef, PermissionPage, PermissionRow, FileReachFacts, WhereName } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { offeredChoice } from '@/i18n/choices';
 import { ADA, CATALOGUE, named, pageFor } from '../unit/general-access-fixtures';
@@ -42,13 +42,13 @@ function rowWith(options: unknown): PermissionRow {
 }
 
 /** Opens the entry's options and answers the change the save would make. */
-function open(options: unknown) {
+function open(options: unknown, definition: PermissionDef = def, fileReach?: FileReachFacts) {
   const written: unknown[] = [];
   const changes: Changes = {
     run: (request) => { written.push((request as { make: (page: PermissionPage) => unknown }).make(page)); return Promise.resolve(true); },
     busy: false, doing: null, error: null, stale: null, again: () => Promise.resolve(true), forget: () => undefined,
   };
-  show(<EntryOptions open onClose={() => undefined} def={def} row={rowWith(options)} entryId={ENTRY_ID} holder="Ada" changes={changes} />);
+  show(<EntryOptions open onClose={() => undefined} def={definition} row={rowWith(options)} entryId={ENTRY_ID} holder="Ada" changes={changes} fileReach={fileReach} />);
   return written;
 }
 
@@ -68,6 +68,58 @@ afterEach(async () => {
 });
 
 const where = () => within(screen.getByRole('group', { name: i18n.t('access.options.where') }));
+
+it.each(['en', 'zh-CN'] as const)('keeps the model limit while granting Ask alone in %s', async (locale) => {
+  await setLocale(locale);
+  const definition = { ...def, options_schema: { type: 'object', properties: {
+    models: { type: 'array', items: { type: 'string' } },
+    purposes: { type: ['array', 'null'], items: { type: 'string', oneOf: [{ const: 'ask', 'x-default-selected': true }, { const: 'work', 'x-default-selected': true }] } },
+  } } };
+  const user = userEvent.setup();
+  const written = open({ models: ['shared-routing-model'] }, definition);
+  await user.click(screen.getByRole('checkbox', { name: i18n.t('access.options.purposeNames.work') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(saved(written)).toEqual({ models: ['shared-routing-model'], purposes: ['ask'] }));
+});
+
+const withPurposes: PermissionDef = { ...def, options_schema: {
+  type: 'object', properties: { purposes: { type: ['array', 'null'], items: { oneOf: [
+    { const: 'ask', 'x-default-selected': true }, { const: 'work', 'x-default-selected': true },
+  ] } } },
+} };
+
+it.each(['en', 'zh-CN'] as const)('shares a provider for Ask alone through compact choices in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  const written = open({}, withPurposes);
+  const ask = screen.getByRole('checkbox', { name: 'Ask' });
+  const other = screen.getByRole('checkbox', { name: locale === 'en' ? 'Other work' : '其他工作' });
+  expect(ask).toBeChecked();
+  expect(other).toBeChecked();
+  expect(ask).not.toHaveAccessibleDescription();
+  expect(other).not.toHaveAccessibleDescription();
+  await user.click(other);
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(written).toHaveLength(1));
+  expect(saved(written)).toEqual({ purposes: ['ask'] });
+  expect(askedOptions({ purposes: ['work'] })).toEqual({ purposes: ['work'] });
+});
+
+it('keeps an explicitly empty set of provider uses when an entry is saved', async () => {
+  const written = open({ purposes: [] }, withPurposes);
+  expect(screen.getByRole('checkbox', { name: 'Ask' })).not.toBeChecked();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(written).toHaveLength(1));
+  expect(saved(written)).toEqual({ purposes: [] });
+});
+
+it.each(['en', 'zh-CN'] as const)('names the provider uses in the share preview in %s', async (locale) => {
+  await setLocale(locale);
+  show(<EntryOptionFacts options={{ purposes: ['ask', 'work'], models: ['sample'] }} word={(text) => text} />);
+  expect(screen.getByText(locale === 'en' ? 'Uses' : '用途')).toBeVisible();
+  expect(document.body).toHaveTextContent(locale === 'en' ? 'Ask, Other work' : 'Ask, 其他工作');
+  expect(document.body).toHaveTextContent('sample');
+});
 
 async function add(user: ReturnType<typeof userEvent.setup>, name: string) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('access.options.whereAdd', { what: i18n.t('access.options.where') }) }));
@@ -216,4 +268,25 @@ it('has the sentences about what leaves in both languages', async () => {
     for (const key of ['credential_shared', 'handed_over']) expect(consent(key), `${key} in ${locale}`).not.toContain('access.options');
     expect(i18n.t('access.options.leavesOther')).not.toBe('access.options.leavesOther');
   }
+});
+
+it.each(['en', 'zh-CN'] as const)('saves one explicit file reach and can narrow Machine back to Roots in %s', async (locale) => {
+  await setLocale(locale);
+  const definition = { ...def, name: 'files.view', options_schema: { type: 'object', properties: {
+    reach: { type: 'string', enum: ['roots', 'machine'], default: 'roots' },
+  } } };
+  const written = open({ reach: 'machine' }, definition);
+  const user = userEvent.setup();
+  const choice = screen.getByRole('combobox', { name: i18n.t('access.options.reach') });
+  await user.click(choice);
+  await user.click(screen.getByRole('option', { name: i18n.t('fileReach.roots') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(saved(written)).toEqual({ reach: 'roots' }));
+});
+
+it.each(['en', 'zh-CN'] as const)('shows the current machine bound beside the file reach choice in %s', async (locale) => {
+  await setLocale(locale);
+  const definition = { ...def, name: 'files.view', options_schema: { type: 'object', properties: { reach: { type: 'string', enum: ['roots', 'machine'], default: 'roots' } } } };
+  open({ reach: 'machine' }, definition, { view: 'roots', manage: null, view_from_terminal: false, manage_from_terminal: false, machine_bound: 'roots' });
+  expect(screen.getByText(i18n.t('fileReach.bound', { reach: i18n.t('fileReach.roots') }))).toBeVisible();
 });

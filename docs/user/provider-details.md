@@ -2,7 +2,7 @@
 group: providers
 title: Choose and read provider details
 screens: /thread/$threadId, /resources/providers, /resources/providers/$id, /resources/machines, /resources/templates
-keywords: how do I choose provider details, facts source, models source, SourceChoice, balances, spend, reset, Not read yet, None reported, Does not report, Unencrypted, providers.allow_http_upstreams, Last program error, interrupted
+keywords: Relay, SDK, provider.relay, how do I choose provider details, facts source, models source, SourceChoice, balances, spend, reset, Not read yet, None reported, Does not report, Unencrypted, providers.allow_http_upstreams, Last program error, interrupted
 summary: Read provider observations with their source, missing-data state and reset options.
 ---
 
@@ -38,6 +38,21 @@ Anthropic Messages uses `speed: "fast"`, with any required beta header in the en
 headers. Compatible Gemini, DeepSeek and other endpoints use their documented fields;
 choosing a format does not grant a model a speed it does not offer.
 
+Gemini's [OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai)
+uses **openai-chat**. Its documented Priority and Flex tiers use the IDs `priority`
+and `flex`; enable the tiers the model offers and choose its default in the same
+model form. Effort uses `reasoning_effort`. Gemini-specific options, such as
+`extra_body.google.cached_content`, use the same nested request-option rules,
+defaults and per-use form as any other declared option.
+
+DeepSeek's [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
+also uses **openai-chat**. Its documented effort and `thinking.type` options can
+have model defaults and per-use overrides. Its API does not declare an inference
+tier selector: a model rule with `service_tier: false` leaves that field out.
+There is no need to invent a Fast tier. New documented fields use the existing
+request-option schema and its `default` values; endpoint defaults, model defaults
+and explicit use choices keep the same precedence for every provider.
+
 In a provider's Settings, open **Where its details come from**. Facts
 and Models have their own choices. **Default** explains the actual
 reader: the native adapter for a sign-in, the known OpenRouter or
@@ -64,7 +79,7 @@ An `http://` address is refused unless **Allow unencrypted upstreams**
 **Unencrypted**. For example, an internal Acme service may be
 `http://plan.internal:41870/provider` only with that policy enabled.
 Calls leave the keeping machine, so its network allowlist or local
-`provider.upstreams` must allow that host too. Orch follows no redirect.
+`provider.upstreams` must allow that address too. A listed origin permits its path and descendants on complete path boundaries, with the same scheme, host and port: https://openrouter.ai allows its /api/v1, never a similar hostname. Orch follows no redirect.
 
 **Nothing** keeps only the credential keeper's facts. **Manual only**
 for models lets a manager enter routing names without discovery. Save
@@ -136,10 +151,18 @@ require resetting choices that its new entry does not open.
 
 Codex's **Access** choice also works on a forwarded API endpoint when the
 interface supports it and a provider manager enabled the program for the model.
-Choose it in the composer's **Model and effort** dialog. The choice applies to
+Choose it from the composer's **Access** control, which stands beside **Model** and **Effort** where the model has a program switched on. The choice applies to
 the next turn and stays with that turn's lease across retries and restarts.
 Ordinary access adds no program selector to a Responses request. Programs merely
 reported by the provider remain unavailable until a manager enables them.
+
+A speed, an access program or a context size that a manager switched on for the
+model, and that the thread cannot use, still has its control, shown off. It
+says why in a few words: the agent does not offer it, the credential does not
+stay with the provider, the environment or the provider is of the other kind, the
+provider's rule for the model leaves it out, or the **Agent features** setting
+has its feature off. Where you may lift the reason, the control also offers the
+act that does, such as **Switch on in Agent features**.
 
 ## Confirmed values
 
@@ -182,8 +205,9 @@ money as new. A source error retains old values, their times and a
 safe **Could not refresh · Retry** line. A failed details query does
 not turn a working model credential into an authorization failure.
 
-**Refresh** reads facts and model offers now. New models are suggestions
-for a manager to enable; nothing is silently switched on. Orch also
+**Refresh** reads facts and model offers now. New models are suggestions for a manager to add.
+The organization's **Switched on when added** setting controls their starting choices. **Context, speeds and access** enables the reported context sizes, speeds and access programs; **Efforts and context** enables context sizes; **Only what it states** keeps the model's own window and efforts. Web search, cache lifetimes, reasoning modes, capacity tiers and request options need separate configuration. Larger contexts remain a per-thread choice.
+When no window is entered, Orch uses the source's largest reported context if it fits the model's enabled context limit. If neither the catalogue nor the endpoint supplies a usable value, enter a window before saving. Orch also
 reads a minute after a vendor-reported reset. Its compact provider
 caption uses the binding windows, else a first reported balance, else
 a first spend row. Without permitted facts it cannot invent room.
@@ -192,7 +216,7 @@ In **Models → Edit options… → Model report**, read the endpoint's reported
 input and output windows, capability support, model line and retirement
 schedule. A scheduled date is not a statement that a model has retired.
 Missing facts stay absent, and a new report does not switch on search,
-larger contexts or other paid options. Saving the model keeps these facts
+larger contexts or other paid options for a model that is already saved. Saving the model keeps these facts
 separate from the options a manager enabled.
 
 ## Program exits
@@ -259,3 +283,17 @@ In an API provider's **Settings → Services**, Orch lists services declared for
 Catalogue prices are estimates in their original currency. An explicit saved price in Orch credits is what Orch counts; a vendor's reported total stays beside it for comparison. Clearing the custom price restores the catalogue estimate. Editing preserves other services and future configuration fields. A stale provider revision is refused so another manager's change is not overwritten.
 
 A thread uses a paid backend only after its capability is explicitly set to **Service** and its backend names an enabled offering. Provider Use, service/model allowlists and purpose caps apply to the original person or native work source on every request. A provider's model list and service list remain independent. Unset keeps the program's default and selects no paid fallback.
+
+
+## Direct model API calls
+
+A key provider’s **Settings → Relay** switch starts off. Open exact enabled models in its model picker, then enable Relay. A separate **Relay** permission grants direct API access with the same complete model, effort and arrangement options as Use; ordinary Can use does not grant it. A standalone SDK call has no attested machine or environment, so a location-restricted grant does not apply. Subscriptions continue through normal threads.
+
+Copy **SDK base** into the SDK’s base URL and authenticate with an Orch API key. For an OpenAI-compatible SDK this is its API key; for a Messages SDK use its bearer/auth-token option. The provider’s model key stays on its connection’s keeper. The base serves `/responses`, `/responses/compact`, `/responses/input_tokens`, `/chat/completions`, `/embeddings`, and `/v1/messages` with `/v1/messages/count_tokens` and `/interactions`; model listings show only opened models the caller may use. These requests do not refresh provider observations.
+
+Calls stream through the existing native forwarder. The same endpoint, group and model option declarations constrain them before an upstream request. Unopened models, undeclared options, exhausted caps, an unavailable keeper or a disabled Relay refuse a call with their actual reason. Relay usage is counted for the caller under **Usage → Relay**, with origin Orch; a cap whose purpose list is empty includes it. The public request never carries the provider’s credential and request or response content is not retained as server files.
+
+System settings `providers.relay_concurrency`, `providers.relay_request_bytes`, `providers.relay_idle_secs` and `providers.relay_retry_ms` control admission, request size, silence and transport retries. `jobs.io_timeout_secs` supplies the call’s overall native work allowance. A disconnected reader ends its command. Replaying an SDK request creates a new call; Orch never silently repeats a possibly paid native call after a runtime crash.
+
+
+The **Common** request format declares cache and schema-output rules once in `request_options.common`, through the same endpoint, model-group and model layers. SDK callers keep using their interface’s native fields. An explicit thread choice uses `provider_options:common` and wins when a format-specific choice names the same value; every original schema and enabled ceiling still applies. A format that cannot represent a member or retention says which one before model work starts. A nested schema-name default alone does not enable schema output. New wire implementations supply their feature bindings through the same protocol contract.

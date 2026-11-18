@@ -23,6 +23,7 @@ use http::header;
 use orch_access_contract::key_scope::KeyScope;
 
 use orch_api_contract::common::ErrorCode;
+use orch_api_contract::common::{SessionEnd, SessionEndCause};
 
 use orch_db::queries::identity;
 
@@ -148,6 +149,12 @@ pub fn new_token(prefix: &str) -> String {
     )
 }
 
+/// A new API key names its actual stored identity and carries 256 random secret bits.
+#[must_use]
+pub fn new_api_token(id: Id) -> String {
+    orch_api_contract::api_keys::encode(id, &rand::random::<[u8; 32]>())
+}
+
 /// The bearer token of a request, where it carries one.
 #[must_use]
 pub fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -178,8 +185,11 @@ pub fn on_surface(
     headers: &HeaderMap,
 ) -> ApiResult<()> {
     use orch_api_contract::surface::HttpSurface;
-    // Keep the existing resolver's classification: opat_ names a key; other bearers
-    // must still resolve as actual session access tokens. This is not a new token-format rule.
+    if bearer(headers).is_some_and(|token| {
+        token.starts_with(API_TOKEN_PREFIX) && orch_api_contract::api_keys::key_id(token).is_none()
+    }) {
+        return Err(invalid_token());
+    }
     if bearer(headers)
         .is_some_and(|token| (surface == HttpSurface::Key) != token.starts_with(API_TOKEN_PREFIX))
         || (surface == HttpSurface::Key
@@ -212,10 +222,15 @@ pub async fn authenticate(
     let Some(token) = bearer(headers) else {
         return Ok(Caller::Anonymous);
     };
+    let key_id = if token.starts_with(API_TOKEN_PREFIX) {
+        Some(orch_api_contract::api_keys::key_id(token).ok_or_else(invalid_token)?)
+    } else {
+        None
+    };
     let hash = token_hash(token);
     let mut conn = app.db.acquire().await?;
-    let (user_id, via, as_admin) = if token.starts_with(API_TOKEN_PREFIX) {
-        let row = identity::api_token_by_hash(&mut conn, &hash, now)
+    let (user_id, via, as_admin) = if let Some(key_id) = key_id {
+        let row = identity::api_token_by_identity(&mut conn, key_id, &hash, now)
             .await?
             .ok_or_else(invalid_token)?;
         let scope = operation_scope(row.operation_scope)?;
@@ -239,9 +254,27 @@ pub async fn authenticate(
             false,
         )
     } else {
-        let row = identity::session_by_access_token(&mut conn, &hash, now)
-            .await?
-            .ok_or_else(invalid_token)?;
+        let row = match identity::session_by_access_token(&mut conn, &hash, now).await? {
+            Some(row) => row,
+            None => {
+                let mut error = invalid_token();
+                // Only an exact retained bearer match may add a fact. Access-token expiry
+                // alone still asks the live session to renew through its ordinary cookie.
+                if let Some(proof) =
+                    identity::session_proof_by_access_hash(&mut conn, &hash).await?
+                {
+                    if let Some(fact) = recorded_session_end(&proof, now) {
+                        error = error.session_ended(fact);
+                    } else if identity::user_by_id(&mut conn, proof.user_id)
+                        .await?
+                        .is_some_and(|user| user.suspended())
+                    {
+                        error = error.session_ended(unavailable_session());
+                    }
+                }
+                return Err(error);
+            }
+        };
         (
             row.user_id,
             Via::Session {
@@ -254,16 +287,46 @@ pub async fn authenticate(
         .await?
         .ok_or_else(invalid_token)?;
     if user.suspended() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSuspended,
-            "this user is suspended",
-        ));
+        let error = ApiError::new(ErrorCode::AuthSuspended, "this user is suspended");
+        return Err(if matches!(&via, Via::Session { .. }) {
+            error.session_ended(unavailable_session())
+        } else {
+            error
+        });
     }
     Ok(Caller::User(Arc::new(Authed {
         user,
         via,
         as_admin,
     })))
+}
+
+/// The first retained session ending wins; cleanup or a later observation supplies no time.
+pub fn recorded_session_end(
+    proof: &identity::SessionProof,
+    now: DateTime<Utc>,
+) -> Option<SessionEnd> {
+    let expired = (proof.expires_at <= now).then_some(proof.expires_at);
+    if let Some(revoked) = proof.revoked_at
+        && expired.is_none_or(|end| revoked < end)
+    {
+        return Some(SessionEnd {
+            cause: SessionEndCause::Revoked,
+            at_if_known: Some(Time::new(revoked)),
+        });
+    }
+    expired.map(|end| SessionEnd {
+        cause: SessionEndCause::Expired,
+        at_if_known: Some(Time::new(end)),
+    })
+}
+
+/// Account standing has no captured change instant, so it cannot supply one.
+pub fn unavailable_session() -> SessionEnd {
+    SessionEnd {
+        cause: SessionEndCause::AccountUnavailable,
+        at_if_known: None,
+    }
 }
 
 fn invalid_token() -> ApiError {
@@ -283,9 +346,10 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     fn surface_headers_reject_foreign_kinds_before_public_and_cookie_shortcuts() {
         use orch_api_contract::surface::HttpSurface;
+        let api_key = new_api_token(orch_types::new_id());
         for (token, origin, foreign) in [
             ("oat_synthetic", HttpSurface::Browser, HttpSurface::Key),
-            ("opat_synthetic", HttpSurface::Key, HttpSurface::Browser),
+            (api_key.as_str(), HttpSurface::Key, HttpSurface::Browser),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -294,6 +358,15 @@ pub mod tests {
             );
             assert!(on_surface(origin, &headers).is_ok());
             assert!(on_surface(foreign, &headers).is_err());
+        }
+        for malformed in ["opat_synthetic".to_owned(), format!("{api_key}x")] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {malformed}").parse().unwrap(),
+            );
+            assert!(on_surface(HttpSurface::Key, &headers).is_err());
+            assert!(on_surface(HttpSurface::Browser, &headers).is_err());
         }
         let mut cookie = HeaderMap::new();
         cookie.insert(
