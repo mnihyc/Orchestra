@@ -178,7 +178,7 @@ async fn administrative_hosts_keep_the_fleet_shape_and_bound_its_real_home_and_p
             .send_bytes()
             .await,
     );
-    assert_eq!(ordinary.as_array().unwrap().len(), 2);
+    assert_eq!(ordinary["items"].as_array().unwrap().len(), 2);
     let mut host_only = rule("host", host, "AdminHostList", "read");
     host_only["resources"] = json!(["host"]);
     let scoped = key(&world, c.root.id(), vec![host_only]).await;
@@ -190,13 +190,20 @@ async fn administrative_hosts_keep_the_fleet_shape_and_bound_its_real_home_and_p
             .send_bytes()
             .await,
     );
-    assert_eq!(result.as_array().unwrap().len(), 1);
-    assert_eq!(result[0]["id"], json!(host));
-    assert_eq!(result[0]["name"], "Selected fleet");
-    assert_ne!(result[0]["machine"]["id"], json!(other));
-    assert!(result[0]["full"].is_null() && result[0]["software_update"].is_null());
-    assert!(result[0]["home"]["name"].is_null());
-    assert!(!result[0]["address"].as_str().unwrap().contains("acme"));
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["id"], json!(host));
+    assert_eq!(result["items"][0]["name"], "Selected fleet");
+    assert_ne!(result["items"][0]["machine"]["id"], json!(other));
+    assert!(
+        result["items"][0]["full"].is_null() && result["items"][0]["software_update"].is_null()
+    );
+    assert!(result["items"][0]["home"]["name"].is_null());
+    assert!(
+        !result["items"][0]["address"]
+            .as_str()
+            .unwrap()
+            .contains("acme")
+    );
     let with_names = key(
         &world,
         c.root.id(),
@@ -214,8 +221,13 @@ async fn administrative_hosts_keep_the_fleet_shape_and_bound_its_real_home_and_p
             .send_bytes()
             .await,
     );
-    assert_eq!(named[0]["machine"], result[0]["machine"]);
-    assert!(named[0]["address"].as_str().unwrap().contains("acme"));
+    assert_eq!(named["items"][0]["machine"], result["items"][0]["machine"]);
+    assert!(
+        named["items"][0]["address"]
+            .as_str()
+            .unwrap()
+            .contains("acme")
+    );
     sqlx::query("UPDATE users SET is_system_admin=false WHERE id=$1")
         .bind(c.root.id())
         .execute(&world.db.pool)
@@ -260,7 +272,7 @@ async fn administrative_runtime_manage_resolves_the_stored_unit_and_its_native_r
             .send_bytes()
             .await,
     );
-    assert_eq!(ordinary.as_array().unwrap().len(), 2);
+    assert_eq!(ordinary["items"].as_array().unwrap().len(), 2);
     let scoped = key(
         &world,
         c.root.id(),
@@ -280,10 +292,10 @@ async fn administrative_runtime_manage_resolves_the_stored_unit_and_its_native_r
             .send_bytes()
             .await,
     );
-    assert_eq!(result.as_array().unwrap().len(), 1);
-    assert_eq!(result[0]["id"], json!(selected));
-    assert_eq!(result[0]["environment"]["id"], json!(env));
-    assert_eq!(result[0]["template"]["id"], json!(template));
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["id"], json!(selected));
+    assert_eq!(result["items"][0]["environment"]["id"], json!(env));
+    assert_eq!(result["items"][0]["template"]["id"], json!(template));
     let surrogate = key(
         &world,
         c.root.id(),
@@ -303,7 +315,11 @@ async fn administrative_runtime_manage_resolves_the_stored_unit_and_its_native_r
             .send_bytes()
             .await,
     );
-    assert_eq!(result, json!([]), "a runtime UUID is never a unit identity");
+    assert_eq!(
+        result["items"],
+        json!([]),
+        "a runtime UUID is never a unit identity"
+    );
 }
 #[tokio::test]
 async fn administrative_build_usage_selects_actual_units_before_aggregating_native_frozen_builds() {

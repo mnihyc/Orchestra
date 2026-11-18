@@ -1,0 +1,3 @@
+test -p orch-api-core --test admin_system -- the_pki_list_pages_every_due_certificate_and_searches_before_its_first_page
+test -p orch-api-core --test activity_depth --test history_native_scopes --test access_everything --test thread_history_pages --test thread_history_scale --test threads_raw --test realtime_raw_sources --test thread_instructions --test resource_summaries
+test -p orch-api-core --test search_names --test search_native_scopes --test personal_state_scope --test people_reactions

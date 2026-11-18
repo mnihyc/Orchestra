@@ -319,8 +319,62 @@ pub struct PageQuery {
     pub cursor: Option<String>,
 }
 
+/// A named collection, searched and read without a fixed total-result cutoff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionQuery {
+    /// Words in this collection's disclosed labels or record text; no minimum length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 when absent, any positive u32 when supplied.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// The opaque continuation returned by this same collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Selects one visible child directory of an otherwise complete resource read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChildCollectionQuery {
+    /// Which native child directory to page; omission keeps the complete resource read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    /// Words in the chosen directory's disclosed text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Positive entries per page; fifty by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continuation of the same resource, child directory and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl ChildCollectionQuery {
+    /// The selected directory uses the ordinary named-page vocabulary.
+    #[must_use]
+    pub fn page(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// Flattened URL query members arrive as strings; JSON callers retain the same numeric vocabulary.
-fn query_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn query_u32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Number {
@@ -636,18 +690,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn flattened_pagination_accepts_url_numeric_strings_without_changing_json_numbers_or_bounds()
+    fn storage_search_and_its_page_size_round_trip_as_flat_query_fields()
     -> Result<(), serde_json::Error> {
-        let url: crate::storage::StorageQuery =
-            serde_json::from_value(json!({"scope":"system","limit":"200"}))?;
-        assert_eq!(url.page.limit, Some(MAX_LIMIT));
-        assert_eq!(url.page.limit(), MAX_LIMIT);
-        let numeric: PageQuery = serde_json::from_value(json!({"limit":200}))?;
-        assert_eq!(numeric, url.page);
-        assert_eq!(serde_json::to_value(&numeric)?, json!({"limit":200}));
+        let query: crate::storage::StorageQuery = serde_json::from_value(json!({
+            "scope": "system", "q": "image", "limit": "501", "cursor": "after"
+        }))?;
+        assert_eq!(query.page.q.as_deref(), Some("image"));
+        assert_eq!(query.page.limit, Some(501));
+        assert_eq!(query.page.cursor.as_deref(), Some("after"));
+        let numeric = json!({"scope":"system","q":"image","limit":501,"cursor":"after"});
+        assert_eq!(serde_json::to_value(&query)?, numeric);
+        assert_eq!(
+            serde_json::from_value::<crate::storage::StorageQuery>(numeric)?,
+            query
+        );
         let absent: crate::storage::StorageQuery =
             serde_json::from_value(json!({"scope":"system"}))?;
-        assert_eq!(absent.page.limit(), DEFAULT_LIMIT);
+        assert_eq!(absent.page, CollectionQuery::default());
         for invalid in [
             json!("-1"),
             json!("1.5"),

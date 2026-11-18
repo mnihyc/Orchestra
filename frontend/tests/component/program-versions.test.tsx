@@ -129,6 +129,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   show(<ProgramBuild program={program} />);
   expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
   expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  // The reason is said beside it: no build of this version is kept, so nothing could be checked.
+  expect(screen.getByText(i18n.t('programVersions.unknownCheckWhy'))).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');
 });
@@ -331,4 +333,28 @@ for (const locale of ['en', 'zh-CN'] as const) it(`summarizes program policies b
   await waitFor(() => expect(view.container.textContent).toBe(new Intl.ListFormat(locale, { style: 'long', type: 'conjunction' }).format(names)));
   expect(view.container).not.toHaveTextContent('2 fields');
   expect(view.container).not.toHaveTextContent('newest_checked');
+});
+
+it('finds a late unit in a complete version-use dialog', async () => {
+  const environments=Array.from({length:60},(_,n)=>({...detailEnvironment,id:`used-${n}`,name:`Workspace ${n}`}));
+  state.usage=[{kind:'codex',version:'0.162.1',environments,providers:[],update_environments:environments.map((one)=>one.id),update_providers:[]}];
+  const user=userEvent.setup();show(<HarnessVersions kinds={['codex']} builds={state.builds} title={()=>'Codex'}/>);
+  await user.click(await screen.findByRole('button',{name:i18n.t('programVersions.usage',{version:'0.162.1',environments:i18n.t('programVersions.environmentCount',{count:60,number:'60'}),providers:i18n.t('programVersions.runtimeCount',{count:0,number:'0'})})}));
+  const dialog=screen.getByRole('dialog',{name:'Codex 0.162.1'});
+  await user.type(within(dialog).getByRole('searchbox'),'Workspace 59');
+  expect(await within(dialog).findByText('Workspace 59')).toBeVisible();
+  expect(within(dialog).queryByText('Workspace 0')).not.toBeInTheDocument();
+  expect(state.start).not.toHaveBeenCalled();
+});
+
+it('keeps the complete reviewed update when its preview is narrowed to one late environment', async()=>{
+  const original=plan(),base=original.plans[0];if(base===undefined)throw new Error('one update plan is present');
+  state.plan={...original,executable:13,plans:Array.from({length:13},(_,n)=>({...base,environment:{...base.environment,id:`preview-${n}`,name:`Workspace ${n}`}}))};
+  const user=userEvent.setup();show(<UpdateDialog targets={{environments:state.plan.plans.map((row)=>row.environment.id)}} onClose={vi.fn()}/>);
+  await user.type(await screen.findByRole('searchbox'),'Workspace 12');
+  expect(await screen.findByText('Workspace 12')).toBeVisible();
+  expect(screen.queryByText('Workspace 0')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button',{name:i18n.t('programVersions.updateCount',{units:i18n.t('programVersions.environmentCount',{count:13,number:'13'})})}));
+  await waitFor(()=>expect(state.start).toHaveBeenCalledOnce());
+  expect(state.start.mock.calls[0]?.[0].preflight_id).toBe(original.preflight_id);
 });

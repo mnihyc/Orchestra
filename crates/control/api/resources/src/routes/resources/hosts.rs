@@ -403,11 +403,19 @@ fn kept_layers_prepared(
     images
         .iter()
         .map(|(&host, images)| {
+            let mut latest = HashMap::<Id, i64>::new();
+            for image in images {
+                latest
+                    .entry(image.environment)
+                    .and_modify(|generation| *generation = (*generation).max(image.generation))
+                    .or_insert(image.generation);
+            }
             (
                 host,
                 images
                     .iter()
                     .map(|image| api::HostKeptLayers {
+                        latest: latest.get(&image.environment) == Some(&image.generation),
                         environment_id: image.environment,
                         environment: environments.get(&image.environment).cloned(),
                         generation: image.generation,
@@ -714,6 +722,7 @@ pub(crate) async fn show_inventory_prepared(
                 .cloned()
                 .unwrap_or_else(|| amounts(&row.declared));
             Ok(Host {
+                next_cursor: None,
                 provenance: orch_api_contract::resource_groups::ResourceProvenance {
                     origin_machine: machines.get(&row.machine_id).cloned(),
                     availability: Vec::new(),
@@ -1426,7 +1435,7 @@ async fn runtime_list(
     ctx: Ctx,
     query: api::HostRuntimeListQuery,
     (): (),
-) -> ApiResult<Vec<Runtime>> {
+) -> ApiResult<orch_api_contract::common::Page<Runtime>> {
     let host = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     orch_db::queries::resources::hosting::host(&mut conn, host)
@@ -1434,7 +1443,31 @@ async fn runtime_list(
         .ok_or_else(ApiError::not_found)?;
     let found =
         environment_hosting::runtimes_on(&mut conn, host, query.kind.map(unit_kind_word)).await?;
-    runtime_views(&ctx, &mut conn, found).await
+    let chronology: Vec<_> = found.iter().map(|row| row.created_at).collect();
+    let rows = runtime_views(&ctx, &mut conn, found).await?;
+    let rows: Vec<_> = chronology.into_iter().zip(rows).collect();
+    let page = crate::collection::snapshot(
+        &query.collection(),
+        &format!("host-runtimes:{}:{host}:{:?}", ctx.user()?.id(), query.kind),
+        rows,
+        |(at, row)| (-at.timestamp_micros(), row.id),
+        |(_, row)| {
+            format!(
+                "{} {} {} {}",
+                row.environment
+                    .as_ref()
+                    .map_or("", |item| item.name.as_str()),
+                row.provider.as_ref().map_or("", |item| item.name.as_str()),
+                row.driver,
+                row.state
+            )
+        },
+        false,
+    )?;
+    Ok(orch_api_contract::common::Page {
+        items: page.items.into_iter().map(|(_, row)| row).collect(),
+        next_cursor: page.next_cursor,
+    })
 }
 
 /// Stops the selected unit on the host, returning credentials and respecting active work.

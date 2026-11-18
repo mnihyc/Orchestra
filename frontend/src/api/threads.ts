@@ -13,6 +13,7 @@
 import { treeWriter } from '@/realtime/stores/tree';
 import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/react-query';
 
+import { NetworkError } from '@/lib/requests';
 import { ApiError, api, client, done, ok, repeatable } from '@/api/client';
 import { threadGatewayQuery } from '@/api/gateways';
 import { seedPendingAgentSchedules } from '@/api/inputSchedules';
@@ -119,7 +120,7 @@ export async function fetchThreadSync(target: ThreadReadTarget, since: number | 
     if (!opening.sync.complete) throw new Error('The full thread opening was incomplete');
     const planned = planThreadOpening(captured.scope, opening.sync.projection ?? null);
     if (planned === null) throw threadReadChanged();
-    hydrateThreadOpening(queryClient, opening, captured, scopedThreadKey(planned, ['thread-outline', id]));
+    hydrateThreadOpening(queryClient, opening, captured, scopedThreadKey(planned, ['thread-outline', id, '', undefined]));
     const accepted = threadWriter.reset(ref, opening.sync, opening.sync.has_older, captured, planned);
     if (accepted === null) throw threadReadChanged();
     return stampThreadRows(opening.sync, accepted);
@@ -203,22 +204,30 @@ export const catchupQuery = (target: ThreadReadTarget, since: number) => {
   });
 };
 
-export const outlineQuery = (target: ThreadReadTarget) => {
+export const outlineQuery = (target: ThreadReadTarget, q = '', kinds?: string) => {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
-  const reading = threadQueryRead(ref, ['thread-outline', id]);
+  const reading = threadQueryRead(ref, ['thread-outline', id, q, kinds]);
   return infiniteQueryOptions({
     queryKey: reading.key,
     enabled: reading.enabled,
     initialPageParam: null as number | null,
     queryFn: async ({ signal, pageParam }): Promise<ThreadOutlinePage> => {
       const captured = await reading.capture(signal, pageParam !== null);
+      let before = pageParam;
+      const seen = new Set<number>();
+      for (;;) {
       const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/outline', {
-        params: { path: { id }, query: { limit: TAIL_ITEMS, ...threadReadSelector(captured),
-          ...(pageParam === null ? {} : { before: pageParam }) } }, signal: readSignal,
+        params: { path: { id }, query: { limit: TAIL_ITEMS, ...(q === '' ? {} : { q }), ...(kinds === undefined ? {} : { kinds }), ...threadReadSelector(captured),
+          ...(before === null ? {} : { before }) } }, signal: readSignal,
       })), signal);
       const accepted = receiveThreadRead(captured, page.projection, signal);
+      if ((q !== '' || kinds !== undefined) && page.entries.length === 0 && page.next_before !== null) {
+        if (seen.has(page.next_before) || before === page.next_before) throw new NetworkError('malformed');
+        seen.add(page.next_before); before = page.next_before; continue;
+      }
       return stampThreadReceipt(page, accepted);
+      }
     },
     getNextPageParam: (page) => page.next_before ?? undefined,
     staleTime: Infinity,
@@ -226,24 +235,32 @@ export const outlineQuery = (target: ThreadReadTarget) => {
 };
 
 /** Historical references remain explicitly pageable, even for turns with no timeline items. */
-export const segmentsQuery = (target: ThreadReadTarget) => {
+export const segmentsQuery = (target: ThreadReadTarget, q = '') => {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
-  const reading = threadQueryRead(ref, ['thread-segments', id]);
+  const reading = threadQueryRead(ref, ['thread-segments', id, q]);
   return infiniteQueryOptions({
     queryKey: reading.key,
     enabled: reading.enabled,
     initialPageParam: null as number | null,
     queryFn: async ({ signal, pageParam }): Promise<ThreadSegmentPage> => {
       const captured = await reading.capture(signal, pageParam !== null);
+      let before = pageParam;
+      const seen = new Set<number>();
+      for (;;) {
       const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/segments', {
-        params: { path: { id }, query: { limit: OLDER_ITEMS, ...threadReadSelector(captured),
-          ...(pageParam === null ? {} : { before: pageParam }) } }, signal: readSignal,
+        params: { path: { id }, query: { limit: OLDER_ITEMS, ...(q === '' ? {} : { q }), ...threadReadSelector(captured),
+          ...(before === null ? {} : { before }) } }, signal: readSignal,
       })), signal);
       const accepted = receiveThreadRead(captured, page.projection, signal);
       stampThreadRows(page, accepted);
       threadWriter.apply(ref, { segments: page.segments }, accepted);
+      if (q !== '' && page.segments.length === 0 && page.next_before !== null) {
+        if (seen.has(page.next_before) || before === page.next_before) throw new NetworkError('malformed');
+        seen.add(page.next_before); before = page.next_before; continue;
+      }
       return page;
+      }
     },
     getNextPageParam: (page) => page.next_before ?? undefined,
     staleTime: Infinity,

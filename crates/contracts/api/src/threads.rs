@@ -351,10 +351,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +829,12 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -3018,6 +3035,11 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many included files the turn changed, whoever changed them: the difference of the files recorded
+    /// before it and the files observed at its end. `null` while either is missing (the files were not
+    /// recorded, or the end has not been observed yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
@@ -3554,6 +3576,12 @@ pub struct ThreadOutlinePage {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadOutlineGetQuery {
+    /// Literal words in the projected outline title or goal condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Comma-separated OutlineKind values, selected before the output page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3570,7 +3598,7 @@ pub struct ThreadOutlineGetQuery {
     /// A bounded neighborhood around this positive turn number; exclusive with before/around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<i64>,
-    /// Source points, default THREAD_SYNC_DEFAULT_LIMIT and at most THREAD_SYNC_MAX_LIMIT.
+    /// Source points; THREAD_SYNC_DEFAULT_LIMIT when omitted, any positive u32 when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -3579,6 +3607,9 @@ pub struct ThreadOutlineGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadHistoryListQuery {
+    /// Literal words in projected segment agent/provider names or the turn's model, state and ordinal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3589,7 +3620,7 @@ pub struct ThreadHistoryListQuery {
     /// Permanent ordinals older than this cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<i32>,
-    /// Rows, default ITEMS_DEFAULT_LIMIT and at most ITEMS_MAX_LIMIT.
+    /// Rows; ITEMS_DEFAULT_LIMIT when omitted, any positive u32 when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -3702,6 +3733,12 @@ pub struct ThreadItemOutputGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadRawListQuery {
+    /// Literal words in the payload after its current masking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Only frames going in this direction, before the output page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<RawDirection>,
     /// Read-only scope for the requested segment's visible history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_id: Option<Id>,
@@ -3720,6 +3757,9 @@ pub struct ThreadRawListQuery {
 /// Raw events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadRawListReply {
+    /// Continue below this native event number, including an empty search-progress page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<ThreadContinuationProjection>,
     /// The events.
@@ -4587,7 +4627,7 @@ crate::endpoints! {
     ThreadQueueResume: POST "/threads/{id}/queue/resume", Permission("thread.interact"), none, json ThreadQueueResumeBody, json ThreadQueue, 200,
         operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Lists the caller's unfinished sessions and completed custody without their own attachments.
-    MeUploadList: GET "/me/uploads", User, query crate::common::PageQuery, none, json crate::common::Page<UploadInventoryItem>, 200,
+    MeUploadList: GET "/me/uploads", User, query crate::common::CollectionQuery, none, json crate::common::Page<UploadInventoryItem>, 200,
         operation Op::facets(&crate::upload_sources::OWN_LIST_FACETS);
     /// Opens one completed upload through this browser session's current system administration.
     AdminUploadContentGet: GET "/admin/uploads/{id}/content", Session, query UploadBlobGetQuery, none, raw, 200,

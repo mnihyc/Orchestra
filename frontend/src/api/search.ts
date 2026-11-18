@@ -7,29 +7,19 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
+import { relatedPagesQuery } from '@/api/links';
 import { suppliedRead } from '@/api/readScheduler';
 import { api, ok } from '@/api/client';
 import { NetworkError } from '@/lib/requests';
 import { readInThread, receiveThreadRead, threadQueryRead, threadReadSelector } from '@/api/threadRead';
 import { stampThreadReceipt, threadReadChanged, type ThreadReadTarget } from '@/realtime/threadScope';
-import type { NameHit, NameKind, NameSearchPage, RelatedItems, SearchHit, SearchHitPage, SearchSort, SettingDef, SearchStreamEvent } from '@/generated/api-types';
+import type { NameHit, NameKind, NameSearchPage, SearchHit, SearchHitPage, SearchSort, SettingDef, SearchStreamEvent } from '@/generated/api-types';
 import { loadSearchCatalogues } from '@/i18n';
 
 export type { NameHit, NameKind, SearchHit };
 
 /** Related reads no body or preview; a document revision reuses its one ranked answer until it changes. */
-export const relatedQuery = (documentId: string, seq: number) => infiniteQueryOptions({
-  queryKey: ['document-related', documentId, seq] as const,
-  initialPageParam: null as string | null,
-  queryFn: async ({ pageParam, signal }): Promise<RelatedItems> => ok(api.GET('/documents/{id}/related', {
-    params: { path: { id: documentId }, query: { ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
-  })),
-  getNextPageParam: (page) => page.next_cursor ?? undefined,
-  // Only opening or an explicit next-page act reads; unfinished indexing may have completed since closing.
-  staleTime: (query) => query.state.data?.pages[0]?.meaning === 'not_ready' ? 0 : Infinity,
-  refetchOnWindowFocus: false,
-  retry: false,
-});
+export const relatedQuery = relatedPagesQuery;
 
 export const recentsKey = ['recents'] as const;
 
@@ -49,9 +39,9 @@ export const recentsQuery = queryOptions({
 
 // ---------------------------------------------------------------- names
 
-/** The fewest and the most names the server answers with, as the contract states them. */
+/** Ordinary and overview batch defaults; every native continuation remains available. */
 export const NAME_LIMIT_DEFAULT = 20;
-export const NAME_LIMIT_MAX = 50;
+export const NAME_OVERVIEW_COUNT = 50;
 
 /** Places, and the things written beside them: what "Go to" lists. */
 export const PLACE_KINDS: readonly NameKind[] = ['org', 'project', 'topic', 'thread', 'document', 'document_container', 'chat', 'tag'];
@@ -108,6 +98,44 @@ export const namesQuery = (search: NameSearch) =>
     retry: false,
     placeholderData: (previous, held) => held?.queryKey[4] === (search.orgId ?? '') && held.queryKey.at(-1) === (search.participating ?? false) && held.queryKey.at(-2) === (search.starred ?? false) ? previous : undefined,
   });
+
+/** Resolve a saved choice through the same authorized native names reader as the picker. */
+export const nameByIdQuery = (kind: NameKind, id: string) => queryOptions({
+  queryKey: ['names', 'identity', kind, id] as const,
+  queryFn: async ({ signal }): Promise<NameHit | null> => {
+    const page = await ok(api.GET('/search/names', { params: { query: { id, kinds: kind } }, signal }));
+    return page.items.find((hit) => hit.id === id && hit.kind === kind) ?? null;
+  },
+  staleTime: NAMES_FRESH_MS,
+  retry: false,
+});
+
+/** A picker has a full native continuation, including an empty first page and one-letter searches. */
+export const pickerNamesQuery = (search: NameSearch) => infiniteQueryOptions({
+  queryKey: [...namesKey(search),'picker-pages'] as const,
+  initialPageParam:null as string|null,
+  queryFn:async({pageParam,signal}):Promise<NameSearchPage>=>{
+    let cursor=pageParam;const seen=new Set<string>();
+    for(;;){
+      signal.throwIfAborted();
+      if(cursor!==null){if(seen.has(cursor))throw new NetworkError('malformed');seen.add(cursor);}
+      const page=await ok(api.GET('/search/names',{params:{query:{
+        picker:true,q:search.q,kinds:search.kinds.join(','),limit:search.limit??NAME_LIMIT_DEFAULT,
+        ...(search.orgId===undefined?{}:{org_id:search.orgId}),
+        ...(search.participating===true?{participating:true}:{}),
+        ...(search.starred===true?{starred:true}:{}),
+        ...(cursor===null?{}:{cursor}),
+      }},signal}));
+      // An empty permission-check batch is progress, rather than the end of the names.
+      if(page.items.length>0||page.next_cursor===null||page.next_cursor===undefined)return page;
+      cursor=page.next_cursor;
+    }
+  },
+  getNextPageParam:(page)=>page.next_cursor??undefined,
+  staleTime:search.q.trim()===''?0:NAMES_FRESH_MS,
+  refetchOnWindowFocus:false,
+  retry:false,
+});
 
 // ---------------------------------------------------------------- the registry the finder reads settings from
 

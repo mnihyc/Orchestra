@@ -18,6 +18,9 @@ import { cx } from '@/ui/cx';
 import { ErrorState } from '@/ui/ErrorState';
 import { HistoryLines } from '@/ui/HistoryLines';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { Disclosure } from '@/ui/Disclosure';
 
 export { Disclosure } from '@/ui/Disclosure';
@@ -157,21 +160,19 @@ export function GridView({ grid, target, source, changes, ask, profile, page, ki
 /** Every permission-page kind has history; read it only when its disclosure is opened. */
 function PageHistory({ target }: { target: AccessTarget }) {
   const { t } = useTranslation();
-  const history = useInfiniteQuery(historyQuery(target));
+  const search = useCollectionSearch(`resource-history:${target.kind}:${target.id}`);
+  const source = historyQuery(target, 'every', undefined, undefined, search.q);
+  const history = useInfiniteQuery(source);
+  usePickerCursorRestart(history, source.queryKey);
   const nextError: unknown = history.isFetchNextPageError ? history.error : undefined;
-  if (history.isPending) return <SkeletonRows read={history} rows={3} />;
-  if (history.isError) return <ErrorState compact error={history.error} title={t('access.history.notLoaded')} retrying={history.isRefetching} onRetry={() => void history.refetch()} />;
-  const lines = history.data.pages.flatMap((entry) => entry.items);
-  if (lines.length === 0) return <EmptyState compact title={t('access.history.none')} />;
-  return (
-    <HistoryLines
-      lines={lines}
-      hasMore={history.hasNextPage}
-      loading={history.isFetchingNextPage}
-      error={nextError}
-      onMore={() => void history.fetchNextPage()}
-    />
-  );
+  const lines = history.data?.pages.flatMap((entry) => entry.items) ?? [];
+  return <div className="flex max-h-[60dvh] min-w-0 flex-col gap-2 overflow-y-auto">
+    <CollectionSearch name={t('access.history.title')} {...search} />
+    {history.isPending ? <SkeletonRows read={history} rows={3} /> : history.isError && !history.isFetchNextPageError
+      ? <ErrorState compact error={history.error} title={t('access.history.notLoaded')} retrying={history.isRefetching} onRetry={() => void history.refetch()} />
+      : lines.length === 0 ? <EmptyState compact title={t(search.q === '' ? 'access.history.none' : 'ui.combobox.empty')} />
+        : <HistoryLines lines={lines} hasMore={history.hasNextPage} loading={history.isFetchingNextPage} error={nextError} onMore={() => void history.fetchNextPage()} />}
+  </div>;
 }
 
 interface ByAreaProps {
