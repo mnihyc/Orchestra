@@ -10,7 +10,7 @@
 
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
-use orch_types::Id;
+use orch_types::{Id, Json};
 
 /// A node of the hierarchy, as the access engine needs it.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -132,24 +132,21 @@ where
 {
     // Both the storage home and Ask's distinct governing root are watched in this
     // same statement; the native graph keeps these factual associations together.
-    Ok(sqlx::query_as(
-        "WITH found AS MATERIALIZED (
-             SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.owner_id, n.archived_at, n.deleted_at,
-                    n.revision, e.placement, t.environment_id, t.ask_root_org_id,
-                    t.ask_retention_days, t.ask_last_message_at,
-                    COALESCE(r.id IS NOT NULL AND r.deleted_at IS NULL AND r.kind='org',false) AS ask_root_live
-               FROM nodes n
-               LEFT JOIN threads t ON t.node_id = n.id
-               LEFT JOIN environments e ON e.id = t.environment_id
-               LEFT JOIN nodes r ON r.id=t.ask_root_org_id
-              WHERE n.id IN (SELECT unnest(path) FROM nodes WHERE id = ANY($1))
-         ), watched AS MATERIALIZED (
-             SELECT orch_authz_saw(orch_authz_epochs(ARRAY(
-                 SELECT org_id FROM found UNION SELECT ask_root_org_id FROM found WHERE ask_root_org_id IS NOT NULL)))
-              WHERE COALESCE(current_setting('orch.authz_seen', true), '') <> ''
-         )
-         SELECT found.* FROM found, (SELECT count(*) FROM watched) w",
-    ).bind(ids).fetch_all(conn).await?)
+    Ok(sqlx::query_as(include_str!("hierarchy_ancestors.sql"))
+        .bind(ids)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// The same ancestor/governance read with its actual plan and buffer work.
+pub async fn explain_ancestors(conn: &mut Conn, ids: &[Id]) -> Result<orch_types::Json, DbError> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
+        include_str!("hierarchy_ancestors.sql")
+    )))
+    .bind(ids)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// The nodes that lie directly in `parent` and are not deleted, in the
@@ -363,6 +360,10 @@ pub struct NodeDetail {
     pub title_source: String,
     /// When automation last wrote the name or tags.
     pub auto_updated_at: Option<DateTime<Utc>>,
+    /// Bounded retained title/tag observations, separate from the current field values.
+    pub automatic_fields: Option<Json>,
+    /// Actual durable queue state and the policy captured when its timing was decided.
+    pub automatic_schedule: Option<Json>,
     /// Its first owner.
     pub owner_id: Id,
     /// When it was archived itself.
@@ -415,7 +416,9 @@ pub async fn details(
 ) -> Result<Vec<NodeDetail>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.description, n.color, n.custom_color, n.title_source,
-                n.auto_updated_at, n.owner_id, n.archived_at, n.archived_by,
+                n.auto_updated_at, ns.automatic_fields,
+                CASE WHEN ns.node_id IS NOT NULL THEN jsonb_build_object('due_at',ns.due_at,'next_at',ns.next_at,'last_at',ns.last_at,'failures',ns.failures,'reason_code',ns.reason_code,'has_reason',ns.reason IS NOT NULL,'run_id',ns.run_id,'retry_policy',ns.retry_policy) END AS automatic_schedule,
+                n.owner_id, n.archived_at, n.archived_by,
                 n.deleted_at, n.deleted_by, n.revision, n.created_at, n.updated_at, n.tree_seq,
                 c.id AS chat_id, COALESCE(c.last_message_seq, 0) AS chat_seq,
                 (SELECT count(DISTINCT x.person) FROM (
@@ -432,6 +435,7 @@ pub async fn details(
                 o.slug, o.org_kind, o.closed, o.flat,
                 t.status AS topic_status, t.done_at, n.tags_source, t.topic_seq
            FROM nodes n
+           LEFT JOIN node_summary_state ns ON ns.node_id=n.id
            LEFT JOIN chats c ON c.node_id = n.id
            LEFT JOIN orgs o ON o.node_id = n.id
            LEFT JOIN topics t ON t.node_id = n.id
@@ -634,7 +638,13 @@ pub async fn put_subscription(
     .bind(level)
     .bind(source)
     .bind(at)
-    .execute(conn)
+    .execute(&mut *conn)
+    .await?;
+    crate::sequences::notify_user_event(
+        conn,
+        &[user],
+        &serde_json::json!({"what":"subscription","node_id":node,"level":level,"source":source}),
+    )
     .await?;
     Ok(())
 }
@@ -645,9 +655,18 @@ pub async fn delete_subscription(conn: &mut Conn, user: Id, node: Id) -> Result<
     let done = sqlx::query("DELETE FROM subscriptions WHERE user_id = $1 AND node_id = $2")
         .bind(user)
         .bind(node)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
-    Ok(done.rows_affected() == 1)
+    let removed = done.rows_affected() == 1;
+    if removed {
+        crate::sequences::notify_user_event(
+            conn,
+            &[user],
+            &serde_json::json!({"what":"subscription","node_id":node,"level":null,"source":null}),
+        )
+        .await?;
+    }
+    Ok(removed)
 }
 
 // ---- making and changing nodes ----

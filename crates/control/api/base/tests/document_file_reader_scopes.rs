@@ -652,6 +652,7 @@ fn rebind_blobs(desk: &mut Desk, blobs: orch_api_core::blobs::Blobs) {
     let old = desk.world.app.app.clone();
     old.engine.attach_blobs(blobs.store());
     let state = Arc::new(AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: old.db.clone(),

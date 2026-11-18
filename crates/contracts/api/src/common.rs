@@ -45,8 +45,8 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const fn is_false(value: &bool) -> bool {
     !*value
 }
-/// The size of one piece of an upload.
-pub const UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+/// Shipped default maximum piece; actual accepted limits are in the session reply.
+pub const UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(test)]
 mod listed_tests {
@@ -320,7 +320,9 @@ pub struct PageQuery {
 }
 
 /// Flattened URL query members arrive as strings; JSON callers retain the same numeric vocabulary.
-fn query_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn query_u32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Number {
@@ -411,6 +413,7 @@ macro_rules! error_codes {
 
 error_codes! {
     RequestInvalid = 400, "request.invalid", "The request is not valid";
+    RequestTooEarly = 425, "request.too_early", "Wait for the secure connection before this action";
     RequestValueRefused = 422, "request.value_refused", "A value is not one that can be kept";
     AdminRiskNotAcknowledged = 400, "admin.risk_not_acknowledged", "The risk was not acknowledged";
     EnvironmentNoneUsable = 400, "environment.none_usable", "No environment can be used";
@@ -472,6 +475,7 @@ error_codes! {
     AccessLocked = 409, "access.locked", "This row is locked above";
     PolicyNotDelegated = 409, "policy.not_delegated", "The machine keeps these keys to itself";
     ConflictStaleRevision = 409, "conflict.stale_revision", "It was changed meanwhile";
+    ConflictConcurrentChange = 409, "conflict.concurrent_change", "A concurrent change interrupted the operation";
     ConflictExists = 409, "conflict.exists", "It exists already";
     ConflictIdempotencyMismatch = 409, "conflict.idempotency_mismatch", "The key was used for another request";
     ConflictConfirmationRequired = 409, "conflict.confirmation_required", "Confirm before going on";
@@ -516,7 +520,7 @@ error_codes! {
     PreflightExpired = 409, "preflight.expired", "The plan is out of date";
     ResourceInUse = 409, "resource.in_use", "It is still in use";
     AdminLastAdmin = 409, "admin.last_admin", "The last admin stays";
-    UploadOffset = 409, "upload.offset", "The piece does not continue the upload";
+    UploadOffset = 409, "upload.offset", "The upload is incomplete or conflicts with received bytes";
     RouteNotReady = 409, "route.not_ready", "The route cannot reach its person yet";
     ExportTooLarge = 409, "export.too_large", "The archive would be larger than the place allows";
     ExportTooMany = 409, "export.too_many", "The archive would hold more things than the place allows";
@@ -526,6 +530,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";
@@ -555,6 +560,31 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// The native database phase whose own deadline expired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseWaitPhase {
+    /// Waiting for a connection from the pool.
+    Acquire,
+    /// PostgreSQL cancelled a statement because its statement deadline expired.
+    Statement,
+    /// PostgreSQL ended a transaction left idle past its deadline.
+    IdleTransaction,
+}
+
+/// Safe facts captured from a known native timeout, belonging to this failed request alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DatabaseWait {
+    /// The native phase, never inferred from a generic error or cancellation code.
+    pub phase: DatabaseWaitPhase,
+    /// The applied deadline in milliseconds; null when the original pool profile was not reported.
+    pub applied_limit_ms: Option<u64>,
+    /// The answering service; currently `api`, without a database address or configuration value.
+    pub service: String,
+    /// The request identifier of this occurrence; not a resource or database identifier.
+    pub occurrence_id: String,
+}
+
 /// An error, as it is answered: `application/problem+json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[error("{code}: {detail}")]
@@ -572,6 +602,9 @@ pub struct Problem {
     pub detail: String,
     /// The request this answers, as in the `X-Request-Id` header.
     pub request_id: String,
+    /// The request's own known native database timeout, absent for every other failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_wait: Option<Box<DatabaseWait>>,
     /// What the code adds, member by member.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Json>,
@@ -589,6 +622,7 @@ impl Problem {
             status: code.status(),
             detail: detail.into(),
             request_id: String::new(),
+            database_wait: None,
             extra: serde_json::Map::new(),
         }
     }
