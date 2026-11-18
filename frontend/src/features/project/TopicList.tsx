@@ -127,7 +127,7 @@ export function TopicList({ topics, showPaths = false, selection }: { topics: re
     },
   ];
 
-  return <Table label={t('places.topics.title')} columns={columns} rows={topics} rowKey={(topic) => topic.id} rowClassName={(topic) => (topic.archived ? 'opacity-60' : undefined)} rowMenu={{ label: (topic) => t('places.menu.of', { name: topic.name }), content: (topic) => <TopicMenuEntries topic={topic} context /> }} />;
+  return <Table virtual label={t('places.topics.title')} columns={columns} rows={topics} rowKey={(topic) => topic.id} rowClassName={(topic) => (topic.archived ? 'opacity-60' : undefined)} rowMenu={{ label: (topic) => t('places.menu.of', { name: topic.name }), content: (topic) => <TopicMenuEntries topic={topic} context /> }} />;
 }
 
 function TopicRowMenu({ topic }: { topic: Topic }) {

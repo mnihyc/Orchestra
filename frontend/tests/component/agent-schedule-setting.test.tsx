@@ -11,7 +11,7 @@ import type { ResolvedSetting, SettingDef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ registry: vi.fn<() => Promise<SettingDef[]>>() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof Settings>(), putSetting: vi.fn<typeof Settings.putSetting>(), registryQuery: { queryKey: ['settings-registry'], queryFn: calls.registry } }));
 const def: SettingDef = { key: 'threads.agent_schedules', title: 'Agent schedules', description: 'Fallback help', group: 'agent', class: 'parameter', scopes: ['system', 'org', 'project', 'topic', 'thread'], merge: 'replace', default: 'off',
   example: 'on', schema: { type: 'string', enum: ['on', 'off'] }, text_key: null, keywords: [] };

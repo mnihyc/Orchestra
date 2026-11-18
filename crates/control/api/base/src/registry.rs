@@ -1131,6 +1131,20 @@ async fn open(
     typed_operation: bool,
     deferred_creation: bool,
 ) -> ApiResult<Ctx> {
+    // A TLS resumption replay may repeat a safe read, never an act. Refuse before authentication,
+    // activity, body parsing or the handler can make an effect; a completed handshake can retry.
+    if (!parts.method.is_safe() || route.path.starts_with("/auth/oidc/"))
+        && parts.headers.get_all("early-data").iter().any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|value| value.split(',').any(|part| part.trim() == "1"))
+        })
+    {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::RequestTooEarly,
+            "the secure handshake must finish before this action; retry without early data",
+        ));
+    }
     let ask_read = parts
         .extensions
         .get::<Arc<crate::ask::tools::ReadRequest>>()
