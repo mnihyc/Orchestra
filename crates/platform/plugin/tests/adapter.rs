@@ -76,6 +76,7 @@ fn adapter_script(extra: &Json) -> Json {
             "result": { "harness_version": "1.0.0", "descriptor": descriptor(PluginKind::Adapter) } },
         "agent.stop": { "result": {} },
         "session.open": { "events": [ { "event": "session.opened", "params": {
+                "opening_id": { "$params": "opening_id" },
                 "thread_id": { "$params": "thread_id" }, "segment_id": { "$params": "segment_id" },
                 "native_session_ref": "s-1", "resumed": false } } ],
             "result": { "native_session_ref": "s-1", "resumed": false, "import_report": null } },
@@ -152,7 +153,7 @@ fn agent_start(agent: &str) -> AgentStart {
 
 fn session_spec(agent: &str, thread: &str, segment: &str) -> SessionSpec {
     serde_json::from_value(json!({
-        "agent_id": agent, "thread_id": thread, "segment_id": segment, "mode": "new", "native_session_ref": null,
+        "opening_id":orch_types::new_id(), "agent_id": agent, "thread_id": thread, "segment_id": segment, "mode": "new", "native_session_ref": null,
         "upto_turn_ordinal": null, "workspace_root": "/workspace", "instruction_root_marker": false,
         "directory": "/workspace/web", "cwd": "/workspace/web", "mounts": [],
         "model": "tiny-1", "effort": null, "params": {}, "approval_mode": "auto", "sandbox_mode": "open",

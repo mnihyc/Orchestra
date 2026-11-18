@@ -459,9 +459,19 @@ async fn carry(
     let incoming = upgrading.then(|| hyper::upgrade::on(&mut request));
     let (mut parts, body) = request.into_parts();
     rewrite_request(&mut parts, upgrading);
+    let addresses = match crate::public_addresses::current(app).await {
+        Ok(addresses) => addresses,
+        Err(_) => {
+            return page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The public address is unavailable",
+                "Try again in a moment.",
+            );
+        }
+    };
     let signed = port_signer().sign(
         &PortAssertion {
-            issuer: app.config.system.public_url.clone(),
+            issuer: addresses.addresses.public_url,
             environment_id: admission.env.id,
             port: entry.port,
             transport: "tcp",

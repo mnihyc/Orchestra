@@ -1,19 +1,25 @@
 /** Resource confirmations wait for complete effects, retain emergency-stop intent and keep switching separate. */
 import tokenDensity from '../../../crates/control/engine/data/token-density.json' with {type:'json'};
 import type * as ResourceApi from '@/api/resources';
+import type * as ToolsApi from '@/api/resource-tools';
 import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { DeleteProviderDialog, DisableProviderDialog } from '@/features/resources/providers/DangerZone';
+import { EditMount } from '@/features/resources/mounts/Edit';
 import { ModelLifecycle } from '@/features/resources/providers/ModelLifecycle';
+import { DeleteMcpDialog } from '@/features/resources/mcp/Preset';
 import type { FactTarget, ProviderModel, ResourceImpact } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
+import { ADA } from '../doubles/chat-rows';
+import { detailMcp, detailMount } from './resource-detail-fixtures';
 
-const calls = vi.hoisted(() => ({ read: vi.fn<(target: FactTarget) => Promise<ResourceImpact>>(), disable: vi.fn(), remove: vi.fn(), updateModel:vi.fn(),removeModel:vi.fn(), switch: vi.fn() }));
+const calls = vi.hoisted(() => ({ read: vi.fn<(target: FactTarget) => Promise<ResourceImpact>>(), disable: vi.fn(), remove: vi.fn(), removeMcp: vi.fn(), updateMount: vi.fn(), updateModel:vi.fn(),removeModel:vi.fn(), switch: vi.fn() }));
 vi.mock('@/api/resource-impact', () => ({ resourceImpactQuery: (target: FactTarget) => ({ queryKey: ['pause-dialog', target], queryFn: () => calls.read(target), retry: false }) }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourceApi>(), disableProvider: calls.disable, deleteProvider: calls.remove,updateModel:calls.updateModel,deleteModel:calls.removeModel }));
+vi.mock('@/api/resource-tools', async (original) => ({ ...await original<typeof ToolsApi>(), deleteMcp: calls.removeMcp, updateMount: calls.updateMount }));
 vi.mock('@/features/change/target', () => ({ openChange: calls.switch }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
@@ -28,10 +34,33 @@ function impact(): ResourceImpact {
       dependents: [{ relation: 'binding', count: 5, visible: [thread], hidden: 4, until: null }] },
   };
 }
-beforeEach(() => { calls.read.mockResolvedValue(impact()); calls.disable.mockResolvedValue(provider); calls.remove.mockResolvedValue(undefined); calls.updateModel.mockResolvedValue(model);calls.removeModel.mockResolvedValue(undefined); });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const notify of [false, true]) {
+  it(`shows current MCP dependents before confirming an explicit ${notify ? 'selected' : 'cleared'} notice (${locale})`, async () => {
+    await setLocale(locale);
+    const target = { object: { kind: 'mcp_server' as const, id: detailMcp.id }, model_id: null };
+    const current = { ...impact(), target, name: detailMcp.name, notification: { audience: { people: [ADA], hidden: 1 }, default_on: true } };
+    current.facts = { ...current.facts, subject: { kind: 'resource', object: target.object }, dependents: [
+      { relation: 'attachment', count: 3, hidden: 2, until: null, visible: [{ ...thread, relation: 'attachment' }] },
+    ] };
+    calls.read.mockResolvedValue(current);
+    const user = userEvent.setup();
+    const removed = vi.fn();
+    show(<DeleteMcpDialog server={{ ...detailMcp, imported: null }} onClose={vi.fn()} onRemoved={removed} />);
+    const choice = await screen.findByRole('checkbox', { name: i18n.t('programVersions.notify', { count: 2, number: '2' }) });
+    expect(choice).toBeChecked();
+    expect(calls.read).toHaveBeenCalledWith(target);
+    expect(screen.getByText(i18n.t('library.given', { number: '3', unit: i18n.t('library.units.attachments', { count: 3 }) }))).toBeVisible();
+    if (!notify) await user.click(choice);
+    await user.click(screen.getByRole('button', { name: i18n.t('resourceDetails.remove') }));
+    await waitFor(() => expect(calls.removeMcp).toHaveBeenCalledExactlyOnceWith(detailMcp.id, notify));
+    await waitFor(() => expect(removed).toHaveBeenCalledOnce());
+  });
+}
+beforeEach(() => { calls.updateMount.mockResolvedValue(detailMount); calls.read.mockResolvedValue(impact()); calls.disable.mockResolvedValue(provider); calls.remove.mockResolvedValue(undefined); calls.updateModel.mockResolvedValue(model);calls.removeModel.mockResolvedValue(undefined); });
 afterEach(async () => { cleanup(); vi.resetAllMocks(); await setLocale('en'); });
 
-it('waits for the current effects before admitting an emergency stop and sends only its one-line note', async () => {
+it('waits for the current effects before admitting an emergency stop and sends its note with an explicit silent choice', async () => {
   const user = userEvent.setup();
   let ready: ((value: ResourceImpact) => void) | undefined;
   calls.read.mockImplementation(() => new Promise<ResourceImpact>((resolve) => { ready = resolve; }));
@@ -48,7 +77,7 @@ it('waits for the current effects before admitting an emergency stop and sends o
   expect(screen.queryByRole('button', { name: i18n.t('resourceImpact.switchFirst') })).not.toBeInTheDocument();
   await user.type(screen.getByRole('textbox', { name: new RegExp(i18n.t('resourceImpact.note')) }), '  Key rotation  ');
   await user.click(confirm);
-  await waitFor(() => expect(calls.disable).toHaveBeenCalledExactlyOnceWith(provider.id, 'Key rotation'));
+  await waitFor(() => expect(calls.disable).toHaveBeenCalledExactlyOnceWith(provider.id, 'Key rotation', false));
 });
 
 it('a failed impact read cannot silently turn unknown effects into zero or permit confirmation', async () => {
@@ -89,7 +118,7 @@ it('a model stop reads only its exact provider membership and keeps switching ou
   expect(screen.queryByRole('button',{name:i18n.t('resourceImpact.switchFirst')})).not.toBeInTheDocument();
   await user.type(screen.getByRole('textbox',{name:new RegExp(i18n.t('resourceImpact.note'))}),'  Model pause  ');
   await user.click(screen.getByRole('button',{name:i18n.t('providers.danger.disableConfirm',{name:model.display_name})}));
-  await waitFor(()=>expect(calls.updateModel).toHaveBeenCalledExactlyOnceWith(provider.id,model.id,{enabled:false},'Model pause'));
+  await waitFor(()=>expect(calls.updateModel).toHaveBeenCalledExactlyOnceWith(provider.id,model.id,{enabled:false},'Model pause',undefined,false));
 });
 
 it('a model deletion requires its exact current name before ending its membership',async()=>{
@@ -102,5 +131,85 @@ it('a model deletion requires its exact current name before ending its membershi
   expect(calls.removeModel).not.toHaveBeenCalled();
   await user.type(screen.getByRole('textbox',{name:i18n.t('resourceImpact.typeName',{name:model.display_name})}),model.display_name);
   await user.click(submit);
-  await waitFor(()=>expect(calls.removeModel).toHaveBeenCalledExactlyOnceWith(provider.id,model.id));
+  await waitFor(()=>expect(calls.removeModel).toHaveBeenCalledExactlyOnceWith(provider.id,model.id,false));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['disable', 'delete'] as const) for (const notify of [false, true]) {
+  it(`confirms the ${notify ? 'selected' : 'cleared'} ${kind} notification choice explicitly (${locale})`, async () => {
+    await setLocale(locale);
+    const current = { ...impact(), notification: { audience: { people: [ADA], hidden: 2 }, default_on: true } };
+    calls.read.mockResolvedValue(current);
+    const user = userEvent.setup();
+    show(kind === 'disable' ? <DisableProviderDialog provider={provider} open onClose={vi.fn()} /> : <DeleteProviderDialog provider={provider} open onClose={vi.fn()} />);
+    const name = i18n.t('programVersions.notify', { count: 3, number: '3' });
+    const choice = await screen.findByRole('checkbox', { name });
+    expect(choice).toBeChecked();
+    if (!notify) await user.click(choice);
+    if (notify) expect(choice).toBeChecked(); else expect(choice).not.toBeChecked();
+    if (kind === 'delete') await user.type(screen.getByRole('textbox', { name: i18n.t('resourceImpact.typeName', { name: provider.name }) }), provider.name);
+    await user.click(screen.getByRole('button', { name: i18n.t(kind === 'delete' ? 'providers.danger.deleteConfirm' : 'providers.danger.disableConfirm', { name: provider.name }) }));
+    await waitFor(() => expect(kind === 'disable' ? calls.disable : calls.remove).toHaveBeenCalled());
+    if (kind === 'disable') expect(calls.disable).toHaveBeenCalledWith(provider.id, undefined, notify);
+    else expect(calls.remove).toHaveBeenCalledWith(provider.id, notify);
+  });
+}
+
+
+for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['disable', 'delete'] as const) for (const notify of [false, true]) {
+  it(`keeps the exact model lifecycle notice choice explicit when ${kind} is ${notify ? 'selected' : 'cleared'} (${locale})`, async () => {
+    await setLocale(locale);
+    calls.read.mockResolvedValue({ ...impact(), name: model.display_name,
+      target: { object: { kind: 'provider', id: provider.id }, model_id: model.id },
+      notification: { audience: { people: [ADA], hidden: 2 }, default_on: true },
+    });
+    const user = userEvent.setup();
+    show(<ModelLifecycle provider={provider} model={model} kind={kind} onClose={vi.fn()} />);
+    const choice = await screen.findByRole('checkbox', { name: i18n.t('programVersions.notify', { count: 3, number: '3' }) });
+    expect(choice).toBeChecked();
+    if (!notify) await user.click(choice);
+    if (kind === 'delete') await user.type(screen.getByRole('textbox', { name: i18n.t('resourceImpact.typeName', { name: model.display_name }) }), model.display_name);
+    await user.click(screen.getByRole('button', { name: i18n.t(kind === 'delete' ? 'providers.danger.deleteConfirm' : 'providers.danger.disableConfirm', { name: model.display_name }) }));
+    if (kind === 'delete') await waitFor(() => expect(calls.removeModel).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, notify));
+    else await waitFor(() => expect(calls.updateModel).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { enabled: false }, undefined, undefined, notify));
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const notify of [false, true]) {
+  it(`saves a mount enabled change with its explicit ${notify ? 'selected' : 'cleared'} notice choice (${locale})`, async () => {
+    await setLocale(locale);
+    calls.read.mockResolvedValue({ ...impact(), name: detailMount.name,
+      target: { object: { kind: 'mount', id: detailMount.id }, model_id: null },
+      notification: { audience: { people: [ADA], hidden: 1 }, default_on: true },
+    });
+    const user = userEvent.setup();
+    show(<EditMount mount={detailMount} onClose={vi.fn()} />);
+    expect(calls.read).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('switch', { name: i18n.t('resourceDetails.enabled') }));
+    const choice = await screen.findByRole('checkbox', { name: i18n.t('programVersions.notify', { count: 2, number: '2' }) });
+    expect(choice).toBeChecked();
+    expect(calls.read).toHaveBeenCalledWith({ object: { kind: 'mount', id: detailMount.id }, model_id: null });
+    if (!notify) await user.click(choice);
+    await user.click(screen.getByRole('button', { name: i18n.t('resources.edit.save') }));
+    await waitFor(() => expect(calls.updateMount).toHaveBeenCalledExactlyOnceWith(detailMount.id, expect.objectContaining({ expected_revision: detailMount.revision, enabled: false, notify })));
+  });
+}
+
+it('keeps a mount enabled draft when its current notice audience cannot be read', async () => {
+  calls.read.mockRejectedValue(new Error('The mount audience could not be read.'));
+  const user = userEvent.setup();
+  show(<EditMount mount={detailMount} onClose={vi.fn()} />);
+  const enabled = screen.getByRole('switch', { name: i18n.t('resourceDetails.enabled') });
+  await user.click(enabled);
+  await screen.findByRole('button', { name: i18n.t('common.tryAgain') });
+  expect(enabled).not.toBeChecked();
+  const save = screen.getByRole('button', { name: i18n.t('resources.edit.save') });
+  expect(save).toHaveAttribute('aria-disabled', 'true');
+  await user.click(save);
+  expect(calls.updateMount).not.toHaveBeenCalled();
+  await user.click(enabled);
+  await user.type(screen.getByRole('textbox', { name: i18n.t('resources.edit.name') }), '-renamed');
+  expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: i18n.t('resources.edit.save') }));
+  await waitFor(() => expect(calls.updateMount).toHaveBeenCalledOnce());
+  expect(calls.updateMount.mock.calls[0]?.[1]).not.toHaveProperty('notify');
 });

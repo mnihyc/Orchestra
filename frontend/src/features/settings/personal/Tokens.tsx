@@ -1,3 +1,4 @@
+import { PathLink } from '@/shell/TrailLink';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 /** Personal API-token operation rules, expiry, review and revocation.
  *
@@ -146,10 +147,10 @@ export function TokenPlace({ node }: { node: ApiTokenInfo['node'] }) {
   if (node.redacted || node.name === null) return <span>{t('people.privateReference')}</span>;
   const Icon = PLACE_ICONS[node.kind];
   return <ReferenceCard reference={{ kind: 'node', id: node.id }} label={node.name}>
-    {(keep) => <a href={placePath(node)} onClick={(event) => { if (isPlainClick(event)) { event.preventDefault(); keep(); } }}
+    {(keep) => <PathLink href={placePath(node)} onClick={(event) => { if (isPlainClick(event)) { event.preventDefault(); keep(); } }}
       className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-bg-muted px-1 align-baseline font-medium text-text hover:bg-border">
       {node.kind === 'thread' ? <ThreadStateIcon display={node.thread_display} className="[&_svg]:size-4" /> : <Icon aria-hidden className="size-4 shrink-0 text-text-muted" />}<span className="truncate">{node.name}</span>
-    </a>}
+    </PathLink>}
   </ReferenceCard>;
 }
 
