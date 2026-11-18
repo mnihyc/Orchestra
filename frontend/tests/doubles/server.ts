@@ -171,7 +171,10 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
-    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 200)) };
+    const requested = query.get('limit');
+    const limit = requested !== null ? Number(requested) : world.places.rowOf(opening[1]) === undefined
+      ? 40 : Number(world.settings.valueAt(opening[1], 'threads.opening_items').value);
+    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], limit) };
   }
   const chat = /^GET \/chats\/([^/]+)\/opening$/.exec(route);
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };
@@ -387,7 +390,7 @@ const server = createServer((request, response) => {
     if (request.method === 'GET' && result.status < 300 && typeof view === 'string' && request.headers.authorization !== undefined) {
       try {
         const { noteView } = await import('./view-read.ts');
-        await noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
+        noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
       } catch { /* Personal bookkeeping never changes a successful native page answer. */ }
     }
     return result;

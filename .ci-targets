@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/start-environment-options.test.tsx tests/component/change-compact.test.tsx tests/component/settings-thing-choices.test.tsx tests/component/thread-status-data.test.tsx tests/component/combobox-group-controls.test.tsx tests/component/resource-picker.test.tsx tests/component/access-where-field.test.tsx tests/component/batch-temporary.test.tsx tests/component/resource-facts.test.tsx tests/component/start-flow.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

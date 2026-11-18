@@ -24,7 +24,7 @@ const BlockEditor = lazy(async () => ({ default: (await import('@/features/docum
 const STORED_PAGE = 200;
 function Conversation({ id }: { id: string }) {
   const { t } = useTranslation();
-  const read = useQuery({ queryKey: ['deleted-inspection', 'thread', id], queryFn: ({ signal }) => traceJson<InspectedThread>(`/threads/${id}/sync?inspect_deleted=true&limit=${STORED_PAGE}`, { signal }), staleTime: 0, gcTime: 0 });
+  const read = useQuery({ queryKey: ['deleted-inspection', 'thread', id], queryFn: ({ signal }) => traceJson<InspectedThread>(`/threads/${id}/sync?inspect_deleted=true&limit=${STORED_PAGE}`, { signal }), gcTime: 0 });
   const older = useInfiniteQuery({ queryKey: ['deleted-inspection', 'items', id], initialPageParam: null as number | null, queryFn: ({ pageParam, signal }) => traceJson<ThreadItemListReply>(`/threads/${id}/items?inspect_deleted=true&before=${pageParam ?? read.data?.items[0]?.seq_created ?? 0}&limit=${STORED_PAGE}`, { signal }), getNextPageParam: (page) => page.has_older ? page.items[0]?.seq_created : undefined, enabled: false, gcTime: 0 });
   useScreenHeading({ title: read.data?.thread.name ?? t('trace.inspect'), icon: MessageSquareText, thread: threadIconFacts(read.data?.thread), ...(read.data === undefined ? {} : { path: read.data.thread.path }) });
   if (read.isPending) return <SkeletonRows read={read} rows={4} />;
@@ -35,7 +35,7 @@ function Conversation({ id }: { id: string }) {
   return <><InspectionBanner facts={inspection} /><Pagination hasMore={pages.length === 0 ? data.has_older : older.hasNextPage} loading={older.isFetchingNextPage} error={older.error ?? undefined} onMore={() => void older.fetchNextPage()} /><StoredTimeline snapshot={snapshot} />{snapshot.items.length === 0 && <EmptyState compact icon={<MessageSquareText aria-hidden />} title={t('trace.nothingKept')} />}</>;
 }
 function Blocks({ id }: { id: string }) {
-  const { t } = useTranslation(); const read = useQuery({ queryKey: ['deleted-inspection', 'document', id], queryFn: ({ signal }) => traceJson<InspectedDocument>(`/documents/${id}/sync?inspect_deleted=true`, { signal }), staleTime: 0, gcTime: 0 });
+  const { t } = useTranslation(); const read = useQuery({ queryKey: ['deleted-inspection', 'document', id], queryFn: ({ signal }) => traceJson<InspectedDocument>(`/documents/${id}/sync?inspect_deleted=true`, { signal }), gcTime: 0 });
   useScreenHeading({ title: read.data?.document.title ?? t('trace.inspect'), icon: FileText, ...(read.data === undefined ? {} : { path: read.data.document.path, leaf: true }) });
   if (read.isPending) return <SkeletonRows read={read} rows={4} />;
   if (read.isError) return <ErrorState error={read.error} title={t('trace.inspectFailure')} onRetry={() => void read.refetch()} />;
@@ -44,7 +44,7 @@ function Blocks({ id }: { id: string }) {
   return <><InspectionBanner facts={inspection} /><h2 className="text-xl font-semibold wrap-anywhere">{read.data.document.title}</h2>{read.data.blocks.length === 0 ? <EmptyState compact icon={<FileText aria-hidden />} title={t('trace.nothingKept')} /> : <Suspense fallback={<SkeletonRows read={read} rows={4} />}><BlockEditor document={read.data.document} editable={false} fixed={read.data.blocks} inspection /></Suspense>}</>;
 }
 function Place({ id }: { id: string }) {
-  const { t } = useTranslation(); const read = useQuery({ queryKey: ['deleted-inspection', 'node', id], queryFn: ({ signal }) => traceJson<InspectedNode>(`/nodes/${id}?inspect_deleted=true`, { signal }), staleTime: 0, gcTime: 0 });
+  const { t } = useTranslation(); const read = useQuery({ queryKey: ['deleted-inspection', 'node', id], queryFn: ({ signal }) => traceJson<InspectedNode>(`/nodes/${id}?inspect_deleted=true`, { signal }), gcTime: 0 });
   const children = useInfiniteQuery({ queryKey: ['deleted-inspection', 'children', id], initialPageParam: null as string | null, queryFn: ({ pageParam, signal }) => traceJson<{ items: InspectedNode[]; next_cursor: string | null }>(`/nodes/${id}/children?inspect_deleted=true${pageParam === null ? '' : `&cursor=${pageParam}`}`, { signal }), getNextPageParam: (page) => page.next_cursor, enabled: read.isSuccess && read.data.kind !== 'thread' && Boolean(read.data.inspection), gcTime: 0 });
   useScreenHeading({ title: read.data?.name ?? t('trace.inspect'), icon: Eye, ...(read.data === undefined ? {} : { path: read.data.path }) });
   if (read.isPending) return <SkeletonRows read={read} rows={4} />;
