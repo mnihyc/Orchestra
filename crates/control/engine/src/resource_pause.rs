@@ -360,7 +360,11 @@ impl Engine {
             || !harnesses.is_empty()
             || !keepers.is_empty()
             || !units.is_empty();
-        let plan = json!({"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
+        let notification_threads = work
+            .iter()
+            .map(|row| row.thread)
+            .collect::<std::collections::BTreeSet<_>>();
+        let plan = json!({"notification_operation":crate::notifications::current_operation(),"notification_threads":notification_threads,"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
         let row = jobs::insert(
             unit.conn,
             &jobs::NewJob {

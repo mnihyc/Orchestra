@@ -1,0 +1,5 @@
+fmt
+test -p orch-api-core --test threads_read -- opening_carries_the_native_screen_projections_and_only_the_readers_own_draft --exact
+test -p orch-engine --lib -- summaries::
+test -p orch-api-core --test summaries --test resource_summaries
+test -p orch-engine --test goals --test resource_summaries

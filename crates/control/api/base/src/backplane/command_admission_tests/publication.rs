@@ -171,6 +171,8 @@ async fn revoked_first_wire(push: bool) -> Proof {
             token: Some(key),
             creator_origin: None,
             scheduled_input: None,
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action,
         },
         fixture.clock.now(),
