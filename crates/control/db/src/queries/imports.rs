@@ -268,16 +268,25 @@ pub async fn lines_of_user(
     user: Id,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<ImportLineRow>, DbError> {
-    Ok(
-        sqlx::query_as(sqlx::AssertSqlSafe(history_page_statement(after.is_some())))
-            .bind(user)
-            .bind(after.map(|each| each.0))
-            .bind(after.map(|each| each.1))
-            .bind(limit)
-            .fetch_all(conn)
-            .await?,
-    )
+    let patterns = super::search::Query::parse(search).like_patterns();
+    let mut sql = history_page_statement(after.is_some());
+    if !patterns.is_empty() {
+        let named = super::search::matching_sql("source.name", "$5");
+        sql = sql.replace("ORDER BY created_at", &format!("AND EXISTS (SELECT 1 FROM unnest(files) AS source(name) WHERE {named}) ORDER BY created_at"));
+    }
+    let statement = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(user)
+        .bind(after.map(|each| each.0))
+        .bind(after.map(|each| each.1))
+        .bind(limit);
+    let statement = if patterns.is_empty() {
+        statement
+    } else {
+        statement.bind(patterns)
+    };
+    Ok(statement.fetch_all(conn).await?)
 }
 
 /// The same creator-only narrow rows for a previously selected native history result.

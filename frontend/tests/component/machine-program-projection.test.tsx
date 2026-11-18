@@ -1,5 +1,6 @@
 /** A selected Programs view reuses only its current Machine projection and retains exact read repairs. */
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import userEvent from '@testing-library/user-event';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -100,5 +101,15 @@ it('retires the open Programs data together with a revoked Machine view', async 
   await act(async () => { await applyChanges(resourceChanges('machine', initial.id, { what: 'changed', view_revoked: true }), view.cache); });
   expect(view.cache.getQueryData(['machine-programs', initial.id])).toBeUndefined();
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument());
+  expect(read).not.toHaveBeenCalled();
+});
+
+it('finds a late discovered program in the complete admitted report without another machine read', async () => {
+  const initial=machine(false);
+  initial.facts={...(initial.facts as Record<string,unknown>),discovered_harnesses:Array.from({length:13},(_,n)=>({...binary,path:`/usr/local/bin/tool-${n}`}))};
+  draw(initial);
+  await userEvent.type(await screen.findByRole('searchbox'),'tool-12');
+  expect(await screen.findByText(/tool-12$/)).toBeVisible();
+  expect(screen.queryByText(/tool-0$/)).not.toBeInTheDocument();
   expect(read).not.toHaveBeenCalled();
 });

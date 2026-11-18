@@ -1,8 +1,9 @@
 /** Search by meaning in Management: each org's state in the reader's language, progress with the time left, the disk against its share, and the two choices a waiting index offers with the size and time shown first. */
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from '@tanstack/react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 
+import { QueryClient } from '@tanstack/react-query';
 import { SemanticSearch } from '@/features/admin/SemanticSearch';
 import type { SemanticSearchOrg, SemanticSearchOverview } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
@@ -13,7 +14,7 @@ import { show } from './support';
 
 const calls = vi.hoisted(() => ({
   templateId: null as string | null,
-  overview: vi.fn(),
+  overview: vi.fn<()=>Promise<SemanticSearchOverview>>(),
   rebuild: vi.fn(),
   keep: vi.fn(),
   local: vi.fn(),
@@ -22,6 +23,10 @@ const calls = vi.hoisted(() => ({
 vi.mock('@/api/admin', () => ({
   semanticSearchKey: ['admin', 'semantic-search'],
   semanticSearchQuery: { queryKey: ['admin', 'semantic-search'], queryFn: calls.overview },
+  semanticSearchPageQuery:(q:string)=>({queryKey:['admin','semantic-search','pages',q],initialPageParam:null as string|null,
+    queryFn:async({pageParam}:{pageParam:string|null})=>{const full:SemanticSearchOverview=await calls.overview();const matches=full.orgs.filter((row)=>row.org.name?.toLowerCase().includes(q.toLowerCase()));const from=Number(pageParam??0);return {...full,orgs:matches.slice(from,from+50),orgs_next_cursor:from+50<matches.length?String(from+50):null};},
+    getNextPageParam:(page:SemanticSearchOverview)=>page.orgs_next_cursor??null,
+  }),
   rebuildSemanticSearch: calls.rebuild,
   keepSemanticSearch: calls.keep,
 }));
@@ -32,7 +37,7 @@ vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: () => <div data-t
 vi.mock('@/features/resources/providers/AddProvider', () => ({AddProviderDialog: (props: {initialHome: string; initialPreset: string}) => <div role="dialog" aria-label={props.initialPreset}>{props.initialHome}</div>}));
 vi.mock('@/api/resources', () => ({providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
 
-afterEach(() => { calls.templateId = null; vi.clearAllMocks(); });
+afterEach(() => { vi.restoreAllMocks();calls.templateId = null; vi.clearAllMocks(); });
 
 const org = (id: string, name: string, over: Partial<SemanticSearchOrg>): SemanticSearchOrg => ({
   org: { id, kind: 'org', name, redacted: false },
@@ -248,4 +253,28 @@ it.each(['en','zh-CN'] as const)('links the used ordinary template to its editor
     fireEvent.click(link);
     await waitFor(()=>expect(router.state.location.pathname).toBe('/resources/templates/template-local'));
   } finally {view.unmount();await setLocale(previous);}
+});
+
+
+it('finds a later semantic index by its native org name',async()=>{
+ vi.spyOn(HTMLElement.prototype,'offsetHeight','get').mockImplementation(function(this:HTMLElement){return this.tagName==='TR'?72:384;});
+ vi.spyOn(HTMLElement.prototype,'offsetWidth','get').mockReturnValue(600);
+
+ calls.overview.mockResolvedValue({...overview(),orgs:Array.from({length:1_001},(_,index)=>org(`org-${index}`,`Index ${String(index).padStart(4,'0')}`,{}))});
+ show(<SemanticSearch/>);await screen.findByText('Index 0000',{exact:true});expect(screen.queryByText('Index 1000',{exact:true})).toBeNull();
+ fireEvent.change(screen.getByRole('searchbox',{name:i18n.t('ui.collection.find',{name:i18n.t('admin.semantic.orgsTitle')})}),{target:{value:'Index 1000'}});
+ expect(await screen.findByText('Index 1000',{exact:true})).toBeVisible();
+});
+
+it('keeps an opened embedding setup when the org leaves the displayed page',async()=>{
+ const row=org('setup-org','Setup',{state:'not_named',provider_id:null,model_name:null});
+ calls.overview.mockResolvedValue({...overview(),orgs:[row]});
+ const cache=new QueryClient({defaultOptions:{queries:{retry:false}}});show(<SemanticSearch/>,cache);
+ await screen.findByText('Setup',{exact:true});fireEvent.click(screen.getByRole('button',{name:i18n.t('admin.semantic.addLocal')}));
+ const dialog=screen.getByRole('dialog',{name:'Local embeddings'});expect(dialog).toBeVisible();
+ act(()=>{
+  cache.setQueryData(['admin','semantic-search'],{...overview(),orgs:[]});
+  cache.setQueryData(['admin','semantic-search','pages',''],{pages:[{...overview(),orgs:[],orgs_next_cursor:null}],pageParams:[null]});
+ });
+ expect(dialog).toBeVisible();expect(dialog).toHaveTextContent('setup-org');
 });

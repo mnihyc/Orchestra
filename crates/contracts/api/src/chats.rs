@@ -230,6 +230,36 @@ pub struct ChatCan {
     pub reason: Option<ChatCanReason>,
 }
 
+/// Select a native member-directory page without changing the chat's other metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChatGetQuery {
+    /// Visible member-name or username words; omission retains the complete ordinary metadata view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members_q: Option<String>,
+    /// Member page size, any positive u32; supplied by the roster reader.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub members_limit: Option<u32>,
+    /// Continue the same chat and member search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members_cursor: Option<String>,
+}
+impl ChatGetQuery {
+    /// Complete metadata remains complete unless this directory was explicitly requested.
+    pub fn members(&self) -> Option<crate::common::CollectionQuery> {
+        (self.members_q.is_some() || self.members_limit.is_some() || self.members_cursor.is_some())
+            .then(|| crate::common::CollectionQuery {
+                q: self.members_q.clone(),
+                limit: self.members_limit,
+                cursor: self.members_cursor.clone(),
+            })
+    }
+}
+
 /// A chat, as the caller reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Chat {
@@ -244,6 +274,9 @@ pub struct Chat {
     pub base: ChatRef,
     /// The people in a direct or group chat; `null` for a node's chat.
     pub members: Option<Vec<UserRef>>,
+    /// A requested member-directory page continues here; absent on complete ordinary metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members_next_cursor: Option<String>,
     /// Those of `members` who are not members of the root org; group chats only.
     pub guests: Vec<Id>,
     /// The current members whose manager flag is set.
@@ -625,6 +658,15 @@ pub enum ChatListScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OrgChatListQuery {
+    /// Visible conversation, participant or place-name words, before the result page fills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Resolve only these comma-separated chat identities through the same native list admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<String>,
+    /// With nodes, also include readable place chats with no messages yet. False by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_empty: Option<bool>,
     /// Only ordinary membership or a node's ordinary chat page, independent of native reach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub participating: Option<bool>,
@@ -636,7 +678,7 @@ pub struct OrgChatListQuery {
     /// members. Without it, the union of every readable org, before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub of: Option<Id>,
-    /// How many entries, at most [`crate::common::MAX_LIMIT`].
+    /// Entries per page; any positive u32, fifty by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     /// The `next_cursor` of the page before.
@@ -1692,7 +1734,7 @@ crate::endpoints! {
     OrgChatCreate: POST "/orgs/{id}/chats", Rule("a member of the org, with chat.direct resolving to members there"), none, json OrgChatCreateBody, json ChatCreateResponse, 201,
         operation Op::receipt(&Op::facets(&crate::chat_sources::creation_facets()));
     /// Reads a chat.
-    ChatGet: GET "/chats/{id}", READ, none, none, json Chat, 200,
+    ChatGet: GET "/chats/{id}", READ, query ChatGetQuery, none, json Chat, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Chat)], Target::Path("id")),
             Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("chat_inspection_groups")),

@@ -1383,7 +1383,7 @@ BEGIN
   RETURN NEW;
 END $_$;
 
-CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust_mirror boolean, expected text[], cutoff timestamp with time zone, wanted_os text, wanted_arch text, wanted_status text, after_order text, after_version text, after_os text, after_arch text, take bigint) RETURNS TABLE(version text, os text, arch text, version_sort text, payload jsonb)
+CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust_mirror boolean, expected text[], cutoff timestamp with time zone, wanted_os text, wanted_arch text, wanted_status text, after_order text, after_version text, after_os text, after_arch text, take bigint, patterns text[]) RETURNS TABLE(version text, os text, arch text, version_sort text, payload jsonb)
     LANGUAGE sql STABLE
     AS $$
     WITH stored AS (
@@ -1391,6 +1391,7 @@ CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust
          FROM orch_program_stored_build_rows(wanted,shipped,trust_mirror,expected,cutoff) b
          WHERE wanted_status IS NULL AND (wanted_os IS NULL OR b.os=wanted_os)
            AND (wanted_arch IS NULL OR b.arch=wanted_arch)
+           AND concat_ws(' ',b.version,b.os,b.arch,b.payload->>'status') ILIKE ALL(patterns)
            AND (after_order IS NULL OR b.version_sort COLLATE "C"<=after_order COLLATE "C")
            AND (after_order IS NULL OR b.version_sort COLLATE "C"<after_order COLLATE "C"
              OR (b.version_sort=after_order AND b.version<after_version)
@@ -1404,6 +1405,7 @@ CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust
             FROM orch_program_stored_build_rows(wanted,shipped,trust_mirror,expected,cutoff) b
             WHERE wanted_status IS NOT NULL AND b.raw_status=state AND b.payload->>'status'=wanted_status
               AND (wanted_os IS NULL OR b.os=wanted_os) AND (wanted_arch IS NULL OR b.arch=wanted_arch)
+           AND concat_ws(' ',b.version,b.os,b.arch,b.payload->>'status') ILIKE ALL(patterns)
               AND (after_order IS NULL OR b.version_sort COLLATE "C"<=after_order COLLATE "C")
               AND (after_order IS NULL OR b.version_sort COLLATE "C"<after_order COLLATE "C"
                 OR (b.version_sort=after_order AND b.version<after_version)
@@ -1416,6 +1418,7 @@ CREATE FUNCTION public.orch_program_build_page(wanted text, shipped jsonb, trust
         SELECT * FROM stored
         UNION ALL
         SELECT * FROM released r WHERE (wanted_os IS NULL OR r.os=wanted_os)
+          AND concat_ws(' ',r.version,r.os,r.arch,r.payload->>'status') ILIKE ALL(patterns)
           AND (wanted_arch IS NULL OR r.arch=wanted_arch) AND (wanted_status IS NULL OR r.payload->>'status'=wanted_status)
           AND (after_order IS NULL OR r.version_sort COLLATE "C"<after_order COLLATE "C"
             OR (r.version_sort=after_order AND r.version<after_version)

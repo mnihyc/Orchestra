@@ -46,7 +46,7 @@ use orch_api_contract::auth::SessionInfo;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::operation_sources::Declaration;
 
@@ -93,7 +93,7 @@ pub fn mount(registry: &mut Registry) {
         );
 }
 
-async fn list(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<AdminSession>> {
+async fn list(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<AdminSession>> {
     native::selected_read::<Sessions>(ctx, query, ()).await
 }
 
@@ -169,7 +169,7 @@ async fn project(
 
 impl native::Selected for Sessions {
     type Source = Source;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = Selected;
     type Reply = Page<AdminSession>;
     const DECLARATION: &'static Declaration<Source> = &sources::USER_SESSIONS;
@@ -178,7 +178,7 @@ impl native::Selected for Sessions {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(Selected, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let owner = ctx.id("id")?;
@@ -188,12 +188,14 @@ impl native::Selected for Sessions {
             super::native::standing(ctx, &principal)?;
             let account = targets::account(conn, owner).await?;
             let cursor_query = AdminTokenListQuery {
+                q: query.q.clone(),
                 owner_id: Some(owner),
                 cursor: query.cursor.clone(),
                 limit: query.limit,
             };
             let mut after = super::tokens::after(ctx, &cursor_query)?;
-            let size = super::page_size(query.limit);
+            let size =
+                usize::try_from(crate::collection::limit(query)?).map_err(ApiError::internal)?;
             let mut rows = Vec::new();
             'pages: loop {
                 let batch = identity::session_inventory(
@@ -202,6 +204,7 @@ impl native::Selected for Sessions {
                     ctx.app.clock.now(),
                     after,
                     super::read_ahead(size),
+                    query.q.as_deref().unwrap_or(""),
                 )
                 .await?;
                 let exhausted = batch.len() < size.saturating_add(1);
@@ -224,9 +227,9 @@ impl native::Selected for Sessions {
             let more = rows.len() > size;
             rows.truncate(size);
             let next_cursor = if more {
-                rows.last().map(|row| {
-                    super::tokens::cursor(ctx.route.name, Some(owner), row.created_at, row.id)
-                })
+                rows.last()
+                    .map(|row| super::tokens::cursor(ctx, &cursor_query, row.created_at, row.id))
+                    .transpose()?
             } else {
                 None
             };
@@ -237,7 +240,7 @@ impl native::Selected for Sessions {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         old: &'a Selected,
     ) -> BoxFuture<'a, ApiResult<(Selected, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
@@ -281,7 +284,7 @@ impl native::Selected for Sessions {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         old: &'a Selected,
         fresh: &'a Selected,
     ) -> BoxFuture<'a, ApiResult<bool>> {
@@ -290,7 +293,7 @@ impl native::Selected for Sessions {
     fn after_read<'a>(
         ctx: &'a Ctx,
         _accepted: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
         old: &'a Selected,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {

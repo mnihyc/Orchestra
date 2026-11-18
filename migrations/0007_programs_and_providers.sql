@@ -113,6 +113,8 @@ CREATE TABLE capability_defs (
     CONSTRAINT capability_defs_pkey PRIMARY KEY (key)
 );
 
+CREATE INDEX capability_defs_text_idx ON capability_defs USING gin ((key || ' ' || label || ' ' || description) gin_trgm_ops);
+
 CREATE TABLE model_call_recovery (
     node_id uuid NOT NULL,
     purpose text NOT NULL,

@@ -25,7 +25,7 @@ use orch_types::{Hash, Id, Json, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Page, PageQuery};
+use crate::common::Page;
 use crate::environment::{EnvironmentRef, ThroughThreadQuery};
 use crate::forks::FilesSource;
 use crate::nodes::JobState;
@@ -1266,13 +1266,13 @@ crate::endpoints! {
     /// Reads the unified diff of a repository in the workspace, as plain text.
     EnvironmentGitDiffGet: GET "/environments/{id}/git/diff", Permission("files.view"), query EnvironmentGitDiffGetQuery, none, raw, 200;
     /// Lists the snapshots of a thread, newest first.
-    ThreadSnapshotList: GET "/threads/{id}/snapshots", Rule("files.view on the thread's environment"), query PageQuery, none, json Page<Snapshot>, 200,
+    ThreadSnapshotList: GET "/threads/{id}/snapshots", Rule("files.view on the thread's environment"), query crate::common::CollectionQuery, none, json Page<Snapshot>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_governors")),
             Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_origins")),
         ]);
     /// Whole-workspace exports kept by this reader, or inspected in browser administration.
-    EnvironmentSnapshotList: GET "/environments/{id}/snapshots", Rule("files.view and snapshot custody"), query PageQuery, none, json Page<Snapshot>, 200,
+    EnvironmentSnapshotList: GET "/environments/{id}/snapshots", Rule("files.view and snapshot custody"), query crate::common::CollectionQuery, none, json Page<Snapshot>, 200,
         operation Op::facets(&[Facet::required(Read, &[Object(K::Environment)], Target::Path("id"))]);
     /// Starts taking a snapshot of a thread's directory as a job whose result names the snapshot.
     ThreadSnapshotCreate: POST "/threads/{id}/snapshots", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotCreateBody, json SnapshotStartResponse, 202,

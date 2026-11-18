@@ -227,14 +227,42 @@ fn def_of(row: CapabilityRow) -> ApiResult<CapabilityDef> {
 }
 
 /// Every definition there is, by key.
-async fn capability_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<CapabilityDef>> {
+async fn capability_list(
+    ctx: Ctx,
+    query: orch_api_contract::admin::CapabilityListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<CapabilityDef>> {
     admin_of(&ctx)?;
+    let collection = query.collection();
+    let aliases = query
+        .aliases
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let source = serde_json::to_string(&("admin-capabilities", ctx.user()?.id(), &aliases))
+        .map_err(ApiError::internal)?;
+    let after = orch_api_base::collection::after::<String>(&collection, &source)?;
+    let size = orch_api_base::collection::limit(&collection)?;
     let mut conn = ctx.app.db.acquire().await?;
-    management::capabilities(&mut conn)
-        .await?
+    let rows = management::capabilities_page(
+        &mut conn,
+        &orch_api_base::collection::terms(&collection),
+        &aliases,
+        after.as_deref(),
+        i64::from(size) + 1,
+    )
+    .await?;
+    let defs = rows
         .into_iter()
         .map(def_of)
-        .collect()
+        .collect::<ApiResult<Vec<_>>>()?;
+    orch_api_base::collection::finish(&collection, &source, defs, |def| def.key.clone())
 }
 
 /// The word of a decision as the database keeps it.
