@@ -19,7 +19,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { environmentMovePlacesQuery, planEnvironmentMove, planEnvironmentUpdate, startEnvironmentMove, startEnvironmentUpdate } from '@/api/changes';
 import { ApiError } from '@/api/client';
 import { environmentQuery } from '@/api/environments';
-import { isTechnicalChange, runtimeChangeText, programChangeText } from '@/features/resources/TechnicalValue';
+import { changeText, isTechnicalChange } from '@/features/resources/TechnicalValue';
 import { moveRemovesSoftware } from '@/features/resources/isolation/runtimes';
 import { TargetBuilds } from '@/features/change/TargetBuilds';
 import { UpdateNotify } from '@/features/change/UpdateNotify';
@@ -377,7 +377,7 @@ function updateLists(plan: EnvironmentUpdatePlan, t: TFunction): { changes: Line
   const changes: Line[] =
     plan.updates.length === 0
       ? [{ id: 'recreate', tone: 'plain', text: t('change.env.plan.recreate') }]
-      : plan.updates.map((update) => ({ id: `update-${update.name}`, tone: 'plain', text: update.what === 'harness' ? programChangeText(update, t) : isTechnicalChange(update) ? runtimeChangeText(update, t) : t('change.env.plan.update', { name: update.name, from: update.from ?? '', to: update.to ?? '' }), ...(isTechnicalChange(update) ? { technical: update } : {}) }));
+      : plan.updates.map((update) => ({ id: `update-${update.name}`, tone: 'plain', text: changeText(update, t), ...(isTechnicalChange(update) ? { technical: update } : {}) }));
   const stays: Line[] = [
     { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }), people: [plan.environment.owner] },
     ...plan.kept.map((entry, index): Line => ({ id: `kept-${index}`, tone: 'plain', text: entry })),

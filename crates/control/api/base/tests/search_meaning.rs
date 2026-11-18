@@ -81,6 +81,7 @@ async fn set_at(s: &Scene, org: Id, key: &str, value: Json) {
         .call(NodeSettingSet, &[&org, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
