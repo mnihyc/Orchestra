@@ -15,6 +15,7 @@ import { ActionIcon, actionForLabel, actionName, type ActionId } from '@/ui/acti
 import { cx } from '@/ui/cx';
 import { AdminActTooltip, type AdminActSpec } from '@/ui/AdminAct';
 import { Tooltip } from '@/ui/Tooltip';
+import { useReadProgress } from '@/lib/useReadProgress';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-ghost';
 export type ButtonSize = 'sm' | 'md';
@@ -110,6 +111,7 @@ export function Button({
   ref,
   ...rest
 }: ButtonProps) {
+  const slow = useReadProgress(pending);
   const act = action ?? actionForLabel(children);
   const sign = act === undefined ? icon : <ActionIcon action={act} />;
   const words = children ?? (act === undefined ? null : actionName(act));
@@ -151,7 +153,7 @@ export function Button({
       onClick={press}
       {...rest}
     >
-      {pending ? <LoaderCircle className="animate-spin" aria-hidden /> : sign}
+      {slow ? <LoaderCircle className="animate-spin" aria-hidden /> : sign}
       {words}
     </button></AdminActTooltip>
   );

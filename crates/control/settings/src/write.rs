@@ -128,6 +128,12 @@ pub enum WriteError {
     /// The place is a side thread, which has no settings of its own.
     #[error("a side thread has no settings of its own")]
     SideThread,
+    /// A proposed local value exceeds a limit set by an ancestor.
+    #[error("a higher level sets a lower maximum")]
+    Ceiling {
+        /// The current view provides the already-resolved inherited limit for the refusal.
+        current: Box<SettingView>,
+    },
     /// A lock above decides the key.
     #[error("a lock above decides this setting")]
     Locked {
@@ -426,6 +432,11 @@ pub async fn prepare_write(
     });
     if !revision_matches(&before, request.expected_revision) {
         return Err(WriteError::Stale {
+            current: Box::new(before),
+        });
+    }
+    if before.exceeds_ceiling(&value) {
+        return Err(WriteError::Ceiling {
             current: Box::new(before),
         });
     }

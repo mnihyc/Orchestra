@@ -12,6 +12,18 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use orch_types::{Hash, Id, Revision, Seq, Time};
 
+/// Captured origin of a nonsecret running configuration value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationOrigin {
+    /// The compiled default, with no explicit file or environment override.
+    Compiled,
+    /// An explicit file member, even when it equals the compiled default.
+    File,
+    /// An environment override actually applied at startup.
+    Environment,
+}
+
 /// Browser HTTP and the existing public protocol paths.
 pub const BROWSER_BASE_PATH: &str = "/api/v1";
 /// Account-key business HTTP and origin-bound key continuations.
@@ -176,7 +188,7 @@ pub struct TicketCreateReceipt {
 
 /// One page of a list that can grow. The order is stated by each list and
 /// is stable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(rename = "{T}Page")]
 pub struct Page<T> {
     /// The entries of this page.
@@ -526,6 +538,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";
