@@ -11,7 +11,7 @@ import { meta } from '../doubles/fixtures';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ title: vi.fn<(title: string) => void>(), preferences: vi.fn<ReturnType<typeof useAppearance.getState>['set']>() }));
-vi.mock('@/lib/title', () => ({ usePageTitle: calls.title }));
+vi.mock('@/lib/title', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePageTitle: calls.title }));
 vi.mock('@/shell/admission', async (original) => ({ ...await original<typeof Admission>(),
   admissionMetaQuery: { queryKey: ['compact-auth-meta'], queryFn: () => Promise.resolve(meta({ name: 'Workshop' })) },
 }));

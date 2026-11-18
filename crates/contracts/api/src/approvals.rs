@@ -159,6 +159,7 @@ pub enum ApprovalMatcher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalOption {
     /// What a decision names.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// What it is called.
     pub label: String,
@@ -204,6 +205,7 @@ pub struct QuestionOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Question {
     /// What an answer names.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// A short heading.
     pub header: String,
@@ -281,6 +283,7 @@ pub struct McpElicitationRequestDetail {
     /// What it says.
     pub message: String,
     /// A JSON Schema of what it wants back.
+    #[schemars(extend("x-native-schema" = true))]
     pub schema: Json,
 }
 
@@ -627,6 +630,7 @@ pub struct ApprovalListQuery {
 #[serde(deny_unknown_fields)]
 pub struct HarnessOptionDecision {
     /// The option chosen.
+    #[schemars(extend("x-native-reference" = true))]
     pub option_id: String,
     /// A note for the harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -638,6 +642,7 @@ pub struct HarnessOptionDecision {
 #[serde(deny_unknown_fields)]
 pub struct HarnessAnswersDecision {
     /// The answers: the choices or the words given, by question.
+    #[schemars(extend("x-storage-exact"=true,"x-native-keys"=true))]
     pub answers: BTreeMap<String, Vec<String>>,
     /// A note for the harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -664,6 +669,7 @@ pub struct HarnessElicitationDecision {
     pub action: ElicitationAction,
     /// What they answer, when they accept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact"=true,"x-native-keys"=true))]
     pub content: Option<Json>,
 }
 
