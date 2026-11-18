@@ -1368,23 +1368,45 @@ pub mod provider_jobs {
             return Ok(Queued::Running(Box::new(running)));
         }
         let progress = initial_progress(making.phases);
-        Ok(Queued::Made(Box::new(
-            super::insert(
-                conn,
-                &super::NewJob {
-                    id: orch_types::new_id(),
-                    kind: making.kind,
-                    node_id: None,
-                    environment_id: None,
-                    provider_id: Some(making.provider),
-                    plan: &making.plan,
-                    progress: &progress,
-                    created_by: making.created_by,
-                },
-                now,
+        let mut job = super::insert(
+            conn,
+            &super::NewJob {
+                id: orch_types::new_id(),
+                kind: making.kind,
+                node_id: None,
+                environment_id: None,
+                provider_id: Some(making.provider),
+                plan: &making.plan,
+                progress: &progress,
+                created_by: making.created_by,
+            },
+            now,
+        )
+        .await?;
+        if making.kind == PROVISION
+            && matches!(
+                making.plan.get("mode").and_then(Json::as_str),
+                Some("start" | "renew")
             )
-            .await?,
-        )))
+            && making.phases.iter().any(|(name, _)| *name == "start")
+        {
+            let runtime =
+                crate::queries::resources::provider_runtime::live_runtime(conn, making.provider)
+                    .await?
+                    .map(|runtime| runtime.id);
+            job.plan["runtime"] = serde_json::json!(runtime);
+            super::merge_plan(conn, job.id, &serde_json::json!({"runtime":runtime}), now).await?;
+            if let Some(runtime) = runtime {
+                crate::queries::runtime_controls::accept_job(
+                    conn,
+                    runtime,
+                    orch_types::new_id(),
+                    job.id,
+                )
+                .await?;
+            }
+        }
+        Ok(Queued::Made(Box::new(job)))
     }
 
     /// Queues the job that starts a stopped runtime so that its harness looks at the sign-in it holds,

@@ -27,6 +27,8 @@ pub use crate::browser::{
     BrowserAdopt, BrowserAdoptResult, BrowserClose, BrowserOpen, BrowserOpenResult,
     BrowserProfileCommand, BrowserProfileResult, ScreenLook, ScreenLookResult,
 };
+pub use crate::native_target::{NativeTarget, SessionTarget};
+
 use crate::events::{EnvironmentFacts, NodeCapacity, NodeStorage};
 use crate::foreign;
 use crate::policy::LocalPolicy;
@@ -345,7 +347,17 @@ pub fn resolve_reference_values<E>(
 
 /// A command, as it is sent to a machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(extend("required" = ["id", "k", "deadline", "authority_until", "b"]))]
 pub struct Cmd {
+    /// The original factual member set, never a grant or a later session lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_members: Option<Vec<crate::tool_sessions::ToolSessionMember>>,
+    /// The revision frozen with those original native facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_revision: Option<i64>,
+    /// The physical operand captured at acceptance; absent only for acts without a native target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_target: Option<crate::native_target::NativeTarget>,
     /// The command's identifier: the same every time it is sent.
     pub id: Id,
     /// Its kind.
@@ -356,9 +368,19 @@ pub struct Cmd {
     pub key: Option<String>,
     /// The moment after which it is not to be started.
     pub deadline: Time,
+    /// The original credential/operation bound. Queue time never extends it; null is
+    /// explicitly unbounded and grants no permission. The server supplies this fact.
+    #[serde(deserialize_with = "explicit_authority_until")]
+    pub authority_until: Option<Time>,
     /// Its body, as its kind defines it.
     #[serde(rename = "b")]
     pub body: Json,
+}
+
+fn explicit_authority_until<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Time>, D::Error> {
+    Option::<Time>::deserialize(deserializer)
 }
 
 /// A live replacement of a retained session's forwarder ticket is never a durable command.
@@ -931,12 +953,16 @@ commands! {
     /// Installs the recommended verified build after the server has fenced and drained hosted turns.
     /// Local update.auto is checked again on receipt and immediately before installation.
     MachineUpdateNow = "machine.update.now": ANY, Machine, 30, None, MachineUpdateNow => MachineUpdateNowResult;
+    /// Runs or observes only this installation's release updater on its bundled node.
+    NodeServerUpdate = "node.server.update": NODE, Machine, 60, None, NodeServerUpdate => orch_api_contract::admin::ServerUpdateObservation;
     /// Changes keys of a machine's local policy that its owner handed over.
     MachinePolicySet = "machine.policy.set": CONNECTED, Machine, 30, None, MachinePolicySet => MachinePolicySetResult;
     /// Changes or probes locally supervised programs, within the existing provider startup budget.
     MachinePrograms = "machine.programs": ANY, Machine, 120, None, MachineProgramsCommand => MachineFacts;
     /// Saves delegated connector roles, then reconnects through the native supervisor.
     MachineRolesSet = "machine.roles.set": ANY, Machine, 30, None, MachineRolesSet => MachineRolesSetResult;
+    /// Saves a primary choice within the same advertised installation, then reconnects after its durable reply.
+    MachineGatewaySet = "machine.gateway.set": ANY, Machine, 30, None, MachineGatewaySet => MachineGatewaySetResult;
     /// Runs one named command after a managed unit starts, keeping its result for this run.
     /// Its hour-long maximum plus thirty seconds allows bounded drain and durable result storage.
     UnitAfterUp = "unit.after_up": AFTER_UP_HOST, Runtime, 3630, None, UnitAfterUp => UnitAfterUpResult;
@@ -1171,9 +1197,9 @@ commands! {
     /// Makes a unit for a runtime.
     NodeRuntimeCreate = "node.runtime.create": NODE, Runtime, 600, None, NodeRuntimeCreate => NodeRuntimeCreateResult;
     /// Starts a runtime's unit.
-    NodeRuntimeStart = "node.runtime.start": NODE, Runtime, 120, None, NodeRuntimeStart => Empty;
+    NodeRuntimeStart = "node.runtime.start": NODE, Runtime, 120, None, NodeRuntimeStart => NodeRuntimeStartResult;
     /// Stops a runtime's unit.
-    NodeRuntimeStop = "node.runtime.stop": NODE, Runtime, 120, None, NodeRuntimeStop => Empty;
+    NodeRuntimeStop = "node.runtime.stop": NODE, Runtime, 120, None, NodeRuntimeStop => NodeRuntimeStopResult;
     /// Removes a runtime's unit.
     NodeRuntimeRemove = "node.runtime.remove": NODE, Runtime, 120, None, NodeRuntimeRemove => Empty;
     /// Installs a runtime's network policy and retains its requested restriction before acknowledging.
@@ -1219,15 +1245,15 @@ commands! {
     /// Restores a carried owned volume before the target unit is created or started.
     NodeRuntimeVolumeImport = "node.runtime.volume.import": NODE, Runtime, 21600, Download, NodeRuntimeVolumeImport => Empty;
     /// Checks whole owned-volume carry support on the target before a plan can be confirmed.
-    NodeVolumeCarryCheck = "node.volume.carry-check": NODE, None, 25, None, NodeVolumeCarryCheck => NodeVolumeCarryCheckResult;
+    NodeVolumeCarryCheck = "node.volume.carry-check": DATA_MAKER, None, 25, None, NodeVolumeCarryCheck => NodeVolumeCarryCheckResult;
     /// Counts a mount's data where it is, before a copy of it is planned.
-    NodeMountMeasure = "node.mount.measure": NODE, None, 3600, None, NodeMountMeasure => orch_driver_contract::volumes::VolumeMeasure;
+    NodeMountMeasure = "node.mount.measure": DATA_MAKER, None, 3600, None, NodeMountMeasure => orch_driver_contract::volumes::VolumeMeasure;
     /// Fingerprints a mount's data in place without following links or changing it.
     NodeMountFingerprint = "node.mount.fingerprint": NODE, None, 3600, None, NodeMountFingerprint => NodeMountFingerprintResult;
     /// Archives a mount's data where it is, as checked parts in the content store, for a copy to another host.
-    NodeMountExport = "node.mount.export": NODE, Volume, 21600, Upload, NodeMountExport => VolumeArchive;
+    NodeMountExport = "node.mount.export": DATA_MAKER, Volume, 21600, Upload, NodeMountExport => VolumeArchive;
     /// Unpacks a copy of a mount's data into a volume made for that mount, which no unit uses.
-    NodeMountImport = "node.mount.import": NODE, Volume, 21600, Download, NodeMountImport => Empty;
+    NodeMountImport = "node.mount.import": DATA_MAKER, Volume, 21600, Download, NodeMountImport => Empty;
     /// Makes what a unit's file system comes from available on a host.
     NodeImageEnsure = "node.image.ensure": NODE, Image, 3600, Download, NodeImageEnsure => NodeImageEnsureResult;
     /// Proposes a template's spec from something a person already has.
@@ -1266,12 +1292,59 @@ impl Cmd {
         body: &B,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self {
+            authority_until: None,
+            native_target: None,
+            native_members: None,
+            native_revision: None,
             id,
             kind: B::KIND.as_str().to_owned(),
             key: key.wire(),
             deadline,
             body: serde_json::to_value(body)?,
         })
+    }
+
+    /// Copies only the accepted command's factual session operands to its wire header.
+    pub fn set_session_facts(&mut self, facts: &Json) -> Result<(), serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Nonce {
+            nonce: Id,
+        }
+        if let Some(target) = facts.get("native_target") {
+            self.native_target = Some(serde_json::from_value(target.clone())?);
+        }
+        if !matches!(
+            crate::native_target::session_action(&self.kind, &self.body),
+            Some(
+                crate::native_target::SessionAction::Open
+                    | crate::native_target::SessionAction::Model
+                    | crate::native_target::SessionAction::Mcp
+            )
+        ) {
+            self.native_members = None;
+            self.native_revision = None;
+            return Ok(());
+        }
+        self.native_revision = facts
+            .get("revision")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        self.native_members = facts
+            .get("members")
+            .map(|value| {
+                let members: BTreeMap<String, Nonce> = serde_json::from_value(value.clone())?;
+                Ok::<_, serde_json::Error>(
+                    members
+                        .into_iter()
+                        .map(|(member, value)| crate::tool_sessions::ToolSessionMember {
+                            member,
+                            nonce: value.nonce,
+                        })
+                        .collect(),
+                )
+            })
+            .transpose()?;
+        Ok(())
     }
 
     /// The command, when its kind is one of the catalogue and its body
@@ -1341,6 +1414,18 @@ pub struct MachineUpdateNowResult {
     pub detail: String,
 }
 
+/// A release selection, never a native path, executable, argument list or download URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeServerUpdate {
+    /// Positive preparation allowance from the accepted system setting, not a cap on the detached release job.
+    pub timeout_secs: u64,
+    /// The same durable job identity across API and node restarts.
+    pub job_id: orch_types::Id,
+    /// The exact validated semantic release selected at admission.
+    pub release: String,
+}
+
 /// The body of `machine.policy.set`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MachinePolicySet {
@@ -1363,6 +1448,19 @@ pub struct MachineRolesSetResult {
     pub roles: Vec<String>,
     /// False for an idempotent request for the currently active roles.
     pub reconnecting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySet {
+    pub choice: crate::gateways::GatewayChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySetResult {
+    pub choice: crate::gateways::GatewayChoice,
+    pub changed: bool,
 }
 
 /// The result of `machine.policy.set`.
@@ -1799,9 +1897,8 @@ pub struct SessionOpenSkill {
 /// A tool server of the environment that the session is given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpenMcp {
-    /// Stable Orch membership, separate from the name a harness sees; absent on older commands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<Id>,
+    /// Stable Orch membership, separate from the name a harness sees.
+    pub server_id: Id,
     /// The name the server is offered under.
     pub name: String,
     /// The ticket that opens the tunnels to it.
@@ -4006,6 +4103,8 @@ pub struct NodeRuntimeCreate(pub foreign::RuntimeSpec);
 pub struct NodeRuntimeCreateResult {
     /// The driver's own reference for what it made.
     pub unit: foreign::UnitRef,
+    /// The original native unit/start this creation observed, retained through later preparation.
+    pub source: crate::native_target::RuntimeSource,
 }
 
 /// The body of `node.runtime.start`.
@@ -4013,6 +4112,45 @@ pub struct NodeRuntimeCreateResult {
 pub struct NodeRuntimeStart {
     /// The runtime.
     pub runtime_id: Id,
+}
+
+/// The actual original native start or unchanged running reuse confirmed by this command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeRuntimeStartResult {
+    /// Captured under the runtime's native effect lock; untracked never means absent.
+    pub source: crate::native_target::RuntimeSource,
+    /// Whether this exact physical unit was already running without a new start.
+    pub reused: bool,
+}
+
+/// Factual completion of an original native Stop, independent of its caller's permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NodeRuntimeStopResult {
+    /// This actual physical source is stopped (including an already stopped original).
+    Stopped {
+        source: crate::native_target::RuntimeSource,
+    },
+    /// These exact owned originals or admitted openings are known absent or closed.
+    /// This never means that an unknown current source was absent.
+    Absent { originals: Vec<Id> },
+}
+impl NodeRuntimeStopResult {
+    #[must_use]
+    pub fn coherent(&self) -> bool {
+        match self {
+            Self::Stopped { source } => source.incarnation.is_some_and(|id| !id.is_nil()),
+            Self::Absent { originals } => {
+                originals.iter().all(|id| !id.is_nil())
+                    && originals
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == originals.len()
+            }
+        }
+    }
 }
 
 /// The body of `node.network.apply`, supplied by the system to the registered host node.
@@ -5035,6 +5173,37 @@ mod tests {
         text.parse().unwrap()
     }
 
+    #[test]
+    fn a_native_command_retains_its_explicit_original_authority_deadline_separate_from_its_work_budget()
+     {
+        let mut command = Cmd::new(
+            id(COMMAND),
+            &SerialKey::Thread(id(THREAD)),
+            time("2026-10-08T17:09:05.000Z"),
+            &SessionClose {
+                thread_id: id(THREAD),
+            },
+        )
+        .unwrap();
+        let unbounded = serde_json::to_value(&command).unwrap();
+        assert!(unbounded.get("authority_until").is_some_and(Json::is_null));
+        assert_eq!(
+            serde_json::from_value::<Cmd>(unbounded.clone()).unwrap(),
+            command
+        );
+        let mut missing = unbounded;
+        missing.as_object_mut().unwrap().remove("authority_until");
+        assert!(
+            serde_json::from_value::<Cmd>(missing).is_err(),
+            "an omitted old form is not an unbounded authority fact"
+        );
+        command.authority_until = Some(time("2026-10-08T17:04:35.000Z"));
+        let saved = serde_json::to_value(&command).unwrap();
+        assert_eq!(saved["authority_until"], "2026-10-08T17:04:35.000Z");
+        assert_eq!(saved["deadline"], "2026-10-08T17:09:05.000Z");
+        assert_eq!(serde_json::from_value::<Cmd>(saved).unwrap(), command);
+    }
+
     /// Reads `example` as a `T`, writes it again and expects the same JSON.
     fn round_trip<T: Serialize + DeserializeOwned>(example: Json) -> T {
         let read: T = serde_json::from_value(example.clone()).unwrap();
@@ -5122,7 +5291,7 @@ mod tests {
                           "ticket": { "$ticket": { "kind": "llm" } } },
             "exec": { "executor": "orch-exec", "tool_set": "claude-code", "environment_id": ENVIRONMENT_ID,
                       "generation": 3, "ticket": { "$ticket": { "kind": "mcp" } } },
-            "mcp": [ { "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
+            "mcp": [ { "server_id": SECRET, "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
             "orch_tools": ["list_shared", "read_shared", "search_shared", "download_shared", "edit_document",
                            "send_message", "announce", "request_capability"],
             "raw_events": true, "raw_after": 42
@@ -5133,7 +5302,7 @@ mod tests {
     fn a_command_frame_reads_and_writes_as_the_protocol_has_it() {
         let cmd: Cmd = round_trip(json!({
             "id": COMMAND, "k": "turn.interrupt", "key": THREAD,
-            "deadline": "2026-10-08T17:04:35.000Z", "b": { "thread_id": THREAD, "turn_id": TURN }
+            "deadline": "2026-10-08T17:04:35.000Z", "authority_until": null, "b": { "thread_id": THREAD, "turn_id": TURN }
         }));
         assert_eq!(
             cmd.command().unwrap(),
@@ -5144,6 +5313,18 @@ mod tests {
         );
         round_trip::<CmdAck>(json!({ "id": COMMAND }));
         round_trip::<CmdCancel>(json!({ "id": COMMAND }));
+    }
+
+    #[test]
+    fn a_native_session_tool_requires_its_registered_identity_alongside_its_name() {
+        let mut body = json!({"name":"files","ticket":"synthetic-session-ticket"});
+        assert!(serde_json::from_value::<SessionOpenMcp>(body.clone()).is_err());
+        body["server_id"] = json!(SECRET);
+        let member: SessionOpenMcp = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            serde_json::to_value(member).unwrap()["server_id"],
+            json!(SECRET)
+        );
     }
 
     #[test]
@@ -5176,7 +5357,7 @@ mod tests {
     #[test]
     fn a_kind_nobody_knows_still_leaves_a_frame_that_can_be_answered() {
         let cmd: Cmd = serde_json::from_value(json!({
-            "id": COMMAND, "k": "fs.teleport", "key": null, "deadline": "2026-10-08T17:04:35.000Z", "b": {}
+            "id": COMMAND, "k": "fs.teleport", "key": null, "deadline": "2026-10-08T17:04:35.000Z", "authority_until": null, "b": {}
         }))
         .unwrap();
         assert_eq!(cmd.id, id(COMMAND));
@@ -5465,7 +5646,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::to_value(&cmd).unwrap(),
-            json!({ "id": COMMAND, "k": "fs.stat", "key": null, "deadline": "2026-10-08T17:04:20.000Z",
+            json!({ "id": COMMAND, "k": "fs.stat", "key": null, "deadline": "2026-10-08T17:04:20.000Z", "authority_until": null,
                     "b": { "environment_id": ENVIRONMENT_ID, "path": "README.md" } })
         );
     }
@@ -5658,6 +5839,48 @@ mod tests {
                 .serves(&[Role::Agent], false)
         );
         assert!(CommandKind::MachineProbe.addressee().serves(&[], false));
+    }
+
+    #[test]
+    fn a_directory_machine_can_measure_its_mount_data_without_a_node_role() {
+        for connected in [false, true] {
+            for role in [Role::Environment, Role::Node] {
+                assert!(
+                    CommandKind::NodeMountMeasure
+                        .addressee()
+                        .serves(&[role], connected)
+                );
+            }
+            for roles in [&[][..], &[Role::Agent][..], &[Role::Provider][..]] {
+                assert!(
+                    !CommandKind::NodeMountMeasure
+                        .addressee()
+                        .serves(roles, connected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_directory_data_maker_can_carry_mount_data_without_gaining_node_runtime_control() {
+        for kind in [
+            CommandKind::NodeVolumeCarryCheck,
+            CommandKind::NodeMountExport,
+            CommandKind::NodeMountImport,
+        ] {
+            assert!(kind.addressee().serves(&[Role::Environment], true));
+            assert!(kind.addressee().serves(&[Role::Node], false));
+            assert!(
+                !kind
+                    .addressee()
+                    .serves(&[Role::Agent, Role::Provider], true)
+            );
+        }
+        assert!(
+            !CommandKind::NodeRuntimeStart
+                .addressee()
+                .serves(&[Role::Environment], true)
+        );
     }
 
     #[test]
