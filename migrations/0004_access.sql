@@ -140,6 +140,13 @@ CREATE TABLE authz_state (
 
 INSERT INTO authz_state (id) VALUES (true);
 
+CREATE TABLE public_meta_state (
+    id boolean DEFAULT true PRIMARY KEY CHECK (id),
+    seq bigint DEFAULT 0 NOT NULL
+);
+
+INSERT INTO public_meta_state (id) VALUES (true);
+
 CREATE UNLOGGED TABLE commit_work (
     xact xid8 NOT NULL,
     CONSTRAINT commit_work_pkey PRIMARY KEY (xact)

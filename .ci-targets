@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test binding_options --test threads_make
+web test -- tests/component/start-flow.test.tsx tests/component/start-environment-options.test.tsx tests/component/model-picker-rows.test.tsx
