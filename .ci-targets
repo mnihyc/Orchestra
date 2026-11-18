@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-core --test binding_options --test providers --test provider_setup --test provider_harness --test binding_readiness --test binding_set
+test -p orch-api-core --test content --test uploads --test workspace_files --test workspace_looking --test reference_preview
+test -p orch-api-core --test workspace_snapshots --test workspace_jobs_scopes --test upload_inventory --test usage_caps --test machine_probe_scopes
+test -p orch-node --test uploads
+web typecheck
+web lint
+web test -- tests/component/binding-lists.test.tsx tests/component/provider-screen-regressions.test.tsx tests/component/provider-source-models.test.tsx tests/component/settings-thing-choices.test.tsx tests/component/summarizer-editor.test.tsx tests/component/implicit-runs-on.test.tsx tests/component/file-action-gates.test.tsx tests/unit/uploads.test.ts tests/unit/import-uploads.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts

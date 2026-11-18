@@ -11,6 +11,9 @@ from release_contract import ledger, require_source, schema, seal_schema, source
 HEAD = "a" * 40
 TAG = "v1.2.3"
 ROOT = Path(__file__).resolve().parents[2]
+EDGE_FILES = ["deploy/frontend.sh", "deploy/compose.frontend-https.yml",
+              "crates/control/api/base/src/certificates/transport.rs",
+              "crates/control/api/base/src/registry.rs", "apps/api/src/composition.rs"]
 
 
 class SourceContractTests(unittest.TestCase):
@@ -25,8 +28,17 @@ class SourceContractTests(unittest.TestCase):
             'pub const KEY_BASE_PATH: &str = "/openapi/v1";\n')
         (root / "deploy").mkdir()
         (root / "deploy/nginx.conf").write_text("\n".join(
-            f"location {route} {{ proxy_pass $upstream$request_uri; }}"
-            for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]))
+            ["upstream orch_api { zone orch_api 64k; server api:8443 resolve; keepalive 32; }"] + [
+                f"location {route} {{ proxy_pass https://orch_api; }}"
+                for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]]))
+        edge = root / "deploy/nginx.conf"
+        edge.write_text(edge.read_text() + '\nmap "$ssl_early_data:$http_early_data" $orch_early_data { default $http_early_data; ~^1: 1; }\n'
+                        'map $http_host $orch_https_port { default 443; ~:(?<orch_port>[0-9]+)$ $orch_port; }\n'
+                        'proxy_set_header Early-Data $orch_early_data;\n')
+        for relative in EDGE_FILES:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((ROOT / relative).read_text())
         target = root / "crates/tooling/xtask/src/release/connectors.rs"
         target.parent.mkdir(parents=True)
         target.write_text((ROOT / "crates/tooling/xtask/src/release/connectors.rs").read_text())
@@ -105,6 +117,23 @@ class SourceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unchanged /openapi/"):
                 source_contract(root, HEAD, TAG)
 
+    def test_an_edge_that_rewrites_a_route_or_keeps_a_stale_address_is_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            self.candidate(root)
+            seal_schema(root)
+            edge = root / "deploy/nginx.conf"
+            original = edge.read_text()
+            # A URI part after the group's name replaces the matched prefix: the route would no longer be unchanged.
+            edge.write_text(original.replace(
+                "location /api/ { proxy_pass https://orch_api; }", "location /api/ { proxy_pass https://orch_api/; }"))
+            with self.assertRaisesRegex(ValueError, "unchanged /api/ "):
+                source_contract(root, HEAD, TAG)
+            # Without `resolve` the name is looked up once: an API made again by an update is not found.
+            edge.write_text(original.replace("server api:8443 resolve;", "server api:8443;"))
+            with self.assertRaisesRegex(ValueError, "look the API's address up again"):
+                source_contract(root, HEAD, TAG)
+
     def test_a_different_or_dirty_checkout_cannot_claim_the_pinned_sha(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -114,6 +143,39 @@ class SourceContractTests(unittest.TestCase):
                 require_source(root, HEAD, TAG)
             with patch("release_contract.command", side_effect=[HEAD, " M source.rs"]), self.assertRaisesRegex(ValueError, "source changed"):
                 require_source(root, HEAD, TAG)
+
+    def test_a_candidate_keeps_resumption_early_write_refusal_and_reachable_http3(self):
+        fragments = [
+            ("deploy/frontend.sh", "include /etc/orch/frontend-tls/transport.include;"),
+            ("deploy/frontend.sh", "nginx -t && nginx -s reload"),
+            ("deploy/compose.frontend-https.yml", ":443/udp"),
+            ("deploy/nginx.conf", "proxy_set_header Early-Data $orch_early_data;"),
+            ("deploy/nginx.conf", '$ssl_early_data:$http_early_data'),
+            ("deploy/nginx.conf", 'map $http_host $orch_https_port'),
+            ("crates/control/api/base/src/certificates/transport.rs", "ssl_session_cache"),
+            ("crates/control/api/base/src/certificates/transport.rs", "ssl_session_timeout"),
+            ("crates/control/api/base/src/certificates/transport.rs", "ssl_session_tickets"),
+            ("crates/control/api/base/src/certificates/transport.rs", "ssl_early_data"),
+            ("crates/control/api/base/src/certificates/transport.rs", "listen 443 quic reuseport;"),
+            ("crates/control/api/base/src/certificates/transport.rs", "Alt-Svc"),
+            ("crates/control/api/base/src/registry.rs", 'get_all("early-data")'),
+            ("crates/control/api/base/src/registry.rs", 'route.path.starts_with("/auth/oidc/")'),
+            ("apps/api/src/composition.rs", "keep_frontend_transport"),
+        ]
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            self.candidate(root)
+            seal_schema(root)
+            source_contract(root, HEAD, TAG)
+            for relative, fragment in fragments:
+                with self.subTest(file=relative, behavior=fragment):
+                    path = root / relative
+                    original = path.read_text()
+                    self.assertIn(fragment, original)
+                    path.write_text(original.replace(fragment, "removed_transport_behavior"))
+                    with self.assertRaisesRegex(ValueError, "HTTPS"):
+                        source_contract(root, HEAD, TAG)
+                    path.write_text(original)
 
 
 if __name__ == "__main__":

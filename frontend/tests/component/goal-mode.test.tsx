@@ -35,7 +35,7 @@ function goalOf(patch: Partial<ThreadGoal>): ThreadGoal {
 
 function threadOf(goal: ThreadGoal | null, permissions = ['thread.view', 'thread.interact']): Thread {
   return { id: 'thread-goal', name: 'Fix the tests', archived: false, side_of: null, state: 'idle', goal,
-    access: { permissions }, binding: { agent: { name: 'Scripted agent' }, plan_mode: false } } as unknown as Thread;
+    access: { permissions }, binding: { agent: { id: 'agent', name: 'Scripted agent' }, provider: { id: 'provider', name: 'Team subscription' }, plan_mode: false } } as unknown as Thread;
 }
 
 beforeEach(() => { vi.clearAllMocks(); goals.updateGoal.mockResolvedValue(base); goals.clearGoal.mockResolvedValue(base); goals.setGoal.mockResolvedValue(base); });
@@ -45,12 +45,36 @@ const STATES = [
   { patch: {}, chip: 'working' },
   { patch: { waiting: 'approval' }, chip: 'waiting' },
   { patch: { status: 'paused', reason: 'person' }, chip: 'paused' },
+  { patch: { status: 'paused', reason: 'unchecked' }, chip: 'unchecked' },
   { patch: { status: 'paused', reason: 'blocked', detail: 'The staging key is missing' }, chip: 'waiting' },
   { patch: { status: 'met', ended_at: '2026-10-28T11:00:00Z' }, chip: 'met' },
   { patch: { status: 'stopped', reason: 'turns' }, chip: 'stopped' },
 ] as const;
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps the helper's captured allowance after it is disabled without replacing goal spending (${locale})`, async () => {
+    await setLocale(locale);
+    const goal = goalOf({ status: 'met', last_report: { id: 'report', turn: 7, status: 'met', evidence: 'The agent supplied evidence', next: null,
+      outcome: 'met', checked_by: 'helper', reason: null, at: '2026-11-15T04:00:00Z', helper: { attempt_id: 'attempt', checked: true,
+        producer: { kind: 'model', title: 'Checked model', offering: 'checked-model', provider: null },
+        usage_owner: { id: 'payer', kind: 'human', username: 'payer', display_name: 'Helper payer', avatar: { text: 'P', color: 1 } },
+        input_allowance_tokens: 13, output_allowance_tokens: 17, last_turn: 'start_omitted', usage: null, captured_at: '2026-11-15T04:00:00Z' } } });
+    const page = show(<GoalLine thread={threadOf(goal)} />);
+    expect(screen.getByText(locale === 'en' ? 'Helper checked' : '辅助模型已检查')).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+    const dialog = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+    expect(within(dialog).getByText(locale === 'en' ? '13 tokens' : '13 词元')).toBeVisible();
+    expect(within(dialog).getByText(locale === 'en' ? '17 tokens' : '17 词元')).toBeVisible();
+    expect(within(dialog).getByText(locale === 'en' ? 'Start omitted' : '已省略开头')).toBeVisible();
+    expect(within(dialog).getByText('Helper payer')).toBeVisible();
+    expect(within(dialog).getAllByText(locale === 'en' ? 'Not reported' : '尚未报告').length).toBeGreaterThan(0);
+    await userEvent.keyboard('{Escape}');
+    page.rerender(<GoalLine thread={threadOf({ ...goal, helper: false })} />);
+    expect(screen.getByText(locale === 'en' ? 'Helper checked' : '辅助模型已检查')).toBeVisible();
+    expect(screen.getByText(/7/u, { selector: '[data-goal-figures]' })).toBeInTheDocument();
+    expect(goals.updateGoal).not.toHaveBeenCalled(); expect(goals.setGoal).not.toHaveBeenCalled();
+  });
+
   it(`the line shows its state as a chip in words, with the condition and the figures (${locale})`, async () => {
     await setLocale(locale);
     for (const state of STATES) {
@@ -90,6 +114,19 @@ it('leaves the acts to people who may drive the thread, and says so', async () =
   expect(pause).toHaveAttribute('aria-disabled', 'true');
   await userEvent.click(pause);
   expect(goals.updateGoal).not.toHaveBeenCalled();
+});
+
+for (const action of ['accept', 'resume'] as const) it(`leaves an unchecked report for the person's ${action} decision`, async () => {
+  const goal = goalOf({ status: 'paused', reason: 'unchecked', last_report: {
+    id: 'report', turn: 1, status: 'met', evidence: 'The agent reports that the tests pass', next: null,
+    outcome: 'unchecked', checked_by: null, reason: 'The independent check is unavailable', at: '2026-11-14T09:00:00Z',
+  } });
+  show(<GoalLine thread={threadOf(goal)} />);
+  expect(screen.getByText('Not checked')).toBeInTheDocument();
+  expect(goals.updateGoal).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: action === 'accept' ? 'Mark met' : 'Keep working' }));
+  await waitFor(() => expect(goals.updateGoal).toHaveBeenCalledOnce());
+  expect(goals.updateGoal.mock.calls[0]?.[1]).toEqual({ action });
 });
 
 for (const status of ['paused', 'stopped'] as const) {

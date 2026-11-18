@@ -81,7 +81,7 @@ struct Invocation {
     seed: OnceCell<Seed>,
     ready: OnceCell<Arc<ReadySource>>,
     url: OnceCell<StageResult>,
-    draft_blob: OnceCell<orch_blob_contract::range::BlobMeta>,
+    draft_blob: OnceCell<orch_blob_contract::store::Stored>,
     completed: OnceCell<(Completed, Caller)>,
     commands: Mutex<BTreeMap<String, Arc<Command>>>,
 }
@@ -313,6 +313,7 @@ impl Opening {
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
                     id: Some(entry.command.id),
                     machine: entry.command.machine,
                     kind: entry.command.kind.as_str().into(),
@@ -720,7 +721,7 @@ async fn draft(
         ));
     }
     opening.check(ctx).await?;
-    let meta = *opening
+    let meta = opening
         .state
         .draft_blob
         .get_or_try_init(|| async {
@@ -739,7 +740,7 @@ async fn draft(
         body.home_id,
         name,
         new_access(body.access),
-        meta,
+        meta.meta,
     )
     .await?;
     let frame = opening.current(ctx, &mut tx).await?;
