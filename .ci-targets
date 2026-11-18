@@ -1,0 +1,13 @@
+fmt
+test -p orch-api-core --test threads_read -- a_sync_brings_a_client_up_to_date_and_then_tells_only_what_changed --exact
+clippy
+contracts
+test -p orch-api-contract -p orch-realtime-contract -p orch-settings --lib
+test -p orch-db --lib -- queries::notifications::subscribers::tests::
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test notifications --test call_recovery
+test -p orch-api-core --lib --test notifications_feed --test notifications_told --test notifications_routes --test notifications_inbox --test mcp_delete_scopes --test loss --test thread_history_pages --test sign_in
+test -p orch-worker-core --lib --test deliveries_and_inbox --test outbox --test routes --test channel_setup
+web typecheck
+web lint
+web test

@@ -9,27 +9,39 @@ import { cx } from '@/ui/cx';
 import { DetailCard, type CardPreview } from '@/ui/DetailCard';
 import { Meter } from '@/ui/Meter';
 import { StatusDot } from '@/ui/StatusDot';
+import { Tooltip } from '@/ui/Tooltip';
 import type { PlaceHost } from '@/generated/api-types';
-import { type ResourceSubject, resourceHint, resourceName } from './facts';
+import { formatBytes } from '@/lib/format';
+import { MEMORY_BYTES_PER_MB, type ModelFacts, type ResourceSubject, resourceHint, resourceName } from './facts';
 import ResourceCard from './ResourceCard';
 
 const GLYPHS = { provider: PlugZap, model: Cpu, host: Server, environment: Box, mount: Box, mcp_server: Plug, template: Cpu, agent: Bot, skill: GraduationCap };
 const chipClasses = 'resource-chip inline-flex min-w-0 max-w-full gap-1 rounded-md border bg-surface px-1.5 py-0.5 text-sm';
+
+/** An admitted result can name its model without disclosing or inventing a provider account. */
+export interface RecordedModelSubject {
+  kind: 'model';
+  model: ModelFacts;
+  providerId: null;
+}
+const recordedModel = (subject: ResourceSubject | RecordedModelSubject): subject is RecordedModelSubject => subject.kind === 'model' && subject.providerId === null;
 
 export function ResourceGlyph({ kind }: { kind: ResourceSubject['kind'] }) {
   const Icon = GLYPHS[kind];
   return <Icon aria-hidden className="size-4 shrink-0 text-text-muted" />;
 }
 
-/** The places list has always used binary gigabytes for its declared-capacity caption. */
-const MEMORY_MB_PER_GIB = 1024;
-
-/** A refused destination keeps its already supplied capacity visible before it can be chosen. */
+/** A refused destination keeps what it has free visible before it can be chosen: what it measured, never what its environments declare. */
 export function HostCapacity({ place }: { place: PlaceHost }) {
   const { t } = useTranslation();
-  if (place.capacity.memory_mb <= 0) return null;
-  const label = t('change.where.declared', { declared: Math.round(place.declared.memory_mb / MEMORY_MB_PER_GIB), capacity: Math.round(place.capacity.memory_mb / MEMORY_MB_PER_GIB) });
-  return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={place.declared.memory_mb / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
+  const { locale } = useFormatContext();
+  const used = place.used.memory_mb;
+  if (place.capacity.memory_mb <= 0 || used === null) return null;
+  const label = t('resourceFacts.memoryFree', {
+    free: formatBytes(Math.max(0, place.capacity.memory_mb - used) * MEMORY_BYTES_PER_MB, locale),
+    total: formatBytes(place.capacity.memory_mb * MEMORY_BYTES_PER_MB, locale),
+  });
+  return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={used / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
 }
 
 export function ResourceHint({ subject, className, wrap = false }: { subject: ResourceSubject; className?: string; wrap?: boolean }) {
@@ -68,10 +80,11 @@ export function resourceChoice(subject: ResourceSubject) {
 }
 
 /** Names keep their native link or control; their details appear on hover and focus. */
-export function ResourceChip({ subject, children, asChild = false, card = true, hint = true, wrap = false, className }: { subject: ResourceSubject; children?: ReactNode; asChild?: boolean; card?: boolean; hint?: boolean; wrap?: boolean; className?: string }) {
+export function ResourceChip({ subject, children, asChild = false, card = true, hint = true, wrap = false, className }: { subject: ResourceSubject | RecordedModelSubject; children?: ReactNode; asChild?: boolean; card?: boolean; hint?: boolean; wrap?: boolean; className?: string }) {
   const valueClass = cx('min-w-0', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate');
   const rowClasses = cx(chipClasses, wrap ? 'items-start' : 'items-center');
   const glyph = wrap ? <span className="inline-flex h-5 shrink-0 items-center"><ResourceGlyph kind={subject.kind} /></span> : <ResourceGlyph kind={subject.kind} />;
+  if (recordedModel(subject)) return <Tooltip content={subject.model.model_name}><span className={cx(rowClasses, 'border-border', className)}>{glyph}<span className={valueClass}>{children ?? subject.model.display_name}</span></span></Tooltip>;
   if (!card) return <span className={cx(rowClasses, 'border-border', className)}>{glyph}<span className={valueClass}>{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} wrap={wrap} />}</span>;
   const trigger = asChild && isValidElement<{ children?: ReactNode; className?: string }>(children)
     ? cloneElement(children, { className: cx(rowClasses, 'border-control-border', children.props.className, className) }, <>{glyph}{typeof children.props.children === 'string' ? <span className={valueClass}>{children.props.children}</span> : children.props.children}</>)

@@ -187,6 +187,7 @@ pub fn file_stat(entry: DirEntry, hash: Option<Hash>) -> FileStat {
         (media.to_owned(), crate::media::is_text_by_name(&entry.name))
     };
     FileStat {
+        facts: None,
         entry,
         hash,
         media_type,
