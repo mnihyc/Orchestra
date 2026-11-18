@@ -162,6 +162,299 @@ pub struct Call {
 type Refusals = Mutex<HashMap<CommandKind, VecDeque<CommandError>>>;
 type OrderedCalls = Arc<Mutex<Vec<(Id, Command)>>>;
 
+/// One dedicated test unit's created source and actual incoming Start headers.
+pub type CanonicalStarts =
+    Arc<Mutex<Vec<(Id, Option<orch_link_contract::native_target::NativeTarget>)>>>;
+
+/// The source reported by this fixture's actual fresh allocation, once it happens.
+pub type CanonicalBirth = Arc<Mutex<Option<orch_link_contract::native_target::RuntimeSource>>>;
+
+/// The model allocates a fresh unit with its admitted birth and retains its actual source
+/// for later starts; an expected header never supplies an existing unit's observation.
+pub fn canonical_creation_replies(host: &ScriptedHost) -> (CanonicalBirth, CanonicalStarts) {
+    use orch_link_contract::native_target::{LifecycleAction, NativeTarget, RuntimeSource};
+    let created = Arc::new(Mutex::new(None));
+    let actual = created.clone();
+    let units = host.units.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeCreate, move |context, command| {
+        let Command::NodeRuntimeCreate(request) = command else {
+            unreachable!()
+        };
+        let opening = match &context.native_target {
+            Some(NativeTarget::Lifecycle(target))
+                if target.coherent_for(LifecycleAction::Create) =>
+            {
+                target.opening
+            }
+            None => Some(new_id()),
+            _ => {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the fixture birth has no coherent original",
+                ));
+            }
+        };
+        let mut units = lock(&units);
+        if units.contains_key(&request.0.runtime_id) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture birth cannot adopt an existing unit",
+            ));
+        }
+        let source = RuntimeSource {
+            incarnation: opening,
+        };
+        units.insert(
+            request.0.runtime_id,
+            NativeUnit {
+                source,
+                running: false,
+                present: true,
+            },
+        );
+        *lock(&actual) = Some(source);
+        Ok(CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+            source,
+            unit: orch_driver_contract::units::UnitRef {
+                reference: "canonical-created-unit".into(),
+                name: request.0.name.clone(),
+                runtime_id: request.0.runtime_id,
+                kind: request.0.kind,
+            },
+        }))
+    });
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let capture = starts.clone();
+    let units = host.units.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeStart, move |context, command| {
+        let Command::NodeRuntimeStart(body) = command else {
+            unreachable!()
+        };
+        let mut units = lock(&units);
+        let unit = units.get_mut(&body.runtime_id).ok_or_else(|| {
+            CommandError::new(ErrorCode::NotFound, "the fixture native unit is absent")
+        })?;
+        let target = match &context.native_target {
+            Some(NativeTarget::Lifecycle(target)) => Some(target),
+            _ => None,
+        };
+        if !unit.present
+            || target.is_some_and(|target| !target.matches_source(unit.source.incarnation))
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture's actual original unit changed",
+            ));
+        }
+        let reused = unit.running;
+        if !reused {
+            unit.source = RuntimeSource {
+                incarnation: Some(
+                    target
+                        .and_then(|target| target.opening)
+                        .unwrap_or_else(new_id),
+                ),
+            };
+            unit.running = true;
+        }
+        lock(&capture).push((context.id, context.native_target.clone()));
+        Ok(CommandResult::NodeRuntimeStart(
+            orch_link_contract::commands::NodeRuntimeStartResult {
+                source: unit.source,
+                reused,
+            },
+        ))
+    });
+    (created, starts)
+}
+
+/// A fresh fixture allocation whose actual reply is held after its unit exists.
+pub type PendingBirth = Arc<Mutex<Option<(Id, orch_link_contract::native_target::RuntimeSource)>>>;
+
+pub fn hold_created_reply(host: &ScriptedHost) -> PendingBirth {
+    use orch_link_contract::native_target::{LifecycleSubject, NativeTarget, RuntimeSource};
+    let created = Arc::new(Mutex::new(None));
+    let result = created.clone();
+    let units = host.units.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeCreate, move |context, command| {
+        let Command::NodeRuntimeCreate(request) = command else {
+            unreachable!()
+        };
+        let Some(NativeTarget::Lifecycle(target)) = &context.native_target else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture birth has no original target",
+            ));
+        };
+        if target.subject
+            != (LifecycleSubject::Runtime {
+                runtime_id: request.0.runtime_id,
+            })
+            || target.observed.is_some()
+            || !target.pending.is_empty()
+            || target.opening.is_none()
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture birth cannot adopt an existing unit",
+            ));
+        }
+        let mut units = lock(&units);
+        if units.contains_key(&request.0.runtime_id) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture native unit already exists",
+            ));
+        }
+        let source = RuntimeSource {
+            incarnation: target.opening,
+        };
+        units.insert(
+            request.0.runtime_id,
+            NativeUnit {
+                source,
+                running: false,
+                present: true,
+            },
+        );
+        *lock(&result) = Some((request.0.runtime_id, source));
+        Ok(CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+            source,
+            unit: orch_driver_contract::units::UnitRef {
+                reference: "actual-held-created-unit".into(),
+                name: request.0.name.clone(),
+                runtime_id: request.0.runtime_id,
+                kind: request.0.kind,
+            },
+        }))
+    });
+    host.added
+        .machine
+        .handler
+        .hold_result(CommandKind::NodeRuntimeCreate);
+    created
+}
+
+/// One stopped fixture unit whose Start effect and terminal reply have separate boundaries.
+/// Its identities come from its actual admitted opening, never its logical runtime identifier.
+pub struct PendingStart {
+    pub source: Arc<Mutex<orch_link_contract::native_target::RuntimeSource>>,
+    pub running: Arc<std::sync::atomic::AtomicBool>,
+    pub starts: CanonicalStarts,
+    pub stops: Arc<Mutex<Vec<orch_link_contract::native_target::NativeTarget>>>,
+}
+
+pub fn hold_started_reply(
+    host: &ScriptedHost,
+    runtime: Id,
+    initial: orch_link_contract::native_target::RuntimeSource,
+) -> PendingStart {
+    use orch_link_contract::native_target::{LifecycleSubject, NativeTarget};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let source = Arc::new(Mutex::new(initial));
+    let running = Arc::new(AtomicBool::new(false));
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let stops = Arc::new(Mutex::new(Vec::new()));
+    let current = source.clone();
+    let active = running.clone();
+    let admitted = starts.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeStart, move |context, command| {
+        let Some(NativeTarget::Lifecycle(target)) = &context.native_target else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture Start needs its original native target",
+            ));
+        };
+        if target.subject
+            != (LifecycleSubject::Runtime {
+                runtime_id: runtime,
+            })
+            || !matches!(command, Command::NodeRuntimeStart(body) if body.runtime_id==runtime)
+            || target.observed != lock(&current).incarnation
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture's actual original unit changed",
+            ));
+        }
+        let opened = orch_link_contract::native_target::RuntimeSource {
+            incarnation: target.opening,
+        };
+        if opened.incarnation.is_none() {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture Start has no admitted opening",
+            ));
+        }
+        *lock(&current) = opened;
+        active.store(true, Ordering::SeqCst);
+        lock(&admitted).push((context.id, context.native_target.clone()));
+        Ok(CommandResult::NodeRuntimeStart(
+            orch_link_contract::commands::NodeRuntimeStartResult {
+                source: opened,
+                reused: false,
+            },
+        ))
+    });
+    let current = source.clone();
+    let active = running.clone();
+    let admitted = stops.clone();
+    host.answer_with_context(CommandKind::NodeRuntimeStop, move |context, command| {
+        let Some(NativeTarget::Lifecycle(target)) = &context.native_target else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the fixture Stop needs its original native target",
+            ));
+        };
+        let actual = *lock(&current);
+        let wire = serde_json::to_value(context.native_target.as_ref())
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        if target.subject
+            != (LifecycleSubject::Runtime {
+                runtime_id: runtime,
+            })
+            || !matches!(command, Command::NodeRuntimeStop(body) if body.runtime_id==runtime)
+            || (target.observed != actual.incarnation
+                && !wire
+                    .pointer("/target/pending")
+                    .and_then(Json::as_array)
+                    .is_some_and(|pending| pending.contains(&json!(actual.incarnation))))
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the admitted Stop does not own this actual native start",
+            ));
+        }
+        active.store(false, Ordering::SeqCst);
+        lock(&admitted).push(
+            context
+                .native_target
+                .clone()
+                .expect("the target was checked"),
+        );
+        let result = serde_json::from_value(json!({"outcome":"stopped","source":actual}))
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        Ok(CommandResult::NodeRuntimeStop(result))
+    });
+    host.added
+        .machine
+        .handler
+        .hold_result(CommandKind::NodeRuntimeStart);
+    PendingStart {
+        source,
+        running,
+        starts,
+        stops,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NativeUnit {
+    source: orch_link_contract::native_target::RuntimeSource,
+    running: bool,
+    present: bool,
+}
+
 /// A host with a node that answers, and the rows that make it a place.
 pub struct ScriptedHost {
     /// The host.
@@ -172,6 +465,7 @@ pub struct ScriptedHost {
     pub added: Added,
     calls: Arc<Mutex<Vec<Call>>>,
     refusals: Arc<Refusals>,
+    units: Arc<Mutex<HashMap<Id, NativeUnit>>>,
 }
 
 /// The facts a unit's connector reports when an environment is attached to it.
@@ -255,6 +549,7 @@ impl ScriptedHost {
             added,
             calls: Arc::new(Mutex::new(Vec::new())),
             refusals: Arc::new(Mutex::new(HashMap::new())),
+            units: Arc::new(Mutex::new(HashMap::new())),
         };
         host.script();
         host
@@ -299,7 +594,8 @@ impl ScriptedHost {
             let ordered = ordered.clone();
             let machine = self.machine;
             let refusals = Arc::clone(&self.refusals);
-            handler.on(kind, move |command: &Command| {
+            let units = Arc::clone(&self.units);
+            handler.on_with_context(kind, move |context, command: &Command| {
                 if let Some(ordered) = &ordered { lock(ordered).push((machine, command.clone())); }
                 lock(&calls).push(Call {
                     kind,
@@ -326,7 +622,21 @@ impl ScriptedHost {
                         serde_json::from_value(json!({ "path": "/tools/orch-connector" })).unwrap(),
                     ),
                     Command::NodeRuntimeCreate(request) => {
+                        let opening=match &context.native_target {
+                            Some(orch_link_contract::native_target::NativeTarget::Lifecycle(target)) if target.coherent_for(orch_link_contract::native_target::LifecycleAction::Create)=>target.opening,
+                            None=>Some(new_id()),
+                            _=>return Err(CommandError::new(ErrorCode::Conflict,"the fixture birth has no coherent original")),
+                        };
+                        let mut units=lock(&units);
+                        if let Some(unit)=units.get(&request.0.runtime_id)
+                            && context.native_target.is_some() && unit.source.incarnation!=opening {
+                            return Err(CommandError::new(ErrorCode::Conflict,"the fixture birth cannot adopt an existing unit"));
+                        }
+                        let source=units.entry(request.0.runtime_id).or_insert_with(||NativeUnit {
+                            source:orch_link_contract::native_target::RuntimeSource {incarnation:opening},running:false,present:true,
+                        }).source;
                         CommandResult::NodeRuntimeCreate(NodeRuntimeCreateResult {
+                            source,
                             unit: orch_driver_contract::units::UnitRef {
                                 reference: "unit".to_owned(),
                                 name: request.0.name.clone(),
@@ -335,8 +645,41 @@ impl ScriptedHost {
                             },
                         })
                     }
-                    Command::NodeRuntimeStart(_) => CommandResult::NodeRuntimeStart(Empty {}),
-                    Command::NodeRuntimeStop(_) => CommandResult::NodeRuntimeStop(Empty {}),
+                    Command::NodeRuntimeStart(body) => {
+                        let mut units = lock(&units);
+                        let unit = units.get_mut(&body.runtime_id).ok_or_else(||CommandError::new(ErrorCode::NotFound,"the fixture native unit is absent"))?;
+                        let target = match context.native_target.as_ref() {
+                            Some(orch_link_contract::native_target::NativeTarget::Lifecycle(target))=>Some(target),
+                            _=>None,
+                        };
+                        if target.is_some_and(|target|!target.matches_source(unit.source.incarnation)) {
+                            return Err(CommandError::new(ErrorCode::Conflict,"the fixture's actual native source changed"));
+                        }
+                        if !unit.present {return Err(CommandError::new(ErrorCode::NotFound,"the fixture native unit is absent"));}
+                        let reused = unit.running;
+                        if !reused {
+                            unit.source = orch_link_contract::native_target::RuntimeSource {incarnation:Some(target.and_then(|target|target.opening).unwrap_or_else(new_id))};
+                            unit.running = true;
+                        }
+                        CommandResult::NodeRuntimeStart(orch_link_contract::commands::NodeRuntimeStartResult {source:unit.source,reused})
+                    },
+                    Command::NodeRuntimeStop(body) => {
+                        let mut units = lock(&units);
+                        let unit = units.get_mut(&body.runtime_id).ok_or_else(||CommandError::new(ErrorCode::NotFound,"the fixture native unit is absent"))?;
+                        if context.native_target.as_ref().is_some_and(|target|matches!(target,orch_link_contract::native_target::NativeTarget::Lifecycle(target) if !target.matches_source(unit.source.incarnation))) {
+                            return Err(CommandError::new(ErrorCode::Conflict,"the fixture's actual native source changed"));
+                        }
+                        unit.running = false;
+                        if !unit.present {
+                            let mut originals: Vec<_> = match context.native_target.as_ref() {
+                                Some(orch_link_contract::native_target::NativeTarget::Lifecycle(target))=>target.observed.into_iter().chain(target.pending.iter().copied()).collect(),
+                                _=>unit.source.incarnation.into_iter().collect(),
+                            };
+                            originals.sort_unstable();originals.dedup();
+                            return Ok(CommandResult::NodeRuntimeStop(orch_link_contract::commands::NodeRuntimeStopResult::Absent {originals}));
+                        }
+                        CommandResult::NodeRuntimeStop(orch_link_contract::commands::NodeRuntimeStopResult::Stopped {source:unit.source})
+                    },
                     Command::NodeRuntimeRemove(_) => CommandResult::NodeRuntimeRemove(Empty {}),
                     Command::NodeResourcesApply(_)=>CommandResult::NodeResourcesApply(Empty {}),
                     Command::NodeResourcesInspect(_)=>CommandResult::NodeResourcesInspect(orch_driver_contract::runtime::RuntimeChanges {pending_reason:None,live_changes:orch_driver_contract::descriptor::LiveChanges {resources:true,..Default::default()},resources:orch_driver_contract::runtime::Resources {memory_mb:Some(256),..Default::default()},memory_used_bytes:Some(64<<20)}),
@@ -382,12 +725,26 @@ impl ScriptedHost {
     where
         F: Fn(&Command) -> Result<CommandResult, CommandError> + Send + Sync + 'static,
     {
+        self.answer_with_context(kind, move |_, command| reply(command));
+    }
+
+    /// Context-aware replies keep the same actual execution log and queued refusals.
+    pub fn answer_with_context<F>(&self, kind: CommandKind, reply: F)
+    where
+        F: Fn(
+                &orch_link::commands::CommandContext,
+                &Command,
+            ) -> Result<CommandResult, CommandError>
+            + Send
+            + Sync
+            + 'static,
+    {
         let calls = Arc::clone(&self.calls);
         let refusals = Arc::clone(&self.refusals);
         self.added
             .machine
             .handler
-            .on(kind, move |command: &Command| {
+            .on_with_context(kind, move |context, command| {
                 lock(&calls).push(Call {
                     kind,
                     body: command.body().unwrap(),
@@ -395,8 +752,25 @@ impl ScriptedHost {
                 if let Some(error) = lock(&refusals).get_mut(&kind).and_then(VecDeque::pop_front) {
                     return Err(error);
                 }
-                reply(command)
+                reply(context, command)
             });
+    }
+
+    /// Explicit fixture observations update the native object before its report is applied.
+    pub fn record_native_source(
+        &self,
+        runtime: Id,
+        source: orch_link_contract::native_target::RuntimeSource,
+        running: bool,
+    ) {
+        lock(&self.units).insert(
+            runtime,
+            NativeUnit {
+                source,
+                running,
+                present: true,
+            },
+        );
     }
 
     /// Every command the node was given, in order.
@@ -461,11 +835,25 @@ impl ScriptedHost {
 
     /// The node tells what it finds a unit in.
     pub async fn tell(&self, runtime: Id, state: &str, detail: Option<&str>) {
+        let source = {
+            let mut units = lock(&self.units);
+            match units.get_mut(&runtime) {
+                Some(unit) => {
+                    unit.running = state == "running";
+                    if state == "absent" {
+                        unit.present = false;
+                    }
+                    unit.source
+                }
+                None => orch_link_contract::native_target::RuntimeSource::untracked(),
+            }
+        };
         self.added
             .machine
             .publish(
                 &Stream::Node,
                 &Event::NodeRuntime(NodeRuntime {
+                    source,
                     runtime_id: runtime,
                     state: state.to_owned(),
                     detail: detail.map(str::to_owned),
@@ -1194,6 +1582,21 @@ pub async fn running(
     )
     .await
     .unwrap();
+    drop(conn);
+    let source = orch_link_contract::native_target::RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    host.record_native_source(runtime, source, true);
+    let mut tx = world.pool.begin().await.unwrap();
+    env_rows::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(&mut tx, host.id, runtime, source, false)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
     (environment, runtime, unit)
 }
 

@@ -1402,6 +1402,11 @@ async fn an_actual_recovered_started_journal_refusal_never_authorizes_another_pr
         .await,
     )?;
     let command = orch_link_contract::commands::Cmd {
+        authority_until: None,
+        native_members: None,
+        native_revision: None,
+
+        native_target: None,
         id: outgoing.id,
         kind: outgoing.kind.as_str().into(),
         key: Some(fixture.thread.to_string()),

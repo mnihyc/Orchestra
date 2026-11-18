@@ -10,8 +10,8 @@ import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { detailHost } from './resource-detail-fixtures';
 
-const reads = vi.hoisted(() => ({ hosts: vi.fn(), settings: vi.fn() }));
-vi.mock('@/api/admin', () => ({ settingsKey: ['admin', 'settings'], hostsQuery: { queryKey: ['admin', 'hosts'], queryFn: reads.hosts }, systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: reads.settings } }));
+const reads = vi.hoisted(() => ({ hosts: vi.fn(), settings: vi.fn(), enrollment: vi.fn(async (): Promise<string | null> => null), retry: vi.fn(async () => undefined) }));
+vi.mock('@/api/admin', () => ({ bundledNodeQuery: {queryKey:['admin','bundled-node'],queryFn:reads.enrollment}, retryBundledNode: reads.retry, settingsKey: ['admin', 'settings'], hostsQuery: { queryKey: ['admin', 'hosts'], queryFn: reads.hosts }, systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: reads.settings } }));
 vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: () => <span>Keeper</span> }));
 const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -37,4 +37,15 @@ it('follows the accepted system value and threshold while retaining the host’s
   await accept('hosts.when_full', 'warn', 'DELETE'); await waitFor(() => expect(sharedRow).toHaveTextContent('Warns, and lets the host answer'));
   expect(reads.hosts).toHaveBeenCalledOnce(); expect(reads.settings).toHaveBeenCalledOnce();
   expect(cache.getQueryData(['admin', 'hosts'])).toEqual([shared, own]);
+});
+
+it('shows why the bundled node could not register and offers to retry its registration', async () => {
+  reads.hosts.mockResolvedValue([]); reads.settings.mockResolvedValue([]);
+  reads.enrollment.mockResolvedValue('registration_unavailable');
+  render(<QueryClientProvider client={cache}><TooltipProvider><Toaster><Hosts /></Toaster></TooltipProvider></QueryClientProvider>);
+  expect(await screen.findByText('The bundled host could not register with the database')).toBeVisible();
+  expect(screen.queryByText('No host yet')).not.toBeInTheDocument();
+  const { fireEvent } = await import('@testing-library/react');
+  fireEvent.click(screen.getByRole('button', {name:'Retry registration'}));
+  await waitFor(() => expect(reads.retry).toHaveBeenCalledOnce());
 });

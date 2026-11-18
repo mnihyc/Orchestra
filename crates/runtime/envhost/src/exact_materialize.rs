@@ -32,11 +32,11 @@ struct Journal {
     request: Hash,
     generation: i64,
     parent_device: u64,
-    parent_inode: u64,
+    parent_inode: crate::platform::FileNumber,
     ignore_fingerprint: Hash,
     stage: String,
     stage_device: u64,
-    stage_inode: u64,
+    stage_inode: crate::platform::FileNumber,
     result: Option<FsMaterializeResult>,
 }
 

@@ -270,3 +270,78 @@ ranges = [{{ from = 41000, to = 41010 }}]
     world.wait_online(machine, false).await;
     world.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_bundled_node_enrolls_and_comes_online_after_a_database_registration_failure() {
+    use orch_api_contract::admin::BundledNodeEnrollment;
+    let mut world = World::start_on("127.0.0.1", "127.0.0.1").await;
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("orch.toml");
+    std::fs::write(&config, "[node]\ndrivers=['host']\n").unwrap();
+    let token_path = temp.path().join("node_enrollment_token");
+    let issued = orch_pki::enrollment::issue_token(
+        &world.secrets.authority(),
+        std::time::Duration::ZERO,
+        world.clock.as_ref(),
+    );
+    std::fs::write(&token_path, issued.token.to_string()).unwrap();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_orch-node"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--data-dir")
+        .arg(temp.path().join("node"))
+        .arg("run")
+        .arg("--token-file")
+        .arg(&token_path)
+        .arg("--url")
+        .arg(world.gateway_url())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let service = world.api.link.certificates().clone();
+    let registrar = tokio::spawn(async move {
+        service
+            .register_bundled_node(&token_path, tokio_util::sync::CancellationToken::new())
+            .await;
+    });
+    eventually(
+        "the bundled host to wait for the first administrator",
+        || async {
+            world.api.link.certificates().bundled_node_enrollment()
+                == Some(BundledNodeEnrollment::WaitingForAdministrator)
+        },
+    )
+    .await;
+    sqlx::query("CREATE FUNCTION refuse_registration() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'temporary registration failure'; END $$")
+        .execute(&world.test_db.pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER refuse_registration BEFORE INSERT ON enrollment_tokens FOR EACH ROW EXECUTE FUNCTION refuse_registration()")
+        .execute(&world.test_db.pool).await.unwrap();
+    orch_db::queries::resources::testing::make_system_admin(
+        &mut world.db.acquire().await.unwrap(),
+        world.user,
+    )
+    .await
+    .unwrap();
+    eventually(
+        "the database registration failure to be visible",
+        || async {
+            world.api.link.certificates().bundled_node_enrollment()
+                == Some(BundledNodeEnrollment::RegistrationUnavailable)
+        },
+    )
+    .await;
+    sqlx::query("DROP TRIGGER refuse_registration ON enrollment_tokens")
+        .execute(&world.test_db.pool)
+        .await
+        .unwrap();
+    eventually("the fresh bundled host to enroll and be online without a second start", || async {
+        sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM hosts h JOIN machines m ON m.id=h.machine_id WHERE h.bundled_with_server AND m.online AND m.status='active')")
+            .fetch_one(&world.test_db.pool).await.unwrap()
+    }).await;
+    registrar.await.unwrap();
+    child.kill().await.unwrap();
+    world.stop().await;
+}

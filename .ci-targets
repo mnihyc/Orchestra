@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-node --test program -- a_fresh_bundled_node_enrolls_and_comes_online_after_a_database_registration_failure
+test -p orch-api-core --test installation_records --features test-support -- only_system_administrators_can_see_and_retry_a_bundled_host_registration_failure
+test -p orch-api-core --test certificates --features test-support -- bundled_node
+web typecheck
+web lint
+web test -- tests/component/admin-host-policy.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

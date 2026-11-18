@@ -592,6 +592,9 @@ impl Shells {
         {
             return Ok(Some(TerminalNotAllowedReason::MachinePolicy));
         }
+        if site.stopping {
+            return Ok(Some(TerminalNotAllowedReason::EnvironmentStopping));
+        }
         if site.status != "running"
             || site.machine_id.is_none()
             || site.machine_online != Some(true)
@@ -1588,11 +1591,14 @@ impl Shells {
                 self.holds(&mut conn, &row).await?
             };
             if holding != Holding::Yes {
-                about(&row, Ending::REVOKED);
-                if let Some(done) = self
-                    .finish(row.id, Ending::REVOKED, &Origin::default())
-                    .await?
-                {
+                let ending =
+                    if holding == Holding::Gate(TerminalNotAllowedReason::EnvironmentStopping) {
+                        Ending::because(reason::ENVIRONMENT_STOPPED)
+                    } else {
+                        Ending::REVOKED
+                    };
+                about(&row, ending);
+                if let Some(done) = self.finish(row.id, ending, &Origin::default()).await? {
                     closed.push(done);
                 }
             }
