@@ -455,8 +455,11 @@ test.describe('Sign-in', () => {
 
   test('keeps the other settings where they are shown: confirming addresses, passwords, and what a code by mail may be for with the lock', async ({ page }) => {
     await open(page, '/admin/sign-in');
-    await page.getByRole('switch', { name: 'Ask new people to confirm their address' }).click();
-    await expect(page.getByRole('switch', { name: 'Ask new people to confirm their address' })).toBeChecked();
+    const verification = page.getByRole('switch', { name: 'Require a confirmed address to sign in' });
+    await verification.hover();
+    await expect(page.getByRole('tooltip')).toContainText('System administrators and people without an email address can sign in without confirmation. Existing sessions stay signed in.');
+    await verification.click();
+    await expect(verification).toBeChecked();
 
     // A code by mail: the two ticks are the system's own value, and the lock holds every org to it.
     const code = page.getByRole('group', { name: 'A code by mail', exact: true });
@@ -727,7 +730,7 @@ test.describe('the rest of Management', () => {
     await open(page, '/admin/settings');
     await expect(page.getByLabel('Search the settings')).toBeVisible();
     const sections = await currentSection(page, 'settings', 'Settings');
-    for (const [id, name] of [['email', 'Channels'], ['templates', 'System templates'], ['mcp', 'MCP presets'], ['defaults', 'Access defaults'], ['rates', 'Rates']] as const) {
+    for (const [id, name] of [['email', 'Email and channels'], ['templates', 'System templates'], ['mcp', 'MCP presets'], ['defaults', 'Access defaults'], ['rates', 'Rates']] as const) {
       const link = sections.locator(`a[data-section-id="${id}"]`);
       await expect(link).toHaveText(name); await expect(link).toHaveAttribute('href', `/admin/${id}`);
     }

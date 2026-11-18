@@ -341,7 +341,7 @@ impl Engine {
         let store = self
             .blobs()
             .ok_or_else(|| EngineError::unreadable("the accepted result store is unavailable"))?;
-        store
+        let _publication = store
             .put(
                 &hash,
                 Some(size),

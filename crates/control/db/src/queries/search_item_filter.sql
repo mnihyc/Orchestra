@@ -7,6 +7,7 @@ i.kind=ANY($9::text[]) AND i.kind<>'marker' AND i.search_text IS NOT NULL AND __
      AND ($32::uuid[] IS NULL OR i.id=ANY($32))
      AND i.search_text NOT LIKE '%<orch>%' -- old projections stay private until their startup repair commits
      AND ($12::uuid IS NULL OR i.author_id=$12)
+     AND ($5::jsonb->'search_advanced'->>'stream' IS NULL OR i.stream=$5::jsonb->'search_advanced'->>'stream')
      AND (($5::jsonb->'search_advanced'->>'date_field') IS NOT NULL OR $13::timestamptz IS NULL OR i.created_at >= $13) AND (($5::jsonb->'search_advanced'->>'date_field') IS NOT NULL OR $14::timestamptz IS NULL OR i.created_at <= $14)
      AND (NOT $21 OR orch_search_file_types(i.payload) @> ARRAY['*/*'])
      AND ($22::uuid IS NULL OR jsonb_path_exists(i.payload,'$.** ? (@.type == "mention" && @.user_id == $person)',jsonb_build_object('person',$22::text)))
