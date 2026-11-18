@@ -331,6 +331,9 @@ impl Engine {
             None
         };
         let files = FilesPlan {
+            source_policy: None,
+            home_policy: None,
+            file_states_policy: None,
             kept_image_bytes: None,
             source: FilesSource::Cached,
             source_as_of,

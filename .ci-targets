@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/component/admin-mode.test.tsx tests/component/admin-mark.test.tsx tests/component/view-group-reveal.test.tsx tests/component/view-group-locator.test.tsx tests/unit/admin-openings-double.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
+web-e2e tests/e2e/workbench-grid.spec.ts tests/e2e/admin-mode.spec.ts tests/e2e/chat.spec.ts tests/accessibility/chat.spec.ts --project=chromium --grep "keeps the active view tab fully visible|the same person reaches private content|several people make a group with a name|an admin reads a chat among others|an admin can identify and open a private chat"
