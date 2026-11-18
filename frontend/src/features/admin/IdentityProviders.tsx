@@ -7,7 +7,10 @@
  * Test looks at the provider itself, its description of itself and its signing keys, and says what it
  * found or what went wrong; it signs nobody in.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { Ellipsis, FlaskConical, Pencil, Plus, ShieldOff, Trash } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -16,7 +19,7 @@ import { choiceOption } from '@/i18n/choices';
 import {
   createIdentityProvider,
   deleteIdentityProvider,
-  identityProvidersQuery,
+  identityProvidersPageQuery,
   testIdentityProvider,
   updateIdentityProvider,
 } from '@/api/admin';
@@ -35,6 +38,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { Menu } from '@/ui/Menu';
 import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -79,6 +83,7 @@ function ProviderForm({ provider, onClose }: FormProps) {
       client_secret: (value) => (provider === null && value === '' ? t('admin.idp.secretRule') : null),
     },
   );
+  const clientSecret = form.field('client_secret');
   const [autoRegister, setAutoRegister] = useState(provider?.auto_register ?? false);
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
   const [org, setOrg] = useState(provider?.default_org_id ?? NO_ORG);
@@ -136,18 +141,21 @@ function ProviderForm({ provider, onClose }: FormProps) {
     >
       <form id="admin-idp-form" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => save.mutate(values))}>
         <div className="grid gap-4 sm:grid-cols-2">
+          <Input label={t('admin.idp.nameField')} optional placeholder={form.values.key} autoComplete="off" {...form.field('name')} />
           <Input label={t('admin.idp.key')} hint={t('admin.idp.keyHint')} autoComplete="off" autoCapitalize="none" mono {...form.field('key')} />
-          <Input label={t('admin.idp.nameField')} optional autoComplete="off" {...form.field('name')} />
         </div>
         <Input label={t('admin.idp.issuer')} hint={t('admin.idp.issuerHint')} autoComplete="off" autoCapitalize="none" mono {...form.field('issuer')} />
         <div className="grid gap-4 sm:grid-cols-2">
           <Input label={t('admin.idp.clientId')} autoComplete="off" mono {...form.field('client_id')} />
-          <Input
+          <SecretField
             label={t('admin.idp.secret')}
-            type="password"
-            autoComplete="new-password"
-            hint={provider?.client_secret_set === true ? t('admin.idp.secretKept') : t('admin.idp.secretHint')}
-            {...form.field('client_secret')}
+            set={provider?.client_secret_set === true}
+            hint={provider?.client_secret_set === true ? undefined : t('admin.idp.secretHint')}
+            value={form.values.client_secret}
+            error={clientSecret.error}
+            onBlur={clientSecret.onBlur}
+            fieldRef={clientSecret.ref}
+            onValueChange={(next) => form.set('client_secret', next)}
           />
         </div>
         <Input label={t('admin.idp.scopes')} hint={t('admin.idp.scopesHint')} autoComplete="off" mono {...form.field('scopes')} />
@@ -247,7 +255,9 @@ function ProviderTest({ provider, onClose }: { provider: IdentityProvider; onClo
 
 export function IdentityProviders() {
   const { t } = useTranslation();
-  const providers = useQuery(identityProvidersQuery);
+  const search = useCollectionSearch("admin-identity-providers");
+  const providers = useInfiniteQuery(identityProvidersPageQuery(search.q));
+  const rows = providers.data?.pages.flatMap((page) => page.items) ?? [];
   const [editing, setEditing] = useState<IdentityProvider | 'new' | null>(null);
   const [removing, setRemoving] = useState<IdentityProvider | null>(null);
   const [testing, setTesting] = useState<IdentityProvider | null>(null);
@@ -314,15 +324,17 @@ export function IdentityProviders() {
           {t('admin.idp.addTitle')}
         </Button>
       </div>
+      <CollectionSearch name={t("admin.signIn.providers.title")} {...search} />
       {providers.isPending ? (
         <SkeletonRows read={providers} rows={2} />
-      ) : providers.isError ? (
+      ) : providers.isError && rows.length === 0 ? (
         <ErrorState compact error={providers.error} retrying={providers.isRefetching} onRetry={() => void providers.refetch()} />
-      ) : providers.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<ShieldOff aria-hidden />} title={t('admin.idp.none')} description={t('admin.idp.noneHint')} />
       ) : (
-        <Table label={t('admin.signIn.providers.title')} columns={columns} rows={providers.data} rowKey={(provider) => provider.id} />
+        <Table label={t('admin.signIn.providers.title')} columns={columns} rows={rows} virtual rowKey={(provider) => provider.id} />
       )}
+      <Pagination hasMore={providers.hasNextPage} loading={providers.isFetchingNextPage} error={providers.isFetchNextPageError ? providers.error : undefined} onMore={() => void providers.fetchNextPage()} />
       {editing !== null && <ProviderForm key={editing === 'new' ? 'new' : editing.id} provider={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
       {testing !== null && <ProviderTest key={testing.id} provider={testing} onClose={() => setTesting(null)} />}
       <ConfirmDialog

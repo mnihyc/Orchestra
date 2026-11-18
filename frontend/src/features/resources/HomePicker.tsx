@@ -12,8 +12,9 @@ import { choiceCopy } from '@/i18n/choices';
 import { rememberedOrg, useSelectedOrg } from '@/shell/org';
 import { client } from '@/api/client';
 import { useTreeStore } from '@/realtime/stores/tree';
-import type { Org, TreeNode } from '@/generated/api-types';
-import { Combobox } from '@/ui/Combobox';
+import type { NodeKind, Org, TreeNode } from '@/generated/api-types';
+import { ResourcePickerLookup } from '@/ui/ResourcePicker';
+import type { ChoiceResource } from '@/ui/DetailCard';
 import { ErrorState } from '@/ui/ErrorState';
 
 export interface HomeChoice {
@@ -114,7 +115,7 @@ export interface HomePickerProps {
   /** The server chooses this home at the effect; choosing another entry is an explicit override. */
   defaultChoice?: string;
   /** An environment may take its settings from the topic or project currently being used. */
-  places?: readonly { id: string; name: string }[];
+  places?: readonly { id: string; name: string;kind?:NodeKind }[];
 }
 
 /** A choice of the org a resource belongs to, with the one in view chosen to begin with. */
@@ -127,20 +128,20 @@ export function HomePicker({ value, onChange, label, hint, error, disabled, comp
   useEffect(() => {
     if (defaultChoice === undefined && value === '' && choices.length > 0) onChange((preferPersonal ? choices.find((choice) => choice.personal)?.id : undefined) ?? defaultHome(choices, inView));
   }, [value, choices, inView, onChange, preferPersonal, defaultChoice]);
-  const options: { value: string; name: string; description?: string }[]=[...(defaultChoice===undefined?[]:[{value:'',name:defaultChoice}]),...places.filter((place) => !choices.some((choice) => choice.id === place.id)).map((place) => ({ value:place.id,name:place.name })),
-    ...choices.map((choice)=>({value:choice.id,...(compact?{name:choice.label}:choiceCopy(t,`resourceHome.${choice.personal?'personal':choice.department?'department':'org'}`,{name:choice.label}))}))];
+  const options: { value: string; name: string; description?: string;resource?:ChoiceResource }[]=[...(defaultChoice===undefined?[]:[{value:'',name:defaultChoice}]),...places.filter((place) => !choices.some((choice) => choice.id === place.id)).map((place) => ({ value:place.id,name:place.name,...(place.kind===undefined?{}:{resource:{kind:place.kind,id:place.id}}) })),
+    ...choices.map((choice)=>({value:choice.id,resource:{kind:'org',id:choice.id},...(compact?{name:choice.label}:choiceCopy(t,`resourceHome.${choice.personal?'personal':choice.department?'department':'org'}`,{name:choice.label}))}))];
   const words = query.trim().toLocaleLowerCase();
   const found = options.filter((option) => option.name.toLocaleLowerCase().includes(words)).map((option) => ({
-    value: option.value, label: option.name, text: option.name,
+    value: option.value, label: option.name, text: option.name,resource:option.resource,
     ...('description' in option ? { description: option.description } : {}),
   }));
   return (
-    <div className="flex min-w-0 flex-col gap-2"><Combobox
+    <div className="flex min-w-0 flex-col gap-2"><ResourcePickerLookup pickerKey="resource-home" groupHomes={false}
       label={label ?? t('resources.home.label')}
       help={<Hint id="home" />}
       {...(hint === undefined ? {} : { hint })}
       error={error}
-      query={query} onQueryChange={setQuery}
+      query={query} onQueryChange={setQuery} initialActiveValue={value}
       onOpenChange={(open) => { if (!open) setQuery(''); }}
       displayValue={options.find((option) => option.value === value)?.name ?? ''}
       onSelect={(option) => { setQuery(''); onChange(option.value); }}

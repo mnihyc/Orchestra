@@ -118,7 +118,8 @@ async fn all_five_group_adapters_preserve_membership_rules_and_exact_group_bound
         .token(&token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(members.iter().any(|person| person.id == member.id()));
     assert_eq!(
         world
@@ -184,6 +185,7 @@ async fn all_five_group_adapters_preserve_membership_rules_and_exact_group_bound
             .send()
             .await
             .ok()
+            .items
             .is_empty(),
         "the same direct membership writer removed the selected holder"
     );
@@ -215,6 +217,7 @@ async fn all_five_group_adapters_preserve_membership_rules_and_exact_group_bound
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     assert_eq!(

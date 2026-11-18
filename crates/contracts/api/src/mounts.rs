@@ -130,6 +130,9 @@ pub struct MountKeptData {
 /// Data that environments attach beside their workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Mount {
+    /// Continuation of an explicitly selected child directory; absent for a complete or final read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Protected origin and native contextual availability, beside home and owner.
     #[serde(default, flatten)]
     pub provenance: crate::resource_groups::ResourceProvenance,
@@ -205,6 +208,8 @@ pub struct MountEnvironment {
 /// One readable mount located on the machine whose page is open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineMount {
+    /// Continue the readable attachments of this mount on this machine.
+    pub environments_next_cursor: Option<String>,
     /// The named data, which stays a resource independent of its machines.
     pub mount: MountRef,
     /// The common path at which environments find it.
@@ -238,9 +243,58 @@ pub struct MachineMountChoice {
     pub storages: Vec<String>,
 }
 
+/// The independently searched collection on a machine's Mounts page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineMountCollection {
+    /// Located mounts.
+    Locations,
+    /// Manageable mounts that may be added.
+    Available,
+    /// Readable attached environments of one located mount.
+    Environments,
+}
+
+/// Search and continue a machine's mount locations, additions or attachments.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineMountListQuery {
+    /// Located mounts by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<MachineMountCollection>,
+    /// Required when continuing one mount's attached environments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<Id>,
+    /// Words in the readable visible name or path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Requested entries; fifty by default, any positive u32.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same machine, collection, mount and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl MachineMountListQuery {
+    /// Shared name search and continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// The host side of mounts, read without a probe or a separate query for each mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineMounts {
+    /// Continue the selected locations, additions or attachments.
+    pub next_cursor: Option<String>,
     /// Protected grouping of the actual readable Mount references below.
     #[serde(default)]
     pub grouping: Vec<crate::resource_groups::ResourceChoiceGrouping>,
@@ -547,7 +601,7 @@ crate::common::full_or_receipt! {
 
 crate::endpoints! {
     /// Mounts located on a readable host or the caller's own machine, and manageable add choices.
-    MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), none, none, json MachineMounts, 200,
+    MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), query MachineMountListQuery, none, json MachineMounts, 200,
         operation Op::facets(&crate::mount_sources::MACHINE_MOUNT_FACETS);
     /// Lists configured workspace roots and environment data on a machine.
     MachineEnvironmentDataGet: GET "/machines/{id}/environment-data", Rule("the machine's owner or host.view/host.use on its host; only readable environment uses are named; roots are changed only through the machine's own environment.roots policy"), none, none, json MachineEnvironmentData, 200,
@@ -559,7 +613,7 @@ crate::endpoints! {
     MountCreate: POST "/mounts", Rule("its home is the caller's domain or an org inside it and the members of that home may make mounts there; else settings.manage on that org; a system admin when it has no home"), none, json MountCreateBody, json MountCreateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mount_sources::CREATE_FACETS));
     /// Reads a mount.
-    MountGet: GET "/mounts/{id}", Rule("any permission on the mount"), none, none, json Mount, 200,
+    MountGet: GET "/mounts/{id}", Rule("any permission on the mount"), query crate::common::ChildCollectionQuery, none, json Mount, 200,
         operation Op::facets(&crate::resource_reads::MOUNT.facets::<7>(Target::TypedPath { parameter: "id", kind: Object(K::Mount) }));
     /// Changes a mount.
     MountUpdate: PATCH "/mounts/{id}", Permission("mount.manage"), none, json MountUpdateBody, json Mount, 200,

@@ -1735,31 +1735,33 @@ pub async fn node_chats_with_messages(
     after: Option<After>,
     limit: i64,
 ) -> Result<Vec<ChatRow>, DbError> {
-    node_chats_with_messages_selected(conn, org, after, limit, None).await
+    node_chats_selected(conn, org, after, limit, None, false).await
 }
 
 /// The same native selector restricted to retained selected identities before ordering and paging.
-pub async fn node_chats_with_messages_selected(
+pub async fn node_chats_selected(
     conn: &mut Conn,
     org: Id,
     after: Option<After>,
     limit: i64,
     selected: Option<&[Id]>,
+    include_empty: bool,
 ) -> Result<Vec<ChatRow>, DbError> {
     Ok(sqlx::query_as(concat!(
         "SELECT c.id, c.kind, c.visibility, c.node_id, c.home_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
         "c.last_message_seq, c.last_message_at, c.created_at ",
         "FROM chats c JOIN nodes n ON n.id = c.node_id ",
-        "WHERE c.org_id = $1 AND c.kind = 'node' AND c.last_message_seq > 0 AND n.deleted_at IS NULL ",
-        "AND ($2::timestamptz IS NULL OR (c.last_message_at, c.id) < ($2, $3)) ",
+        "WHERE c.org_id = $1 AND c.kind = 'node' AND ($6::boolean OR c.last_message_seq > 0) AND n.deleted_at IS NULL ",
+        "AND ($2::timestamptz IS NULL OR (COALESCE(c.last_message_at,c.created_at), c.id) < ($2, $3)) ",
         "AND ($5::uuid[] IS NULL OR c.id = ANY($5)) ",
-        "ORDER BY c.last_message_at DESC, c.id DESC LIMIT $4"
+        "ORDER BY COALESCE(c.last_message_at,c.created_at) DESC, c.id DESC LIMIT $4"
     ))
     .bind(org)
     .bind(after.map(|after| after.at))
     .bind(after.map(|after| after.id))
     .bind(limit)
     .bind(selected)
+    .bind(include_empty)
     .fetch_all(conn)
     .await?)
 }

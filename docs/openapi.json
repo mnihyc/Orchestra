@@ -1317,10 +1317,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/SessionInfo"
-                  }
+                  "$ref": "#/components/schemas/SessionInfoPage"
                 }
               }
             }
@@ -1339,6 +1336,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       },
@@ -1581,10 +1618,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ApiTokenInfo"
-                  }
+                  "$ref": "#/components/schemas/ApiTokenInfoPage"
                 }
               }
             }
@@ -1603,6 +1637,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       },
@@ -3972,10 +4046,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/UserRef"
-                  }
+                  "$ref": "#/components/schemas/UserSearchReply"
                 }
               }
             }
@@ -4017,6 +4088,56 @@
               ],
               "format": "uuid",
               "description": "Look among the members of this org, at whatever level it lies."
+            }
+          },
+          {
+            "name": "include_external",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Also find admitted public people outside the selected org, retaining actual membership facts.\nRequires org_id; false by default."
+            }
+          },
+          {
+            "name": "picker",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Picker mode accepts the first character and opens with private recents and shared-org people."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries per page; any positive u32, twenty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same actor, org, picker mode and words."
             }
           }
         ]
@@ -4454,10 +4575,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Invitation"
-                  }
+                  "$ref": "#/components/schemas/InvitationPage"
                 }
               }
             }
@@ -4491,6 +4609,56 @@
               ],
               "format": "uuid",
               "description": "Only the invitations into this org."
+            }
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Only invitations that are unrevoked, unexpired and not used up."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in its visible destination, address, note or inviter."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same org, active choice and search."
             }
           }
         ]
@@ -6389,6 +6557,34 @@
         ],
         "parameters": [
           {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SharedListKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "All kinds by default."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal visible words, with no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -6399,7 +6595,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries requested in this page; fifty by default, any positive u32."
             }
           },
           {
@@ -6411,7 +6607,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "Continue the same actor, kind and search."
             }
           }
         ]
@@ -6886,6 +7082,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the admitted visible name, before paging."
             }
           },
           {
@@ -9473,10 +9681,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Tag"
-                  }
+                  "$ref": "#/components/schemas/TagPage"
                 }
               }
             }
@@ -9505,6 +9710,56 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal visible tag-name words; an exact name precedes partial matches."
+            }
+          },
+          {
+            "name": "picker",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Empty picker openings put this person's recent available definitions first."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries per page; any positive u32, fifty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same actor, place, name query and captured personal order."
             }
           }
         ]
@@ -11436,7 +11691,7 @@
                 "string",
                 "null"
               ],
-              "description": "A template's unit kind, or an environment's origin (machine/template)."
+              "description": "A template's unit kind, an environment's origin (machine/template), or system for an agent without a home."
             }
           },
           {
@@ -14106,6 +14361,56 @@
               ],
               "description": "The place control lists visible places of its tree, or matching addresses in any tree."
             }
+          },
+          {
+            "name": "picker",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Picker mode opens with private recent people and groups; name filtering starts with one character."
+            }
+          },
+          {
+            "name": "kinds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Comma-separated holder kinds, filtered before paging; absent means every kind."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries per page; any positive u32, fifty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue this actor, source place, tree, kinds and literal locator search."
+            }
           }
         ]
       }
@@ -14182,6 +14487,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -16644,6 +16987,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Visible person-name or username words, before paging."
+            }
+          },
+          {
             "name": "holder",
             "in": "query",
             "required": true,
@@ -16831,6 +17186,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in the currently projected text, action, actor name or disclosed file/thread name."
+            }
+          },
+          {
             "name": "upload",
             "in": "query",
             "required": false,
@@ -16868,7 +17235,7 @@
                 "string",
                 "null"
               ],
-              "description": "A comma list of the kinds of line wanted; for an environment, values of\n[`HistoryKind`]."
+              "description": "A comma list of the kinds of line wanted: HistoryKind for an environment,\nAuditKind for a node or another resource; applied before paging."
             }
           },
           {
@@ -25852,6 +26219,34 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in the payload after its current masking."
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/RawDirection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only frames going in this direction, before the output page."
+            }
+          },
+          {
             "name": "continuation_id",
             "in": "query",
             "required": false,
@@ -26205,6 +26600,30 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in the projected outline title or goal condition."
+            }
+          },
+          {
+            "name": "kinds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Comma-separated OutlineKind values, selected before the output page."
+            }
+          },
+          {
             "name": "continuation_id",
             "in": "query",
             "required": false,
@@ -26290,7 +26709,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "Source points, default THREAD_SYNC_DEFAULT_LIMIT and at most THREAD_SYNC_MAX_LIMIT."
+              "description": "Source points; THREAD_SYNC_DEFAULT_LIMIT when omitted, any positive u32 when supplied."
             }
           }
         ]
@@ -26386,6 +26805,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in projected segment agent/provider names or the turn's model, state and ordinal."
+            }
+          },
+          {
             "name": "continuation_id",
             "in": "query",
             "required": false,
@@ -26445,7 +26876,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "Rows, default ITEMS_DEFAULT_LIMIT and at most ITEMS_MAX_LIMIT."
+              "description": "Rows; ITEMS_DEFAULT_LIMIT when omitted, any positive u32 when supplied."
             }
           }
         ]
@@ -26541,6 +26972,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in projected segment agent/provider names or the turn's model, state and ordinal."
+            }
+          },
+          {
             "name": "continuation_id",
             "in": "query",
             "required": false,
@@ -26600,7 +27043,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "Rows, default ITEMS_DEFAULT_LIMIT and at most ITEMS_MAX_LIMIT."
+              "description": "Rows; ITEMS_DEFAULT_LIMIT when omitted, any positive u32 when supplied."
             }
           }
         ]
@@ -28193,6 +28636,18 @@
         ],
         "parameters": [
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -28203,7 +28658,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -28215,7 +28670,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -33082,10 +33537,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Environment"
-                  }
+                  "$ref": "#/components/schemas/EnvironmentPage"
                 }
               }
             }
@@ -33114,6 +33566,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -35895,6 +36385,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -35905,7 +36407,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -35917,7 +36419,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -36101,6 +36603,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -36111,7 +36625,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -36123,7 +36637,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -38053,6 +38567,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the kept environment's visible name, matched before paging."
+            }
+          },
+          {
             "name": "under",
             "in": "query",
             "required": false,
@@ -39165,7 +39691,45 @@
                 "boolean",
                 "null"
               ],
-              "description": "Apply this thing's current restoration authority."
+              "description": "Apply the environment's current restoration authority."
+            }
+          },
+          {
+            "name": "threads_q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the visible bound-thread, topic, owner or directory text."
+            }
+          },
+          {
+            "name": "threads_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in the requested bound-thread page; ordinary reads keep the complete set."
+            }
+          },
+          {
+            "name": "threads_cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The preceding bound-thread page's continuation for this reader and query."
             }
           }
         ]
@@ -40016,6 +40580,60 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/EnvironmentMcpCollection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Servers by default, or discovered definitions."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the admitted visible name."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Requested page size; any positive u32, defaulting to fifty."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The continuation returned for this collection and search."
             }
           }
         ]
@@ -52967,6 +53585,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -52977,7 +53607,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -52989,7 +53619,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -53127,10 +53757,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/NativeSession"
-                  }
+                  "$ref": "#/components/schemas/NativeSessionPage"
                 }
               }
             }
@@ -53167,6 +53794,57 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the session title or folder, matched before paging."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same captured source and search."
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "The source returned by the first page; omit to ask the native program afresh."
             }
           }
         ]
@@ -54197,10 +54875,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ProviderModel"
-                  }
+                  "$ref": "#/components/schemas/ProviderModelPage"
                 }
               }
             }
@@ -54229,6 +54904,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -54726,10 +55439,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ModelSuggestion"
-                  }
+                  "$ref": "#/components/schemas/ModelSuggestionPage"
                 }
               }
             }
@@ -54758,6 +55468,68 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words of a visible model name."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The continuation from this same source and filter."
+            }
+          },
+          {
+            "name": "unlisted",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Omit names already saved on this provider before paging."
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Ask the source again instead of reading its last successful catalogue."
             }
           }
         ]
@@ -58441,6 +59213,56 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Which native child directory to page; omission keeps the complete resource read."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the chosen directory's disclosed text."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Positive entries per page; fifty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continuation of the same resource, child directory and search."
+            }
           }
         ]
       },
@@ -60586,6 +61408,56 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Which native child directory to page; omission keeps the complete resource read."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the chosen directory's disclosed text."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Positive entries per page; fifty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continuation of the same resource, child directory and search."
+            }
           }
         ]
       },
@@ -60796,10 +61668,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Runtime"
-                  }
+                  "$ref": "#/components/schemas/RuntimePage"
                 }
               }
             }
@@ -60844,6 +61713,44 @@
                 }
               ],
               "description": "Only those of this kind."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the admitted visible name."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Requested page size; any positive u32, defaulting to fifty."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The continuation returned for this collection and search."
             }
           }
         ]
@@ -61731,6 +62638,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -61741,7 +62660,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -61753,7 +62672,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -62630,6 +63549,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in block keys, source labels and stored preview text; full blobs are read separately."
+            }
+          },
+          {
             "name": "id",
             "in": "query",
             "required": false,
@@ -62691,7 +63622,7 @@
                 "null"
               ],
               "format": "int64",
-              "description": "How many: 50 when left out, at most 200."
+              "description": "How many: 50 when left out, any positive representable count when supplied."
             }
           }
         ]
@@ -62975,6 +63906,31 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "thread_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "Only schedules whose disclosed destination and agent origin address this thread."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the admitted visible name, before paging."
             }
           },
           {
@@ -64219,6 +65175,73 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/MachineMountCollection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Located mounts by default."
+            }
+          },
+          {
+            "name": "mount_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "Required when continuing one mount's attached environments."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the readable visible name or path."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Requested entries; fifty by default, any positive u32."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same machine, collection, mount and search."
+            }
           }
         ]
       }
@@ -64746,6 +65769,56 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "collection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Which native child directory to page; omission keeps the complete resource read."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the chosen directory's disclosed text."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Positive entries per page; fifty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continuation of the same resource, child directory and search."
             }
           }
         ]
@@ -67782,6 +68855,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -67792,7 +68877,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -67804,7 +68889,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -68399,6 +69484,18 @@
         ],
         "parameters": [
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in projected title/body, current disclosed place names and actor names."
+            }
+          },
+          {
             "name": "unread",
             "in": "query",
             "required": false,
@@ -68421,7 +69518,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`crate::common::MAX_LIMIT`]."
+              "description": "Entries per page; the ordinary default when omitted, any positive u32 when supplied."
             }
           },
           {
@@ -68933,10 +70030,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/PushDevice"
-                  }
+                  "$ref": "#/components/schemas/PushDevicePage"
                 }
               }
             }
@@ -68955,6 +70049,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       }
@@ -69065,10 +70199,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/NotificationRoute"
-                  }
+                  "$ref": "#/components/schemas/NotificationRoutePage"
                 }
               }
             }
@@ -69087,6 +70218,58 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "retained",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Only routes kept after their channel was removed, or only current routes when false."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the safe channel name, kind or connected label."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Requested entries; fifty by default, any positive u32."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same person, retained choice and search."
+            }
           }
         ]
       }
@@ -69308,10 +70491,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/NotificationChannel"
-                  }
+                  "$ref": "#/components/schemas/NotificationChannelPage"
                 }
               }
             }
@@ -69357,6 +70537,44 @@
                 "null"
               ],
               "description": "Inspect only the system's channels as their ordinary administrator. Mutually exclusive\nwith `org_id`; the default remains the channels that can reach the caller."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the visible channel name or notifier kind."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same channel owner and search."
             }
           }
         ]
@@ -70194,10 +71412,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Destination"
-                  }
+                  "$ref": "#/components/schemas/DestinationPage"
                 }
               }
             }
@@ -70226,6 +71441,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -70686,6 +71939,18 @@
         ],
         "parameters": [
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the token's current name, matched before its page is selected."
+            }
+          },
+          {
             "name": "owner_id",
             "in": "query",
             "required": true,
@@ -70721,7 +71986,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "Requested page size, bounded by the ordinary page limit."
+              "description": "Entries requested in one page, fifty by default; any positive u32 when supplied."
             }
           }
         ]
@@ -70921,6 +72186,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the token's current name, matched before its page is selected."
+            }
+          },
+          {
             "name": "owner_id",
             "in": "query",
             "required": true,
@@ -70956,7 +72233,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "Requested page size, bounded by the ordinary page limit."
+              "description": "Entries requested in one page, fifty by default; any positive u32 when supplied."
             }
           }
         ]
@@ -71228,6 +72505,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -71238,7 +72527,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -71250,7 +72539,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -72640,10 +73929,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Host"
-                  }
+                  "$ref": "#/components/schemas/HostPage"
                 }
               }
             }
@@ -72662,6 +73948,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       }
@@ -72735,10 +74061,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Runtime"
-                  }
+                  "$ref": "#/components/schemas/RuntimePage"
                 }
               }
             }
@@ -72787,6 +74110,44 @@
                 }
               ],
               "description": "Only those of this kind."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words of the visible unit, resource or template name."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same host, kind and name search."
             }
           }
         ]
@@ -73099,10 +74460,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/AdminPlugin"
-                  }
+                  "$ref": "#/components/schemas/AdminPluginPage"
                 }
               }
             }
@@ -73121,6 +74479,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       }
@@ -73165,10 +74563,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/CapabilityDef"
-                  }
+                  "$ref": "#/components/schemas/CapabilityDefPage"
                 }
               }
             }
@@ -73187,6 +74582,58 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal words in stored visible definition text."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Positive entries per page; fifty by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same actor, words and public alias keys."
+            }
+          },
+          {
+            "name": "aliases",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Comma-separated exact keys also matching a localized shipped capability name or description."
+            }
           }
         ]
       }
@@ -74874,10 +76321,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/IdentityProvider"
-                  }
+                  "$ref": "#/components/schemas/IdentityProviderPage"
                 }
               }
             }
@@ -74896,6 +76340,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       },
@@ -75344,6 +76828,46 @@
           {
             "bearer": []
           }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
+          }
         ]
       }
     },
@@ -75665,6 +77189,46 @@
         "security": [
           {
             "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
+            }
           }
         ]
       }
@@ -76072,6 +77636,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -76082,7 +77658,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -76094,7 +77670,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -76246,6 +77822,18 @@
         ],
         "parameters": [
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -76256,7 +77844,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -76268,7 +77856,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -77025,6 +78613,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal version, platform or check-state words, before the output page."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": true,
@@ -77211,6 +78811,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal current readable item-name words; the native score and reasons are retained."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -77221,7 +78833,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries per page; any positive u32, the place's related count by default."
             }
           },
           {
@@ -77233,7 +78845,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "Continue the same actor, source, words and ranked visible observation."
             }
           }
         ]
@@ -78172,6 +79784,19 @@
         ],
         "parameters": [
           {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "One exact identity, independent of recent visits; the same current visibility checks still apply."
+            }
+          },
+          {
             "name": "starred",
             "in": "query",
             "required": false,
@@ -78233,6 +79858,30 @@
             }
           },
           {
+            "name": "picker",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Picker mode offers all available names when empty, with this person's recent selections first."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same selection with the previous next_cursor."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -78243,7 +79892,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many names, at most [`NAME_SEARCH_LIMIT_MAX`]; [`NAME_SEARCH_LIMIT_DEFAULT`] when left out."
+              "description": "How many names; any positive u32, [`NAME_SEARCH_LIMIT_DEFAULT`] when left out."
             }
           }
         ]
@@ -78493,6 +80142,18 @@
             "schema": {
               "$ref": "#/components/schemas/LinkDirection",
               "description": "Which way: `in` for what refers to the document, `out` for what it refers to."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Visible source/target name, context or written label/path words; with of, rendered mention-line words."
             }
           },
           {
@@ -81881,6 +83542,42 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Visible conversation, participant or place-name words, before the result page fills."
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Resolve only these comma-separated chat identities through the same native list admission."
+            }
+          },
+          {
+            "name": "include_empty",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "With nodes, also include readable place chats with no messages yet. False by default."
+            }
+          },
+          {
             "name": "participating",
             "in": "query",
             "required": false,
@@ -81932,7 +83629,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`crate::common::MAX_LIMIT`]."
+              "description": "Entries per page; any positive u32, fifty by default."
             }
           },
           {
@@ -82246,6 +83943,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "members_q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Visible member-name or username words; omission retains the complete ordinary metadata view."
+            }
+          },
+          {
+            "name": "members_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Member page size, any positive u32; supplied by the roster reader."
+            }
+          },
+          {
+            "name": "members_cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same chat and member search."
             }
           }
         ]
@@ -87284,6 +89019,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in the admitted visible name, before paging."
             }
           },
           {
@@ -98130,6 +99877,18 @@
         ],
         "parameters": [
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -98140,7 +99899,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -98152,7 +99911,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -98350,6 +100109,18 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -98360,7 +100131,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
             }
           },
           {
@@ -98372,7 +100143,7 @@
                 "string",
                 "null"
               ],
-              "description": "The `next_cursor` of the page before."
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -99879,6 +101650,140 @@
         ]
       }
     },
+    "/me/picker-recents": {
+      "get": {
+        "operationId": "MePickerRecentsGet",
+        "summary": "Reads this person's recent picker choices in one preference read.",
+        "x-orch-access": "user",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MePickerRecentsGet",
+          "method": "GET",
+          "path": "/me/picker-recents",
+          "title": "Reads this person's recent picker choices in one preference read.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MePickerRecentsGet",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "read",
+                  "resources": [
+                    "account"
+                  ],
+                  "target": {
+                    "kind": "current_account"
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MePickerRecents"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "MePickerRecentCreate",
+        "summary": "Promotes one key atomically without replacing another device's choices.",
+        "x-orch-access": "user",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MePickerRecentCreate",
+          "method": "POST",
+          "path": "/me/picker-recents",
+          "title": "Promotes one key atomically without replacing another device's choices.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MePickerRecentCreate",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "write",
+                  "resources": [
+                    "account"
+                  ],
+                  "target": {
+                    "kind": "current_account"
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MePickerRecentReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MePickerRecentChoice"
+              }
+            }
+          }
+        }
+      }
+    },
     "/me/state/project_views/{project_id}": {
       "put": {
         "operationId": "MeProjectViewSet",
@@ -101210,10 +103115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Suspension"
-                  }
+                  "$ref": "#/components/schemas/SuspensionPage"
                 }
               }
             }
@@ -101242,6 +103144,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -101332,10 +103272,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Group"
-                  }
+                  "$ref": "#/components/schemas/GroupPage"
                 }
               }
             }
@@ -101376,6 +103313,44 @@
                 "null"
               ],
               "description": "Also the groups that the orgs inside it keep."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words of the group's visible name."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 by default."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A continuation from this org, descendant choice and search."
             }
           }
         ]
@@ -101603,10 +103578,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Group"
-                  }
+                  "$ref": "#/components/schemas/GroupPage"
                 }
               }
             }
@@ -101635,6 +103607,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -101910,10 +103920,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/UserRef"
-                  }
+                  "$ref": "#/components/schemas/UserRefPage"
                 }
               }
             }
@@ -101942,6 +103949,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -102046,10 +104091,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Holder"
-                  }
+                  "$ref": "#/components/schemas/HolderPage"
                 }
               }
             }
@@ -102078,6 +104120,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -102494,10 +104574,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ServiceAccount"
-                  }
+                  "$ref": "#/components/schemas/ServiceAccountPage"
                 }
               }
             }
@@ -102526,6 +104603,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -102794,10 +104909,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ApiTokenInfo"
-                  }
+                  "$ref": "#/components/schemas/ApiTokenInfoPage"
                 }
               }
             }
@@ -102826,6 +104938,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Words in this collection's disclosed labels or record text; no minimum length."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The opaque continuation returned by this same collection and search."
             }
           }
         ]
@@ -107767,6 +109917,60 @@
         ],
         "description": "Stops a mailed code being a second step of the person."
       },
+      "CollectionQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in this collection's disclosed labels or record text; no minimum length."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The opaque continuation returned by this same collection and search."
+          }
+        },
+        "description": "A named collection, searched and read without a fixed total-result cutoff."
+      },
+      "SessionInfoPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionInfo"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "SessionInfo": {
         "type": "object",
         "properties": {
@@ -107816,6 +110020,30 @@
           "expires_at"
         ],
         "description": "A session of a browser, as its person lists their own."
+      },
+      "ApiTokenInfoPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiTokenInfo"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "ApiTokenInfo": {
         "type": "object",
@@ -112617,6 +114845,25 @@
             ],
             "description": "What a starting thread is waiting for."
           },
+          "starting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the step it is waiting for began."
+          },
+          "starting_work": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartingWork"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The command that step waits for, and what holds it up; none while it waits for nothing in particular."
+          },
           "blocked": {
             "anyOf": [
               {
@@ -113256,6 +115503,11 @@
           },
           {
             "type": "string",
+            "const": "recording",
+            "description": "The files of the directory, recorded before the turn so that they can be put back."
+          },
+          {
+            "type": "string",
             "const": "files",
             "description": "Its files."
           },
@@ -113266,6 +115518,27 @@
           }
         ],
         "description": "What a starting thread is waiting for."
+      },
+      "StartingWork": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`."
+          },
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of command of other work, on the same machine and in the same line, that it waits behind."
+          }
+        },
+        "required": [
+          "command",
+          "behind"
+        ],
+        "description": "The command a starting thread's step waits for, and the other work that holds it up."
       },
       "ThreadBlocked": {
         "type": "object",
@@ -113403,6 +115676,14 @@
           "placement": {
             "$ref": "#/components/schemas/Placement",
             "description": "Whether it is a person's own machine or one the system manages."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The host of a managed machine, independent of the host's displayed name."
           }
         },
         "required": [
@@ -116014,12 +118295,77 @@
             ],
             "format": "uuid",
             "description": "Look among the members of this org, at whatever level it lies."
+          },
+          "include_external": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Also find admitted public people outside the selected org, retaining actual membership facts.\nRequires org_id; false by default."
+          },
+          "picker": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Picker mode accepts the first character and opens with private recents and shared-org people."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries per page; any positive u32, twenty by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same actor, org, picker mode and words."
           }
         },
         "required": [
           "q"
         ],
         "description": "Searches for people by the start of a username or a part of a display name\namong those who share an org with the caller, and by an exact username or\naddress anywhere. It never lists everybody."
+      },
+      "UserSearchReply": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserRef"
+            },
+            "description": "Current public references admitted by this search."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of the same search, absent at the end."
+          },
+          "org_member_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "With include_external, returned people who are members of org_id; absent otherwise."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "Native people results with membership facts for the selected org, independent of loaded pages."
       },
       "PageQuery": {
         "type": "object",
@@ -116489,9 +118835,63 @@
             ],
             "format": "uuid",
             "description": "Only the invitations into this org."
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Only invitations that are unrevoked, unexpired and not used up."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in its visible destination, address, note or inviter."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same org, active choice and search."
           }
         },
         "description": "The invitations of a place."
+      },
+      "InvitationPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Invitation"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "InvitationAcceptBody": {
         "type": "object",
@@ -117624,13 +120024,20 @@
           "partial": {
             "type": "boolean",
             "description": "More candidates may match beyond the answer or its bounded access-check budget."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same actor, kinds, scope and search; absent at the end."
           }
         },
         "required": [
           "items",
           "partial"
         ],
-        "description": "A bounded name lookup; a partial answer asks the reader to narrow the words rather than claiming completeness."
+        "description": "One currently authorized name page, with continuation through the same native selector."
       },
       "NameHit": {
         "type": "object",
@@ -121050,6 +123457,82 @@
         ],
         "description": "A node's chat, as the tree names it."
       },
+      "SharedListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SharedListKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "All kinds by default."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal visible words, with no minimum length."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries requested in this page; fifty by default, any positive u32."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same actor, kind and search."
+          }
+        },
+        "description": "Search visible shared names, descriptions and disclosed path names before paging."
+      },
+      "SharedListKind": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "org",
+            "description": "An organization."
+          },
+          {
+            "type": "string",
+            "const": "project",
+            "description": "A project or hierarchy folder."
+          },
+          {
+            "type": "string",
+            "const": "topic",
+            "description": "A topic."
+          },
+          {
+            "type": "string",
+            "const": "thread",
+            "description": "A thread."
+          },
+          {
+            "type": "string",
+            "const": "document_container",
+            "description": "A document-only folder."
+          },
+          {
+            "type": "string",
+            "const": "document",
+            "description": "A text document."
+          }
+        ],
+        "description": "The independently searchable kinds in Shared."
+      },
       "SharedListReply": {
         "type": "object",
         "properties": {
@@ -121242,6 +123725,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the admitted visible name, before paging."
+          },
           "participating": {
             "type": [
               "boolean",
@@ -124741,7 +127231,7 @@
               "string",
               "null"
             ],
-            "description": "A template's unit kind, or an environment's origin (machine/template)."
+            "description": "A template's unit kind, an environment's origin (machine/template), or system for an agent without a home."
           },
           "resource_view": {
             "anyOf": [
@@ -126093,6 +128583,13 @@
               "$ref": "#/components/schemas/EnvironmentThread"
             },
             "description": "The threads bound to it that the caller may view."
+          },
+          "threads_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly requested bound-thread page, absent for an ordinary complete read or its final page."
           },
           "threads_hidden": {
             "type": "integer",
@@ -131860,6 +134357,13 @@
       "Machine": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly selected child directory; absent for a complete or final read."
+          },
           "data_directory": {
             "anyOf": [
               {
@@ -131996,6 +134500,14 @@
           "placement": {
             "$ref": "#/components/schemas/Placement",
             "description": "Whether it is a person's own machine or one the system manages."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The host of a managed machine, independent of the host's displayed name."
           },
           "owner": {
             "anyOf": [
@@ -132409,6 +134921,13 @@
       "Host": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly selected child directory; absent for a complete or final read."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -132767,6 +135286,10 @@
       "HostKeptLayers": {
         "type": "object",
         "properties": {
+          "latest": {
+            "type": "boolean",
+            "description": "The newest visible retained generation for this environment, independent of the chosen page."
+          },
           "environment_id": {
             "type": "string",
             "format": "uuid"
@@ -132791,6 +135314,7 @@
           }
         },
         "required": [
+          "latest",
           "environment_id",
           "environment",
           "generation",
@@ -133697,6 +136221,13 @@
       "Mount": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly selected child directory; absent for a complete or final read."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -135235,6 +137766,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +138206,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -136749,6 +139433,36 @@
               "null"
             ],
             "description": "The place control lists visible places of its tree, or matching addresses in any tree."
+          },
+          "picker": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Picker mode opens with private recent people and groups; name filtering starts with one character."
+          },
+          "kinds": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Comma-separated holder kinds, filtered before paging; absent means every kind."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries per page; any positive u32, fifty by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue this actor, source place, tree, kinds and literal locator search."
           }
         },
         "required": [
@@ -136765,6 +139479,13 @@
               "$ref": "#/components/schemas/HolderCandidate"
             },
             "description": "The page's tree first, every result with its whole place."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Native continuation; absent at the end."
           }
         },
         "required": [
@@ -136808,6 +139529,13 @@
       "NodeRoleListReply": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "More assignments held here; owners and inherited policy facts remain complete."
+          },
           "owners": {
             "type": "array",
             "items": {
@@ -138839,6 +141567,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Visible person-name or username words, before paging."
+          },
           "holder": {
             "type": "string",
             "description": "Which holder to list. The forms are `role:<place>:<role>` with the place a node identifier\nor `system`; `group:<id>`; `node:<id>`, for those with a role in a\nplace named in a Use row; and `admins`, for the admins of the page's place. Only holders\nthat the page shows are answered."
@@ -138901,6 +141636,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in the currently projected text, action, actor name or disclosed file/thread name."
+          },
           "upload": {
             "type": [
               "string",
@@ -138925,7 +141667,7 @@
               "string",
               "null"
             ],
-            "description": "A comma list of the kinds of line wanted; for an environment, values of\n[`HistoryKind`]."
+            "description": "A comma list of the kinds of line wanted: HistoryKind for an environment,\nAuditKind for a node or another resource; applied before paging."
           },
           "path": {
             "type": [
@@ -154440,6 +157182,14 @@
             "format": "uuid",
             "description": "The complete or explicitly unavailable recorded files before this turn."
           },
+          "files_changed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many included files the turn changed, whoever changed them: the difference of the files recorded\nbefore it and the files observed at its end. `null` while either is missing (the files were not\nrecorded, or the end has not been observed yet)."
+          },
           "model": {
             "type": "string",
             "description": "The model's routing name."
@@ -156597,6 +159347,24 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in the payload after its current masking."
+          },
+          "direction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RawDirection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only frames going in this direction, before the output page."
+          },
           "continuation_id": {
             "type": [
               "string",
@@ -156640,9 +159408,32 @@
         ],
         "description": "The raw events of one segment, newest first."
       },
+      "RawDirection": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "to_harness",
+            "description": "To the harness."
+          },
+          {
+            "type": "string",
+            "const": "from_harness",
+            "description": "From the harness."
+          }
+        ],
+        "description": "Which way a raw event travelled."
+      },
       "ThreadRawListReply": {
         "type": "object",
         "properties": {
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Continue below this native event number, including an empty search-progress page."
+          },
           "projection": {
             "anyOf": [
               {
@@ -156699,21 +159490,6 @@
           "payload"
         ],
         "description": "One event exactly as it crossed between Orch and a harness."
-      },
-      "RawDirection": {
-        "oneOf": [
-          {
-            "type": "string",
-            "const": "to_harness",
-            "description": "To the harness."
-          },
-          {
-            "type": "string",
-            "const": "from_harness",
-            "description": "From the harness."
-          }
-        ],
-        "description": "Which way a raw event travelled."
       },
       "ThreadAdoptRetryHistoryResponse": {
         "anyOf": [
@@ -156806,6 +159582,20 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in the projected outline title or goal condition."
+          },
+          "kinds": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Comma-separated OutlineKind values, selected before the output page."
+          },
           "continuation_id": {
             "type": [
               "string",
@@ -156858,7 +159648,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "Source points, default THREAD_SYNC_DEFAULT_LIMIT and at most THREAD_SYNC_MAX_LIMIT."
+            "description": "Source points; THREAD_SYNC_DEFAULT_LIMIT when omitted, any positive u32 when supplied."
           }
         },
         "description": "One outline neighborhood or older page, never the entire historical payload table."
@@ -156867,6 +159657,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in projected segment agent/provider names or the turn's model, state and ordinal."
+          },
           "continuation_id": {
             "type": [
               "string",
@@ -156903,7 +159700,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "Rows, default ITEMS_DEFAULT_LIMIT and at most ITEMS_MAX_LIMIT."
+            "description": "Rows; ITEMS_DEFAULT_LIMIT when omitted, any positive u32 when supplied."
           }
         },
         "description": "Explicit historical turn/segment pagination; a missing cursor starts at the most recent window."
@@ -159427,6 +162224,17 @@
             "$ref": "#/components/schemas/EnvironmentDefault",
             "description": "What a new thread does about its environment unless told."
           },
+          "default_environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BindingDefaultEnvironment"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use\nit when they cannot; absent when no setting names one and when rebinding an existing thread."
+          },
           "source": {
             "$ref": "#/components/schemas/BindingSource",
             "description": "Safe resolved repository settings and the place supplying the repository address."
@@ -160019,7 +162827,7 @@
           },
           "is_default": {
             "type": "boolean",
-            "description": "Whether it is the topic's default."
+            "description": "Whether it is the default of the threads started here: the environment the nearest setting of\n`env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it."
           },
           "used": {
             "$ref": "#/components/schemas/EnvironmentUse",
@@ -160101,6 +162909,40 @@
           }
         ],
         "description": "What `env.thread_default` resolves to."
+      },
+      "BindingDefaultEnvironment": {
+        "type": "object",
+        "properties": {
+          "environment": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The environment the setting names."
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NodeRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place whose setting it is, when that is not the place asked about itself: a project or org above it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,\nor `environment_not_seen` when it is not among those the caller may see."
+          }
+        },
+        "required": [
+          "environment",
+          "from",
+          "reason"
+        ],
+        "description": "The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it."
       },
       "BindingSource": {
         "type": "object",
@@ -161824,6 +164666,30 @@
           }
         ],
         "description": "What happened to one distinct occurrence."
+      },
+      "EnvironmentPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Environment"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "TopicDefaultEnvironmentSetBody": {
         "type": "object",
@@ -164662,6 +167528,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the kept environment's visible name, matched before paging."
+          },
           "under": {
             "type": [
               "boolean",
@@ -165059,6 +167932,13 @@
             },
             "description": "The threads bound to it that the caller may view."
           },
+          "threads_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly requested bound-thread page, absent for an ordinary complete read or its final page."
+          },
           "threads_hidden": {
             "type": "integer",
             "format": "int64",
@@ -165400,6 +168280,43 @@
           "revision"
         ],
         "description": "The actual newly accepted standalone Environment and provision without existing content."
+      },
+      "EnvironmentGetQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "inspect_deleted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Apply the environment's current restoration authority."
+          },
+          "threads_q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the visible bound-thread, topic, owner or directory text."
+          },
+          "threads_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in the requested bound-thread page; ordinary reads keep the complete set."
+          },
+          "threads_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The preceding bound-thread page's continuation for this reader and query."
+          }
+        },
+        "description": "Reads an environment, optionally selecting a page of its visible bound threads."
       },
       "EnvironmentSyncGetQuery": {
         "type": "object",
@@ -165925,9 +168842,72 @@
         ],
         "description": "Accepted configuration mutation without existing Environment content."
       },
+      "EnvironmentMcpListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentMcpCollection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Servers by default, or discovered definitions."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the admitted visible name."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Requested page size; any positive u32, defaulting to fifty."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The continuation returned for this collection and search."
+          }
+        },
+        "description": "Search and continue one environment's MCP catalogue."
+      },
+      "EnvironmentMcpCollection": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "servers",
+            "description": "The configured server connections."
+          },
+          {
+            "type": "string",
+            "const": "found",
+            "description": "The server definitions discovered by the native programs."
+          }
+        ],
+        "description": "Which native environment catalogue this page continues."
+      },
       "EnvironmentMcp": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of the selected catalogue, or null after its last row."
+          },
           "servers": {
             "type": "array",
             "items": {
@@ -165952,6 +168932,7 @@
           }
         },
         "required": [
+          "next_cursor",
           "servers",
           "applies",
           "found",
@@ -177902,6 +180883,74 @@
         ],
         "description": "A thread that is bound to a provider."
       },
+      "NativeSessionListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the session title or folder, matched before paging."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same captured source and search."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The source returned by the first page; omit to ask the native program afresh."
+          }
+        },
+        "description": "Search and continuation within one captured native-session catalogue."
+      },
+      "NativeSessionPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NativeSession"
+            },
+            "description": "This page's readable sessions."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The next page of the same captured source and search."
+          },
+          "source": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Its opaque captured catalogue; not authority to read a provider."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "source"
+        ],
+        "description": "Native source identity stays outside the row window and is checked again on every page."
+      },
       "ProviderKeySetBody": {
         "type": "object",
         "additionalProperties": false,
@@ -178339,6 +181388,30 @@
         ],
         "description": "Chooses where a provider's details come from. An element left out stays as it is; one given takes the place\nof its choice, and its source is asked what it is and read once at once."
       },
+      "ProviderModelPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderModel"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "CapabilityBackendQuery": {
         "type": "object",
         "properties": {
@@ -178545,6 +181618,74 @@
         },
         "description": "Changes a model of a provider. A routing name is not changed: another model is added."
       },
+      "ProviderModelSuggestionListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words of a visible model name."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 when absent."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The continuation from this same source and filter."
+          },
+          "unlisted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Omit names already saved on this provider before paging."
+          },
+          "refresh": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Ask the source again instead of reading its last successful catalogue."
+          }
+        },
+        "description": "A page of the source's proposals, optionally only those not saved on the provider."
+      },
+      "ModelSuggestionPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSuggestion"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "ProviderModelSuggestionAcceptBody": {
         "type": "object",
         "additionalProperties": false,
@@ -178560,7 +181701,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [
@@ -180495,6 +183636,43 @@
         ],
         "description": "A newly issued replacement credential without retained installation paths or roles."
       },
+      "ChildCollectionQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which native child directory to page; omission keeps the complete resource read."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the chosen directory's disclosed text."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Positive entries per page; fifty by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of the same resource, child directory and search."
+          }
+        },
+        "description": "Selects one visible child directory of an otherwise complete resource read."
+      },
       "MachineEnrollmentInfo": {
         "type": "object",
         "properties": {
@@ -181588,6 +184766,13 @@
       "HostListedContent": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly selected child directory; absent for a complete or final read."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -181955,9 +185140,56 @@
               }
             ],
             "description": "Only those of this kind."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the admitted visible name."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Requested page size; any positive u32, defaulting to fifty."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The continuation returned for this collection and search."
           }
         },
         "description": "The runtimes of a host to list."
+      },
+      "RuntimePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Runtime"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "Runtime": {
         "type": "object",
@@ -182415,6 +185647,13 @@
             ],
             "description": "`under_7_days`, `7_to_30_days`, `30_days_plus` or `unknown`."
           },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in this collection's disclosed labels or record text; no minimum length."
+          },
           "limit": {
             "type": [
               "integer",
@@ -182422,14 +185661,14 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent."
+            "description": "Entries in this page; 50 when absent, any positive u32 when supplied."
           },
           "cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The `next_cursor` of the page before."
+            "description": "The opaque continuation returned by this same collection and search."
           }
         },
         "description": "Scope and filters of the single storage report."
@@ -183208,6 +186447,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in block keys, source labels and stored preview text; full blobs are read separately."
+          },
           "id": {
             "type": [
               "string",
@@ -183246,7 +186492,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "How many: 50 when left out, at most 200."
+            "description": "How many: 50 when left out, any positive representable count when supplied."
           }
         },
         "description": "Which records to read."
@@ -183725,8 +186971,22 @@
       "InputScheduleListQuery": {
         "type": "object",
         "additionalProperties": false,
-        "description": "A topic's readable schedules, next due first.",
         "properties": {
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Only schedules whose disclosed destination and agent origin address this thread."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the admitted visible name, before paging."
+          },
           "limit": {
             "type": [
               "integer",
@@ -183755,6 +187015,7 @@
             "description": "Optional lifecycle filter."
           }
         },
+        "description": "A topic's readable schedules, next due first.",
         "required": [
           "state"
         ]
@@ -184412,9 +187673,85 @@
         ],
         "description": "What one model of a turn was counted at."
       },
+      "MachineMountListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MachineMountCollection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Located mounts by default."
+          },
+          "mount_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Required when continuing one mount's attached environments."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the readable visible name or path."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Requested entries; fifty by default, any positive u32."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same machine, collection, mount and search."
+          }
+        },
+        "description": "Search and continue a machine's mount locations, additions or attachments."
+      },
+      "MachineMountCollection": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "locations",
+            "description": "Located mounts."
+          },
+          {
+            "type": "string",
+            "const": "available",
+            "description": "Manageable mounts that may be added."
+          },
+          {
+            "type": "string",
+            "const": "environments",
+            "description": "Readable attached environments of one located mount."
+          }
+        ],
+        "description": "The independently searched collection on a machine's Mounts page."
+      },
       "MachineMounts": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the selected locations, additions or attachments."
+          },
           "grouping": {
             "type": "array",
             "items": {
@@ -184439,6 +187776,7 @@
           }
         },
         "required": [
+          "next_cursor",
           "grouping",
           "locations",
           "available"
@@ -184448,6 +187786,13 @@
       "MachineMount": {
         "type": "object",
         "properties": {
+          "environments_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the readable attachments of this mount on this machine."
+          },
           "mount": {
             "$ref": "#/components/schemas/MountRef",
             "description": "The named data, which stays a resource independent of its machines."
@@ -184507,6 +187852,7 @@
           }
         },
         "required": [
+          "environments_next_cursor",
           "mount",
           "target",
           "kind",
@@ -184706,6 +188052,13 @@
       "MountListedContent": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation of an explicitly selected child directory; absent for a complete or final read."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -186265,6 +189618,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in projected title/body, current disclosed place names and actor names."
+          },
           "unread": {
             "type": [
               "boolean",
@@ -186279,7 +189639,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "How many entries, at most [`crate::common::MAX_LIMIT`]."
+            "description": "Entries per page; the ordinary default when omitted, any positive u32 when supplied."
           },
           "cursor": {
             "type": [
@@ -186819,6 +190179,30 @@
         ],
         "description": "Takes a browser out of the push subscriptions."
       },
+      "PushDevicePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushDevice"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "PushDevice": {
         "type": "object",
         "properties": {
@@ -186851,6 +190235,67 @@
           "last_ok_at"
         ],
         "description": "A browser of the caller's that took push, without its endpoint or its keys."
+      },
+      "NotificationRouteListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "retained": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Only routes kept after their channel was removed, or only current routes when false."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the safe channel name, kind or connected label."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Requested entries; fifty by default, any positive u32."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same person, retained choice and search."
+          }
+        },
+        "description": "Search and continue the caller's stored delivery routes."
+      },
+      "NotificationRoutePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationRoute"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "NotificationRoute": {
         "type": "object",
@@ -187159,9 +190604,64 @@
               "null"
             ],
             "description": "Inspect only the system's channels as their ordinary administrator. Mutually exclusive\nwith `org_id`; the default remains the channels that can reach the caller."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the visible channel name or notifier kind."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same channel owner and search."
           }
         },
         "description": "The channels a caller is shown."
+      },
+      "NotificationChannelPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationChannel"
+            },
+            "description": "Readable channel rows in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same owner and search."
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Notifier kinds in the unfiltered authorized selection; no private channel contributes one."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "kinds"
+        ],
+        "description": "Channel rows and the complete visible kind facts needed by singleton creation choices."
       },
       "NotificationChannel": {
         "type": "object",
@@ -187633,6 +191133,30 @@
         ],
         "description": "An accepted link generation without a readable current link secret."
       },
+      "DestinationPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Destination"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "Destination": {
         "type": "object",
         "properties": {
@@ -187917,6 +191441,13 @@
       "AdminTokenListQuery": {
         "type": "object",
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the token's current name, matched before its page is selected."
+          },
           "owner_id": {
             "type": [
               "string",
@@ -187939,7 +191470,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "Requested page size, bounded by the ordinary page limit."
+            "description": "Entries requested in one page, fifty by default; any positive u32 when supplied."
           }
         },
         "required": [
@@ -188699,6 +192230,30 @@
         },
         "description": "Removes only the system value the writer reviewed."
       },
+      "HostPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Host"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "AdminRuntimeListQuery": {
         "type": "object",
         "additionalProperties": false,
@@ -188721,6 +192276,29 @@
               }
             ],
             "description": "Only those of this kind."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words of the visible unit, resource or template name."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same host, kind and name search."
           }
         },
         "description": "Which runtimes to list."
@@ -188764,6 +192342,30 @@
           "to"
         ],
         "description": "Which stored series to read. A span inside `[retention] metrics_fine_days` is answered from the\nvalues of each minute; a longer or an older one from those of each hour, at a step of an hour or a\nday (`400 request.invalid` for a finer step there). Without `name`, the answer lists the names\nthere are."
+      },
+      "AdminPluginPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminPlugin"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "AdminPlugin": {
         "type": "object",
@@ -188834,6 +192436,67 @@
           }
         ],
         "description": "How a plugin fares."
+      },
+      "CapabilityListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal words in stored visible definition text."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Positive entries per page; fifty by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same actor, words and public alias keys."
+          },
+          "aliases": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Comma-separated exact keys also matching a localized shipped capability name or description."
+          }
+        },
+        "description": "A capability definition directory, including the interface's public localized aliases."
+      },
+      "CapabilityDefPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityDef"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "HarnessVersionFetchBody": {
         "type": "object",
@@ -189318,6 +192981,30 @@
           "revision"
         ],
         "description": "Accepted root-organization limits without its existing page content."
+      },
+      "IdentityProviderPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityProvider"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "IdentityProvider": {
         "type": "object",
@@ -189834,7 +193521,14 @@
             "items": {
               "$ref": "#/components/schemas/PkiInfoMachinesExpiring"
             },
-            "description": "At most 50 active machines whose certificates end within 30 days, including those already\nlapsed, soonest first. The count above includes machines beyond this list."
+            "description": "One searched expiry page of active machines, including already lapsed certificates, soonest first."
+          },
+          "machines_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same administrator, words and fixed expiry window; absent at the end."
           }
         },
         "required": [
@@ -190458,6 +194152,13 @@
               "$ref": "#/components/schemas/SemanticSearchOrg"
             },
             "description": "The root orgs where it is on or that have an index, by name."
+          },
+          "orgs_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same administrator's root-org name search; absent at the end."
           }
         },
         "required": [
@@ -191364,6 +195065,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal version, platform or check-state words, before the output page."
+          },
           "limit": {
             "type": [
               "integer",
@@ -191415,6 +195123,7 @@
           }
         },
         "required": [
+          "q",
           "limit",
           "cursor",
           "os",
@@ -191446,6 +195155,36 @@
           "next_cursor"
         ],
         "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
+      "DocumentRelatedListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal current readable item-name words; the native score and reasons are retained."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries per page; any positive u32, the place's related count by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same actor, source, words and ranked visible observation."
+          }
+        },
+        "description": "Native name search within the source document's ranked readable suggestions."
       },
       "RelatedItems": {
         "type": "object",
@@ -192825,6 +196564,14 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "One exact identity, independent of recent visits; the same current visibility checks still apply."
+          },
           "starred": {
             "type": [
               "boolean",
@@ -192861,6 +196608,20 @@
             "format": "uuid",
             "description": "Keeps to one tree of orgs."
           },
+          "picker": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Picker mode offers all available names when empty, with this person's recent selections first."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same selection with the previous next_cursor."
+          },
           "limit": {
             "type": [
               "integer",
@@ -192868,7 +196629,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "How many names, at most [`NAME_SEARCH_LIMIT_MAX`]; [`NAME_SEARCH_LIMIT_DEFAULT`] when left out."
+            "description": "How many names; any positive u32, [`NAME_SEARCH_LIMIT_DEFAULT`] when left out."
           }
         },
         "description": "Which names to find, among whatever the caller may see: nodes they may view, documents they may\nread, the chats they are in, the people and groups of the trees they belong to, and the resources\nlisted for them. Recents come first, then a match at the beginning of a name, then by\n`updated_at`."
@@ -192900,6 +196661,13 @@
           "direction": {
             "$ref": "#/components/schemas/LinkDirection",
             "description": "Which way: `in` for what refers to the document, `out` for what it refers to."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Visible source/target name, context or written label/path words; with of, rendered mention-line words."
           },
           "limit": {
             "type": [
@@ -196305,6 +200073,13 @@
             },
             "description": "The people in a direct or group chat; `null` for a node's chat."
           },
+          "members_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A requested member-directory page continues here; absent on complete ordinary metadata."
+          },
           "guests": {
             "type": "array",
             "items": {
@@ -197090,6 +200865,27 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Visible conversation, participant or place-name words, before the result page fills."
+          },
+          "ids": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolve only these comma-separated chat identities through the same native list admission."
+          },
+          "include_empty": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "With nodes, also include readable place chats with no messages yet. False by default."
+          },
           "participating": {
             "type": [
               "boolean",
@@ -197123,7 +200919,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "How many entries, at most [`crate::common::MAX_LIMIT`]."
+            "description": "Entries per page; any positive u32, fifty by default."
           },
           "cursor": {
             "type": [
@@ -197259,6 +201055,36 @@
           "created"
         ],
         "description": "The native opening outcome without reading existing chat content."
+      },
+      "ChatGetQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "members_q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Visible member-name or username words; omission retains the complete ordinary metadata view."
+          },
+          "members_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Member page size, any positive u32; supplied by the roster reader."
+          },
+          "members_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same chat and member search."
+          }
+        },
+        "description": "Select a native member-directory page without changing the chat's other metadata."
       },
       "ChatJoinRequestBody": {
         "type": "object",
@@ -199901,6 +203727,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words in the admitted visible name, before paging."
+          },
           "participating": {
             "type": [
               "boolean",
@@ -206128,6 +209961,71 @@
         },
         "description": "The subscriptions wanted."
       },
+      "MePickerRecents": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Entries retained and offered per kind; zero disables remembering."
+          },
+          "choices": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "description": "Newest-first distinct opaque keys. Names and authority come only from the picker source."
+          }
+        },
+        "required": [
+          "count",
+          "choices"
+        ],
+        "description": "The person's private recent picker choices, with the system's current group length."
+      },
+      "MePickerRecentChoice": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "Native resource kind, or model. The same kind shares history across screens."
+          },
+          "key": {
+            "type": "string",
+            "description": "Stable choice key. Models use their provider-qualified key."
+          }
+        },
+        "required": [
+          "kind",
+          "key"
+        ],
+        "description": "One deliberate selection; opening or inspecting a choice does not record it."
+      },
+      "MePickerRecentReceipt": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The current system group length."
+          },
+          "remembered": {
+            "type": "boolean",
+            "description": "False when remembering is switched off; no earlier choice was erased."
+          }
+        },
+        "required": [
+          "count",
+          "remembered"
+        ],
+        "description": "A selection write acknowledges only its effect, without disclosing any stored private history."
+      },
       "ThreadReadBody": {
         "type": "object",
         "additionalProperties": false,
@@ -206775,6 +210673,30 @@
         ],
         "description": "The accepted membership suspension without existing membership details."
       },
+      "SuspensionPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Suspension"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "OrgGroupListQuery": {
         "type": "object",
         "additionalProperties": false,
@@ -206785,9 +210707,56 @@
               "null"
             ],
             "description": "Also the groups that the orgs inside it keep."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Words of the group's visible name."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries in this page; 50 by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A continuation from this org, descendant choice and search."
           }
         },
         "description": "The groups an org keeps."
+      },
+      "GroupPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "OrgGroupCreateBody": {
         "type": "object",
@@ -206894,6 +210863,30 @@
           "group_id"
         ],
         "description": "The accepted group update without group content or its keeping-org name."
+      },
+      "HolderPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Holder"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "GroupHolderAddBody": {
         "type": "object",
@@ -207046,6 +211039,30 @@
           }
         }
       },
+      "ServiceAccountPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceAccount"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
+      },
       "ServiceAccount": {
         "type": "object",
         "properties": {
@@ -207133,6 +211150,67 @@
           "service_account_id"
         ],
         "description": "An accepted service Account creation without stored account metadata or token counts."
+      },
+      "NodeTagListQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal visible tag-name words; an exact name precedes partial matches."
+          },
+          "picker": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Empty picker openings put this person's recent available definitions first."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Entries per page; any positive u32, fifty by default."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same actor, place, name query and captured personal order."
+          }
+        },
+        "description": "Native tag definition pages for a place, with optional personal picker ordering."
+      },
+      "TagPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            },
+            "description": "The entries of this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to send as `cursor` for the next page; `null` at the end."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "description": "One page of a list that can grow. The order is stated by each list and\nis stable."
       },
       "NodeTagCreateBody": {
         "type": "object",
@@ -209629,6 +213707,11 @@
             "type": "string",
             "const": "reactions",
             "description": "The last few emoji chosen, newest first."
+          },
+          {
+            "type": "string",
+            "const": "picker_recents",
+            "description": "Recently selected picker keys, newest first within each kind."
           },
           {
             "type": "string",

@@ -537,3 +537,49 @@ async fn person_session_and_activity_delivery_keep_current_system_standing_and_b
         );
     }
 }
+
+#[tokio::test]
+async fn a_persons_administrative_credentials_are_found_by_name_before_a_small_page() {
+    let world = World::new().await;
+    let c = admin_support::cast(&world).await;
+    let (wanted_session, _) = session(&world, c.ada.id()).await;
+    sqlx::query(
+        "UPDATE sessions SET user_agent='Earlier research browser',created_at=$2 WHERE id=$1",
+    )
+    .bind(wanted_session)
+    .bind(world.now() - chrono::Duration::days(1))
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    session(&world, c.ada.id()).await;
+    let sessions = value(
+        world
+            .app
+            .call(AdminUserSessionList, &[&c.ada.id()])
+            .token(&c.root.token)
+            .query(&json!({"q":"Earlier research","limit":1}))
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(sessions["items"].as_array().unwrap().len(), 1);
+    assert_eq!(sessions["items"][0]["id"], json!(wanted_session));
+    let (wanted_key, _) = key(&world, c.ada.id(), None).await;
+    sqlx::query("UPDATE api_tokens SET name='Earlier research key',created_at=$2 WHERE id=$1")
+        .bind(wanted_key)
+        .bind(world.now() - chrono::Duration::days(1))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    key(&world, c.ada.id(), None).await;
+    let keys = value(
+        world
+            .app
+            .call(AdminUserTokenList, &[&c.ada.id()])
+            .token(&c.root.token)
+            .query(&json!({"q":"Earlier research","limit":1}))
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(keys["items"].as_array().unwrap().len(), 1);
+    assert_eq!(keys["items"][0]["info"]["id"], json!(wanted_key));
+}
