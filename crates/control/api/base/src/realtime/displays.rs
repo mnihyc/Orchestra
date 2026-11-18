@@ -475,7 +475,7 @@ impl Sockets {
                 _ => "link_lost",
             };
         }
-        let (mut reader, mut writer) = tokio::io::split(tunnel);
+        let (mut reader, mut writer) = tunnel.into_halves();
         let viewer = new_id();
         lock(&self.viewers).insert((ticket.display, viewer), ticket.origin.user());
         let _ = app.engine.displays().used(ticket.display).await;
@@ -489,6 +489,8 @@ impl Sockets {
         let mut bytes = [0; READ_BYTES];
         let mut tick = tokio::time::interval(KEEPER_TICK);
         let mut permission_epoch = app.realtime.inner.epoch.subscribe();
+        let mut input_changes =
+            super::publication::WriteWatch::new(app.realtime.inner.epoch.subscribe(), KEEPER_TICK);
         let mut checked_at = tokio::time::Instant::now();
         let handshake_deadline = tokio::time::sleep(READY_WAIT);
         tokio::pin!(handshake_deadline);
@@ -506,10 +508,10 @@ impl Sockets {
                             for reply in header.replies{if !matches!(Self::publish_bytes(app,ticket,socket,reply).await,Ok(true)){failed=true;break;}}
                             if failed{break match Self::gates(app,ticket).await {Ok((false,_,reason,_))=>reason,_=>"link_lost"}}
                             if header.shared {
-                                match super::publication::write_message(&mut writer,&[1],app.clock.as_ref(),||Self::input_current(app,ticket,false)).await {
+                                match super::publication::write_message(&mut writer,&[1],app.clock.as_ref(),&mut input_changes,||Self::input_current(app,ticket,false)).await {
                                     Ok(Some(Ok(())))=>{},
                                     Ok(None)=>{break match Self::gates(app,ticket).await{Ok((false,_,reason,_))=>reason,_=>"link_lost"}},
-                                    _=>break "link_lost",
+                                    _=>break match Self::gates(app,ticket).await {Ok((false,_,reason,_))=>reason,_=>"link_lost"},
                                 }
                             }
                             if filter.push(&header.data).is_err(){break "protocol"}
@@ -519,7 +521,7 @@ impl Sockets {
                                 let (view,control,reason,_)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>{failure=Some("link_lost");break;}};
                                 if !view {failure=Some(reason);break;}
                                 if message.action&&!control{continue}
-                                match super::publication::write_message(&mut writer,&message.bytes,app.clock.as_ref(),||Self::input_current(app,ticket,message.action)).await {
+                                match super::publication::write_message(&mut writer,&message.bytes,app.clock.as_ref(),&mut input_changes,||Self::input_current(app,ticket,message.action)).await {
                                     Ok(Some(Ok(())))=>{if message.activity{self.input(app,ticket);}},
                                     Ok(None)=>{
                                         match Self::gates(app,ticket).await{
@@ -528,7 +530,7 @@ impl Sockets {
                                             Err(_)=>{failure=Some("link_lost");break;},
                                         }
                                     },
-                                    _=>{failure=Some("link_lost");break;},
+                                    _=>{failure=Some(match Self::gates(app,ticket).await {Ok((false,_,reason,_))=>reason,_=>"link_lost"});break;},
                                 }
                             }
                             if let Some(reason)=failure{break reason}

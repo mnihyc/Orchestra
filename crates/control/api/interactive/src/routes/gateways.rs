@@ -45,7 +45,11 @@ use orch_link_contract::gateways::GatewaySelection;
 use orch_link_contract::gateways::GatewayStatusReport;
 
 use orch_link_contract::gateways::TunnelPlan;
+
+#[path = "gateways/public_addresses.rs"]
+mod public_addresses;
 pub fn mount(registry: &mut Registry) {
+    public_addresses::mount(registry);
     registry
         .on_with_operation(
             api::GatewayCatalogueGet,

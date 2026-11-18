@@ -2019,7 +2019,10 @@ async fn a_host_data_move_keeps_its_childs_copy_and_never_erases_the_source_befo
         .machine
         .handler
         .hold(CommandKind::NodeMountImport);
+    let source_membership_id = new_id();
     let copy = CopyDecision {
+        source_membership_id,
+        target_membership_id: None,
         mount_id: mount,
         source_machine: source.machine,
         source_driver: "docker".into(),
@@ -2119,7 +2122,10 @@ async fn a_host_data_move_keeps_its_childs_copy_and_never_erases_the_source_befo
     )
     .await
     .unwrap();
-    mounts::set_location(&mut tx, &from).await.unwrap();
+    sqlx::query("INSERT INTO mount_locations(membership_id,mount_id,machine_id,kind,source,storage,data_kind,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(source_membership_id).bind(from.mount_id).bind(from.machine_id).bind(&from.kind).bind(&from.source)
+        .bind(&from.storage).bind(&from.data_kind).bind(from.created_by).bind(from.created_at)
+        .execute(&mut *tx).await.unwrap();
     mounts::set_location(&mut tx, &location(target.machine, child_name.clone()))
         .await
         .unwrap();

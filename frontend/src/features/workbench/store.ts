@@ -246,7 +246,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   close: (scope) => {
     const state = get(), ids = tabsForClose(state.layout, scope).map((tab) => tab.id);
     if (ids.length === 0) return;
-    if (ids.some((id) => state.unsaved.has(id))) { set({ pendingClose: ids }); return; }
+    // A side section that is not content closes by hiding: its view stays, with what is typed in it, so a close asks only about what it takes away.
+    const taken = ids.filter((id) => { const place = findTab(state.layout, id); return place?.container === undefined || isContentTab(place.tab); });
+    if (taken.some((id) => state.unsaved.has(id))) { set({ pendingClose: ids }); return; }
     state.finishClose(ids);
   },
   finishClose: (ids) => {

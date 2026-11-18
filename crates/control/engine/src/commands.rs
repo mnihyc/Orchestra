@@ -10,7 +10,9 @@
 
 pub mod authority;
 mod host_probe;
+pub mod host_unit;
 mod http_origin;
+pub mod provider_unit;
 mod receipts;
 pub use http_origin::HttpCommand;
 pub use receipts::McpImportAck;
@@ -20,8 +22,8 @@ pub(crate) mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
 pub use host_probe::HostPortsProbe;
 pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
+    HostPolicyAuthority, MachineGatewayAuthority, MachinePolicyAuthority, MachineProbeAuthority,
+    MachineProgramsAuthority, MachineRolesAuthority, role_change_refusal,
 };
 pub use machine_controls::{
     PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,
@@ -78,6 +80,9 @@ pub type BeforeCommand<'a> =
 /// A command to send to a machine.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outgoing {
+    /// A factual physical operand captured before deferred work; never permission evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_target: Option<orch_link_contract::commands::NativeTarget>,
     /// Its identifier: a command asked for twice under one is made once.
     pub id: Id,
     /// The machine it is for.
@@ -134,6 +139,7 @@ impl Outgoing {
         body: &B,
     ) -> Result<Self, CommandsError> {
         Ok(Self {
+            native_target: None,
             id,
             machine,
             key,
@@ -143,6 +149,16 @@ impl Outgoing {
             deadline: None,
             authority: None,
         })
+    }
+
+    /// Keeps the physical operand already captured by a producer, rather than resolving it later.
+    #[must_use]
+    pub fn with_native_target(
+        mut self,
+        target: orch_link_contract::commands::NativeTarget,
+    ) -> Self {
+        self.native_target = Some(target);
+        self
     }
 
     /// Retains login-origin evidence until the durable link's first-send/retry checkpoint.
@@ -178,6 +194,7 @@ pub(crate) async fn session_close(
     thread: Id,
     segment: Option<Id>,
 ) -> Result<Outgoing, crate::error::EngineError> {
+    let target = orch_db::queries::session_dependencies::target(conn, thread, segment).await?;
     if requires_fence(conn, thread).await? {
         let segment = segment.ok_or_else(|| {
             crate::error::EngineError::unreadable(
@@ -203,6 +220,7 @@ pub(crate) async fn session_close(
                 segment_id: segment,
             },
         )
+        .map(|command| command.with_native_target(target))
         .map_err(Into::into);
     }
     Outgoing::new(
@@ -211,6 +229,7 @@ pub(crate) async fn session_close(
         SerialKey::Thread(thread),
         &orch_link_contract::commands::SessionClose { thread_id: thread },
     )
+    .map(|command| command.with_native_target(target))
     .map_err(Into::into)
 }
 
