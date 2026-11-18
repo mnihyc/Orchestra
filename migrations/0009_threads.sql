@@ -490,6 +490,7 @@ CREATE INDEX model_inputs_node_seq_idx ON model_inputs USING btree (node_id, seq
 CREATE INDEX model_inputs_segment_idx ON model_inputs USING btree (segment_id, purpose, seq_created);
 
 CREATE TABLE threads (
+    native_opening_epoch bigint DEFAULT 0 NOT NULL,
     program text CHECK (program IS NULL OR program = 'orch'),
     program_root_org_id uuid REFERENCES nodes(id),
     ask_root_org_id uuid REFERENCES nodes(id) ON DELETE CASCADE,
@@ -515,6 +516,9 @@ CREATE TABLE threads (
     blocked_reason text,
     blocked_detail text,
     starting_step text,
+    starting_step_at timestamp with time zone,
+    starting_command text,
+    starting_behind text,
     agent_id uuid,
     provider_id uuid,
     arrangement text,
@@ -547,7 +551,8 @@ CREATE TABLE threads (
     CONSTRAINT threads_execution_revision_check CHECK ((execution_revision > 0)),
     CONSTRAINT threads_pending_notice_preview_bounded CHECK (((jsonb_typeof(pending_notices) = 'array'::text) AND (jsonb_array_length(pending_notices) <= 64))),
     CONSTRAINT threads_side_reading_check CHECK ((side_reading = ANY (ARRAY['read_only'::text, 'approval_gated'::text, 'no_tools'::text]))),
-    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'recording'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_work_check CHECK (starting_step IS NOT NULL OR (starting_step_at IS NULL AND starting_command IS NULL AND starting_behind IS NULL)),
     CONSTRAINT threads_state_check CHECK ((state = ANY (ARRAY['idle'::text, 'starting'::text, 'running'::text, 'waiting_approval'::text, 'blocked'::text]))),
     CONSTRAINT threads_pkey PRIMARY KEY (node_id),
     CONSTRAINT threads_agent_fk FOREIGN KEY (agent_id) REFERENCES agents(id),
@@ -558,6 +563,23 @@ CREATE TABLE threads (
     CONSTRAINT threads_side_of_fkey FOREIGN KEY (side_of) REFERENCES threads(node_id) ON DELETE CASCADE,
     CONSTRAINT threads_topic_id_fkey FOREIGN KEY (topic_id) REFERENCES nodes(id)
 );
+-- When a starting thread's step began, kept by the database for every writer: a step that changes starts its
+-- clock again and forgets the command and the wait noted for the step before; no step, nothing noted.
+CREATE FUNCTION orch_thread_starting_step() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.starting_step IS NULL THEN
+        NEW.starting_step_at := NULL;
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    ELSIF OLD.starting_step IS DISTINCT FROM NEW.starting_step THEN
+        NEW.starting_step_at := now();
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER threads_starting_step BEFORE UPDATE OF starting_step ON threads FOR EACH ROW EXECUTE FUNCTION orch_thread_starting_step();
 
 CREATE INDEX thread_display_topic_page_idx ON threads USING btree (topic_id, node_id);
 
@@ -1339,12 +1361,15 @@ CREATE TABLE turns (
     end_manifest_blob bytea,
     files_work_pending boolean DEFAULT false NOT NULL,
     files_end_manifest jsonb,
+    files_changed integer CHECK (files_changed >= 0),
     files_end_due boolean DEFAULT false NOT NULL,
     model text NOT NULL,
     effort text,
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
     lease_id uuid,
     native_turn_ref text,
+    native_opening_id uuid,
+    native_model_nonce uuid,
     native_end_confirmed boolean DEFAULT false NOT NULL,
     owner_read_results bigint DEFAULT 0 NOT NULL CHECK (owner_read_results >= 0),
     command_cleanup jsonb,
@@ -1561,3 +1586,364 @@ BEGIN
 END
 $$;
 CREATE TRIGGER ask_files_release AFTER DELETE ON ask_files FOR EACH ROW EXECUTE FUNCTION orch_release_ask_file();
+
+
+-- Physical admission exists before the logical history segment is published.
+CREATE TABLE native_opening_sources (
+    opening_id uuid PRIMARY KEY,
+    thread_id uuid NOT NULL REFERENCES threads(node_id) ON DELETE CASCADE,
+    segment_id uuid NOT NULL,
+    machine_id uuid NOT NULL,
+    opening_epoch bigint NOT NULL,
+    UNIQUE(thread_id,opening_epoch)
+);
+CREATE TABLE native_session_states (
+    id uuid PRIMARY KEY,
+    thread_id uuid NOT NULL REFERENCES threads(node_id) ON DELETE CASCADE,
+    machine_id uuid,
+    environment_id uuid,
+    env_generation integer NOT NULL,
+    provider_id uuid,
+    agent_id uuid,
+    executor text,
+    tool_set text,
+    ended_at timestamptz,
+    delivered_resources jsonb
+);
+CREATE INDEX native_session_thread ON native_session_states(thread_id,id);
+
+CREATE FUNCTION orch_attach_native_session() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE physical native_session_states%ROWTYPE;
+BEGIN
+    SELECT * INTO physical FROM native_session_states WHERE id=NEW.id FOR UPDATE;
+    IF FOUND THEN
+        IF physical.thread_id IS DISTINCT FROM NEW.thread_id
+          OR physical.environment_id IS DISTINCT FROM NEW.environment_id
+          OR physical.env_generation IS DISTINCT FROM NEW.env_generation
+          OR physical.provider_id IS DISTINCT FROM NEW.provider_id
+          OR physical.agent_id IS DISTINCT FROM NEW.agent_id
+          OR physical.executor IS DISTINCT FROM NEW.executor
+          OR physical.tool_set IS DISTINCT FROM NEW.tool_set
+          OR (NEW.machine_id IS NOT NULL AND physical.machine_id IS DISTINCT FROM NEW.machine_id) THEN
+            RAISE EXCEPTION 'The prepared native session belongs to another binding'
+              USING ERRCODE='23514',CONSTRAINT='native_session_address';
+        END IF;
+        NEW.machine_id:=physical.machine_id;
+        NEW.delivered_resources:=physical.delivered_resources;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER attach_native_session BEFORE INSERT ON segments FOR EACH ROW EXECUTE FUNCTION orch_attach_native_session();
+
+-- Tool membership is factual session state. A restored policy never restores a withdrawn nonce.
+CREATE FUNCTION orch_tool_revision(facts jsonb) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+    SELECT GREATEST(COALESCE((facts->>'admitted_revision')::bigint,0),
+                    COALESCE((facts->>'revision')::bigint,0),
+                    COALESCE((facts#>>'{tool_admission,revision}')::bigint,0))+1
+$$;
+CREATE FUNCTION orch_tool_close(facts jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_set(jsonb_set(facts,'{tool_admission,live}','false'),
+                     '{tool_admission,revision}',to_jsonb(orch_tool_revision(facts)))
+           ||jsonb_build_object('admitted_revision',orch_tool_revision(facts))
+$$;
+CREATE FUNCTION orch_tool_withdraw(facts jsonb, members text[]) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_set(jsonb_set(facts,'{tool_admission,members}',
+                       (facts#>'{tool_admission,members}')-members),
+                     '{tool_admission,revision}',to_jsonb(orch_tool_revision(facts)))
+           ||jsonb_build_object('admitted_revision',orch_tool_revision(facts))
+$$;
+CREATE INDEX native_session_tool_members_idx ON native_session_states USING gin ((delivered_resources#>'{tool_admission,members}'))
+    WHERE delivered_resources#>>'{tool_admission,live}'='true';
+CREATE INDEX native_session_tool_environment_idx ON native_session_states(environment_id,id)
+    WHERE delivered_resources#>>'{tool_admission,live}'='true';
+CREATE INDEX native_session_tool_provider_idx ON native_session_states(provider_id,id)
+    WHERE delivered_resources#>>'{tool_admission,live}'='true';
+
+-- A new opening cannot retain a nonce that was attempted during the original Stop.
+CREATE FUNCTION orch_tool_stop_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS(SELECT 1 FROM runtime_withdrawals w
+              WHERE w.environment_id=NEW.environment_id OR w.provider_id=NEW.provider_id) THEN
+        NEW.delivered_resources:=orch_tool_close(NEW.delivered_resources);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_stop_admission BEFORE INSERT OR UPDATE OF delivered_resources,environment_id,provider_id ON native_session_states
+    FOR EACH ROW WHEN (NEW.delivered_resources#>>'{tool_admission,live}'='true')
+    EXECUTE FUNCTION orch_tool_stop_admission();
+
+-- The existing revision feed closes open channels as soon as the exact Stop is accepted.
+CREATE FUNCTION orch_tool_runtime_stopping() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS(SELECT 1 FROM runtime_withdrawals WHERE runtime_id=NEW.id) THEN
+        IF NEW.kind='environment' THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE environment_id=NEW.environment_id AND env_generation=(NEW.native_stop#>>'{registration,resource,environment_generation}')::integer
+                AND delivered_resources#>>'{tool_admission,live}'='true';
+        ELSE
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE provider_id=NEW.provider_id AND delivered_resources#>>'{tool_admission,live}'='true';
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_runtime_stopping AFTER UPDATE OF native_stop,native_control_intent,native_control_revision,native_incarnation,host_id,machine_id,generation,kind,environment_id,provider_id,successor_of,state ON runtimes
+    FOR EACH ROW WHEN (NEW.native_stop IS NOT NULL)
+    EXECUTE FUNCTION orch_tool_runtime_stopping();
+
+CREATE FUNCTION orch_tool_session_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE segments SET delivered_resources=NEW.delivered_resources
+      WHERE id=NEW.id AND thread_id=NEW.thread_id
+        AND delivered_resources IS DISTINCT FROM NEW.delivered_resources;
+    IF OLD.delivered_resources->'tool_admission' IS DISTINCT FROM NEW.delivered_resources->'tool_admission' THEN
+        PERFORM pg_notify('orch_tool_session',NEW.id::text);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_session_notify AFTER UPDATE OF delivered_resources ON native_session_states FOR EACH ROW
+    WHEN (OLD.delivered_resources IS DISTINCT FROM NEW.delivered_resources)
+    EXECUTE FUNCTION orch_tool_session_notify();
+
+CREATE FUNCTION orch_tool_segment_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.ended_at IS DISTINCT FROM OLD.ended_at OR NEW.environment_id IS DISTINCT FROM OLD.environment_id
+         OR NEW.env_generation IS DISTINCT FROM OLD.env_generation OR NEW.machine_id IS DISTINCT FROM OLD.machine_id
+         OR NEW.provider_id IS DISTINCT FROM OLD.provider_id OR NEW.agent_id IS DISTINCT FROM OLD.agent_id
+         OR NEW.executor IS DISTINCT FROM OLD.executor OR NEW.tool_set IS DISTINCT FROM OLD.tool_set) THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources),
+            ended_at=NEW.ended_at,environment_id=NEW.environment_id,env_generation=NEW.env_generation,
+            machine_id=NEW.machine_id,provider_id=NEW.provider_id,agent_id=NEW.agent_id,
+            executor=NEW.executor,tool_set=NEW.tool_set
+          WHERE id=OLD.id AND thread_id=OLD.thread_id
+            AND (ended_at,environment_id,env_generation,machine_id,provider_id,agent_id,executor,tool_set)
+              IS DISTINCT FROM (NEW.ended_at,NEW.environment_id,NEW.env_generation,NEW.machine_id,
+                                NEW.provider_id,NEW.agent_id,NEW.executor,NEW.tool_set);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_segment_changed AFTER UPDATE OF ended_at,environment_id,env_generation,machine_id,provider_id,agent_id,executor,tool_set ON segments
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_segment_changed();
+
+CREATE FUNCTION orch_tool_thread_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.current_segment_id IS DISTINCT FROM OLD.current_segment_id OR NEW.environment_id IS DISTINCT FROM OLD.environment_id
+       OR NEW.provider_id IS DISTINCT FROM OLD.provider_id OR NEW.agent_id IS DISTINCT FROM OLD.agent_id THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+          WHERE thread_id=OLD.node_id AND delivered_resources#>>'{tool_admission,live}'='true'
+            AND (id IS DISTINCT FROM NEW.current_segment_id OR environment_id IS DISTINCT FROM NEW.environment_id
+              OR provider_id IS DISTINCT FROM NEW.provider_id OR agent_id IS DISTINCT FROM NEW.agent_id);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_thread_changed AFTER UPDATE OF current_segment_id,environment_id,provider_id,agent_id ON threads
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_thread_changed();
+
+CREATE FUNCTION orch_tool_server_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE member text;
+BEGIN
+    IF (NEW.name,NEW.spec,NEW.machine_id,NEW.environment_id,NEW.enabled,NEW.deleted_at,NEW.home_id,NEW.owner_id)
+       IS DISTINCT FROM (OLD.name,OLD.spec,OLD.machine_id,OLD.environment_id,OLD.enabled,OLD.deleted_at,OLD.home_id,OLD.owner_id) THEN
+        member:='mcp:'||OLD.id;
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY[member])
+          WHERE delivered_resources#>>'{tool_admission,live}'='true'
+            AND (delivered_resources#>'{tool_admission,members}')?member;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_server_changed AFTER UPDATE OF name,spec,machine_id,environment_id,enabled,deleted_at,home_id,owner_id ON mcp_servers
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_server_changed();
+
+CREATE FUNCTION orch_tool_map_changes(old_map jsonb,new_map jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(array_agg('mcp:'||key),'{}'::text[]) FROM (
+        SELECT jsonb_object_keys(COALESCE(old_map,'{}')) AS key
+        UNION SELECT jsonb_object_keys(COALESCE(new_map,'{}')) AS key
+    ) keys WHERE old_map->key IS DISTINCT FROM new_map->key
+$$;
+CREATE FUNCTION orch_tool_mcp_members(facts jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(array_agg(key),'{}'::text[])
+      FROM jsonb_object_keys(facts#>'{tool_admission,members}') key WHERE key LIKE 'mcp:%'
+$$;
+
+CREATE FUNCTION orch_tool_environment_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed text[]; policy_changed boolean;
+BEGIN
+    IF NEW.generation IS DISTINCT FROM OLD.generation OR NEW.machine_id IS DISTINCT FROM OLD.machine_id
+       OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.lost_at IS DISTINCT FROM OLD.lost_at
+       OR (NEW.status IS DISTINCT FROM OLD.status AND NEW.status IN ('stopped','disabled','removed','lost','recreating','moving','failed')) THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+          WHERE environment_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true';
+    ELSE
+        policy_changed:=NEW.home_node_id IS DISTINCT FROM OLD.home_node_id OR NEW.owner_id IS DISTINCT FROM OLD.owner_id
+                       OR NEW.template_id IS DISTINCT FROM OLD.template_id OR NEW.granted_capabilities IS DISTINCT FROM OLD.granted_capabilities;
+        changed:=orch_tool_map_changes(OLD.config->'mcp.enabled',NEW.config->'mcp.enabled');
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,
+                    CASE WHEN policy_changed THEN orch_tool_mcp_members(delivered_resources) ELSE changed END)
+          WHERE environment_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true'
+            AND (delivered_resources#>'{tool_admission,members}') ?| CASE WHEN policy_changed THEN orch_tool_mcp_members(delivered_resources) ELSE changed END;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_environment_changed AFTER UPDATE OF generation,machine_id,deleted_at,lost_at,status,home_node_id,owner_id,template_id,granted_capabilities,config ON environments
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_environment_changed();
+
+CREATE FUNCTION orch_tool_settings_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE before_value jsonb; after_value jsonb; changed text[]; place uuid; whole_policy boolean; setting_key text;
+BEGIN
+    IF TG_OP<>'INSERT' THEN before_value:=OLD.value; place:=OLD.node_id; setting_key:=OLD.key; END IF;
+    IF TG_OP<>'DELETE' THEN after_value:=NEW.value; place:=NEW.node_id; setting_key:=NEW.key; END IF;
+    IF setting_key='tunnels.control_timeout_ms' THEN
+        PERFORM pg_notify('orch_tool_session','control');
+    ELSIF setting_key='mcp.enabled' THEN
+        whole_policy:=(TG_OP='UPDATE' AND NEW.locked IS DISTINCT FROM OLD.locked)
+            OR (TG_OP='INSERT' AND NEW.locked) OR (TG_OP='DELETE' AND OLD.locked);
+        changed:=orch_tool_map_changes(before_value,after_value);
+        UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,
+                    CASE WHEN whole_policy THEN orch_tool_mcp_members(s.delivered_resources) ELSE changed END)
+          FROM environments e JOIN nodes n ON n.id=e.home_node_id
+          WHERE s.environment_id=e.id AND (place IS NULL OR place=ANY(n.path))
+            AND s.delivered_resources#>>'{tool_admission,live}'='true'
+            AND (s.delivered_resources#>'{tool_admission,members}') ?| CASE WHEN whole_policy THEN orch_tool_mcp_members(s.delivered_resources) ELSE changed END;
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END
+$$;
+CREATE TRIGGER tool_settings_changed AFTER INSERT OR UPDATE OR DELETE ON settings FOR EACH ROW EXECUTE FUNCTION orch_tool_settings_changed();
+
+CREATE FUNCTION orch_tool_resource_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_TABLE_NAME='agents' THEN
+        IF NEW.disabled AND NOT OLD.disabled OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE agent_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true';
+        END IF;
+    ELSIF TG_TABLE_NAME='providers' THEN
+        IF NEW.status='disabled' AND OLD.status<>'disabled' OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE provider_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true';
+        ELSE
+            IF NEW.machine_id IS DISTINCT FROM OLD.machine_id THEN
+                UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+                  WHERE provider_id=OLD.id AND machine_id=OLD.machine_id AND delivered_resources#>>'{tool_admission,live}'='true';
+            END IF;
+            IF NEW.key_machine_id IS DISTINCT FROM OLD.key_machine_id THEN
+                UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY['llm'])
+                  WHERE provider_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true'
+                    AND (delivered_resources#>'{tool_admission,members}')?'llm';
+            END IF;
+        END IF;
+    ELSIF TG_TABLE_NAME='machines' THEN
+        IF NEW.status IS DISTINCT FROM OLD.status OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.lost_at IS DISTINCT FROM OLD.lost_at THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE (machine_id=OLD.id OR environment_id IN (SELECT id FROM environments WHERE machine_id=OLD.id))
+                AND delivered_resources#>>'{tool_admission,live}'='true';
+            UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,
+                ARRAY(SELECT key FROM jsonb_each(s.delivered_resources#>'{tool_admission,members}') member
+                       WHERE member.value#>>'{binding,ticket,$ticket,dst}'=OLD.id::text))
+              WHERE s.delivered_resources#>>'{tool_admission,live}'='true'
+                AND EXISTS(SELECT 1 FROM jsonb_each(s.delivered_resources#>'{tool_admission,members}') member
+                            WHERE member.value#>>'{binding,ticket,$ticket,dst}'=OLD.id::text);
+        ELSIF (NEW.facts->'policy'->'mcp.add',NEW.facts->'policy'->'mcp.import') IS DISTINCT FROM
+              (OLD.facts->'policy'->'mcp.add',OLD.facts->'policy'->'mcp.import') THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,orch_tool_mcp_members(delivered_resources))
+              WHERE environment_id IN (SELECT id FROM environments WHERE machine_id=OLD.id)
+                AND delivered_resources#>>'{tool_admission,live}'='true' AND cardinality(orch_tool_mcp_members(delivered_resources))>0;
+        END IF;
+    ELSIF TG_TABLE_NAME='nodes' THEN
+        IF NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.archived_at IS DISTINCT FROM OLD.archived_at THEN
+            UPDATE native_session_states s SET delivered_resources=orch_tool_close(s.delivered_resources)
+              FROM nodes n WHERE s.thread_id=n.id AND OLD.id=ANY(n.path) AND s.delivered_resources#>>'{tool_admission,live}'='true';
+        ELSIF NEW.path IS DISTINCT FROM OLD.path THEN
+            UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,orch_tool_mcp_members(s.delivered_resources))
+              FROM environments e JOIN nodes n ON n.id=e.home_node_id
+              WHERE s.environment_id=e.id AND OLD.id=ANY(n.path)
+                AND s.delivered_resources#>>'{tool_admission,live}'='true' AND cardinality(orch_tool_mcp_members(s.delivered_resources))>0;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_agent_changed AFTER UPDATE OF disabled,deleted_at ON agents FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+CREATE TRIGGER tool_provider_changed AFTER UPDATE OF status,deleted_at,machine_id,key_machine_id ON providers FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+CREATE TRIGGER tool_machine_changed AFTER UPDATE OF status,deleted_at,lost_at,facts ON machines FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+CREATE TRIGGER tool_node_changed AFTER UPDATE OF deleted_at,archived_at,path ON nodes FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+
+CREATE FUNCTION orch_tool_template_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed text[];
+BEGIN
+    IF NEW.spec->'mcp_server_ids' IS DISTINCT FROM OLD.spec->'mcp_server_ids' THEN
+        SELECT COALESCE(array_agg('mcp:'||id),'{}'::text[]) INTO changed FROM (
+            (SELECT jsonb_array_elements_text(COALESCE(OLD.spec->'mcp_server_ids','[]')) id
+             EXCEPT SELECT jsonb_array_elements_text(COALESCE(NEW.spec->'mcp_server_ids','[]')))
+            UNION
+            (SELECT jsonb_array_elements_text(COALESCE(NEW.spec->'mcp_server_ids','[]'))
+             EXCEPT SELECT jsonb_array_elements_text(COALESCE(OLD.spec->'mcp_server_ids','[]')))
+        ) ids;
+        UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,changed)
+          FROM environments e WHERE s.environment_id=e.id AND e.template_id=OLD.id
+            AND s.delivered_resources#>>'{tool_admission,live}'='true'
+            AND (s.delivered_resources#>'{tool_admission,members}') ?| changed;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_template_changed AFTER UPDATE OF spec ON env_templates FOR EACH ROW EXECUTE FUNCTION orch_tool_template_changed();
+
+CREATE FUNCTION orch_tool_lease_closed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.closed_at IS NOT NULL AND OLD.closed_at IS NULL THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY['llm'])
+          WHERE thread_id=OLD.thread_id AND delivered_resources#>>'{tool_admission,live}'='true'
+            AND delivered_resources#>>'{tool_admission,members,llm,binding,ticket,$ticket,service}'='llm/'||OLD.id;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_lease_closed AFTER UPDATE OF closed_at ON leases FOR EACH ROW EXECUTE FUNCTION orch_tool_lease_closed();
+
+CREATE FUNCTION orch_tool_session_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.delivered_resources->'tool_admission' IS NOT NULL THEN
+        PERFORM pg_notify('orch_tool_session',jsonb_build_object(
+            'machine_id',OLD.delivered_resources#>>'{tool_admission,machine_id}',
+            'thread_id',OLD.thread_id,'segment_id',OLD.id,'opening_id',OLD.delivered_resources#>>'{tool_admission,opening_id}','opening_epoch',(OLD.delivered_resources#>>'{tool_admission,opening_epoch}')::bigint,
+            'revision',orch_tool_revision(OLD.delivered_resources),'live',false,'members','[]'::jsonb)::text);
+    END IF;
+    RETURN OLD;
+END
+$$;
+CREATE TRIGGER tool_session_deleted BEFORE DELETE ON native_session_states FOR EACH ROW EXECUTE FUNCTION orch_tool_session_deleted();
+CREATE FUNCTION orch_tool_segment_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+      WHERE id=OLD.id AND thread_id=OLD.thread_id;
+    RETURN OLD;
+END
+$$;
+CREATE TRIGGER tool_segment_deleted AFTER DELETE ON segments FOR EACH ROW EXECUTE FUNCTION orch_tool_segment_deleted();
+
+CREATE INDEX native_session_tool_source ON native_session_states ((delivered_resources#>>'{tool_admission,machine_id}'))
+    WHERE delivered_resources->'tool_admission' IS NOT NULL;
+
+CREATE FUNCTION orch_tool_offering_lost() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE member text;
+BEGIN
+    IF (TG_OP='DELETE' OR (NEW.state IS DISTINCT FROM OLD.state AND NEW.state<>'ready'))
+       AND EXISTS(SELECT 1 FROM mcp_servers WHERE id=OLD.server_id AND machine_id=OLD.machine_id) THEN
+        member:='mcp:'||OLD.server_id;
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY[member])
+          WHERE delivered_resources#>>'{tool_admission,live}'='true'
+            AND (delivered_resources#>'{tool_admission,members}')?member;
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END
+$$;
+CREATE TRIGGER tool_offering_lost AFTER UPDATE OF state OR DELETE ON mcp_server_offerings FOR EACH ROW EXECUTE FUNCTION orch_tool_offering_lost();

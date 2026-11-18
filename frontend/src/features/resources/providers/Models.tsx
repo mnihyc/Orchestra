@@ -247,7 +247,7 @@ function Suggestions({ provider }: { provider: Provider }) {
                         {suggestion.parameters.context_window !== undefined && suggestion.parameters.context_window !== null && (
                           <span className="text-sm text-text-muted">{t('providers.models.context', { size: formatContext(suggestion.parameters.context_window, locale) })}</span>
                         )}
-                        {offered.length > 0 && <span className="text-sm text-text-subtle">{t('models.list.offered', { list: offered.join(', ') })}</span>}
+                        {offered.length > 0 && <span className="text-sm text-text-subtle">{t('models.list.offers', { list: offered.join(', ') })}</span>}
                       </span>
                     }
                     checked={chosen.includes(suggestion.model_name)}

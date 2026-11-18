@@ -1183,6 +1183,7 @@ mod tests {
 
     fn spec() -> SessionSpec {
         SessionSpec {
+            opening_id: orch_types::new_id(),
             settings: SessionSettings {
                 native_model: None,
                 agent_id: new_id(),
