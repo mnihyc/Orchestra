@@ -696,6 +696,16 @@ pub trait AgentAdapter: Send + 'static {
     /// Opens a session: a new one, a resumed one, a fork, an import or an adoption.
     async fn open_session(&mut self, spec: SessionSpec) -> Result<SessionOpened, AdapterError>;
 
+    /// A capability session uses only its confined IO port; ordinary local execution is no fallback.
+    async fn open_program_session(
+        &mut self,
+        spec: SessionSpec,
+        io: std::sync::Arc<dyn crate::program_work::ProgramIo>,
+    ) -> Result<SessionOpened, AdapterError> {
+        let _ = (spec, io);
+        unsupported("isolated capability execution")
+    }
+
     /// Resolves a current native user reference to its retained item/client identity
     /// and inspects that boundary in a quiescent exact native lane.
     /// No model call, source mutation, session replacement or file restore.

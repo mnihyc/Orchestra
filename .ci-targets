@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test ask -- subscription::
+test -p orch-engine --lib -- ask::
+test -p orch-api-core --test ask_tools_native_origin
+test -p orch-adapter-claude-code --test sessions -- a_program_model_turn_
+test -p orch-adapter-claude-code --test conformance -- a_native_conversation_with_no_tools_refuses_a_forced_action_on_the_controlled_model
+test -p orch-db --test usage_ledger
+test -p orch-api-core --test ask -- backend_reserve::
+web typecheck
+web lint
+web test -- tests/component/ask-models-setting.test.tsx tests/component/ask-models-editor.test.tsx tests/component/ask-models.test.tsx tests/component/ask-model-params.test.tsx tests/component/capability-backend-choice.test.tsx tests/component/capability-helper.test.tsx tests/component/summarizer-editor.test.tsx tests/component/builtin-program-composer.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue.test.ts

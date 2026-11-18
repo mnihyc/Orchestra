@@ -582,6 +582,7 @@ impl StartSnapshot {
                 .prompt_cache_ttl
                 .filter(|_| self.descriptor.capabilities.prompt_cache_ttl),
             background_wake: self.settings.background_wake,
+            web_action_wait_secs: self.settings.web_action_wait_secs,
             image_generation: self.settings.image_generation,
             native_configuration: self
                 .native_model
@@ -1054,6 +1055,7 @@ pub fn session_open_body_importing(
         _ => serde_json::Map::new(),
     };
     Ok(link::SessionOpen {
+        program_work: None,
         native_model: snapshot.native_model.clone(),
         transport_only: false,
         turn_changes_require_restart: snapshot
@@ -1087,6 +1089,7 @@ pub fn session_open_body_importing(
         subagent_limits: snapshot.settings.subagent_limits,
         prompt_cache_ttl: configuration.prompt_cache_ttl,
         background_wake: snapshot.settings.background_wake,
+        web_action_wait_secs: configuration.web_action_wait_secs,
         image_generation: configuration.image_generation,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
@@ -1108,12 +1111,24 @@ pub fn session_open_body_importing(
         raw_after: 0,
         // A side thread reads by the mechanism chosen when it was made; the adapter enforces it at every open
         // and resume, or refuses the session.
-        side_reading: snapshot
-            .thread
-            .side_reading
+        side_reading: if snapshot
+            .native_model
             .as_deref()
-            .map(|word| convert(&Json::String(word.to_owned())))
-            .transpose()?,
+            .map(|model| model.program_output())
+            .transpose()
+            .map_err(EngineError::unreadable)?
+            .flatten()
+            .is_some()
+        {
+            Some(link::SideReading::NoTools)
+        } else {
+            snapshot
+                .thread
+                .side_reading
+                .as_deref()
+                .map(|word| convert(&Json::String(word.to_owned())))
+                .transpose()?
+        },
         // The environment's answer about the workspace's own harness configuration: without one, an adapter that
         // finds such a configuration refuses, and the people who manage the environment are asked.
         workspace_configuration: snapshot.workspace_configuration.clone(),
@@ -1536,9 +1551,21 @@ impl Engine {
             unnamed_before,
             context_sent,
         };
-        let allowed = Box::pin(self.native_model_use_preview(conn, &snapshot)).await?;
-        snapshot.native_model =
-            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
+        // A delegated input reopens its source while projecting its model. Keep the source
+        // and caller checks together, and release them before issuing any native command.
+        snapshot.native_model = if !orch_db::queries::transaction_guard::in_transaction(conn)
+            && crate::tools::capability_service::delegation::ParentLink::of_input(&snapshot.input)?
+                .is_some()
+        {
+            let mut tx = sqlx::Connection::begin(conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+            let model = Box::pin(self.preview_turn_model(&mut tx, &mut snapshot)).await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            model
+        } else {
+            Box::pin(self.preview_turn_model(conn, &mut snapshot)).await?
+        };
         Ok(StartLoad::Ready(Box::new(snapshot)))
     }
 }

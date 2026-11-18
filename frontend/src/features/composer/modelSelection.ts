@@ -1,5 +1,8 @@
 /** API selections keep presets and unrelated declared options while normalizing effort aliases. */
-export interface ModelIdentity { provider_id: string; model: string }
+import type { BackendRef } from '@/generated/api-types';
+import { backendIdentity } from '@/features/settings/capabilityBackendValue';
+
+export interface ModelIdentity { provider_id: string; model: string; backend?: BackendRef }
 export interface ModelSelection extends ModelIdentity { params?: unknown }
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
@@ -23,4 +26,6 @@ export function selectionWithEffort(params: unknown, effort: string): Record<str
   return { ...next, effort };
 }
 
-export const sameSelectionModel = (left: ModelSelection | null | undefined, right: ModelSelection): boolean => left?.provider_id === right.provider_id && left.model === right.model;
+export const sameSelectionModel = (left: ModelSelection | null | undefined, right: ModelSelection): boolean =>
+  left?.provider_id === right.provider_id && left.model === right.model &&
+  (left.backend === undefined || right.backend === undefined ? left.backend === right.backend : backendIdentity(left.backend) === backendIdentity(right.backend));

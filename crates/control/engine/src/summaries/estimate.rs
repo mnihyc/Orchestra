@@ -42,7 +42,8 @@ pub(crate) async fn handoff_estimate(
     else {
         return Ok(none);
     };
-    let budget = input_budget(conn, thread, config.provider_id, &config.model_name).await?;
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let budget = input_budget(conn, thread, offering.provider, &offering.offering).await?;
     let wanted = turns
         .max(0)
         .saturating_mul(BRIEF_TURN_BYTES + INDEX_LINE_BYTES);
@@ -50,7 +51,7 @@ pub(crate) async fn handoff_estimate(
     let input_tokens =
         (bytes / crate::fork_history::CARRY_BYTES_PER_TOKEN + FRAME_TOKENS).min(budget.tokens);
     let output_tokens = config.max_output_tokens;
-    let own = crate::caps::own_rate(conn, config.provider_id, &config.model_name).await?;
+    let own = crate::caps::own_rate(conn, offering.provider, &offering.offering).await?;
     let book = crate::rates::RateBook::load(conn, thread).await?;
     let tokens = orch_db::usage::ledger::Tokens {
         input: input_tokens,
@@ -64,7 +65,7 @@ pub(crate) async fn handoff_estimate(
         .price(
             conn,
             own.as_ref(),
-            &config.model_name,
+            &offering.offering,
             &tokens,
             Some(input_tokens),
             None,

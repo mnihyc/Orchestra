@@ -11,12 +11,13 @@ use orch_db::queries::{resources::thread_engine as resources, threads};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult, SerialKey};
 use orch_summarizer_contract::summarizer::SummarizeError;
-use orch_summarizer_model::Complete;
+use orch_summarizer_model::{Complete, CompletionAnswer, CompletionRequest};
 use orch_types::{Id, Json};
 use serde_json::json;
 
 pub(super) mod automatic;
 mod paid;
+pub(super) mod program;
 
 /// A model failure with no matching policy must not fall back to an unrelated retry timer.
 pub(super) const NO_RULE: &str = "calls.details.rule_unavailable";
@@ -71,7 +72,8 @@ pub(super) async fn recover(
     conn: &mut Conn,
     limit: i64,
 ) -> Result<(), EngineError> {
-    let calls: Vec<Call> = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE purpose = 'summary' ORDER BY created_at,id LIMIT $1")
+    program::retire_finished(engine, conn, limit).await?;
+    let calls: Vec<Call> = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE purpose = 'summary' AND program_backend IS NULL ORDER BY created_at,id LIMIT $1")
         .bind(limit).fetch_all(&mut *conn).await.map_err(DbError::from)?;
     for call in calls {
         let status = engine.inner.commands.status(call.id).await?;
@@ -497,8 +499,10 @@ impl Host {
                 .check(self.engine.inner.clock.as_ref())
                 .map_err(internal)?;
         }
-        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING")
-            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id).execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
+        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id,resource_request_id,resource_call_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(id) DO NOTHING")
+            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id)
+            .bind(resource.as_ref().map(super::resource::Work::request)).bind(resource.as_ref().map(super::resource::Work::call))
+            .execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
         let admitted: Call = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL")
             .bind(call.id).fetch_one(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
         let mut expected = call;
@@ -856,9 +860,13 @@ impl Complete for Host {
     async fn complete(
         &self,
         node: Id,
-        mut request: ProviderComplete,
-    ) -> Result<ProviderCompleteResult, SummarizeError> {
+        request: CompletionRequest,
+    ) -> Result<CompletionAnswer, SummarizeError> {
         use orch_provider_contract::calls::Purpose;
+        if request.backend.route == "summary.delegation" {
+            return self.complete_program(node, request).await;
+        }
+        let mut request = request.into_api()?;
         let configured = (request.provider_id, request.model_name.clone());
         let mut tx = self.engine.db().begin().await.map_err(internal)?;
         let plan = crate::calls::plan_service(
@@ -1018,6 +1026,6 @@ impl Complete for Host {
                     .bind(node).bind(self.call).execute(&mut *conn).await.map_err(DbError::from).map_err(internal)?;
             }
         }
-        answer
+        answer.map(CompletionAnswer::from)
     }
 }

@@ -254,6 +254,14 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread_id: Id,
     ) -> Result<Outcome, EngineError> {
+        crate::summaries::with_program_source_checks(self.preflight_in_scope(unit, thread_id)).await
+    }
+
+    async fn preflight_in_scope(
+        &self,
+        unit: &mut Unit<'_>,
+        thread_id: Id,
+    ) -> Result<Outcome, EngineError> {
         let outcome = Box::pin(self.preflight_inner(unit, thread_id)).await?;
         // Preparation has not refused the parked native continuation. Its decision follows
         // when the retained input material is ready, before the adapter releases output.
@@ -480,10 +488,9 @@ impl Engine {
         for input in
             Self::preflight_phase(|| threads::pending_inputs(&mut *unit.conn, thread_id)).await?
         {
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                Self::preflight_phase(|| crate::inputs::settings_for(unit.conn, &input, &settings))
+                    .await?;
             let settings = &actual_settings;
             let background = crate::background_wake::is_wake(&input);
             if background && !settings.background_wake {
@@ -748,10 +755,9 @@ impl Engine {
                 return Ok(Outcome::Blocked(blocked));
             };
 
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                Self::preflight_phase(|| crate::inputs::settings_for(unit.conn, &input, &settings))
+                    .await?;
             let settings = &actual_settings;
             if Self::preflight_phase(|| {
                 crate::native_actions::hold_invalid(
@@ -810,7 +816,12 @@ impl Engine {
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
-                let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
+                let blocked = Blocked::new(
+                    "error",
+                    crate::preparation::source_failed_detail(
+                        crate::preparation::source_failure_reason(&thread).as_deref(),
+                    ),
+                );
                 Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
@@ -1607,7 +1618,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.
@@ -1753,6 +1767,20 @@ impl Engine {
             // Options the agent's setup gives that the model's admitted constraints refuse: the setup needs attention.
             Err(reason) => return Ok(Err(Blocked::new("binding_invalid", reason))),
         };
+        if let Some(input) = input
+            && let Some(parent) =
+                crate::inputs::saved_authority(input.submission_authority.as_ref())?
+                    .as_ref()
+                    .and_then(crate::inputs::InputAuthority::capability_parent)
+            && !parent
+                .input_options_match(conn, input, &params, effort.as_deref())
+                .await?
+        {
+            return Ok(Err(Blocked::new(
+                "binding_invalid",
+                "The selected program cannot apply the requested model options.",
+            )));
+        }
         let metering = metering(path, descriptor.capabilities.usage_tokens);
         let tier = crate::providers::service_tier(&descriptor.parameters, &params);
         Ok(Ok(Plan {

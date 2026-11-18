@@ -43,6 +43,7 @@ mod native_web;
 pub mod parameters;
 pub mod performance;
 pub mod process;
+mod program_work;
 pub mod protocol;
 pub mod provider;
 pub mod review;
@@ -159,6 +160,7 @@ struct Running {
     kill: Arc<Notify>,
     pump: JoinHandle<()>,
     catalogue: Option<Arc<model_catalogue::Catalogue>>,
+    identity: Option<model_catalogue::Identity>,
     events: Arc<model_processes::ProcessEvents>,
 }
 
@@ -176,6 +178,7 @@ pub struct CodexAdapter {
     patience: Patience,
     running: Option<Running>,
     model_processes: HashMap<model_catalogue::Identity, Running>,
+    unit_work: HashMap<ThreadId, program_work::Context>,
     /// Exact lanes observed idle when the native client unsubscribed them.
     prefix_sources: std::collections::HashSet<orch_agent_contract::history::NativePrefixSource>,
     history_inventory: Option<(Id, Arc<native_history::Inventory>)>,
@@ -286,6 +289,7 @@ impl CodexAdapter {
             patience: Patience::default(),
             running: None,
             model_processes: HashMap::new(),
+            unit_work: HashMap::new(),
             prefix_sources: Default::default(),
             history_inventory: None,
         }
@@ -333,7 +337,7 @@ impl CodexAdapter {
     // -- starting and stopping -----------------------------------------------------------------------
 
     async fn launch(&self, start: AgentStart, sink: EventSink) -> Result<Running, AdapterError> {
-        self.launch_model(start, model_processes::ProcessEvents::new(sink), None)
+        self.launch_model(start, model_processes::ProcessEvents::new(sink), None, None)
             .await
     }
 
@@ -346,8 +350,13 @@ impl CodexAdapter {
         start: AgentStart,
         events: Arc<model_processes::ProcessEvents>,
         catalogue: Option<Arc<model_catalogue::Catalogue>>,
+        unit: Option<program_work::UnitProcess>,
     ) -> Result<Running, AdapterError> {
-        let sink = events.sink_for(catalogue.as_ref().map(|catalogue| catalogue.identity));
+        let identity = unit
+            .as_ref()
+            .map(|unit| unit.identity)
+            .or_else(|| catalogue.as_ref().map(|catalogue| catalogue.identity));
+        let sink = events.sink_for(identity);
         if start.profile.attach_mode() == AttachMode::Daemon {
             return Err(AdapterError::Unsupported(
                 "attaching to a daemon: this adapter starts the harness itself and talks to it over its standard streams"
@@ -611,17 +620,38 @@ impl CodexAdapter {
             background_control,
             sink: sink.clone(),
             clock: Arc::clone(&self.clock),
-            outputs: OutputStore::new(outputs_home.join("outputs")),
+            outputs: OutputStore::new(
+                unit.as_ref()
+                    .map_or_else(|| outputs_home.join("outputs"), |unit| unit.output.clone()),
+            ),
             rpc,
             raw,
             version: version.clone(),
             exit: Arc::clone(&exit),
             patience: self.patience,
+            native_result_wait: Duration::from_millis(
+                start
+                    .profile
+                    .config
+                    .get("native_result_wait_ms")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_WAIT_MS),
+            ),
+            native_result_buffer_bytes: start
+                .profile
+                .config
+                .get("native_result_buffer_bytes")
+                .and_then(Json::as_u64)
+                .map(|bytes| usize::try_from(bytes).unwrap_or(usize::MAX))
+                .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES),
         });
         if let Some(home) = harness_home.as_deref().filter(|_| managed) {
             let (method, expires_at) = provider::read_login_note(home);
             shared.login.noted(method, expires_at);
             shared.login.issued(provider::read_issued_at(home));
+        }
+        if let Some(unit) = unit {
+            shared.set_program_io(unit.io);
         }
         let pump = tokio::spawn(runtime::pump(Arc::clone(&shared), incoming));
         let _ = sink
@@ -646,6 +676,7 @@ impl CodexAdapter {
             kill,
             pump,
             catalogue,
+            identity,
             events,
         })
     }
@@ -663,14 +694,14 @@ impl CodexAdapter {
             stopping.push(Self::stop_running(running));
         }
         let _ = futures::future::join_all(stopping).await;
+        for (_, unit) in self.unit_work.drain() {
+            let _ = unit.io.retire().await;
+        }
     }
 
     async fn stop_running(running: Running) {
         let events = Arc::clone(&running.events);
-        let identity = running
-            .catalogue
-            .as_ref()
-            .map(|catalogue| catalogue.identity);
+        let identity = running.identity;
         running.shared.stopping();
         running.shared.rpc().finish();
         if running.shared.exit_message(STOP_GRACE).await.is_none() {
@@ -816,7 +847,9 @@ impl CodexAdapter {
         let review_support = descriptor::capabilities().approval_reviewer;
         // The workspace's own configuration, looked for where the harness would read it: not on a machine the
         // tools run on elsewhere, whose files here are not the project's.
-        let look = if spec.exec.executor.is_none() {
+        let look = if spec.exec.executor.is_none()
+            && !self.unit_work.contains_key(&spec.settings.thread_id)
+        {
             sessions::validate_instruction_files(
                 &spec.settings.workspace_root,
                 &spec.settings.cwd,
@@ -1009,6 +1042,7 @@ impl CodexAdapter {
             directory: settings.directory.clone(),
         })
         .with_native_web_results(true)
+        .with_web_action_wait(Duration::from_secs(settings.web_action_wait_secs))
         .with_external_images(
             spec.exec.executor.is_some()
                 || settings.arrangement
@@ -1417,6 +1451,9 @@ impl AgentAdapter for CodexAdapter {
 
     async fn open_session(&mut self, spec: SessionSpec) -> Result<SessionOpened, AdapterError> {
         validate_session_open(&spec)?;
+        if self.unit_work.contains_key(&spec.settings.thread_id) {
+            self.close_session(spec.settings.thread_id).await?;
+        }
         let mode = spec.settings.mode;
         let thread = spec.settings.thread_id;
         let opened = self.open(spec, None, None).await?;
@@ -1430,6 +1467,14 @@ impl AgentAdapter for CodexAdapter {
             }
         }
         Ok(opened)
+    }
+
+    async fn open_program_session(
+        &mut self,
+        spec: SessionSpec,
+        io: Arc<dyn orch_agent_contract::program_work::ProgramIo>,
+    ) -> Result<SessionOpened, AdapterError> {
+        self.open_unit(spec, io).await
     }
 
     async fn inspect_input_prefix(
@@ -1640,10 +1685,27 @@ impl AgentAdapter for CodexAdapter {
                     native_session_ref: native,
                 });
         }
+        if let Some(unit) = self.unit_work.remove(&thread) {
+            if let Some(running) = self.model_processes.remove(&unit.identity) {
+                Self::stop_running(running).await;
+            }
+            unit.io.retire().await?;
+        }
         Ok(())
     }
 
-    async fn start_turn(&mut self, turn: TurnStart) -> Result<(), AdapterError> {
+    async fn start_turn(&mut self, mut turn: TurnStart) -> Result<(), AdapterError> {
+        let isolated = self.unit_work.contains_key(&turn.thread_id);
+        if let Some(unit) = self.unit_work.get_mut(&turn.thread_id) {
+            if unit.turn.is_some_and(|id| id != turn.turn_id) {
+                return Err(AdapterError::SessionNotFound(
+                    "the completed isolated context does not belong to this new input".into(),
+                ));
+            }
+            unit.turn = Some(turn.turn_id);
+            turn.approval_mode = orch_agent_contract::descriptor::ApprovalMode::Ask;
+            turn.sandbox_mode = orch_agent_contract::descriptor::SandboxMode::ReadOnly;
+        }
         if turn.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto
             && !descriptor::auto_proven()
         {
@@ -1653,7 +1715,7 @@ impl AgentAdapter for CodexAdapter {
         shared.with_session(turn.thread_id, |record| {
             // A configuration that appeared since the session was opened, an agent's own included, is refused
             // until somebody who manages the environment has answered for it.
-            if record.remote.is_none() {
+            if record.remote.is_none() && !isolated {
                 sessions::validate_instruction_files(
                     &record.workspace_root,
                     &record.cwd,
@@ -1696,6 +1758,16 @@ impl AgentAdapter for CodexAdapter {
         }
         let mut input = vec![json!({ "type": "text", "text": turn.text, "text_elements": [] })];
         for image in &turn.images {
+            if self.unit_work.contains_key(&turn.thread_id) {
+                match program_work::input_image(image) {
+                    Ok(image) => input.push(image),
+                    Err(error) => {
+                        abandon(&shared);
+                        return Err(error);
+                    }
+                }
+                continue;
+            }
             let Some(path) = &image.path else {
                 abandon(&shared);
                 return Err(invalid(
@@ -1761,6 +1833,10 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn steer(&mut self, steer: TurnSteer) -> Result<(), AdapterError> {
+        if self.unit_work.contains_key(&steer.thread_id) {
+            return Err(AdapterError::Unsupported(
+            "the capability owns its frozen input; stop it before starting independent helper work".into()));
+        }
         let (shared, harness) = self.live_session(steer.thread_id)?;
         let (native, running) = shared.with_session(steer.thread_id, |record| {
             (
@@ -1774,6 +1850,10 @@ impl AgentAdapter for CodexAdapter {
         let _ = turn;
         let mut input = vec![json!({ "type": "text", "text": steer.text, "text_elements": [] })];
         for image in &steer.images {
+            if self.unit_work.contains_key(&steer.thread_id) {
+                input.push(program_work::input_image(image)?);
+                continue;
+            }
             let path = image.path.as_ref().ok_or_else(|| {
                 invalid("an image comes as a file the connector put on this machine")
             })?;

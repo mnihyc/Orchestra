@@ -1,4 +1,4 @@
-//! Reserved program metadata stays inert and cannot masquerade as an API binding.
+//! An Ask segment retains the exact API interface or private program selection that served it.
 use super::*;
 use orch_db::queries::{ask as rows, threads};
 
@@ -15,7 +15,10 @@ async fn api_segment(s: &Scene) -> (Id, Id) {
         conversation,
         &rows::SegmentBinding {
             provider_id: provider,
-            protocol: "openai-responses".into(),
+            transport: rows::DialogueTransport::Api {
+                protocol: "openai-responses".into(),
+                backend: AskModelIdentity::api(provider, MODEL.into()).backend,
+            },
             model: MODEL.into(),
         },
         s.ada.id(),
@@ -30,7 +33,7 @@ async fn api_segment(s: &Scene) -> (Id, Id) {
 }
 
 #[tokio::test]
-async fn api_segments_keep_their_protocol_and_an_unset_program_backend() {
+async fn api_segments_keep_their_exact_backend_and_protocol() {
     let s = Scene::new().await;
     s.rig.engine.stop();
     let (conversation, segment) = api_segment(&s).await;
@@ -41,12 +44,22 @@ async fn api_segments_keep_their_protocol_and_an_unset_program_backend() {
             .fetch_one(&mut *conn)
             .await
             .unwrap();
-    assert_eq!(stored, ("openai-responses".into(), None));
+    assert_eq!(stored.0, "openai-responses");
     let binding = rows::segment_binding(&mut conn, conversation, segment)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(binding.protocol, "openai-responses");
+    assert_eq!(
+        binding.transport,
+        rows::DialogueTransport::Api {
+            protocol: "openai-responses".into(),
+            backend: AskModelIdentity::api(binding.provider_id, MODEL.into()).backend
+        }
+    );
+    assert_eq!(
+        stored.1,
+        Some(serde_json::to_value(binding.transport.backend()).unwrap())
+    );
     assert_eq!(binding.model, MODEL);
     assert!(
         rows::program_binding(&mut conn, conversation)
@@ -54,6 +67,86 @@ async fn api_segments_keep_their_protocol_and_an_unset_program_backend() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn a_program_segment_keeps_its_exact_backend_without_borrowing_an_api_interface() {
+    let s = Scene::new().await;
+    s.rig.engine.stop();
+    let (conversation, previous) = api_segment(&s).await;
+    let provider = s.on.provider;
+    let backend = serde_json::from_value(json!({
+        "route":"ask.delegation","offering":{"provider":provider,"offering":MODEL},
+        "config":{"environment_id":s.on.environment,"helper_topic_id":s.tree.topic.base.id},
+        "x_choice":{"revision":"selected"}
+    }))
+    .unwrap();
+    let binding = rows::SegmentBinding {
+        provider_id: provider,
+        model: MODEL.into(),
+        transport: rows::DialogueTransport::Program(backend),
+    };
+    let segment = new_id();
+    let mut tx = s.rig.db.begin().await.unwrap();
+    let mut unit = orch_engine::unit::Unit::new(&mut tx, s.rig.world.now());
+    let seq = unit.stamp(conversation).await.unwrap();
+    let mut mismatched = binding.clone();
+    mismatched.provider_id = new_id();
+    assert!(
+        rows::segment(
+            unit.conn,
+            segment,
+            conversation,
+            &mismatched,
+            s.ada.id(),
+            s.rig.world.now(),
+            seq
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT ended_at IS NULL FROM segments WHERE id=$1")
+            .bind(previous)
+            .fetch_one(&mut *unit.conn)
+            .await
+            .unwrap()
+    );
+    rows::segment(
+        unit.conn,
+        segment,
+        conversation,
+        &binding,
+        s.ada.id(),
+        s.rig.world.now(),
+        seq,
+    )
+    .await
+    .unwrap();
+    unit.finish().await.unwrap();
+    tx.commit().await.unwrap();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    assert_eq!(
+        rows::segment_binding(&mut conn, conversation, segment)
+            .await
+            .unwrap(),
+        Some(binding)
+    );
+    assert!(
+        rows::program_binding(&mut conn, conversation)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let physical: (Option<String>, Option<Id>, Option<Id>, String) = sqlx::query_as(
+        "SELECT program_protocol,environment_id,agent_id,credential_path FROM segments WHERE id=$1",
+    )
+    .bind(segment)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(physical, (None, None, None, "native".into()));
+    assert_eq!(s.rig.commands.issued_of("provider.generate"), 0);
 }
 
 #[tokio::test]

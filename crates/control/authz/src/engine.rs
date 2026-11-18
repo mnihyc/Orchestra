@@ -1515,7 +1515,10 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
 
     fn ask_inspection(&self, site: &Site) -> Option<Site> {
         let boundary = self.ask_boundary(site)?;
-        if boundary.person == self.principal.user() || !self.ask_root_available(boundary) {
+        if !boundary.inspectable
+            || boundary.person == self.principal.user()
+            || !self.ask_root_available(boundary)
+        {
             return None;
         }
         let root = self.graph.site_of(boundary.root)?;
