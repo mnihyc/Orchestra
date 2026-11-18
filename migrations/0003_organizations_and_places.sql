@@ -78,12 +78,16 @@ CREATE INDEX nodes_org_tree_idx ON nodes USING btree (org_id, tree_seq);
 
 CREATE INDEX nodes_parent_idx ON nodes USING btree (parent_id) WHERE (deleted_at IS NULL);
 
+CREATE INDEX nodes_place_parent_idx ON nodes USING btree (parent_id, id) WHERE (kind <> 'thread' AND deleted_at IS NULL);
+
 CREATE INDEX nodes_summary_thread_activity_idx ON nodes (updated_at DESC, id DESC)
     WHERE kind = 'thread' AND deleted_at IS NULL AND archived_at IS NULL;
 
 CREATE INDEX nodes_path_idx ON nodes USING gin (path);
 
 CREATE INDEX nodes_places_idx ON nodes USING btree (id) WHERE ((kind <> 'thread'::text) AND (deleted_at IS NULL));
+
+CREATE INDEX nodes_deleted_idx ON nodes (id) WHERE deleted_at IS NOT NULL;
 
 CREATE INDEX related_node_folded_name_idx ON nodes USING btree (parent_id, orch_related_name_key(translate(orch_related_tree_name(name), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::text, 'abcdefghijklmnopqrstuvwxyz'::text))) WHERE (deleted_at IS NULL);
 
@@ -302,6 +306,9 @@ CREATE TABLE node_summary_state (
     last_seq bigint DEFAULT 0 NOT NULL,
     failures bigint DEFAULT 0 NOT NULL,
     reason text,
+    reason_code text,
+    retry_policy jsonb CHECK (retry_policy IS NULL OR jsonb_typeof(retry_policy) = 'object'),
+    automatic_fields jsonb CHECK (automatic_fields IS NULL OR jsonb_typeof(automatic_fields) = 'object'),
     run_id uuid,
     claimed_by uuid,
     claimed_until timestamp with time zone,

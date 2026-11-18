@@ -561,8 +561,15 @@ impl Engine {
         let affected = resources::ending_threads(conn, object.id).await?;
         if !affected.is_empty() {
             let mut unit = crate::unit::Unit::new(conn, at.get());
-            self.settle_in(&mut unit, &affected, Some(by), "disabled", false)
-                .await?;
+            self.settle_in(
+                &mut unit,
+                &affected,
+                Some(by),
+                "disabled",
+                orch_api_contract::threads::InputCancellationCause::SourceUnavailable,
+                false,
+            )
+            .await?;
             for id in &affected {
                 let seq = unit.stamp(*id).await?;
                 let reason = match fact.kind.as_str() {

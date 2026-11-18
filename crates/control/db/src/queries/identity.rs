@@ -96,8 +96,6 @@ pub struct UserRow {
     pub density: String,
     /// The org that is its own.
     pub personal_org_id: Option<Id>,
-    /// The sequence of its own feed.
-    pub inbox_seq: i64,
     /// Who created it, where somebody did.
     pub created_by: Option<Id>,
     /// When it was created.
@@ -541,7 +539,9 @@ pub async fn confirm_current_email(
 
 /// Notes that `user` was seen at `at`.
 pub async fn touch_last_seen(conn: &mut Conn, user: Id, at: DateTime<Utc>) -> Result<(), DbError> {
-    sqlx::query("UPDATE users SET last_seen_at = $2 WHERE id = $1")
+    // Presence never waits on a person's own credential/profile write. Their next use records it.
+    sqlx::query("WITH available AS (SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE SKIP LOCKED)
+                 UPDATE users SET last_seen_at=GREATEST(last_seen_at,$2) WHERE id IN(SELECT id FROM available)")
         .bind(user)
         .bind(at)
         .execute(conn)
@@ -898,17 +898,58 @@ pub async fn slide_session(
     now: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE sessions SET last_used_at = $2, expires_at = $3 WHERE id = $1")
+    sqlx::query("UPDATE sessions SET last_used_at = GREATEST(last_used_at,$2), expires_at = GREATEST(expires_at,$3) WHERE id = $1")
         .bind(session)
         .bind(now)
         .bind(expires_at)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("DELETE FROM access_tokens WHERE session_id = $1 AND expires_at <= $2")
-        .bind(session)
-        .bind(now)
-        .execute(conn)
-        .await?;
+    drop_expired_access_tokens(conn, session, now).await?;
+    Ok(())
+}
+
+/// Renews one still-live session, ordered against that session's revocation and expiry.
+/// Account eligibility is sampled in the same statement without locking profile or Inbox writes.
+pub async fn renew_session(
+    conn: &mut Conn,
+    session: Id,
+    now: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let renewed = sqlx::query(
+        "UPDATE sessions s SET last_used_at=GREATEST(s.last_used_at,$2),expires_at=GREATEST(s.expires_at,$3)
+          FROM users u WHERE s.id=$1 AND u.id=s.user_id AND u.status='active'
+            AND s.revoked_at IS NULL AND s.expires_at>$2",
+    )
+    .bind(session)
+    .bind(now)
+    .bind(expires_at)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        == 1;
+    if renewed {
+        drop_expired_access_tokens(conn, session, now).await?;
+    }
+    Ok(renewed)
+}
+
+/// An expired token still held by an admitted action is collected on a later renewal or upkeep.
+async fn drop_expired_access_tokens(
+    conn: &mut Conn,
+    session: Id,
+    now: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "WITH expired AS MATERIALIZED (
+        SELECT token_hash FROM access_tokens WHERE session_id=$1 AND expires_at<=$2
+        FOR UPDATE SKIP LOCKED
+    ) DELETE FROM access_tokens a USING expired e WHERE a.token_hash=e.token_hash",
+    )
+    .bind(session)
+    .bind(now)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -2054,8 +2095,8 @@ pub struct NewInboxRow<'a> {
 /// was given in their feed.
 pub async fn add_inbox_row(conn: &mut Conn, row: &NewInboxRow<'_>) -> Result<Option<i64>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
       RETURNING inbox_seq",
     )
     .bind(row.user_id)
@@ -2174,6 +2215,34 @@ pub async fn interface_state(conn: &mut Conn, user: Id) -> Result<Vec<(String, J
             .fetch_all(conn)
             .await?,
     )
+}
+
+/// The caller's own model choices, newest first; no other person's history is joined.
+pub async fn recent_models(conn: &mut Conn, user: Id) -> Result<Vec<(Id, String)>, DbError> {
+    Ok(sqlx::query_as("SELECT provider_id, model_name FROM user_model_recents WHERE user_id=$1 ORDER BY position DESC")
+        .bind(user).fetch_all(conn).await?)
+}
+
+/// Each selection updates only its own identity; concurrent devices retain both choices.
+pub async fn note_model_choice(
+    conn: &mut Conn,
+    user: Id,
+    provider: Id,
+    model: &str,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO user_model_recents(user_id,provider_id,model_name,used_at) VALUES($1,$2,$3,$4)
+        ON CONFLICT(user_id,provider_id,model_name) DO UPDATE SET position=DEFAULT,used_at=EXCLUDED.used_at")
+        .bind(user).bind(provider).bind(model).bind(at).execute(&mut *conn).await?;
+    crate::idempotency::creation::observe_with(
+        conn,
+        Some(user),
+        "recent_activity",
+        provider,
+        serde_json::json!({"kind":"model","model_name":model}),
+    )
+    .await?;
+    Ok(())
 }
 
 /// A served page carries its last-place fields without overwriting concurrent sidebar choices.
@@ -4591,7 +4660,7 @@ mod tests {
         };
         assert_eq!(add_inbox_row(&mut conn, &row).await.unwrap(), Some(1));
         assert_eq!(add_inbox_row(&mut conn, &row).await.unwrap(), None);
-        let seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id = $1")
+        let seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id = $1")
             .bind(ada)
             .fetch_one(&mut *conn)
             .await

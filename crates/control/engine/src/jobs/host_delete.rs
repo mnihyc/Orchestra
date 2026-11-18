@@ -183,6 +183,7 @@ impl Deleting {
                 return;
             }
             progress.activity = Some(JobActivity {
+                captured_deadline: None,
                 waiting_for: reason,
                 updated_at: Time::new(job.now()),
                 stall_after_seconds: 0,

@@ -320,6 +320,9 @@ pub struct NodeBase<K> {
     pub tags_source: FieldSource,
     /// When automation last wrote the title or tags.
     pub auto_updated_at: Option<Time>,
+    /// Retained automatic field outcomes and actual scheduling facts; current ownership still wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_fields: Option<crate::summary_facts::AutomaticFields>,
     /// How its permission page stands against the defaults.
     pub page: PageState,
     /// The node's chat; reading it needs its own permission.
@@ -787,11 +790,14 @@ pub enum AuditActor {
 /// Read-only deletion facts returned by an authorized inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeletedInspection {
+    /// Present for a node inspected under its restoration authority; distinct from purge_at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_hold: Option<NodeCleanupHold>,
     /// When the object was deleted.
     pub deleted_at: Time,
     /// Who deleted it, where known.
     pub deleted_by: Option<UserRef>,
-    /// Its promised purge day.
+    /// The recorded restoration cutoff; physical cleanup can wait for retained dependencies.
     pub purge_at: Time,
     /// Always true for an inspection.
     pub readonly: bool,
@@ -1062,6 +1068,7 @@ pub struct FirstInput {
     /// What to say to the agent.
     pub content: Vec<ContentPart>,
     /// A value of the client's own that makes sending it again safe.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1157,6 +1164,10 @@ pub struct CreateThread {
     /// Prepare the repository when the directory is missing on any machine, unless explicitly false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepare_source: Option<bool>,
+    /// File edits saved before a new workspace exists. Creation applies them conditionally
+    /// after source preparation and before the agent's first input, then consumes this plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_edits: Vec<crate::source::WorkspaceFileEdit>,
     /// An own branch and unused worktree directory in an existing environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::source::WorktreeChoice>,
@@ -1376,6 +1387,7 @@ pub struct ThreadAdoptBody {
     /// The agent profile.
     pub agent_id: Id,
     /// The harness's own reference to the session.
+    #[schemars(extend("x-storage-exact" = true))]
     pub native_session_ref: String,
     /// The environment; the caller's one on that machine whose root holds the
     /// session's directory when left out.
@@ -1799,9 +1811,47 @@ pub struct NodeArchiveEnvironment {
     pub redacted: bool,
 }
 
+/// The native condition holding an otherwise configured automatic node action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRetentionHold {
+    ActiveWork,
+    AlreadyArchived,
+    AncestorArchived,
+    NotArchived,
+}
+
+/// One effective policy and its eligibility, assessed by the enforcing scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeRetentionPolicy {
+    pub days: Option<i64>,
+    /// Safe layer only; private ancestor names and identifiers are not disclosed.
+    pub source: Option<crate::settings::SettingScope>,
+    pub eligible_at: crate::workspace::JobWaitTime,
+    pub hold_reason: Option<NodeRetentionHold>,
+}
+
+/// Current automatic eligibility, separate from an accepted deletion's recovery cutoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeRetention {
+    pub archive: NodeRetentionPolicy,
+    pub delete: NodeRetentionPolicy,
+    pub measured_at: Time,
+}
+
+/// The physical purge worker's current dependency predicate, with no private reference names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeCleanupHold {
+    pub held: bool,
+    pub measured_at: Time,
+}
+
 /// The complete read-only review of archiving or unarchiving a subtree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeArchivePlan {
+    /// The same automatic assessment as the native scheduler, not the review token lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<NodeRetention>,
     /// Caller-bound stored review, for this node and direction only.
     pub preflight_id: Id,
     /// When the review expires.

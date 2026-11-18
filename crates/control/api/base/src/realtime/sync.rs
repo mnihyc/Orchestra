@@ -229,11 +229,8 @@ impl Inner {
         let Some((after, upto)) = st.cursor.owed(target) else {
             return Ok(());
         };
-        // The current credential and shared authority gate stay pinned through projection
-        // and serialization; authority writers cannot commit halfway through this frame.
-        let Some(_identity) = super::watches::delivery_guard(self, sub.connection()).await? else {
-            return Ok(());
-        };
+        // read_rows refreshes the exact credential through key_reads::admit before any
+        // projection. The epoch and credential are checked again before queueing it below.
         let rows = self
             .read_rows(sub, after, upto, cache, sub.thread_scope(st))
             .await?;
@@ -341,19 +338,34 @@ impl Inner {
             if !st.open {
                 continue;
             }
-            match self.recheck(&sub, &mut st, epoch).await {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    tracing::warn!(%error, ?source, "the access of a subscription could not be asked again");
-                    continue;
-                }
-            }
-            if let Err(error) = self.deliver(&sub, &mut st, target, &mut cache).await {
-                tracing::warn!(%error, ?source, "rows could not be read for a subscription; the next pass reads them");
-            }
+            let feed = st.cursor.owed(target).map(|_| sub.feed());
+            let work = self.pass_subscriber(&sub, &mut st, epoch, source, target, &mut cache);
+            self.traced_frame_sql(feed, sub.connection().user, "read", work)
+                .await;
         }
         Ok(())
+    }
+
+    async fn pass_subscriber(
+        self: &Arc<Self>,
+        sub: &Arc<Subscription>,
+        state: &mut SubState,
+        epoch: i64,
+        source: Source,
+        target: Seq,
+        cache: &mut Cache,
+    ) {
+        match self.recheck(sub, state, epoch).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(%error,?source,"the access of a subscription could not be asked again");
+                return;
+            }
+        }
+        if let Err(error) = self.deliver(sub, state, target, cache).await {
+            tracing::warn!(%error,?source,"rows could not be read for a subscription; the next pass reads them");
+        }
     }
 
     /// The work of one source: passes, spaced by the gap, for as long as
@@ -437,11 +449,23 @@ impl Inner {
     /// subscribers are read for, unless they all have read that far.
     pub(crate) fn announce(self: &Arc<Self>, source: Source, seq: Seq) {
         let mut registry = self.registry();
+        let stopping = match source {
+            Source::Thread(thread) => registry.stop_pending.contains(&thread),
+            _ => false,
+        };
         let Some(entry) = registry.sources.get_mut(&source) else {
             return;
         };
+        let progressed = seq > entry.notified;
         entry.notified = entry.notified.max(seq);
         self.kick(entry, source);
+        drop(registry);
+        if stopping
+            && progressed
+            && let Source::Thread(thread) = source
+        {
+            super::thread_stops::changed(self, thread);
+        }
     }
 
     /// Looks again whether anybody has not read as far as was announced, for a
@@ -484,6 +508,7 @@ impl Inner {
     async fn listen_loop(self: Arc<Self>) {
         let channels = [
             sequences::THREAD_CHANNEL,
+            sequences::THREAD_STOP_CHANNEL,
             sequences::TOPIC_CHANNEL,
             sequences::TREE_CHANNEL,
             sequences::USER_CHANNEL,
@@ -548,6 +573,11 @@ impl Inner {
                     // Raw projection repair is driven by actual commits, never the periodic durable-feed sweep.
                     self.ephemeral.raw_changed(Some(thread));
                     self.announce(Source::Thread(thread), seq);
+                }
+            }
+            sequences::THREAD_STOP_CHANNEL => {
+                if let Some((thread, _)) = sequences::parse_payload(payload) {
+                    super::thread_stops::changed(self, thread);
                 }
             }
             sequences::TOPIC_CHANNEL => {
@@ -719,8 +749,11 @@ impl Inner {
             );
             // The state lock orders projection after the reset, even when the epoch
             // watcher arrived first. Keep only this unprojected notice across a cut change.
-            let projected =
-                super::personal_changes::project(self, sub.connection(), event.clone()).await?;
+            let Some(projected) =
+                super::personal_changes::project(self, sub.connection(), event.clone()).await?
+            else {
+                return Ok(());
+            };
             #[cfg(any(test, feature = "test-support"))]
             super::epoch_handoff_tests::after_projection(super::epoch_handoff_tests::Cut::Personal)
                 .await;
@@ -832,6 +865,30 @@ impl Inner {
         let mut conn = self.db.acquire().await?;
         for (id, seq) in orch_db::queries::feeds::thread_seqs(&mut conn, &threads).await? {
             self.announce(Source::Thread(id), seq);
+        }
+        let stopping = orch_db::queries::threads::stopping_versions(&mut conn, &threads).await?;
+        let changed = {
+            let mut registry = self.registry();
+            let live: HashSet<_> = threads.iter().copied().collect();
+            registry
+                .stop_versions
+                .retain(|thread, _| live.contains(thread));
+            registry.stop_pending.retain(|thread| live.contains(thread));
+            stopping
+                .into_iter()
+                .filter_map(|(thread, version)| {
+                    let old = registry.stop_versions.entry(thread).or_default();
+                    if version > *old {
+                        *old = version;
+                        Some(thread)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for thread in changed {
+            super::thread_stops::changed(self, thread);
         }
         for (id, seq) in orch_db::queries::feeds::topic_seqs(&mut conn, &topics).await? {
             self.announce(Source::Topic(id), seq);
