@@ -86,6 +86,33 @@ def catalogue(root, name):
     return rows
 
 
+def https_edge_contract(root):
+    """Keep the shipped HTTPS path configurable, resumable and safe to replay only for reads."""
+    required = {
+        "deploy/frontend.sh": ["include /etc/orch/frontend-tls/transport.include;", "nginx -t && nginx -s reload"],
+        "deploy/compose.frontend-https.yml": [":443/udp"],
+        "deploy/nginx.conf": ['$ssl_early_data:$http_early_data', "proxy_set_header Early-Data $orch_early_data;",
+                              "map $http_host $orch_https_port"],
+        "crates/control/api/base/src/certificates/transport.rs": ["ssl_session_cache", "ssl_session_timeout",
+            "ssl_session_tickets", "ssl_early_data", "http2", "listen 443 quic reuseport;", "Alt-Svc"],
+        "crates/control/api/base/src/registry.rs": ['get_all("early-data")', "!parts.method.is_safe()",
+            'route.path.starts_with("/auth/oidc/")', "ErrorCode::RequestTooEarly"],
+        "apps/api/src/composition.rs": ["publish_frontend_transport", "keep_frontend_transport"],
+    }
+    for relative, fragments in required.items():
+        path = root / relative
+        if not path.is_file():
+            raise ValueError(f"the HTTPS edge is missing {relative}")
+        text = path.read_text()
+        for fragment in fragments:
+            if fragment not in text:
+                raise ValueError(f"the HTTPS edge lost {fragment!r} in {relative}")
+    registry = (root / "crates/control/api/base/src/registry.rs").read_text()
+    opened = registry[registry.index("async fn open("):]
+    if opened.index('get_all("early-data")') > opened.index("authentication::on_surface"):
+        raise ValueError("the HTTPS edge must refuse early writes before authentication can have an effect")
+
+
 def source_contract(root, commit, tag, *, require_sealed=True):
     version(tag)
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -108,10 +135,17 @@ def source_contract(root, commit, tag, *, require_sealed=True):
     if surfaces != {"browser": "/api/v1", "keys": "/openapi/v1"}:
         raise ValueError("the candidate changed the reviewed browser/key transport roots")
     nginx = (root / "deploy/nginx.conf").read_text()
+    # The API's group keeps its connections and looks the service's name up again as its address changes, so an API
+    # made again by an update is found without the edge being restarted.
+    groups = re.findall(r"upstream\s+orch_api\s*\{([^{}]*)\}", nginx)
+    if len(groups) != 1 or not re.search(r"\bserver\s+api:8443\s+resolve;", groups[0]):
+        raise ValueError("the stock edge must look the API's address up again (upstream orch_api with `resolve`)")
     for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]:
         blocks = re.findall(rf"location\s+{re.escape(route)}\s*\{{([^{{}}]*)\}}", nginx)
-        if len(blocks) != 1 or "proxy_pass $upstream$request_uri;" not in blocks[0]:
+        # A `proxy_pass` without a URI part hands the request's own URI on as it was received.
+        if len(blocks) != 1 or not re.search(r"\bproxy_pass\s+https://orch_api;", blocks[0]):
             raise ValueError(f"the stock edge must forward the unchanged {route} route")
+    https_edge_contract(root)
     native = catalogue(root, "TARGETS")
     nodes = catalogue(root, "NODE_TARGETS")
     if any(row[1] != "linux" or row[0] not in {target[0] for target in native} for row in nodes):

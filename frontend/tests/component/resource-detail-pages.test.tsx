@@ -20,6 +20,7 @@ import { McpScreen } from '@/features/resources/mcp/Preset';
 import { MountScreen } from '@/features/resources/mounts/Mount';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { formatBytes, formatPercent } from '@/lib/format';
 import type { Environment, EnvironmentSandboxReadiness } from '@/generated/api-types';
 import { detailAgent, detailEnvironment, detailHost, detailMachine, detailMcp, detailMount, detailSchema, detailTemplate } from './resource-detail-fixtures';
 import { show } from './support';
@@ -58,7 +59,7 @@ vi.mock('@/api/resource-tools', async (load) => {
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, to, params, className }: { children: ReactNode; to: string; params?: Record<string, string>; className?: string }) => <a className={className} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
@@ -102,6 +103,18 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.agent = detailAgent;
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
+
+for(const locale of ['en','zh-CN'] as const) it(`names the idle reconnect beside automatic certificate renewal only for a valid identity (${locale})`,async()=>{
+  await setLocale(locale);
+  const renewal=locale==='en'?'Automatic · reconnects when idle':'自动续期 · 空闲时重新连接';
+  const view=draw(<Machine machineId={detailMachine.id} tab="certificate" onTab={vi.fn()} />);
+  expect(await screen.findByText(renewal)).toBeVisible();
+  expect(screen.getByText(i18n.t('machines.certificate.ends'))).toBeVisible();
+  act(()=>{view.client.setQueryData(machineKey(detailMachine.id),{...detailMachine,status:'revoked'});});
+  await waitFor(()=>expect(screen.queryByText(renewal)).not.toBeInTheDocument());
+  const certificate=screen.getByLabelText(i18n.t('machines.certificate.title'),{selector:'dl'});
+  expect(within(certificate).getByText(i18n.t('machines.certificate.revoked'))).toBeVisible();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
@@ -332,3 +345,29 @@ it.each(['en', 'zh-CN'] as const)('keeps the machine Access address reachable in
   expect(calls.read).toHaveBeenCalledExactlyOnceWith('machine');
   expect(calls.hidden).not.toHaveBeenCalled();
 });
+
+for(const locale of ['en','zh-CN'] as const) {
+  it(`shows measured host load and free storage before declared needs (${locale})`,async()=>{
+    await setLocale(locale);
+    const host={...detailHost,capacity:{cpu_millis:6000,memory_mb:1344,disk_gb:66},declared:{cpu_millis:2000,memory_mb:2048,disk_gb:0},
+      usage:{cpu_percent_milli:12500,memory_used_mb:617,observed_at:'2026-11-13T18:38:00Z'},
+      storages:[{name:'Root',default:true,capacity_gb:66,free_gb:54,private_views:false}]};
+    draw(<HostScreen hostId={host.id} tab="overview" onTab={vi.fn()}/>,host);
+    const facts=await screen.findByLabelText(i18n.t('hosts.overview.about'),{selector:'dl'});
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredCpu',{used:formatPercent(0.125,locale),capacity:i18n.t('resources.amount.cpu',{count:6})}));
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredMemory',{used:formatBytes(617*1024*1024,locale),free:formatBytes(727*1024*1024,locale),capacity:formatBytes(1344*1024*1024,locale)}));
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredStorage',{name:'Root',free:i18n.t('resources.amount.disk',{size:54}),capacity:i18n.t('resources.amount.disk',{size:66})}));
+    expect(facts).not.toHaveTextContent(i18n.t('hosts.capacity.declared',{declared:formatBytes(2048*1024*1024,locale),capacity:formatBytes(1344*1024*1024,locale)}));
+    expect(screen.queryByLabelText(i18n.t('hosts.capacity.title'))).not.toBeInTheDocument();
+  });
+  it(`keeps unreported host load unknown instead of substituting declared needs (${locale})`,async()=>{
+    await setLocale(locale);
+    const host={...detailHost,usage:null,storages:[]};
+    draw(<HostScreen hostId={host.id} tab="overview" onTab={vi.fn()}/>,host);
+    const facts=await screen.findByLabelText(i18n.t('hosts.overview.about'),{selector:'dl'});
+    for(const key of ['cpu','memory','disk']) {
+      const term=[...facts.querySelectorAll('dt')].find((row)=>row.textContent===`${i18n.t(`hosts.capacity.${key}`)}:`);
+      expect(term?.nextElementSibling).toHaveTextContent('–');
+    }
+  });
+}

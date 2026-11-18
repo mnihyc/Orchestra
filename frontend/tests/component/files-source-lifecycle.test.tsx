@@ -1,5 +1,7 @@
 /** Actual Files/door/tree/ledger lifecycle; only native replies and virtual viewport measurement are synthetic. */
-import { act, cleanup, fireEvent, render, screen, waitFor, type RenderResult } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within, type RenderResult } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { EditorView } from '@codemirror/view';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider } from '@tanstack/react-router';
 import { createStore } from 'zustand/vanilla';
@@ -7,12 +9,21 @@ import { File, PanelsTopLeft } from 'lucide-react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Live from '@/realtime/live';
 import type * as Workspace from '@/api/workspace';
-import type { DirEntry, DirListing } from '@/generated/api-types';
+import type * as Forks from '@/api/forks';
+import type * as Environments from '@/api/environments';
+import type * as SourceApi from '@/api/source';
+import type { DirEntry, DirListing, Environment, FileStat } from '@/generated/api-types';
 import type { FeedFrame, SocketStatus } from '@/realtime/socket';
 import { ApiError, client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { environmentQuery } from '@/api/workspace';
+import { i18n, setLocale } from '@/i18n';
 import { FilesView } from '@/features/inspector/Files';
+import { WorkspaceInstructions,StagedWorkspaceInstructions } from '@/features/start/WorkspaceInstructions';
+import { Where } from '@/features/change/Where';
+import { SourcePreparation } from '@/features/source/Preparation';
+import { initialChoices } from '@/features/change/choices';
+import { headQuery, invalidateHead } from '@/features/files/content';
 import { allTabs, findTab, makeGroup, makeTab, type Tab } from '@/features/workbench/layout';
 import { PageView } from '@/features/workbench/PageView';
 import { useWorkbench } from '@/features/workbench/store';
@@ -27,25 +38,34 @@ import { registerView } from '@/features/workbench/views';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { Route as ThreadRoute } from '@/routes/thread/$threadId/index';
 import { RoutingFrame } from './workbench-routing/frame';
+import { workspaceFile } from '../doubles/workspace-file';
+import { show } from './support';
 import { delayedReads, feedCalls, FileWitness, heldFeeds, nativeEnvironment, nativeNodes, nativeRows, nativeThread, USER } from './workbench-content/fixture';
 
 const TREE_WAIT_MS = 15_000;
-const calls = vi.hoisted(() => ({ list: vi.fn(), subscribe: vi.fn() }));
+const calls = vi.hoisted(() => ({ list: vi.fn(), stat: vi.fn(), fetch: vi.fn(), bytes: vi.fn(), write: vi.fn(),sourceEdits:vi.fn(),sourcePrepare:vi.fn(), environment: vi.fn<() => Promise<Environment>>(), subscribe: vi.fn(), liveOnly: false }));
+vi.mock('@/api/source',async(original)=>({...await original<typeof SourceApi>(),sourceFileEditsQuery:(environment:string,thread:string,scope:string)=>({queryKey:['source-file-edits',environment,thread,scope],queryFn:calls.sourceEdits,retry:false}),prepareSource:calls.sourcePrepare}));
 vi.mock('@/realtime/live', async (original) => {
   const actual = await original<typeof Live>();
   const { useNativeFeed } = await import('./workbench-content/fixture');
   return { ...actual, useThreadFeed: useNativeFeed, socket: {
     subscribe: calls.subscribe,
-    status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, build: null, outdated: false })),
+    status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, usualRoundTripMs: null, slow: false, build: null, outdated: false })),
   } };
 });
 vi.mock('@/api/workspace', async (original) => {
   const actual = await original<typeof Workspace>();
   const { nativeEnvironment: environment } = await import('./workbench-content/fixture');
-  return { ...actual, listDirectory: calls.list,
-    environmentQuery: (id: string) => ({ ...actual.environmentQuery(id), queryFn: () => Promise.resolve({ ...environment(id), workspace_incarnation: 'source-one' }) }),
+  return { ...actual, listDirectory: calls.list, statFile: calls.stat, fetchFile: calls.fetch, readFileBytes: calls.bytes, writeFile: calls.write,
+    environmentQuery: (id: string) => ({ ...actual.environmentQuery(id), queryFn: () => Promise.resolve({ ...environment(id), ...(calls.liveOnly ? { index: 'live', index_reason: 'chosen' } : {}), workspace_incarnation: 'source-one' }) }),
   };
 });
+vi.mock('@/api/forks', async (original) => ({ ...await original<typeof Forks>(),
+  placesQuery: (topic: string) => ({ queryKey: ['change-places', topic], queryFn: () => Promise.resolve([]) }),
+}));
+vi.mock('@/api/environments', async (original) => ({ ...await original<typeof Environments>(),
+  environmentQuery: (id: string) => ({ queryKey: ['environment', id], queryFn: calls.environment }),
+}));
 vi.mock('@/features/thread/Thread', async () => {
   const { FullThread } = await import('./workbench-content/fixture'); return { ThreadScreen: FullThread };
 });
@@ -74,7 +94,10 @@ function listing(path: string): DirListing {
 beforeEach(() => {
   state().leave(); localStorage.clear(); stopWatching(); queryClient.clear(); threadWriter.clear();
   nativeRows.clear(); nativeNodes.clear(); heldFeeds.clear(); delayedReads.clear(); feedCalls.length = 0;
-  calls.list.mockReset(); calls.subscribe.mockReset(); watches.length = 0;
+  calls.list.mockReset(); calls.subscribe.mockReset(); watches.length = 0; calls.liveOnly = false;
+  calls.stat.mockReset(); calls.fetch.mockReset(); calls.bytes.mockReset(); calls.write.mockReset();
+  calls.environment.mockReset();
+  calls.sourceEdits.mockReset();calls.sourcePrepare.mockReset();
   calls.list.mockImplementation((_door: Workspace.Door, path: string) => Promise.resolve(listing(path)));
   calls.subscribe.mockImplementation((feed: string, options: { onFrame: (frame: FeedFrame) => void }) => {
     const watch = { feed, onFrame: options.onFrame, unsubscribe: vi.fn() }; watches.push(watch); return watch;
@@ -94,6 +117,7 @@ afterEach(async () => {
   for (const remove of removes.splice(0)) remove();
   queryClient.setDefaultOptions(savedOptions); client.session.setState(savedSession); localStorage.clear();
   clearPageNavigation(pageNavigationOrigin()); clearViewOpenings(); focusScreenHeading(null); clearScreenHeading();
+  vi.unstubAllGlobals();
 });
 function draw() {
   nativeRows.set(threadId, { ...nativeThread(threadId), directory: 'web' });
@@ -134,6 +158,7 @@ function fileTab(): Tab {
   return tab;
 }
 
+// The complete trip through the held native admissions shares the first tree's observation budget.
 it('the actual Board thread-to-file-to-thread transition retains expansion, selection and scroll through a held E/T admission without another tree read', async () => {
   const drawn = draw(), { tree, src, app } = await expanded();
   const sourceWatches = [...watches], reads = calls.list.mock.calls.length;
@@ -160,7 +185,7 @@ it('the actual Board thread-to-file-to-thread transition retains expansion, sele
   expect(feedCalls.some((one) => one.owner === workspace.key.owner && !one.controls)).toBe(true);
   expect(feedCalls.filter((one) => one.native === threadId).every((one) => one.owner === drawn.page.id || one.owner === workspace.key.owner)).toBe(true);
   expect(workspace.controls).toBeUndefined();
-});
+}, TREE_WAIT_MS);
 
 it('an explicitly chosen folder root survives another same-source admission with its selected child and viewport', async () => {
   draw(); const { src } = await expanded();
@@ -266,4 +291,353 @@ it('hiding the sidebar panel during an admission releases its leases, and late m
   expect(before.every((one) => one.unsubscribe.mock.calls.length === 1)).toBe(true);
   expect(screen.queryByRole('tree')).toBeNull(); expect(calls.list).toHaveBeenCalledTimes(count);
   expect(useDirectories.getState().dirs.get(directoryKey(environmentId, 'web'))?.entries.map((one) => one.path)).not.toContain('web/late.ts');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`names the opened-folder watch scope without claiming the unopened workspace is watched in ${locale}`, async () => {
+  await setLocale(locale); calls.liveOnly = true;
+  try {
+    const { view } = draw(); await expanded();
+    expect(await screen.findByText(locale === 'en' ? /open folders/i : /已打开的文件夹/)).toBeVisible();
+    expect(view.container.querySelector('time[datetime="2026-10-17T00:00:00Z"]')).not.toBeNull();
+    expect(calls.list.mock.calls.every(([, path]) => path === 'web' || path === 'web/src')).toBe(true);
+  } finally { await setLocale('en'); }
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`distinguishes retained file bytes from metadata in the same cached folder in ${locale}`, async () => {
+  await setLocale(locale);
+  calls.list.mockImplementation((_door: Workspace.Door, path: string) => {
+    const value = listing(path);
+    return Promise.resolve({ ...value, source: 'cached', entries: value.entries.map((one) => ({ ...one, cached: one.path === 'web/src/app.ts' })) });
+  });
+  try {
+    draw(); const { app } = await expanded();
+    expect(within(app).getByText(i18n.t('files.tree.cached'))).toBeVisible();
+    const missing = screen.getByRole('treeitem', { name: /lib.ts/ });
+    expect(within(missing).getByText(locale === 'en' ? 'Needs machine' : '需要连接机器')).toBeVisible();
+    expect(within(missing).queryByText(i18n.t('files.tree.cached'))).not.toBeInTheDocument();
+  } finally { await setLocale('en'); }
+});
+
+it('keeps a mounted file and each workspace incarnation separate at the same relative path',async()=>{
+  const door={environmentId,threadId:null},path='AGENTS.md';
+  const workspaceHash='a'.repeat(64),mountHash='b'.repeat(64);
+  calls.stat.mockImplementation((_door:Workspace.Door,_path:string,_signal:AbortSignal,mount?:string)=>Promise.resolve(workspaceFile(path,'Instructions',{hash:mount===undefined?workspaceHash:mountHash})));
+  calls.fetch.mockImplementation((_door:Workspace.Door,_path:string,_signal:AbortSignal,mount?:string)=>Promise.resolve({state:'ready',hash:mount===undefined?workspaceHash:mountHash,size:12}));
+  const first=headQuery(door,path,'workspace-one');
+  const replaced=headQuery(door,path,'workspace-two');
+  const mounted=headQuery(door,path,undefined,'read-only-mount');
+  expect((await queryClient.query(first)).brought).toMatchObject({hash:workspaceHash});
+  expect((await queryClient.query(replaced)).brought).toMatchObject({hash:workspaceHash});
+  expect((await queryClient.query(mounted)).brought).toMatchObject({hash:mountHash});
+  await queryClient.query(first);
+  expect(calls.stat).toHaveBeenCalledTimes(3);
+  expect(calls.fetch).toHaveBeenCalledTimes(3);
+  expect(calls.stat.mock.calls.map((call):unknown=>call[3])).toEqual([undefined,undefined,'read-only-mount']);
+  expect(calls.fetch.mock.calls.map((call):unknown=>call[3])).toEqual([undefined,undefined,'read-only-mount']);
+});
+
+/** Native stat, versioned bytes and compare-and-swap replies; the file reader/editor and directory watch are real. */
+function instructionsWorld(initial: string | null, bound = false, directory='web') {
+  const path = directory===''?'AGENTS.md':`${directory}/AGENTS.md`, door = { environmentId, threadId: null };
+  const versions = new Map<string, string>();
+  let revision = 0, text: string | null = null, hash: string | null = null;
+  const change = (next: string) => {
+    text = next; revision += 1; hash = revision.toString(16).padStart(64, '0'); versions.set(hash, next);
+  };
+  if (initial !== null) change(initial);
+  const stat = () => text === null ? null : workspaceFile(path, text, { hash, mtime: `2026-10-17T00:00:${revision.toString().padStart(2, '0')}Z` });
+  calls.stat.mockImplementation(() => {
+    const found = stat();
+    return found === null ? Promise.reject(new ApiError({ type: 'about:blank', title: 'Missing file', status: 404,
+      code: 'not_found', detail: 'The native file is absent', reason: 'not_found', request_id: 'synthetic' }, null)) : Promise.resolve(found);
+  });
+  calls.fetch.mockImplementation(() => Promise.resolve(hash === null
+    ? { state: 'unavailable', reason: 'not_found', hash: null, size: null }
+    : { state: 'ready', hash, size: new TextEncoder().encode(text ?? '').length }));
+  calls.bytes.mockImplementation((_door: Workspace.Door, _path: string, version: string) => {
+    const value = versions.get(version);
+    if (value === undefined) throw new Error('Only a native version can be read');
+    const bytes = new TextEncoder().encode(value);
+    return Promise.resolve({ bytes, total: bytes.length });
+  });
+  calls.write.mockImplementation((_door: Workspace.Door, _path: string, value: string, expected: string | null) => {
+    if (expected !== (hash ?? 'none')) return Promise.reject(new ApiError({ type: 'about:blank', title: 'Newer file', status: 409,
+      code: 'conflict.stale_revision', detail: 'The native version changed', current: stat(), request_id: 'synthetic' }, null));
+    change(value); return Promise.resolve(stat());
+  });
+  calls.list.mockImplementation(() => Promise.resolve({ ...listing('web'), entries: stat() === null ? [] : [stat()] }));
+  const base = nativeEnvironment(environmentId);
+  const environment = { ...base, workspace_incarnation: 'source-one', status: 'running' as const, remote_write: true, machine: null,
+    access: { ...base.access, permissions: ['environment.view', 'files.view', 'files.manage'] } };
+  calls.environment.mockResolvedValue(environment);
+  queryClient.setQueryData(['environment', environmentId], environment);
+  const thread = { ...nativeThread(threadId), directory };
+  const view = show(bound
+    ? <Where thread={thread} choices={{ ...initialChoices('replace'), where: { kind: 'same' } }} onChange={() => undefined} fork={false} />
+    : <WorkspaceInstructions environment={environment} directory={directory} />, queryClient); mounted.push(view);
+  const notify = () => {
+    const found = stat();
+    for (const watch of watches) act(() => watch.onFrame({ op: 'event', id: 1, feed: watch.feed,
+      data: { reset: true, changed: found === null ? [] : [found], removed: [] } }));
+  };
+  return { path, door, change, remove: () => { text = null; hash = null; }, notify, text: () => text, stat, view, environment };
+}
+
+function typeInstructions(body: HTMLElement, text: string) {
+  const editor = EditorView.findFromDOM(body);
+  if (editor === null) throw new Error('The actual shared file editor is mounted');
+  act(() => editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } }));
+}
+
+it('stages a change from the actual copied source version without writing into the source environment',async()=>{
+  const world=instructionsWorld('Instructions read from the source.\n',false,'');
+  const original=world.stat()?.hash;
+  const keep=vi.fn();
+  world.view.rerender(<StagedWorkspaceInstructions value={null} onChange={keep} sourceKey="copied-source" files={{from_environment:environmentId}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  const body=await screen.findByRole('textbox',{name:'Text of AGENTS.md'});
+  expect(body).toHaveTextContent('Instructions read from the source.');
+  typeInstructions(body,'The reviewed change for the new workspace.\n');
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.save')}));
+  expect(keep).toHaveBeenCalledExactlyOnceWith({path:'AGENTS.md',text:'The reviewed change for the new workspace.\n',expected_hash:original});
+  expect(calls.write).not.toHaveBeenCalled();
+  expect(world.text()).toBe('Instructions read from the source.\n');
+});
+
+it('starts a nested workspace instruction edit from the file actually carried into that directory',async()=>{
+  const world=instructionsWorld('The nested source instructions.\n',false,'web');
+  const keep=vi.fn(),hash=world.stat()?.hash;
+  world.view.rerender(<StagedWorkspaceInstructions value={null} onChange={keep} sourceKey="nested-copy" directory="web" files={{from_environment:environmentId,selection:{mode:'selection',include:['web/**']}}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  const body=await screen.findByRole('textbox',{name:'Text of AGENTS.md'});
+  expect(body).toHaveTextContent('The nested source instructions.');
+  expect(calls.stat.mock.calls.at(-1)?.[1]).toBe('web/AGENTS.md');
+  expect(calls.bytes.mock.calls.at(-1)?.[1]).toBe('web/AGENTS.md');
+  typeInstructions(body,'The reviewed nested change.\n');
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.save')}));
+  expect(keep).toHaveBeenCalledExactlyOnceWith({path:'AGENTS.md',text:'The reviewed nested change.\n',expected_hash:hash});
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('resolves a nested instruction preview below the source threads own directory',async()=>{
+  const world=instructionsWorld('Instructions below the selected source thread.\n',false,'source/web');
+  const request=vi.fn<(input:RequestInfo|URL,init?:RequestInit)=>Promise<Response>>().mockImplementation((input,init)=>{
+    const request=input instanceof Request?input:new Request(input,init);
+    expect(new URL(request.url).pathname).toBe('/api/v1/nodes/selected-source');
+    return Promise.resolve(Response.json({...nativeThread(threadId),id:'selected-source',directory:'source'}));
+  });
+  vi.stubGlobal('fetch',request);
+  world.view.rerender(<StagedWorkspaceInstructions value={null} onChange={vi.fn()} sourceKey="nested-thread-source" directory="web" files={{from_thread:'selected-source'}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  expect(await screen.findByRole('textbox',{name:'Text of AGENTS.md'})).toHaveTextContent('Instructions below the selected source thread.');
+  expect(calls.stat.mock.calls.at(-1)?.[1]).toBe('source/web/AGENTS.md');
+  expect(calls.bytes.mock.calls.at(-1)?.[1]).toBe('source/web/AGENTS.md');
+  expect(calls.write).not.toHaveBeenCalled();expect(request).toHaveBeenCalledOnce();
+});
+
+it('reads a nested snapshot instruction file instead of the root file when staging a nested thread',async()=>{
+  const world=instructionsWorld(null),keep=vi.fn(),hash='b'.repeat(64);
+  const request=vi.fn<(input:RequestInfo|URL,init?:RequestInit)=>Promise<Response>>().mockImplementation((input,init)=>{
+    const request=input instanceof Request?input:new Request(input,init);
+    expect(new URL(request.url).pathname).toBe('/api/v1/snapshots/nested-source/files/content');
+    expect(new URL(request.url).searchParams.get('path')).toBe('web/AGENTS.md');
+    return Promise.resolve(new Response('The nested snapshot instructions.\n',{headers:{ETag:`"${hash}"`}}));
+  });
+  vi.stubGlobal('fetch',request);
+  world.view.rerender(<StagedWorkspaceInstructions value={null} onChange={keep} sourceKey="nested-snapshot" directory="web" files={{snapshot_id:'nested-source'}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  expect(await screen.findByRole('textbox',{name:'Text of AGENTS.md'})).toHaveTextContent('The nested snapshot instructions.');
+  expect(request).toHaveBeenCalledOnce();expect(calls.write).not.toHaveBeenCalled();
+});
+
+it.each(['absent','empty','refused'] as const)('reads only the named snapshot file and preserves its %s source state in a staged edit',async(kind)=>{
+  const world=instructionsWorld(null),keep=vi.fn(),hash='a'.repeat(64);
+  const request=vi.fn<(input:RequestInfo|URL,init?:RequestInit)=>Promise<Response>>().mockImplementation((input,init)=>{
+    const request=input instanceof Request?input:new Request(input,init);
+    expect(new URL(request.url).pathname).toBe('/api/v1/snapshots/saved-source/files/content');
+    expect(new URL(request.url).searchParams.get('path')).toBe('AGENTS.md');
+    expect(request.headers.get('Range')).toMatch(/^bytes=0-\d+$/u);
+    return Promise.resolve(kind==='empty'?new Response(null,{status:416,headers:{ETag:`"${hash}"`,'Content-Range':'bytes */0'}}):Response.json({type:'about:blank',title:'Unavailable',status:404,code:'not_found',detail:'The named file is unavailable',request_id:'synthetic',...(kind==='absent'?{reason:'not_found'}:{})},{status:404}));
+  });
+  vi.stubGlobal('fetch',request);
+  world.view.rerender(<StagedWorkspaceInstructions value={null} onChange={keep} sourceKey="snapshot-source" files={{snapshot_id:'saved-source'}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  if(kind==='refused') {
+    expect(await screen.findByRole('alert')).toBeVisible();
+    expect(screen.queryByRole('textbox',{name:'Text of AGENTS.md'})).not.toBeInTheDocument();
+  }else {
+    const body=await screen.findByRole('textbox',{name:'Text of AGENTS.md'});
+    typeInstructions(body,'Reviewed snapshot instructions.\n');
+    await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.save')}));
+    expect(keep).toHaveBeenCalledExactlyOnceWith({path:'AGENTS.md',text:'Reviewed snapshot instructions.\n',expected_hash:kind==='empty'?hash:null});
+  }
+  expect(request).toHaveBeenCalledOnce();expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('compares the retained start edit with the source file and saves only after its current version was reviewed',async()=>{
+  const world=instructionsWorld('The source brought this text.\n');
+  const hash=world.stat()?.hash;
+  const environment={...world.environment,access:{...world.environment.access,permissions:[...world.environment.access.permissions,'environment.manage']}};
+  const revision='f'.repeat(64);
+  calls.sourceEdits.mockResolvedValue({revision,edits:[{path:'AGENTS.md',text:'The saved proposal.\n',expected_hash:null}]});
+  calls.sourcePrepare.mockResolvedValue(undefined);
+  world.view.rerender(<WorkspaceInstructions environment={environment} directory="web" recovery={{thread:threadId,state:'failed'}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  expect(await screen.findByRole('textbox',{name:'Text of AGENTS.md'})).toHaveTextContent('The saved proposal.');
+  expect(screen.getByRole('button',{name:i18n.t('files.edit.save')})).toHaveAttribute('aria-disabled','true');
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.changed.compare')}));
+  expect(await screen.findByRole('textbox',{name:i18n.t('files.edit.changed.theirsLabel',{name:'AGENTS.md'})})).toHaveTextContent('The source brought this text.');
+  expect(world.text()).toBe('The source brought this text.\n');
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.changed.keepMine')}));
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.save')}));
+  await waitFor(()=>expect(calls.sourcePrepare).toHaveBeenCalledOnce());
+  expect(calls.sourcePrepare.mock.calls[0]).toEqual([environmentId,threadId,expect.any(String),undefined,{revision,edits:[{path:'AGENTS.md',text:'The saved proposal.\n',expected_hash:hash}]}]);
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('offers the retained instruction edit at the failed start without opening Where or preparing anything',async()=>{
+  const world=instructionsWorld('The source brought this text.\n');
+  const revision='f'.repeat(64);
+  calls.sourceEdits.mockResolvedValue({revision,edits:[{path:'AGENTS.md',text:'The saved proposal.\n',expected_hash:null}]});
+  world.view.rerender(<SourcePreparation thread={{...nativeThread(threadId),directory:'web',environment_permissions:['environment.manage'],source:{kind:'directory',directory:'web',repository_url:null,branch:null,head:null,state:'failed',job:null,reason:'workspace.source_conflict'}}}/>);
+  expect(calls.sourceEdits).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  expect(await screen.findByRole('textbox',{name:'Text of AGENTS.md'})).toHaveTextContent('The saved proposal.');
+  expect(screen.getByText(i18n.t('files.edit.changed.title'))).toBeVisible();
+  expect(calls.sourcePrepare).not.toHaveBeenCalled();expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('retires retained instruction text when the new reader cannot read the pending start plan',async()=>{
+  const world=instructionsWorld('The source text.\n');
+  calls.sourceEdits.mockResolvedValue({revision:'f'.repeat(64),edits:[{path:'AGENTS.md',text:'The private saved proposal.\n',expected_hash:null}]});
+  world.view.rerender(<WorkspaceInstructions environment={world.environment} directory="web" recovery={{thread:threadId,state:'failed'}}/>);
+  await userEvent.click(screen.getByText('AGENTS.md',{exact:true}));
+  expect(await screen.findByRole('textbox',{name:'Text of AGENTS.md'})).toHaveTextContent('The private saved proposal.');
+  calls.sourceEdits.mockRejectedValue(new ApiError({type:'about:blank',title:'Refused',status:403,code:'authz.denied',detail:'The current reader cannot read these files',request_id:'synthetic'},null));
+  act(()=>client.session.setState((before)=>({readerVersion:(before.readerVersion??0)+1})));
+  await screen.findByRole('alert');
+  expect(screen.queryByRole('textbox',{name:'Text of AGENTS.md'})).not.toBeInTheDocument();
+  expect(screen.queryByText('The private saved proposal.')).not.toBeInTheDocument();
+  expect(calls.sourcePrepare).not.toHaveBeenCalled();expect(calls.write).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`creates missing shared instructions only while the native path is still absent in ${locale}`, async () => {
+  await setLocale(locale);
+  try {
+    const world = instructionsWorld(null);
+    expect(calls.stat).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+    const body = await screen.findByRole('textbox', { name: i18n.t('files.code.label', { name: 'AGENTS.md' }) });
+    typeInstructions(body, 'Shared new instructions');
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('files.edit.save') }));
+    await waitFor(() => expect(world.text()).toBe('Shared new instructions'));
+    expect(calls.write).toHaveBeenCalledExactlyOnceWith(world.door, world.path, 'Shared new instructions', 'none');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  } finally { await setLocale('en'); }
+});
+
+it.each(['ignored', undefined])('does not turn an unavailable instruction read with reason %s into a new writable file', async (reason) => {
+  instructionsWorld(null);
+  calls.stat.mockRejectedValue(new ApiError({ type: 'about:blank', title: 'Unavailable', status: 404,
+    code: 'not_found', detail: 'The file cannot be read', ...(reason === undefined ? {} : { reason }), request_id: 'synthetic' }, null));
+  await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+  await waitFor(() => expect(calls.stat).toHaveBeenCalled());
+  expect(await screen.findByRole('alert')).toBeVisible();
+  expect(screen.queryByRole('textbox', { name: i18n.t('files.code.label', { name: 'AGENTS.md' }) })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: i18n.t('files.edit.save') })).not.toBeInTheDocument();
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('keeps both instruction texts when another person creates the file before the first save', async () => {
+  const world = instructionsWorld(null);
+  await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+  const body = await screen.findByRole('textbox', { name: 'Text of AGENTS.md' });
+  typeInstructions(body, 'My unfinished instructions');
+  world.change('Instructions the other person saved');
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByText(i18n.t('files.edit.changed.title'))).toBeVisible();
+  expect(body).toHaveTextContent('My unfinished instructions');
+  expect(world.text()).toBe('Instructions the other person saved');
+  await userEvent.click(await screen.findByRole('button', { name: 'Compare' }));
+  expect(screen.getByTestId('their-version')).toHaveTextContent('Instructions the other person saved');
+  expect(calls.write).toHaveBeenCalledExactlyOnceWith(world.door, world.path, 'My unfinished instructions', 'none');
+  await userEvent.click(screen.getByRole('button', { name: 'Keep mine' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(world.text()).toBe('My unfinished instructions'));
+  expect(calls.write.mock.calls[1]?.[3]).toBe('1'.padStart(64, '0'));
+});
+
+it('follows shared instruction edits through the native directory watch without replacing unsaved text', async () => {
+  const world = instructionsWorld('Original instructions');
+  await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+  const body = await screen.findByRole('textbox', { name: 'Text of AGENTS.md' });
+  await waitFor(() => expect(watches.length).toBeGreaterThan(0));
+  world.change('Saved by a second person'); world.notify();
+  await waitFor(() => expect(body).toHaveTextContent('Saved by a second person'));
+  typeInstructions(body, 'My draft stays here');
+  world.change('A third current version'); world.notify();
+  expect(await screen.findByText(i18n.t('files.edit.changed.title'))).toBeVisible();
+  expect(body).toHaveTextContent('My draft stays here');
+  await userEvent.click(screen.getByRole('button', { name: 'Compare' }));
+  expect(screen.getByTestId('their-version')).toHaveTextContent('A third current version');
+  expect(calls.write).not.toHaveBeenCalled();
+  await act(async () => { await invalidateHead(queryClient, world.door, world.path); });
+  expect(body).toHaveTextContent('My draft stays here');
+});
+
+it('edits the same shared instructions while setting up a bound thread without making a thread instruction value', async () => {
+  const world = instructionsWorld('The bound workspace instructions', true);
+  expect(calls.stat).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+  const body = await screen.findByRole('textbox', { name: 'Text of AGENTS.md' });
+  typeInstructions(body, 'Every thread in this directory sees this file');
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(world.text()).toBe('Every thread in this directory sees this file'));
+  expect(calls.write).toHaveBeenCalledExactlyOnceWith(world.door, world.path, 'Every thread in this directory sees this file', '1'.padStart(64, '0'));
+});
+
+it('keeps instruction drafts with their physical workspace while a replacement source waits for its own file read', async () => {
+  const world = instructionsWorld('Original physical workspace instructions');
+  await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+  typeInstructions(await screen.findByRole('textbox', { name: 'Text of AGENTS.md' }), 'Draft for the original workspace');
+  const replacement = { ...world.environment, workspace_incarnation: 'source-two' };
+  world.change('Instructions in the replacement workspace');
+  let release: ((stat: FileStat) => void) | undefined;
+  const held = new Promise<FileStat>((resolve) => { release = resolve; });
+  calls.stat.mockReturnValueOnce(held);
+  act(() => { queryClient.setQueryData(['environment', environmentId], replacement); });
+  world.view.rerender(<WorkspaceInstructions environment={replacement} directory="web" />);
+  expect(screen.queryByRole('textbox', { name: 'Text of AGENTS.md' })).not.toBeInTheDocument();
+  expect(screen.queryByText('Original physical workspace instructions')).not.toBeInTheDocument();
+  const next = world.stat();
+  if (release === undefined || next === null) throw new Error('The replacement file read is held');
+  const finish = release;
+  await act(async () => { finish(next); await held; });
+  const body = await screen.findByRole('textbox', { name: 'Text of AGENTS.md' });
+  expect(body).toHaveTextContent('Instructions in the replacement workspace');
+  expect(body).not.toHaveTextContent('Draft for the original workspace');
+  expect(screen.queryByText(i18n.t('files.edit.changed.title'))).not.toBeInTheDocument();
+  act(() => { queryClient.setQueryData(['environment', environmentId], world.environment); });
+  world.view.rerender(<WorkspaceInstructions environment={world.environment} directory="web" />);
+  expect(await screen.findByRole('textbox', { name: 'Text of AGENTS.md' })).toHaveTextContent('Draft for the original workspace');
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('keeps unsaved instructions when another person deletes the file and recreates it only after the missing version is chosen', async () => {
+  const world = instructionsWorld('Original shared instructions');
+  await userEvent.click(screen.getByText('AGENTS.md', { exact: true }));
+  const body = await screen.findByRole('textbox', { name: 'Text of AGENTS.md' });
+  typeInstructions(body, 'Instructions to keep after deletion');
+  world.remove();
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByText(i18n.t('files.edit.changed.title'))).toBeVisible();
+  expect(body).toHaveTextContent('Instructions to keep after deletion');
+  expect(world.text()).toBeNull();
+  const keep = screen.getByRole('button', { name: 'Keep mine' });
+  await waitFor(() => expect(keep).toBeEnabled());
+  await userEvent.click(keep);
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(world.text()).toBe('Instructions to keep after deletion'));
+  expect(calls.write).toHaveBeenNthCalledWith(1, world.door, world.path, 'Instructions to keep after deletion', '1'.padStart(64, '0'));
+  expect(calls.write).toHaveBeenNthCalledWith(2, world.door, world.path, 'Instructions to keep after deletion', 'none');
 });

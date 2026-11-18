@@ -340,9 +340,100 @@ pub struct PlanHostBlocker {
     pub message: String,
 }
 
+/// The scheduler's actual inputs and consequence, captured before a host is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementCalculation {
+    /// When this calculation was captured.
+    pub captured_at: Time,
+    /// Existing units' declared needs before runtime overhead.
+    pub declared_totals: Amounts,
+    /// The exact totals used by this scheduler's capacity tests.
+    pub applied_totals: Amounts,
+    /// Runtime overhead, kept distinct from unit needs and measured usage.
+    pub runtime_overhead: PlacementRuntimeOverhead,
+    /// Reported host capacities; missing members are named by sources.capacity_unreported.
+    pub capacities: Amounts,
+    /// When this capacity report was received; absent when not reported.
+    pub capacities_as_of: Option<Time>,
+    /// The memory tests' effective settings and incoming need.
+    pub thresholds: PlacementThresholds,
+    /// Whether a full or undersized host warns or blocks.
+    pub consequence: WhenFull,
+    /// Actual declaration/setting layers used for these values.
+    pub sources: PlacementCalculationSources,
+    /// Isolation resolved from the same selected driver, runtime and template.
+    pub isolation: Option<orch_driver_contract::isolation::RuntimeIsolation>,
+}
+
+/// Memory additional to the unit's declared resources, without assuming unknown means zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementRuntimeOverhead {
+    /// Additional memory actually included for existing units.
+    pub existing_memory_mb: i64,
+    /// The selected class's additional memory for the incoming unit, when declared.
+    pub incoming_memory_mb: Option<i64>,
+    /// Whether this scheduler included incoming overhead in its room test.
+    pub incoming_included: bool,
+    /// The selected class's overhead provenance.
+    pub source: orch_driver_contract::isolation::RuntimeAssumptionSource,
+}
+
+/// The actual memory threshold and incoming declaration used by the scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementThresholds {
+    /// Fullness percentage resolved for this calculation.
+    pub full_percent: i64,
+    /// The incoming unit's memory need used by the room test.
+    pub incoming_memory_mb: i64,
+}
+
+/// Layers, rather than concealed resource names or machine policy, behind a calculation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementCalculationSources {
+    /// One source per incoming CPU, memory and disk need.
+    pub needs: std::collections::BTreeMap<String, PlacementNeedSource>,
+    /// Capacity members absent from the actual report; absence never becomes measured zero.
+    pub capacity_unreported: Vec<String>,
+    /// The revision of the actual template read by this calculation.
+    pub template_revision: i64,
+    /// Fullness is the system's hosts.full_percent setting.
+    pub full_percent: PlacementSettingSource,
+    /// A host's explicit answer, otherwise the system's hosts.when_full setting.
+    pub consequence: PlacementSettingSource,
+}
+
+/// The branch of the normal needs resolver that supplied a resource value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementNeedSource {
+    /// Explicit or inherited env.needs/runtime.needs.
+    ResolvedNeeds,
+    /// The template's needs member.
+    TemplateNeeds,
+    /// Effective resource limits, including the template's ceilings.
+    ResolvedResources,
+    /// The template's resource declaration.
+    TemplateResources,
+    /// No value was declared; the calculation used its existing zero fallback.
+    NotReported,
+}
+
+/// The authority level at which the existing setting was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementSettingSource {
+    /// The system setting, including its declared default.
+    System,
+    /// The host's explicit when-full choice.
+    Host,
+}
+
 /// A host an environment could be placed on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaceHost {
+    /// Scheduler inputs captured for this proposal, never reconstructed for an old result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculation: Option<Box<PlacementCalculation>>,
     /// Stored home, protected origin and the native placement verdict.
     #[serde(default, flatten)]
     pub grouping: crate::resource_groups::ResourceGrouping,
@@ -528,10 +619,24 @@ pub enum McpTransport {
     Http,
 }
 
-/// An MCP server found in the configuration of a harness that is installed in an environment.
-/// None is used until somebody imports it.
+/// The readable name of the agent profile whose native configuration was found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpProfileRef {
+    /// Its profile identifier.
+    pub id: Id,
+    /// Its readable name.
+    pub name: String,
+}
+
+/// An MCP server found in a program's own configuration, independently of its optional Orch copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpFound {
+    /// Opaque identity of this actual native profile and configuration entry, used by Import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Its profile's name where this reader may see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<McpProfileRef>,
     /// What it is called there.
     pub name: String,
     /// The harness whose configuration it is in, such as `codex` or `claude-code`.
@@ -544,6 +649,30 @@ pub struct McpFound {
     pub transport: McpTransport,
     /// The server it became, once it was imported.
     pub imported: Option<Id>,
+    /// This thread's last reported program connection state; absent without an observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<McpState>,
+    /// The definition the program reports using for this name; absent without an observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<McpDefinitionSource>,
+}
+
+/// Which definition was supplied to the program for a reported MCP connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDefinitionSource {
+    /// The program's own global or directory configuration.
+    Native,
+    /// The server enabled in Orch for this environment.
+    Orch,
+}
+
+/// A thread's current native connection observations, or the environment's unscoped discoveries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentMcpGetQuery {
+    /// Read this thread's selected native segment; requires its View and its current environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
 }
 
 /// Whether the tree of an environment is indexed.
@@ -831,6 +960,8 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that
@@ -838,6 +969,13 @@ pub enum EnvironmentIndexReason {
 /// directory of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Environment {
+    /// The last refused directory attach and the retry eligibility captured with it.
+    /// Absent when no attempt is retained or this reader only sees a thread's limited environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_retry: Option<EnvironmentAttachRetry>,
+    /// Current caller file reach and its native machine bound, on an environment only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_reach: Option<orch_access_contract::permissions::FileReachFacts>,
     /// Protected origin and native contextual availability, beside home and owner.
     #[serde(default, flatten)]
     pub provenance: crate::resource_groups::ResourceProvenance,
@@ -941,8 +1079,12 @@ pub struct Environment {
     pub manifest_at: Option<Time>,
     /// When something last happened in it.
     pub last_activity_at: Option<Time>,
-    /// When the idle timeout will stop it; `null` for never, or when it is not running.
+    /// When the idle timeout will stop it; null while work defers it, when off, or when not running.
     pub idle_stop_at: Option<Time>,
+    /// An enabled unit idle stop is currently held by active turns or native background work.
+    pub idle_stop_deferred: bool,
+    /// The current prospective owned-file recovery window; null for a non-unit or invalid policy. Accepted removal keeps its original frozen window separately.
+    pub removal_keep_days: Option<i64>,
     /// Since when no thread, other than archived ones, is bound to it.
     pub unused_since: Option<Time>,
     /// The retained-volume lifecycle and this reader's current actions.
@@ -962,6 +1104,19 @@ pub struct Environment {
     pub revision: Revision,
     /// What the caller holds on it.
     pub access: ResourceAccess,
+}
+
+/// A recorded attach refusal; eligibility is observed by the sweep, never a promised start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentAttachRetry {
+    /// When the refused attempt ended.
+    pub last_attempt_at: Time,
+    /// The earliest next attempt in that machine session, frozen when this attempt ended.
+    pub next_eligible_at: Time,
+    /// The same safe refusal detail shown by the environment's ordinary status.
+    pub last_problem: String,
+    /// The environment configuration used by the attempt.
+    pub revision: Revision,
 }
 
 /// The owner's opportunity to keep or export a disposable environment.
@@ -1120,10 +1275,25 @@ pub struct McpImportRight {
     pub reason: Option<McpImportReason>,
 }
 
-/// The MCP servers of one environment: those switched on for it and what became of each there,
-/// and those found in the harness configuration there that nobody imported yet.
+/// A program's current connection, including one whose static configuration was not reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpConnection {
+    /// Its name in the running program.
+    pub name: String,
+    /// The program kind.
+    pub source: String,
+    /// Its reported state, absent while this opening has reported none.
+    pub state: Option<McpState>,
+    /// The definition selected for this opening, where it is known.
+    pub using: Option<McpDefinitionSource>,
+}
+
+/// Managed servers of one environment and the programs' own native configuration, imported or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMcp {
+    /// Current scoped program connections, including those without a static importable definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<McpConnection>,
     /// The servers switched on for it.
     pub servers: Vec<EnvironmentMcpServer>,
     /// When a change here reaches a thread that is at work.
@@ -1743,11 +1913,13 @@ impl EnvironmentUpdateResponse {
     }
 }
 
-/// Imports an MCP server found in the configuration of a harness there: the connector keeps a
-/// copy of its definition, which is what runs from then on.
+/// Copies one native definition into an Orch resource, leaving the program's own configuration alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentMcpImportCreateBody {
+    /// The native entry chosen in the received list; omitted only for an unambiguous entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// The harness whose configuration it is in.
     pub source: String,
     /// The user's own configuration, or a directory of the workspace.
@@ -1878,6 +2050,12 @@ pub struct EnvironmentDeleteQuery {
     /// When to remove it; now when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<Time>,
+    /// The recovery window reviewed by the caller; a changed policy refuses before effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_keep_days: Option<i64>,
+    /// The environment revision reviewed with its roots and name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<Revision>,
 }
 
 /// Asks for a plan to move reviewed environment data to another permitted machine.
@@ -2478,8 +2656,8 @@ crate::endpoints! {
     /// Changes an environment; what the running unit cannot take is stored and listed in `updates`.
     EnvironmentUpdate: PATCH "/environments/{id}", Rule("environment.manage, and for another home also node.interact on the new home"), none, json EnvironmentUpdateBody, json EnvironmentUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::environment_sources::UPDATE_FACETS));
-    /// Lists the MCP servers of an environment and those found in the harness configuration there that nobody imported.
-    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), none, none, json EnvironmentMcp, 200,
+    /// Lists managed servers and native configuration, optionally with a readable thread's connection state.
+    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment; thread.view for thread_id"), query EnvironmentMcpGetQuery, none, json EnvironmentMcp, 200,
         operation Op::facets(&crate::environment_sources::MCP_GET_FACETS);
     /// Imports an MCP server found in the harness configuration of an environment; the connector keeps a copy of its definition.
     EnvironmentMcpImportCreate: POST "/environments/{id}/mcp/imports", Rule("environment.manage; on a person's machine also being the machine's owner, or managing every environment of that machine once its owner handed the policy key for imports over"), none, json EnvironmentMcpImportCreateBody, json EnvironmentMcpCreateResponse, 201,
@@ -2682,7 +2860,8 @@ mod tests {
                 },
                 "granted_capabilities": ["ptrace"],
                 "status_detail": null, "facts": { "os": "linux", "cpus": 8 },
-                "manifest_at": AT, "last_activity_at": AT, "idle_stop_at": null, "unused_since": null,
+                "manifest_at": AT, "last_activity_at": AT, "idle_stop_at": null,
+                "idle_stop_deferred": false, "removal_keep_days": null, "unused_since": null,
                 "removal": null, "remove_at": null, "remove_reason": null, "job": null,
                 "seq": 42, "revision": 5,
                 "access": { "permissions": ["environment.manage"], "administers": false, "through": [{ "kind": "owner" }] }

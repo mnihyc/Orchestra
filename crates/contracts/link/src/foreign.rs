@@ -19,7 +19,8 @@ pub use orch_api_contract::processes::{ProcessInfo, ResourceSample};
 pub use orch_api_contract::resources::Rate;
 pub use orch_api_contract::threads::TokenUsage;
 pub use orch_api_contract::workspace::{
-    ArchiveListing, DirEntry, FileMatch, FileStat, GitStatus, JobProgress,
+    ArchiveListing, DirEntry, FileMatch, FileRenameResult, FileStat, GitStatus, JobProgress,
+    JobWorkPolicy,
 };
 pub use orch_model_contract::endpoint::EndpointOptions;
 /// The driver recipe before the node opens its command-bound enrollment credential.
