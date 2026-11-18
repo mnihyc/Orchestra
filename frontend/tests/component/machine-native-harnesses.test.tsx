@@ -12,6 +12,7 @@ import { i18n, setLocale } from '@/i18n';
 import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { detailMachine } from './resource-detail-fixtures';
+import { GRACE } from '../doubles/chat-rows';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<MachinePrograms>>(), write: vi.fn<(id: string, body: MachineProgramsCommand) => Promise<MachinePrograms>>() }));
 vi.mock('@/api/machinePrograms', () => ({ machineProgramsKey: (id: string) => ['machine-programs', id], machineProgramsQuery: (id: string) => ({ queryKey: ['machine-programs', id], queryFn: calls.read }), changeMachinePrograms: calls.write }));
@@ -83,6 +84,54 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(calls.write).not.toHaveBeenCalled();
   });
 }
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows the current program approver and recorded time to a viewer (${locale})`, async () => {
+    await setLocale(locale);
+    const acknowledgement = { ...snapshot(false), approvals: [{
+      subject: { kind: 'program' as const, harness_kind: program.kind, path: program.path },
+      by: GRACE, at: '2026-10-31T00:00:00Z',
+    }] };
+    calls.read.mockResolvedValue(acknowledgement);
+    const view = draw(machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy }));
+    const person = await screen.findByRole('button', { name: GRACE.display_name });
+    expect(person).toBeVisible();
+    expect(person.closest('label')).toBeNull();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(screen.queryByRole('button', { name: locale === 'en' ? 'Remove' : '移除' })).not.toBeInTheDocument();
+    expect(calls.write).not.toHaveBeenCalled();
+  });
+
+  it(`shows only the acknowledged approver after Use and sends no invented author (${locale})`, async () => {
+    await setLocale(locale);
+    const initial = machine({ harnesses: [], discovered_harnesses: [program], searched_harness_kinds: ['codex'], policy });
+    const updated = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy });
+    const acknowledgement = { ...snapshot(true, updated), approvals: [{
+      subject: { kind: 'program' as const, harness_kind: program.kind, path: program.path },
+      by: GRACE, at: '2026-10-31T00:00:00Z',
+    }] };
+    calls.write.mockResolvedValue(acknowledgement);
+    const user = userEvent.setup(), view = draw(initial);
+    await user.click(await screen.findByRole('button', { name: locale === 'en' ? 'Use' : '使用' }));
+    expect(await screen.findByRole('button', { name: GRACE.display_name })).toBeVisible();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(calls.write).toHaveBeenCalledExactlyOnceWith('machine', { action: 'confirm_harness', kind: program.kind, path: program.path });
+    expect(calls.read).toHaveBeenCalledTimes(1);
+  });
+}
+
+it('does not attribute a replacement path or a discovered program to an old confirmation', async () => {
+  const acknowledgement = { ...snapshot(), approvals: [{
+    subject: { kind: 'program' as const, harness_kind: program.kind, path: '/old/codex' },
+    by: GRACE, at: '2026-10-31T00:00:00Z',
+  }] };
+  calls.read.mockResolvedValue(acknowledgement);
+  const view = draw(machine({ harnesses: [program], discovered_harnesses: [{ ...program, path: '/old/codex' }], searched_harness_kinds: ['codex'], policy: confirmedPolicy }));
+  await screen.findByText('Confirmed', { exact: true });
+  expect(screen.queryByRole('button', { name: GRACE.display_name })).not.toBeInTheDocument();
+  expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeNull();
+  expect(calls.write).not.toHaveBeenCalled();
+});
 
 it('keeps a different canonical path distinct when the acknowledged discovery replaces a removed tuple', async () => {
   const initial = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy });
