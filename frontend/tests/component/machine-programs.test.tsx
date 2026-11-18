@@ -15,7 +15,7 @@ vi.mock('@/features/resources/harnesses',()=>({useHarnessTitle:()=>((kind:string
 vi.mock('@/features/resources/machines/Enrollment',()=>({AddMachineDialog:()=>null}));
 vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
 const machine={id:'machine',facts:{},roles:['agent','provider']};
-function snapshot(remote=true):MachinePrograms {return {entries:[],can_manage:true,config_file:'/var/user/orch/config.toml',capabilities:(['agent','provider_source'] as const).map((kind)=>({kind,supported:true,remote,delegated:remote,enabled:remote,policy_key:kind==='agent'?'agent.programs':'provider.programs',reason:remote?null:'Kept by the operator.'}))};}
+function snapshot(remote=true):MachinePrograms {return {approvals:[],entries:[],can_manage:true,config_file:'/var/user/orch/config.toml',capabilities:(['agent','provider_source'] as const).map((kind)=>({kind,supported:true,remote,delegated:remote,enabled:remote,policy_key:kind==='agent'?'agent.programs':'provider.programs',reason:remote?null:'Kept by the operator.'}))};}
 function program(kind:MachineProgramKind):MachineProgram {return {kind,name:'local-program',command:['/opt/my program','--model','local model'],origin:'orch',ready:true,version:'1.0.0',descriptor:kind==='agent'?{kind:'local-agent',harness:{name:'Local agent'},sandbox_modes:['open'],approval_modes:['on_request']}:{title:'GPU service',models:{}},models:null,detail:null};}
 beforeEach(()=>{vi.clearAllMocks();read.mockResolvedValue(snapshot());write.mockResolvedValue(snapshot());});
 
@@ -124,4 +124,15 @@ it('distinguishes an Orch-controlled off switch from a key kept on the machine',
   expect(screen.getByRole('link',{name:'Open policy'})).toHaveAttribute('href','/resources/machines/machine?tab=policy');
   expect(screen.queryByRole('button',{name:'Reload'})).not.toBeInTheDocument();
   expect(screen.queryByText(/Kept on this machine/u)).not.toBeInTheDocument();
+});
+
+
+it('lets a viewer find one registered program in a long list without another read',async()=>{
+  const entries=Array.from({length:12},(_,index)=>({...program('agent'),name:`entry-${index}`,descriptor:{harness:{name:`Program ${index}`}}}));
+  read.mockResolvedValue({...snapshot(),can_manage:false,entries});
+  const user=userEvent.setup();show(<MachineProgramsTab machine={machine}/>);
+  await user.type(await screen.findByRole('textbox',{name:i18n.t('programList.search')}),'entry-11');
+  expect(screen.getByText('Program 11')).toBeVisible();
+  expect(screen.queryByText('Program 0')).not.toBeInTheDocument();
+  expect(write).not.toHaveBeenCalled();expect(read).toHaveBeenCalledTimes(1);
 });

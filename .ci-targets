@@ -1,0 +1,4 @@
+fmt
+test -p orch-api-core --lib -- backplane::session_source_tests::
+test -p orch-api-core --test kvnc_core --features test-support -- a_manager_
+web test -- tests/component/vnc-view.test.tsx tests/unit/vnc-viewer.test.ts

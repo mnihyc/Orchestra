@@ -15,6 +15,8 @@ import { closeDisplay, displayKeys, displaysQuery, lookAgainForDisplays, openDis
 import { useBrowserRequests } from '@/features/browser/store';
 import type { Display, Environment, EnvironmentDisplays } from '@/generated/api-types';
 import { socket } from '@/realtime/live';
+import { hostQuery, machinePolicyQuery, updateMachinePolicy } from '@/api/resources';
+import { StateLine } from '@/ui/StateLine';
 import { AvatarStack } from '@/ui/AvatarStack';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -63,16 +65,20 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
   const query = useQuery(displaysQuery(environment.id));
   useDisplaysFeed(environment.id);
   const [front, setFront] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
+  const [opening, setOpening] = useState<'virtual' | 'server' | null>(null);
   const [closing, setClosing] = useState<Display | null>(null);
   const requests = useBrowserRequests();
   const look = useMutation({ mutationFn: () => lookAgainForDisplays(environment.id), onSuccess: (list) => client.setQueryData(displayKeys.list(environment.id), list) });
+  const share = useMutation({
+    mutationFn: () => openDisplay(environment.id, {desktop:true}, threadId),
+    onSuccess: (display) => { setFront(display.id); void client.invalidateQueries({queryKey:displayKeys.list(environment.id)}); },
+  });
   const mayWork = environment.access.permissions.includes('vnc.manage');
 
   if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const data = query.data;
-  const displays = data.displays.filter((display) => display.state !== 'closed');
+  const displays = data.off === null ? data.displays.filter((display) => display.state !== 'closed') : [];
   const asked = requests.display !== null && displays.some((display) => display.id === requests.display) ? requests.display : null;
   const shown = displays.find((display) => display.id === (asked ?? front)) ?? displays[0] ?? null;
   const found = data.support.servers.length > 0;
@@ -85,8 +91,10 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
     <div className="flex h-full min-h-0 flex-col gap-2 p-3" data-displays-view={environment.id}>
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="min-w-0 flex-1 truncate text-sm font-medium">{t('vnc.list.title', { environment: environment.name })}</h2>
+        {mayWork && data.off === null && data.support.desktop === true && <Button size="sm" pending={share.isPending} onClick={() => share.mutate()}>{t('vnc.attach.desktop')}</Button>}
+        {mayWork && data.off === null && <Button size="sm" onClick={() => setOpening('server')}>{t('vnc.attach.title')}</Button>}
         {mayWork && data.off === null && found && (
-          <Button size="sm" icon={<ScreenShare aria-hidden />} onClick={() => setOpening(true)}>
+          <Button size="sm" icon={<ScreenShare aria-hidden />} onClick={() => setOpening('virtual')}>
             {t('vnc.list.open')}
           </Button>
         )}
@@ -107,6 +115,7 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
           </span>
         </InlineAlert>
       )}
+      {share.error !== null && <ErrorAlert error={share.error} />}
       {look.error !== null && <ErrorAlert error={look.error} />}
       {displays.length > 0 && (
         <ul className="flex max-h-40 shrink-0 flex-col overflow-auto rounded-lg border border-border" aria-label={t('vnc.list.label')}>
@@ -139,7 +148,8 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
       )}
       {displays.length === 0 && data.off === null && found && <EmptyState compact icon={<MonitorPlay aria-hidden />} title={t('vnc.list.empty')} description={mayWork ? t('vnc.list.emptyHint') : undefined} />}
       {shown !== null && <Front key={shown.id} display={shown} environment={environment} mayWork={mayWork} onClose={() => setClosing(shown)} {...(load === undefined ? {} : { load })} />}
-      {opening && <OpenDisplay environment={environment} threadId={threadId} onClose={() => setOpening(false)} onOpened={(display) => { setOpening(false); choose(display.id); }} />}
+      {opening === 'server' && <AttachDisplay environmentId={environment.id} threadId={threadId} onClose={() => setOpening(null)} onOpened={(display) => { setOpening(null); choose(display.id); }} />}
+      {opening === 'virtual' && <OpenDisplay environment={environment} threadId={threadId} onClose={() => setOpening(null)} onOpened={(display) => { setOpening(null); choose(display.id); }} />}
       {closing !== null && <CloseDisplay display={closing} onClose={() => setClosing(null)} />}
     </div>
   );
@@ -147,17 +157,61 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
 
 function OffNotice({ off, environment }: { off: NonNullable<EnvironmentDisplays['off']>; environment: Environment }) {
   const { t } = useTranslation();
+  if (off === 'machine_policy') return <PolicyOff environment={environment} />;
   const words = {
     disabled_by_policy: t('vnc.off.policy', { environment: environment.name }),
     environment_switch_off: t('vnc.off.switch', { environment: environment.name, owner: environment.owner.display_name }),
-    machine_policy: t('vnc.off.machine', { machine: environment.machine?.name ?? environment.name }),
+    environment_stopping: t('terminal.refused.environment_stopping'),
     environment_offline: t('vnc.off.offline', { environment: environment.name }),
   }[off];
   return (
-    <InlineAlert tone={off === 'environment_offline' ? 'info' : 'warning'}>
+    <InlineAlert tone={off === 'environment_offline' || off === 'environment_stopping' ? 'info' : 'warning'}>
       <span data-displays-off={off}>{words}</span>
     </InlineAlert>
   );
+}
+
+function PolicyOff({environment}:{environment: Environment}) {
+  const { t } = useTranslation();
+  const client = useQueryClient();
+  const hostId = environment.host?.id;
+  const host = useQuery({...hostQuery(hostId ?? ''), enabled: hostId !== undefined, retry:false});
+  const machine = (environment.placement === 'managed' ? host.data?.machine : environment.machine) ?? null;
+  const query = machinePolicyQuery(machine?.id ?? '');
+  const policy = useQuery({...query, enabled: machine !== null, retry:false});
+  const key = policy.data?.keys.find((row) => row.key === 'environment.vnc');
+  const enable = useMutation({
+    mutationFn: () => {
+      if (machine === null || key?.writable !== true) throw new Error(t('vnc.off.machine', {machine: environment.name}));
+      return updateMachinePolicy(machine.id, {'environment.vnc': true});
+    },
+    onSuccess: (ack) => {
+      client.setQueryData(query.queryKey, ack);
+      void client.invalidateQueries({queryKey: displayKeys.list(environment.id)});
+    },
+  });
+  return <><StateLine compact message={<span data-displays-off="machine_policy">{t('vnc.off.machine', {machine: machine?.name ?? environment.name})}</span>}
+    action={key?.writable === true && key.value !== true ? <Button size="sm" pending={enable.isPending} onClick={() => enable.mutate()}>{t('vnc.attach.enable')}</Button> : undefined} />
+    {enable.isError && <ErrorAlert error={enable.error} />}</>;
+}
+
+function AttachDisplay({ environmentId, threadId, onClose, onOpened }: {environmentId:string; threadId:string | null; onClose:()=>void; onOpened:(row:Display)=>void}) {
+  const { t } = useTranslation();
+  const [port, setPort] = useState(''), [password, setPassword] = useState('');
+  const number = Number(port);
+  const valid = /^\d+$/.test(port) && Number.isInteger(number) && number > 0 && number <= 65535;
+  const attach = useMutation({
+    mutationFn: () => openDisplay(environmentId, {attach:{port:number, ...(password === '' ? {} : {password})}}, threadId),
+    onSuccess: onOpened,
+  });
+  return <Dialog open size="sm" title={t('vnc.attach.title')} onOpenChange={(next) => { if (!next) onClose(); }}
+    footer={<><Button onClick={onClose}>{t('common.cancel')}</Button><Button variant="primary" pending={attach.isPending} disabled={!valid} onClick={() => attach.mutate()}>{t('vnc.attach.apply')}</Button></>}>
+    <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (valid && !attach.isPending) attach.mutate(); }}>
+      <Input label={t('vnc.attach.port')} inputMode="numeric" placeholder="5900" value={port} onChange={(event) => setPort(event.target.value)} />
+      <Input label={t('vnc.attach.password')} optional type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} />
+      {attach.isError && <ErrorAlert error={attach.error} />}
+    </form>
+  </Dialog>;
 }
 
 function Front({ display, environment, mayWork, onClose, load }: { display: Display; environment: Environment; mayWork: boolean; onClose: () => void; load?: () => Promise<RfbConstructor> }) {

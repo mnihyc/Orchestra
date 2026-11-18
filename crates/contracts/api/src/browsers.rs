@@ -142,6 +142,8 @@ pub enum BrowsersOff {
     MachinePolicy,
     /// The environment is unreachable.
     EnvironmentOffline,
+    /// Stop has been accepted for the current environment registration.
+    EnvironmentStopping,
 }
 
 /// The availability of one way to start a browser.

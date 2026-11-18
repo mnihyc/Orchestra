@@ -65,6 +65,68 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
 fn body() -> MachineRolesSetBody {
     serde_json::from_value(json!({"roles":["agent"]})).unwrap()
 }
+
+#[tokio::test]
+async fn a_gateway_write_requires_its_own_actual_machine_scope_and_returns_only_the_choice() {
+    use orch_api_contract::gateways::MachineGatewaySet;
+    let world = World::new().await;
+    let owner = places::person(&world, "gateway-manager").await;
+    let id = machine(&world, owner.id()).await;
+    let other = machine(&world, owner.id()).await;
+    for rules in [
+        vec![rule("MachineGatewaySet", "machine", id, &["read"])],
+        vec![rule("MachineGatewaySet", "machine", other, &["manage"])],
+    ] {
+        let scoped = key(&world, owner.id(), rules).await;
+        let refusal = world
+            .app
+            .call(MachineGatewaySet, &[&id])
+            .token(&scoped.secret)
+            .raw_body(&json!({"selection":"automatic"}))
+            .send()
+            .await
+            .problem();
+        assert_eq!(refusal.code, ErrorCode::AuthzDenied);
+    }
+    let scoped = key(
+        &world,
+        owner.id(),
+        vec![rule("MachineGatewaySet", "machine", id, &["manage"])],
+    )
+    .await;
+    let send = world
+        .app
+        .call(MachineGatewaySet, &[&id])
+        .token(&scoped.secret)
+        .raw_body(&json!({"selection":"automatic"}));
+    let native = async {
+        let command = tokio::time::timeout(std::time::Duration::from_secs(30),async {
+            loop {
+                let command:Option<Id> = sqlx::query_scalar("SELECT id FROM commands WHERE machine_id=$1 AND kind='machine.gateway.set' AND state IN ('queued','sent','accepted') ORDER BY created_at,id LIMIT 1")
+                    .bind(id).fetch_optional(&world.db.pool).await.unwrap();
+                if let Some(command)=command { break command; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let source = link::command_authority(&mut *world.conn().await, command)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(serde_json::from_value::<CommandAuthority>(source).is_ok());
+        sqlx::query("UPDATE commands SET state='succeeded',result=$2 WHERE id=$1")
+            .bind(command)
+            .bind(json!({"choice":{"selection":"automatic"},"changed":true}))
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+    };
+    let (reply, ()) = tokio::join!(send.send_bytes(), native);
+    let receipt = accepted(reply);
+    assert_eq!(receipt["projection"], "receipt");
+    assert_eq!(receipt["machine_id"], json!(id));
+    assert_eq!(receipt["selection"], "automatic");
+    assert!(receipt.get("facts").is_none());
+}
 fn receipt(id: Id) -> Json {
     json!({"projection":"receipt","machine_id":id,"requested_roles":["agent"],"reconnecting":true})
 }

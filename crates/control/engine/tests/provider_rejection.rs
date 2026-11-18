@@ -159,7 +159,7 @@ async fn provider_attention_reaches_its_managers_once_per_rejection_and_no_other
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_thread_bound_to_a_rejected_provider_starts_no_turn_and_names_that_provider() {
+async fn a_waiting_thread_keeps_its_input_and_reads_the_provider_refusal_without_an_identifier() {
     let world = World::new().await;
     let waiting = world.thread("Waiting").await;
     rejected(&world).await;
@@ -186,10 +186,8 @@ async fn a_thread_bound_to_a_rejected_provider_starts_no_turn_and_names_that_pro
             waiting,
         )
         .await;
-    assert!(
-        detail.contains("Fake subscription") && detail.contains("refused"),
-        "{detail}"
-    );
+    assert_eq!(detail, refusal().message);
+    assert!(!detail.contains(&world.provider.to_string()), "{detail}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
