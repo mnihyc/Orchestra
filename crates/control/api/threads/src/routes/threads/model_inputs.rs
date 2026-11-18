@@ -35,9 +35,6 @@ use serde::de::DeserializeOwned;
 /// How many records a page holds where the caller does not say: the ordinary bound of a list.
 pub const PAGE_DEFAULT: i64 = 50;
 
-/// The most a page holds.
-pub const PAGE_MAX: i64 = 200;
-
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry.on_snapshot_read_with_optional_operation(
@@ -274,6 +271,36 @@ pub mod tests {
         assert_eq!(
             page.next_cursor, None,
             "private records are filtered before pagination"
+        );
+        let searched = app
+            .call(NodeModelInputList, &[&node])
+            .token(&scene.cai.token)
+            .query(&ModelInputListQuery {
+                q: Some("public status".into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(
+            searched.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [normal]
+        );
+        let hidden_match = app
+            .call(NodeModelInputList, &[&node])
+            .token(&scene.cai.token)
+            .query(&ModelInputListQuery {
+                q: Some("Secret".into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert!(
+            hidden_match.items.is_empty(),
+            "unreadable prompt text never supplies a match"
         );
         let exact = app
             .call(NodeModelInputList, &[&node])

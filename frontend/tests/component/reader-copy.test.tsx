@@ -57,7 +57,7 @@ vi.mock('@/shell/admission', async (original) => ({
   admissionMetaQuery: (await import('@/api/auth')).metaQuery,
 }));
 
-vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null) => ({ queryKey: ['reader-shared', cursor], queryFn: () => Promise.resolve({ items: calls.emptyShared ? [] : [home()], next_cursor: null, partial: false }) }) }));
+vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null, q = '', kind?: string) => ({ queryKey: ['reader-shared', cursor, q, kind], queryFn: () => Promise.resolve({ items: calls.emptyShared || kind !== undefined && kind !== 'org' || q !== '' && !home().name.includes(q) ? [] : [home()], next_cursor: null, partial: false }) }) }));
 vi.mock('@/api/usage', async (original) => ({ ...await original<typeof UsageApi>(),
   usageQuery: (params: UsageParams) => ({ queryKey: ['reader-usage', params], queryFn: (): Promise<UsageAnalytics> => {
     // The populated breakdown needs real activity; a zero-use board correctly omits that picker.
@@ -71,7 +71,7 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>
   orgBySlugQuery: (slug: string) => ({ queryKey: ['reader-org', slug], queryFn: () => Promise.resolve(department()) }),
 }));
 vi.mock('@/api/access', async (original) => ({ ...await original<typeof AccessApi>(),
-  holderSearchQuery: (...args: unknown[]) => { calls.holders(...args); return { queryKey: ['reader-holders', ...args], queryFn: () => Promise.resolve(holderRows()) }; },
+  holderPickerQuery: (...args: unknown[]) => { calls.holders(...args); return { queryKey: ['reader-holders', ...args], initialPageParam: null, queryFn: () => Promise.resolve(holderRows()), getNextPageParam: () => undefined }; },
 }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
 vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
@@ -135,10 +135,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(screen.getAllByRole('combobox')).toHaveLength(1);
     await userEvent.click(source);
     await userEvent.click(await screen.findByRole('option', { name: 'Acme / Research' }));
-    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', '00000000-0000-4000-8000-000000000002', home().id, false));
+    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', '00000000-0000-4000-8000-000000000002', home().id, false, ['group', 'role']));
     await userEvent.click(source);
     await userEvent.click(screen.getByRole('option', { name: i18n.t('access.candidates.thisPlace', { place: 'Repair login' }) }));
-    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', 'actual-topic', home().id, false));
+    await waitFor(() => expect(calls.holders).toHaveBeenCalledWith('', 'actual-topic', home().id, false, ['group', 'role']));
     expect(picker.container).not.toHaveTextContent('current');
   });
 

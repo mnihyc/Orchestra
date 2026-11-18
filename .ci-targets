@@ -1,0 +1,5 @@
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test notifications_inbox --test admin_messages --test personal_native_scopes --test program_admin --test people_scale
+test -p orch-api-core --test admin_system --test hosts --test upload_inventory
+test -p orch-api-core --test workspace_files -- upload_history::

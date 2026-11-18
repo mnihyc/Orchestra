@@ -22,7 +22,7 @@ const calls = vi.hoisted(() => ({ read: vi.fn<typeof Access.readSystemDefaults>(
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof Access>(), readSystemDefaults: calls.read,
   previewSystemDefaults: calls.preview, changeSystemDefaults: calls.change,
   permissionsQuery: { queryKey: ['permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
-  holderSearchQuery: () => ({ queryKey: ['system-candidates'], queryFn: calls.candidates }),
+  holderPickerQuery: () => ({ queryKey: ['system-candidates'], initialPageParam: null, queryFn: calls.candidates, getNextPageParam: (page: HolderSearchReply) => page.next_cursor ?? undefined }),
 }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(), nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: calls.node }) }));

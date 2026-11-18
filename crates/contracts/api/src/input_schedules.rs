@@ -293,6 +293,12 @@ pub struct InputScheduleUpdateBody {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputScheduleListQuery {
+    /// Only schedules whose disclosed destination and agent origin address this thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
+    /// Words in the admitted visible name, before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Ordinary paging.
     #[serde(flatten)]
     pub page: PageQuery,
