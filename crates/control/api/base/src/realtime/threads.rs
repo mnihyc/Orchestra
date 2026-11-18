@@ -379,7 +379,7 @@ pub(crate) async fn read_scoped(
     // Personalized rows and authority share one cut. Do not reuse another credential's
     // snapshot, even when its user and numeric cursor happen to match.
     let mut tx = feeds::begin_reading(&inner.db).await?;
-    let snapshot = load(inner, &mut tx, thread, after, scope).await?;
+    let mut snapshot = load(inner, &mut tx, thread, after, scope).await?;
     #[cfg(any(test, feature = "test-support"))]
     super::history_read_tests::pause(super::history_read_tests::Cut::SocketRows).await;
     if snapshot.gone {
@@ -469,6 +469,14 @@ pub(crate) async fn read_scoped(
         .await
         .map_err(Fail::other)?;
     }
+    orch_engine::notifications::decisions::project(
+        &mut tx,
+        principal.user(),
+        &mut snapshot.turns,
+        &mut items,
+    )
+    .await
+    .map_err(Fail::other)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(Rows::Frame(Box::new(Frame {
         data: SyncData::Thread(ThreadData {

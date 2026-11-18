@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/component/model-picker-rows.test.tsx tests/component/withheld-choices.test.tsx tests/component/composer-controls.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
+web-e2e tests/e2e/forwarded-access-program.spec.ts --project=chromium

@@ -203,6 +203,8 @@ impl Services {
 /// A command as a role is handed it.
 #[derive(Debug, Clone)]
 pub struct Call {
+    /// The actual dispatcher execution timer; absent for work without a reported job.
+    pub work_deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     /// What the link knows of it: its identifier, its key, its deadline, and the token that fires when
     /// the system asks for it not to be carried out.
     pub context: CommandContext,
