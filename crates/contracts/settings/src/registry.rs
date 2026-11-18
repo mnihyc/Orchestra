@@ -1201,9 +1201,20 @@ pub fn get(key: &str) -> Option<&'static SettingDef> {
     REGISTRY.iter().find(|def| def.key == key)
 }
 
-/// Canonicalize exact host names before validating and storing their list; invalid entries remain invalid.
+/// Canonicalize declared list identities before validating and storing them. Invalid entries remain invalid.
 #[must_use]
 pub fn canonical_value(key: &str, value: &Json) -> Json {
+    if key == keys::ASK_MODELS {
+        let mut entries = value.clone();
+        if let Some(list) = entries.as_array_mut() {
+            for entry in list {
+                if let Some(backend) = entry.get_mut("backend").and_then(Json::as_object_mut) {
+                    backend.entry("config").or_insert(Json::Null);
+                }
+            }
+        }
+        return entries;
+    }
     if key != keys::NETWORK_ALLOWED_HOSTS {
         return value.clone();
     }
@@ -1916,6 +1927,18 @@ const WRITTEN_SUMMARY_OPTIONS: Schema = Schema::Object {
     members: &[],
     open: false,
 };
+/// The features of agent programs that are on while no scope says otherwise. A feature whose only purpose is to show what a manager
+/// of a provider has already switched on for a model is on: the access program of Codex, which a thread offers only on a model whose
+/// managers enabled it. A scope that does not want a program offered under it sets its feature off; the others stay as they are.
+const AGENT_FEATURES_SHIPPED: DefaultOf = DefaultOf::Value(r#"{"codex.cyber_access":true}"#);
+/// What each generated target does while no scope sets it, written out in full. The settings page draws these as the values a
+/// target starts from, and the engine falls back to the same numbers (it reads them from this default), so the page and the work
+/// can never disagree: nothing is automatic; a thread keeps the shared trigger pacing (two minutes after a turn or a milestone), a topic
+/// follows its children at a quarter of an hour, a document waits for edits to settle for five minutes, chats and their titles collect
+/// messages for five minutes; each reads up to 32,000 tokens and writes up to 600 characters, 80 for the title of a chat.
+const SUMMARY_TARGETS_SHIPPED: DefaultOf = DefaultOf::Value(
+    r#"{"thread":{"automatic":false,"on":["turn_completed","milestone"],"min_interval_secs":120,"context_tokens":32000,"output_chars":600},"topic":{"automatic":false,"on":["child_changed"],"min_interval_secs":900,"context_tokens":32000,"output_chars":600},"document":{"automatic":false,"on":["content_changed"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat_title":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":80}}"#,
+);
 const SUMMARY_TARGETS: Schema = Schema::Object {
     members: &[
         optional("thread", SUMMARY_TARGET_OPTIONS),
@@ -2135,13 +2158,29 @@ macro_rules! registry {
 }
 
 const ASK_MODEL_ENTRY: Schema = Schema::Object {
-    members: &[required("provider_id", Schema::Id), required("model", TEXT)],
+    members: &[required(
+        "backend",
+        Schema::Object {
+            members: &[
+                required("route", TEXT),
+                required(
+                    "offering",
+                    Schema::Object {
+                        members: &[required("provider", Schema::Id), required("offering", TEXT)],
+                        open: false,
+                    },
+                ),
+                optional("config", ANY),
+            ],
+            open: true,
+        },
+    )],
     open: false,
 };
 
 registry! {
     ASK_MODELS = "ask.models", Automation, Policy, SYSTEM_ORG, Intersect, UNSET, Schema::List { items: &ASK_MODEL_ENTRY, unique: false },
-        "Ask models", "Allowed API model identities for Ask. Child scopes only narrow the list; parent order is retained. The first usable identity is the default. Unset everywhere or empty blocks Ask.";
+        "Ask models", "Allowed dialogue backends and offerings for Ask. Child scopes narrow the list in parent order. The first usable entry is the default. An unset or empty list blocks Ask.";
     ASK_PAID_BY = "ask.paid_by", Automation, Policy, SYSTEM_ORG, Replace, value("\"person\""), choice(&["person", "setter"]),
         "Who pays for Ask", "The person asking, or the writer of this setting. Usage is always attributed to the person asking.";
     ASK_RETENTION_DAYS = "ask.retention_days", Retention, Parameter, SYSTEM_ORG, Replace, value("30"), int(1, Unit::Days),
@@ -2153,15 +2192,19 @@ registry! {
     ASK_MAX_STEPS = "ask.max_steps", Automation, Policy, SYSTEM_ORG, Min, value("16"), int(1, Unit::Count),
         "Ask steps per turn", "The model steps allowed for one question before it asks the person to continue.";
     ASK_MAX_OUTPUT_TOKENS = "ask.max_output_tokens", Automation, Policy, SYSTEM_ORG, Min, value("4096"), int(1, Unit::Count),
-        "Ask answer tokens", "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.";
+        "Ask answer tokens", "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies.";
     ASK_CONTEXT_TOKENS = "ask.context_tokens", Automation, Policy, SYSTEM_ORG, Min, UNSET, int(1, Unit::Count),
-        "Ask context tokens", "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.";
+        "Ask context tokens", "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies.";
     ASK_MAX_TOOLS = "ask.max_tools", Automation, Policy, SYSTEM_ORG, Min, value("32"), int(1, Unit::Count),
         "Ask tools per turn", "The read operations allowed for one question before it asks the person to narrow the question.";
-    ASK_TOOL_BYTES = "ask.tool_bytes", Automation, Policy, SYSTEM_ORG, Min, value("65536"), int(1, Unit::Bytes),
-        "Ask source size", "The most bytes from one read result supplied to the model, with a canonical link to the full source.";
-    ASK_TURN_TOOL_BYTES = "ask.turn_tool_bytes", Automation, Policy, SYSTEM_ORG, Min, value("262144"), int(1, Unit::Bytes),
-        "Ask sources per turn", "The total read-result bytes supplied while answering one question.";
+    ASK_DOCS_HITS = "ask.docs_hits", Automation, Policy, SYSTEM_ORG, Min, value("5"), int(1, Unit::Count),
+        "Ask guide pages per search", "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match.";
+    ASK_DOCS_EXCERPT_TOKENS = "ask.docs_excerpt_tokens", Automation, Policy, SYSTEM_ORG, Min, value("1000"), int(1, Unit::Count),
+        "Ask guide excerpt size", "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it.";
+    ASK_MAX_OPERATIONS = "ask.max_operations", Automation, Policy, SYSTEM_ORG, Min, value("20"), int(1, Unit::Count),
+        "Ask operations per search", "The most read operations one Ask search of the read catalogue returns.";
+    ASK_MAX_LINKS = "ask.max_links", Automation, Policy, SYSTEM_ORG, Min, value("50"), int(1, Unit::Count),
+        "Ask links per source", "The most canonical source links Ask keeps from one read.";
     CALLS_RULES = "calls.rules", Automation, Policy, SYSTEM_TO_TOPIC, Replace, value(orch_provider_contract::calls::DEFAULT_RULES), Schema::List { items: &Schema::Any, unique: false },
         "Call recovery", "Ordered rules for retrying, continuing, failing over or waiting after a model call fails.";
     CALLS_REPEAT_LIMIT = "calls.repeat_limit", Automation, Policy, SYSTEM_TO_TOPIC, Min, value("3"), int(0, Unit::Count),
@@ -2178,7 +2221,7 @@ registry! {
         "Effort", "The reasoning effort asked of the model, one of those the model lists.";
     AGENT_PARAMS = "agent.params", Agent, Parameter, ORG_TO_THREAD, Map, EMPTY_MAP, map(&ANY),
         "Agent parameters", "Values for the parameters that the agent's adapter declares, by parameter.";
-    AGENT_FEATURES = "agent.features", Agent, Policy, SYSTEM_TO_TOPIC, Map, EMPTY_MAP, map(&BOOL),
+    AGENT_FEATURES = "agent.features", Agent, Policy, SYSTEM_TO_TOPIC, Map, AGENT_FEATURES_SHIPPED, map(&BOOL),
         "Agent features", "Which optional features of agents are switched on, by feature.";
     AGENT_INSTRUCTIONS = "agent.instructions", Agent, Parameter, ORG_TO_THREAD, Append, value("\"\""), INSTRUCTIONS,
         "Instructions", "Standing instructions given to the agent with every session; each scope adds its own under those above it.";
@@ -2205,6 +2248,13 @@ registry! {
         "Release mirror", "A URL that serves the vendors' release files where this server cannot reach them; empty reads the vendors directly.";
     AGENTS_PROMPT_CACHE_TTL = "agents.prompt_cache_ttl", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &choice(&["5m", "1h"]) },
         "Prompt cache lifetime", "An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it.";
+    AGENTS_WEB_ACTION_WAIT_SECS = "agents.web_action_wait_secs", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("120"), int(1, Unit::Seconds),
+        "Web action wait", "Close a native web action that has not reported its end after this many seconds, with its reason. A later result can still update it. Applies when the session opens again.";
+    AGENTS_NATIVE_RESULT_WAIT_MS = "agents.native_result_wait_ms", Agent, Parameter, SYSTEM, Replace, value("2000"), int(0, Unit::Milliseconds),
+        "Native result wait", "How long an agent program may read retained native results before reporting unavailable evidence. Programs that declare this wait use it as their profile default, within the engine's interrupt window. Applies when the program starts again.";
+    // Eight MiB keeps a short burst for one session while its optional local evidence is read.
+    AGENTS_NATIVE_RESULT_BUFFER_BYTES = "agents.native_result_buffer_bytes", Agent, Parameter, SYSTEM, Replace, value("8388608"), int(0, Unit::Bytes),
+        "Native result buffer", "Pending native input retained for a session while its result evidence is read. When full, the optional read ends as unverified and all input continues. Programs that declare this buffer use it as their profile default. Applies when the program starts again.";
     AGENTS_SUBAGENTS_AT_ONCE = "agents.subagents_at_once", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("8"), int_between(1, 64, Unit::Count),
         "Sub-agents at once", "How many sub-agents the harness may run at once; the shortest value along the hierarchy wins. A harness without this control says it does not apply.";
     AGENTS_SUBAGENT_DEPTH = "agents.subagent_depth", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("1"), int_between(1, 5, Unit::Count),
@@ -2255,6 +2305,8 @@ registry! {
         "Allowed services", "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.";
     PROVIDERS_ALLOWED = "providers.allowed", Models, Policy, SYSTEM_TO_TOPIC, Intersect, UNSET, list(&TEXT),
         "Allowed providers", "Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here.";
+    MODELS_ADD_SWITCHES_ON = "models.add_switches_on", Models, Parameter, SYSTEM_ORG, Replace, value("\"all\""), choice(&["all", "basic", "nothing"]),
+        "Switched on when added", "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.";
     COLLAB_ATTRIBUTION = "collab.attribution", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"auto\""), choice(&["auto", "always", "never"]),
         "Attribution", "Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers.";
     COLLAB_DEFAULT_DELIVERY = "collab.default_delivery", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"queue\""), choice(&["queue", "steer"]),
@@ -2318,6 +2370,8 @@ registry! {
         "Shared search result budget", "The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation.";
     ORCH_TOOLS_SEARCH_CONTEXT = "orch_tools.search_context", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int(0, Unit::Count),
         "Shared search context budget", "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context.";
+    THREADS_OPENING_ITEMS = "threads.opening_items", Collaboration, Parameter, SYSTEM_TO_THREAD, Replace, value("40"), int_between(1, u32::MAX as i64, Unit::Count),
+        "Thread opening items", "Timeline items in the first screen. Older items remain available by scrolling; a reader may request another window size.";
     THREADS_OFFLINE_DEADLINE = "threads.offline_deadline", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &int(0, Unit::Seconds) },
         "Offline turn deadline", "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.";
     THREADS_BACKGROUND_WAKE = "threads.background_wake", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("\"on\""), choice(&["on", "off"]),
@@ -2364,6 +2418,8 @@ registry! {
         "Keep turn files", "Days to keep complete turn and restore undo files in the environment; zero disables recording.";
     WORKSPACE_RECORD_MAX_BYTES = "workspace.record_max_bytes", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("1073741824"), int(1, Unit::Bytes),
         "Largest recorded directory", "The included file and link bytes eligible for whole-state recording; larger directories use per-file undo.";
+    WORKSPACE_RECORD_WAIT_SECS = "workspace.record_wait_secs", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("30"), int(1, Unit::Seconds),
+        "Wait for turn files", "Seconds a turn waits for the files before it to be recorded; when they are not ready in time the turn starts with per-file undo, and the turn says so.";
     BROADCAST_DELIVERY = "broadcast.delivery", Collaboration, Parameter, ORG_TO_TOPIC, Replace, value("\"steer\""), choice(&["interrupt", "steer", "next_turn"]),
         "Announcement delivery", "How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn.";
     BROADCAST_FALLBACK = "broadcast.fallback", Collaboration, Parameter, ORG_TO_TOPIC, Replace, value("\"next_turn\""), choice(&["next_turn", "interrupt"]),
@@ -2424,6 +2480,10 @@ registry! {
         "Full at", "The share of a host's memory, declared as needed by what runs there, at which the host counts as full.";
     HOSTS_WHEN_FULL = "hosts.when_full", System, Policy, SYSTEM, Replace, value("\"warn\""), choice(&["warn", "block"]),
         "When a host is full", "Whether making or moving an environment onto a full host only warns, or is refused beforehand.";
+    DELEGATION_BACKGROUND_HEADROOM_PERCENT = "delegation.background_headroom_percent", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, value("0"), int_between(0, 100, Unit::Percent),
+        "Background plan reserve", "Wait before automatic subscription summaries when a current applicable window has this percentage or less remaining. Zero disables the reserve.";
+    DELEGATION_SESSION_IDLE_SECS = "delegation.session_idle_secs", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, value("300"), int(0, Unit::Seconds),
+        "Context idle time", "Close a delegated program's private conversation after this many idle seconds, keeping its helper history and the provider's separate runtime policy. Zero closes it as soon as its work finishes. Active or later independent work is left alone.";
     RUNTIME_IDLE_STOP_MINUTES = "runtime.idle_stop_minutes", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, value("0"), int(0, Unit::Minutes),
         "Idle stop", "Keep a managed provider's runtime running with 0, the shipped default. A positive number stops it after that many idle minutes without a session or a lease. Scheduled reads leave it stopped until a turn, sign-in, Start, Refresh or renewal starts it again.";
     RUNTIME_TEMPLATE_ID = "runtime.template_id", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, FROM_SEEDS, ID,
@@ -2541,10 +2601,12 @@ registry! {
         "Summarizer", "Which summarizer is used, and its configuration.";
     AUTO_TRIGGERS = "auto.triggers", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("{\"on\":[\"turn_completed\",\"milestone\"],\"min_interval_secs\":120}"), TRIGGERS,
         "Triggers", "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.";
-    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, EMPTY_MAP, SUMMARY_TARGETS,
+    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, SUMMARY_TARGETS_SHIPPED, SUMMARY_TARGETS,
         "Summary targets", "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.";
     SUMMARY_FOLLOW_INTERVAL_SECS = "summary.follow_interval_secs", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int_between(1, 4_294_967_295, Unit::Seconds),
         "Summary follow interval", "Free reads while a summary is eligible or running; a scheduled future update is followed at its actual due time instead.";
+    SUMMARY_READ_REPEATS = "summary.read_repeats", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("3"), int_between(0, i64::MAX, Unit::Count),
+        "Summary read repeats", "Unpaid source rereads and prompt rebuilds before the first model call. A changing read or rebuild loop uses this limit; 0 makes no repeat. A source change after a model call never creates a paid retry.";
     SUMMARY_READ_BATCH_SIZE = "summary.read_batch_size", Automation, Parameter, SYSTEM, Replace, value("100"), int_between(1, 4_294_967_295, Unit::Count),
         "Summary read batch", "Distinct source targets read in one search-summary window; larger selections continue in further windows.";
     CAPABILITY_POLICY = "capability.policy", Confinement, Policy, SYSTEM_TO_TOPIC, Map, FROM_SEEDS, map(&CAPABILITY_DECISION),
@@ -2615,6 +2677,8 @@ registry! {
         "File size", "The largest one file a document here may hold, in bytes.";
     DOCS_FILES_MAX_BYTES = "docs.files_max_bytes", ChatDocuments, Policy, SYSTEM_TO_TOPIC, Min, value("1073741824"), BYTES,
         "Files together", "The most the files of one document here may come to together, in bytes.";
+    DOCUMENTS_README_BLOCKS = "documents.readme_blocks", ChatDocuments, Parameter, SYSTEM_TO_THREAD, Replace, value("12"), int(1, Unit::Count),
+        "README preview", "Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page.";
     DOCUMENTS_LINKS_SHOWN = "documents.links.shown", ChatDocuments, Policy, SYSTEM_TO_TOPIC, Replace,
         value("[\"referenced_by\",\"references\",\"related\",\"graph\"]"), set(&LINKS_TAB),
         "Links tabs", "The tabs of a document's Links section that its readers see; the document's owner can switch tabs off for one document.";
@@ -2632,6 +2696,8 @@ registry! {
         "Graph nodes", "The most nodes the Links graph draws.";
     CHAT_ATTACHMENT_MAX_BYTES = "chat.attachment_max_bytes", ChatDocuments, Policy, SYSTEM_ORG, Min, DefaultOf::SameAs("storage.max_blob_bytes"), BYTES,
         "Attachment size", "The largest file attached to a chat message, in bytes.";
+    SEARCH_TEXT_CHARS = "search.text_chars", ChatDocuments, Parameter, SYSTEM, Replace, value("20000"), int(1, Unit::Count),
+        "Conversation search text", "Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded.";
     // Fifty candidates oversample the twenty-row screen; a fourfold recent sample detects dense terms.
     SEARCH_WORD_RECENT_CANDIDATES = "search.word_recent_candidates", ChatDocuments, Parameter, SYSTEM_ORG, Replace, value("200"), int(1, Unit::Count),
         "Recent word sample", "Recent rows sampled before probing the text index.";
@@ -2747,6 +2813,24 @@ registry! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_model_that_is_added_starts_with_everything_it_offers_unless_an_organization_narrows_it() {
+        use super::*;
+        use serde_json::json;
+        let setting = get(keys::MODELS_ADD_SWITCHES_ON).unwrap();
+        assert_eq!(setting.default_value(), Some(json!("all")));
+        assert!(matches!(setting.merge, Merge::Replace));
+        assert!(setting.set_at(Scope::System) && setting.set_at(Scope::Org));
+        assert!(!setting.set_at(Scope::Topic));
+        for word in ["all", "basic", "nothing"] {
+            assert!(
+                validate(keys::MODELS_ADD_SWITCHES_ON, &json!(word)).is_ok(),
+                "{word}"
+            );
+        }
+        assert!(validate(keys::MODELS_ADD_SWITCHES_ON, &json!("some")).is_err());
+    }
+
     #[test]
     fn messaging_defaults_keep_wake_explicit_and_hourly_budgets_separate() {
         use super::*;
@@ -3020,6 +3104,23 @@ mod tests {
         assert_eq!(
             get(keys::ENV_IDLE_STOP_MINUTES).unwrap().default_value(),
             Some(json!(1440))
+        );
+    }
+
+    #[test]
+    fn delegated_contexts_close_after_their_own_idle_time_without_stopping_the_provider() {
+        let def = get("delegation.session_idle_secs").unwrap();
+        assert_eq!(def.default_value(), Some(json!(300)));
+        assert!(!def.zero_disables());
+        assert!(def.faults(&json!(0)).is_empty());
+        assert!(def.faults(&json!(86400)).is_empty());
+        assert!(!def.faults(&json!(-1)).is_empty());
+        assert!(def.set_at(Scope::Provider));
+        assert_eq!(
+            get(keys::RUNTIME_IDLE_STOP_MINUTES)
+                .unwrap()
+                .default_value(),
+            Some(json!(0))
         );
     }
 
@@ -3654,7 +3755,7 @@ mod tests {
         assert!(
             validate(
                 keys::AUTO_SUMMARIZER,
-                &json!({ "kind": "model", "provider_id": new_id(), "model": "small" })
+                &json!({ "kind": "model", "backend": {"route":"summarizer-model.complete","offering":{"provider":new_id(),"offering":"small"}} })
             )
             .is_ok()
         );

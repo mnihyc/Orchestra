@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-api-contract --lib -- ask::tests::input_model_can_keep_choose_or_clear_its_preference
+test -p orch-api-core --test ask -- subscription::
+test -p orch-engine --lib -- ask::
+test -p orch-api-core --test ask -- backend_reserve::
+test -p orch-api-core --test ask_tools_native_origin
+test -p orch-api-core --lib -- backplane::command_admission_tests::ask_origins::
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::

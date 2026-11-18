@@ -78,9 +78,10 @@ fn failure_class(error: &EngineError) -> (&'static str, Option<String>) {
     use orch_db::DbError;
     match error {
         EngineError::Capability(_) => ("capability", None),
+        EngineError::CapabilityPacketUnavailable(_) => ("capability_packet_unavailable", None),
         EngineError::CapabilityPaused(_) => ("capability_paused", None),
-        EngineError::AskContextNoRoom => ("ask_context_no_room", None),
         EngineError::AskContextTooLong(_) => ("ask_context_too_long", None),
+        EngineError::AskTurnTooLong(_) => ("ask_turn_too_long", None),
         EngineError::BeforeEffect(_) => ("before_effect", None),
         EngineError::BackgroundRunning(_) => ("background_running", None),
         EngineError::Db(DbError::Unique { .. }) => ("db_unique", Some("23505".into())),

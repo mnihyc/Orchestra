@@ -3,41 +3,58 @@ use super::*;
 use futures::future::BoxFuture;
 use orch_api_contract::threads::ContentPart;
 use orch_authz::CapturedCaller;
+use orch_db::queries::capability_work;
+use orch_provider_contract::capabilities::ExecutionSupport;
 use serde_json::json;
 
 const SLOT: &str = "delegated_capability";
+mod ask;
+mod codecs;
+pub(crate) mod executor;
+mod image;
+mod origin;
+pub mod placement;
 mod run;
-pub(super) use run::{execute, failure};
+mod sessions;
+mod summary;
+pub(crate) mod text;
+mod thread_tool;
+mod unit;
+pub(super) use run::failure;
+
+/// These codecs are implemented by the installed native result reader, not by a route declaration.
+pub(crate) fn execution_support() -> Vec<ExecutionSupport> {
+    codecs::installed()
+        .map(|codecs| codecs.support())
+        .unwrap_or_default()
+}
 
 /// A conjunctive condition on the helper's real creator/input authority, never an acting credential.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParentLink {
-    answer: Id,
+    work: Id,
     helper: Id,
-    slot: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
-    source: source::Source,
-    call: CallContext,
-    selected: selection::Selection,
-    recovery: Option<recovery_binding::Binding>,
+    origin: origin::Producer,
     attempt: Id,
     helper: Id,
     actor: Id,
+    person: Option<Id>,
     capability: String,
+    execution: ExecutionSupport,
     agent: Id,
     provider: Id,
-    environment: Id,
-    topic: Id,
-    directory: String,
+    placement: placement::Placement,
     model: String,
+    effort: Option<String>,
     content: Vec<ContentPart>,
     input: Json,
-    limits: Vec<CapturedCaller>,
+    material: Vec<orch_model_contract::generation::GenerationPart>,
     deadline: Time,
     profile: Hash,
     actor_name: String,
@@ -45,31 +62,504 @@ struct Record {
     program_label: Json,
 }
 
+/// The native sign-in lives on its provider. Link reconnects and cosmetic edits leave
+/// its binding intact; a different keeper, program or observed login changes it.
+async fn session_login_hash(conn: &mut Conn, provider: Id) -> Result<Option<Hash>, EngineError> {
+    let identity: Option<Json> = sqlx::query_scalar("SELECT jsonb_build_array(p.agent_id,p.machine_id,p.key_machine_id,p.login_state,p.credential_renewed_at)
+        FROM providers p WHERE p.id=$1 AND p.kind='subscription' AND p.deleted_at IS NULL FOR SHARE OF p")
+        .bind(provider).fetch_optional(conn).await.map_err(orch_db::DbError::from)?;
+    identity.map(source::hash_json).transpose()
+}
+
+async fn session_login_current(
+    conn: &mut Conn,
+    provider: Id,
+    work: &capability_work::ProgramWork,
+) -> Result<bool, EngineError> {
+    let Some(saved) = work.session_login_hash.as_deref() else {
+        return Ok(true);
+    };
+    Ok(session_login_hash(conn, provider)
+        .await?
+        .is_some_and(|hash| hash.as_bytes().as_slice() == saved))
+}
+
+/// Freeze the same effective effort ordinary helper preflight will select, before any helper exists.
+async fn helper_effort(
+    conn: &mut Conn,
+    provider: Id,
+    model: &str,
+    topic: Id,
+    requested: Option<&str>,
+) -> Result<Option<String>, EngineError> {
+    let row = resources::thread_engine::model(conn, provider, model)
+        .await?
+        .filter(|row| row.enabled)
+        .ok_or(EngineError::StaleToolSource)?;
+    let settings = crate::resolved::load(conn, topic).await?;
+    let parameters = crate::binding::model_parameters(&row)?;
+    let wanted = requested.or(settings.effort.as_deref());
+    if parameters.effort_is_gone(wanted) {
+        return Err(EngineError::StaleToolSource);
+    }
+    Ok(parameters.effort_for(wanted))
+}
+
 impl Record {
     fn helper_info(&self) -> Json {
-        json!({"thread_id":self.helper,"actor_id":self.actor,"actor":self.actor_ref,"actor_name":self.actor_name,
-            "program_label":self.program_label,"requester_thread_id":self.call.thread})
+        json!({"thread_id":self.helper,"actor_id":self.actor,"actor":self.actor_ref,"actor_name":self.actor_name,"provider_id":self.provider,
+            "program_label":self.program_label,"requester_thread_id":self.origin.thread()})
     }
 }
 
 impl ParentLink {
-    async fn record(&self, conn: &mut Conn) -> Result<Record, EngineError> {
-        let stored: Option<Json> =
-            sqlx::query_scalar("SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1")
-                .bind(self.answer)
-                .bind(&self.slot)
-                .fetch_optional(conn)
-                .await
-                .map_err(orch_db::DbError::from)?
-                .flatten();
-        let record: Record = serde_json::from_value(stored.ok_or(EngineError::StaleToolSource)?)?;
-        if record.helper != self.helper
-            || record.source.answer() != self.answer
-            || self.slot != format!("{SLOT}:{}", record.attempt)
+    /// Frozen request choices apply only to the producer's actual initial input.
+    /// Ordinary model admission still resolves their eligibility and current limits.
+    pub(crate) async fn apply_input_options(
+        &self,
+        conn: &mut Conn,
+        input: &threads::InputRow,
+        settings: &mut crate::resolved::Resolved,
+    ) -> Result<(), EngineError> {
+        if input.thread_id != self.helper || !self.owns_input(conn, input.id).await? {
+            return Err(EngineError::StaleToolSource);
+        }
+        let record = self.record(conn).await?;
+        if input.author_id != Some(record.actor)
+            || input.content != serde_json::to_value(&record.content)?
         {
             return Err(EngineError::StaleToolSource);
         }
-        Ok(record)
+        if let Some(params) = record.origin.params() {
+            let chosen = params.as_object().ok_or(EngineError::StaleToolSource)?;
+            let actual = settings
+                .params
+                .as_object_mut()
+                .ok_or(EngineError::StaleToolSource)?;
+            actual.extend(chosen.clone());
+        }
+        Ok(())
+    }
+
+    /// A withdrawn or unimplemented explicit option cannot silently become a different request.
+    pub(crate) async fn input_options_match(
+        &self,
+        conn: &mut Conn,
+        input: &threads::InputRow,
+        params: &Json,
+        effort: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        if input.thread_id != self.helper || !self.owns_input(conn, input.id).await? {
+            return Ok(false);
+        }
+        let record = self.record(conn).await?;
+        let Some(chosen) = record.origin.params() else {
+            return Ok(true);
+        };
+        let chosen = chosen.as_object().ok_or(EngineError::StaleToolSource)?;
+        Ok(chosen.iter().all(|(key, value)| {
+            if key == "effort" {
+                value.is_null() || value.as_str() == effort
+            } else {
+                params.get(key) == Some(value) || (value.is_null() && params.get(key).is_none())
+            }
+        }))
+    }
+
+    /// A copied condition cannot make a later independent input part of this attempt.
+    pub(crate) async fn owns_input(&self, conn: &mut Conn, input: Id) -> Result<bool, EngineError> {
+        Ok(capability_work::program(conn, self.work)
+            .await?
+            .is_some_and(|work| work.helper == self.helper && work.input == Some(input)))
+    }
+
+    /// The native prompt keeps the actual producer's immutable Read governors.
+    pub(crate) async fn retain_prompt_governors(
+        &self,
+        conn: &mut Conn,
+        input: Id,
+        record_id: Id,
+    ) -> Result<(), EngineError> {
+        if !self.owns_input(conn, input).await? {
+            return Err(EngineError::StaleToolSource);
+        }
+        let record = self.record(conn).await?;
+        if let Some(source) = record.origin.summary() {
+            let (request, viewer, refs) = source.prompt_governors();
+            crate::model_inputs::retain_summary_governors(conn, record_id, request, viewer, &refs)
+                .await?;
+        } else if let Some(thread) = record.origin.thread() {
+            crate::model_inputs::retain_program_governors(
+                conn,
+                record_id,
+                self.work,
+                match &record.origin {
+                    origin::Producer::Ask { source, .. } => Some(source.person),
+                    _ => None,
+                },
+                &[orch_api_contract::summaries::SummaryTarget::Thread { id: thread }],
+            )
+            .await?;
+        } else {
+            return Err(EngineError::StaleToolSource);
+        }
+        Ok(())
+    }
+
+    /// Only the actual owned input can mark its source at a successful native wire cut.
+    pub(crate) async fn mark_model_admitted(
+        &self,
+        conn: &mut Conn,
+        input: &threads::InputRow,
+        at: Time,
+    ) -> Result<(), EngineError> {
+        if input.thread_id != self.helper || !self.owns_input(conn, input.id).await? {
+            return Err(EngineError::StaleToolSource);
+        }
+        let record = self.record(conn).await?;
+        if let Some(source) = record.origin.summary() {
+            source.mark_model_admitted(conn, at).await?;
+        }
+        Ok(())
+    }
+
+    /// The owned initial input asks for the program's declared native mode without changing inherited settings.
+    pub(crate) async fn native_settings(
+        &self,
+        conn: &mut Conn,
+        input: &threads::InputRow,
+        thread: Id,
+        descriptor: &orch_agent_contract::descriptor::AgentDescriptor,
+        declarations: &orch_provider_contract::capabilities::Declarations,
+    ) -> Result<BTreeMap<String, Json>, EngineError> {
+        if thread != self.helper {
+            return Ok(BTreeMap::new());
+        }
+        if input.thread_id != self.helper || !self.owns_input(conn, input.id).await? {
+            return Err(EngineError::StaleToolSource);
+        }
+        let record = self.record(conn).await?;
+        if input.author_id != Some(record.actor)
+            || input.content != serde_json::to_value(&record.content)?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        let program = descriptor.capability_program();
+        let mode = program
+            .access
+            .get("native")
+            .and_then(|access| access.native.get(&record.capability))
+            .and_then(|support| support.delegated_mode.as_ref())
+            .ok_or(EngineError::StaleToolSource)?;
+        let definition = declarations
+            .capabilities
+            .get(&record.capability)
+            .ok_or(EngineError::StaleToolSource)?;
+        if !definition.modes.contains_key(mode) {
+            return Err(EngineError::StaleToolSource);
+        }
+        Ok(definition
+            .mode_setting
+            .as_ref()
+            .map(|key| BTreeMap::from([(key.clone(), json!(mode))]))
+            .unwrap_or_default())
+    }
+
+    /// Confinement and output facts belong only to the actual owned initial model turn.
+    pub(crate) async fn program_output(
+        &self,
+        conn: &mut Conn,
+        input: &threads::InputRow,
+        turn: &threads::TurnRow,
+        descriptor: &orch_agent_contract::descriptor::AgentDescriptor,
+    ) -> Result<Option<orch_agent_contract::session::ProgramOutput>, EngineError> {
+        if turn.thread_id != self.helper {
+            return Ok(None);
+        }
+        let record = self.record(conn).await?;
+        if !record.execution.confined_tools {
+            return Ok(None);
+        }
+        if input.thread_id != self.helper
+            || turn.input_id != input.id
+            || !self.owns_input(conn, input.id).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        if turn.model != record.model
+            || turn.effort != record.effort
+            || input.author_id != Some(record.actor)
+            || input.content != serde_json::to_value(&record.content)?
+            || !descriptor
+                .side_thread_modes
+                .contains(&orch_agent_contract::descriptor::SideReading::NoTools)
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        let schema = if let origin::Producer::Ask { source, .. } = &record.origin {
+            let enforced = crate::ask::dialogue::structured_output(descriptor);
+            if record.input["schema_enforced"].as_bool() != Some(enforced) {
+                return Err(EngineError::StaleToolSource);
+            }
+            enforced.then(|| crate::ask::dialogue::response_schema(&source.request.input.tools))
+        } else {
+            None
+        };
+        let output = orch_agent_contract::session::ProgramOutput {
+            max_output_tokens: record
+                .input
+                .get("max_output_tokens")
+                .and_then(Json::as_i64)
+                .ok_or(EngineError::StaleToolSource)?,
+            schema,
+        };
+        output.validate().map_err(EngineError::unreadable)?;
+        Ok(Some(output))
+    }
+
+    /// The actual admitted producer creates only its fixed private execution artifact.
+    pub(crate) async fn birth(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+        access: &dyn crate::access::ResourceAccess,
+    ) -> Result<(Principal, crate::binding::NewThread, crate::binding::Birth), EngineError> {
+        use crate::binding::{Birth, BirthAgentAccess, NewThread};
+        use orch_access_contract::pages::{PageChange, Whole};
+        if !self.current_use(conn, clock, access).await? {
+            return Err(EngineError::StaleToolSource);
+        }
+        let record = self.record(conn).await?;
+        if self.helper != record.helper
+            || threads::thread(conn, self.helper).await?.is_some()
+            || capability_work::program(conn, self.work)
+                .await?
+                .is_none_or(|work| work.input.is_some())
+            || !record.origin.current_act(conn, clock).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        let origins = record
+            .origin
+            .callers(conn, clock, access)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+        let actor = origins
+            .callers
+            .into_iter()
+            .find(|caller| caller.user() == record.actor)
+            .ok_or(EngineError::StaleToolSource)?;
+        let principal = Principal::load(conn, actor, clock.time()).await?;
+        let new = NewThread {
+            topic: record.placement.topic,
+            name: "Capability helper".into(),
+            agent: record.agent,
+            provider: record.provider,
+            environment: record.placement.environment,
+            directory: record.placement.directory,
+            arrangement: None,
+            model: Some(record.model),
+            effort: record.effort,
+        };
+        let birth = Birth {
+            agent_access: BirthAgentAccess::nothing(),
+            prepare_source: Some(false),
+            page: Some(PageChange {
+                whole: Some(Whole::Private),
+                ..PageChange::default()
+            }),
+            ..Birth::default()
+        };
+        Ok((principal, new, birth))
+    }
+
+    pub(crate) fn helper(&self) -> Id {
+        self.helper
+    }
+
+    /// Re-enter the accepted producer, retaining its real operations for this exact helper input.
+    pub(crate) fn input_callers<'a>(
+        &'a self,
+        conn: &'a mut Conn,
+        thread: &'a threads::ThreadRow,
+        content: &'a Json,
+        actor: Id,
+        clock: &'a dyn Clock,
+    ) -> BoxFuture<'a, Result<Option<Vec<Caller>>, EngineError>> {
+        Box::pin(async move {
+            if !self.current(conn, thread, content, actor, clock).await? {
+                return Ok(None);
+            }
+            let record = self.record(conn).await?;
+            let origins = match record.origin.input_callers(conn, clock).await {
+                Ok(origins) => origins,
+                Err(EngineError::StaleToolSource | EngineError::ToolCallIdentity) => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            if origins.actor != record.actor || origins.person != record.person {
+                return Ok(None);
+            }
+            let callers: Vec<_> = origins
+                .callers
+                .into_iter()
+                .filter(|caller| caller.user() == actor)
+                .collect();
+            Ok((!callers.is_empty()).then_some(callers))
+        })
+    }
+
+    /// The helper's producer may copy only its admitted input, with the same held image receipts.
+    pub(crate) async fn accepts_frozen_images(
+        &self,
+        engine: &Engine,
+        conn: &mut Conn,
+        thread: Id,
+        actor: Id,
+        content: &[ContentPart],
+    ) -> Result<bool, EngineError> {
+        let record = self.record(conn).await?;
+        if thread != self.helper || actor != record.actor || content != record.content {
+            return Err(EngineError::StaleToolSource);
+        }
+        let origin::Producer::ThreadTool { source, call, .. } = &record.origin else {
+            return Ok(false);
+        };
+        if record.material.is_empty() {
+            return Ok(false);
+        }
+        record.origin.before_read(engine, conn).await?;
+        let images = source
+            .scope(crate::tools::image_generation::inputs::retained_images(
+                conn,
+                call,
+                record.material.len(),
+            ))
+            .await?;
+        if images.as_ref() != Some(&record.material) {
+            return Err(EngineError::StaleToolSource);
+        }
+        // Match the exact ordered hash, type and source name as well as the frozen content.
+        let mut admitted = record.material.iter();
+        for part in content {
+            match part {
+                ContentPart::Text { .. } => {}
+                ContentPart::Image {
+                    blob,
+                    media_type,
+                    name,
+                    path: None,
+                } => {
+                    let Some(orch_model_contract::generation::GenerationPart::ImageRef {
+                        blob: saved,
+                        media_type: kind,
+                        name: label,
+                        ..
+                    }) = admitted.next()
+                    else {
+                        return Err(EngineError::ToolCallIdentity);
+                    };
+                    if blob != saved
+                        || name != label
+                        || serde_json::to_value(media_type)? != kind.as_str()
+                    {
+                        return Err(EngineError::ToolCallIdentity);
+                    }
+                }
+                _ => return Err(EngineError::ToolCallIdentity),
+            }
+        }
+        if admitted.next().is_some() {
+            return Err(EngineError::ToolCallIdentity);
+        }
+        Ok(true)
+    }
+
+    /// The shared input writer records ownership before its ordinary preflight may start work.
+    pub(crate) async fn bind_input(
+        &self,
+        conn: &mut Conn,
+        input: &threads::InputRow,
+    ) -> Result<(), EngineError> {
+        let record = self.record(conn).await?;
+        if input.thread_id != self.helper
+            || input.author_id != Some(record.actor)
+            || input.content != serde_json::to_value(&record.content)?
+            || !capability_work::bind_program_input(conn, self.work, input.id).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        Ok(())
+    }
+
+    /// Reading an already paid result checks its source binding, without reserving another allowance.
+    pub(crate) async fn current_placement(&self, conn: &mut Conn) -> Result<bool, EngineError> {
+        self.record(conn).await?.placement.current(conn).await
+    }
+
+    async fn record(&self, conn: &mut Conn) -> Result<Record, EngineError> {
+        Ok(self.record_and_work(conn).await?.0)
+    }
+
+    async fn record_and_work(
+        &self,
+        conn: &mut Conn,
+    ) -> Result<(Record, capability_work::ProgramWork), EngineError> {
+        let work = capability_work::program(conn, self.work)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+        let slot = format!("{SLOT}:{}", work.attempt);
+        let stored: Option<Json> = match (
+            work.source_answer,
+            work.source_summary_call,
+            work.source_ask_call,
+        ) {
+            (Some(answer), None, None) => {
+                sqlx::query_scalar("SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1")
+                    .bind(answer)
+                    .bind(&slot)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?
+                    .flatten()
+            }
+            (None, None, Some(call)) => sqlx::query_scalar(
+                "SELECT delegated_program FROM ask_calls WHERE id=$1 AND machine_id IS NULL",
+            )
+            .bind(call)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?
+            .flatten(),
+            (None, Some(call), None) => sqlx::query_scalar(
+                "SELECT delegated_program FROM summary_calls WHERE id=$1 AND purpose='summary'",
+            )
+            .bind(call)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?
+            .flatten(),
+            _ => return Err(EngineError::StaleToolSource),
+        };
+        let record: Record = serde_json::from_value(stored.ok_or(EngineError::StaleToolSource)?)?;
+        if record.helper != self.helper
+            || !record.origin.matches_journal(&work)
+            || record.origin.request() != work.request
+            || work.id != crate::ids::derived("capability.work", &[record.attempt.as_bytes()])
+            || work.helper != self.helper
+            || work.actor != record.actor
+            || work.person != record.person
+            || work.node != record.origin.node()
+            || work.purpose != record.capability
+            || work.attempt != record.attempt
+            || work.backend != serde_json::to_value(record.origin.backend())?
+            || work.record != record.origin.locator(&slot)
+            || work.deadline != record.deadline.get()
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        Ok((record, work))
     }
 
     /// Check only the retained source, original credential ceilings and exact input/binding.
@@ -93,9 +583,10 @@ impl ParentLink {
             if thread.node_id != self.helper
                 || thread.agent_id != Some(record.agent)
                 || thread.provider_id != Some(record.provider)
-                || thread.environment_id != Some(record.environment)
-                || thread.topic_id != record.topic
-                || thread.workspace_dir != record.directory
+                || thread.environment_id != Some(record.placement.environment)
+                || thread.topic_id != record.placement.topic
+                || thread.workspace_dir != record.placement.directory
+                || !record.placement.current(conn).await?
                 || thread.deleted_at.is_some()
                 || thread.archived_at.is_some()
                 || actor != record.actor
@@ -104,31 +595,7 @@ impl ParentLink {
             {
                 return Ok(false);
             }
-            let unfinished: bool = sqlx::query_scalar(
-                "SELECT NOT(completed OR retired) FROM thread_tool_calls WHERE answer_id=$1",
-            )
-            .bind(self.answer)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(orch_db::DbError::from)?
-            .unwrap_or(false);
-            if !unfinished {
-                return Ok(false);
-            }
-            for limit in &record.limits {
-                if limit.restore_current(conn, clock).await?.is_none() {
-                    return Ok(false);
-                }
-            }
-            let checked = record
-                .source
-                .scope(source::check_call(conn, &record.call))
-                .await;
-            match checked {
-                Ok(()) => Ok(clock.time() < record.deadline),
-                Err(EngineError::StaleToolSource | EngineError::ToolCallIdentity) => Ok(false),
-                Err(error) => Err(error),
-            }
+            Ok(record.origin.current_act(conn, clock).await? && clock.time() < record.deadline)
         })
     }
 
@@ -148,21 +615,12 @@ impl ParentLink {
         access: &'a dyn crate::access::ResourceAccess,
     ) -> BoxFuture<'a, Result<Option<CurrentCallers>, EngineError>> {
         Box::pin(async move {
-            let record = self.record(conn).await?;
+            let (record, work) = self.record_and_work(conn).await?;
             if clock.time() >= record.deadline
-                || !record.selected.is_current(conn, record.call.thread).await?
-            {
-                return Ok(None);
-            }
-            if let Some(binding) = &record.recovery
-                && !binding
-                    .current_call(
-                        conn,
-                        &record.call,
-                        &record.capability,
-                        Some(&record.selected),
-                        record.attempt,
-                    )
+                || !record.placement.current(conn).await?
+                || !record
+                    .origin
+                    .selection_current(conn, &record.capability, record.attempt)
                     .await?
             {
                 return Ok(None);
@@ -177,36 +635,25 @@ impl ParentLink {
             if account.agent_id != Some(record.agent)
                 || agent.disabled
                 || agent.deleted_at.is_some()
-                || source::hash_json(agent.profile)? != record.profile
-                || !native_available(
+                || source::hash_json(agent.profile.clone())? != record.profile
+                || backend_state(
                     conn,
                     &BuiltinSources::default(),
-                    record.provider,
-                    &record.model,
                     &record.capability,
+                    record.origin.backend(),
                 )
                 .await?
+                .is_err()
             {
                 return Ok(None);
             }
-            let origins = record
-                .source
-                .scope(source::original_callers_with_limits(
-                    conn,
-                    &record.call,
-                    clock,
-                    access,
-                    &record.limits,
-                ))
-                .await;
-            let origins = match origins {
-                Ok(origins) => origins,
-                Err(EngineError::StaleToolSource | EngineError::ToolCallIdentity) => {
-                    return Ok(None);
-                }
-                Err(error) => return Err(error),
+            let Some(origins) = record.origin.callers(conn, clock, access).await? else {
+                return Ok(None);
             };
-            if crate::provider_policy::forbidden(conn, record.call.thread, record.provider)
+            if origins.actor != record.actor || origins.person != record.person {
+                return Ok(None);
+            }
+            if crate::provider_policy::forbidden(conn, record.origin.node(), record.provider)
                 .await?
                 .is_some()
             {
@@ -218,16 +665,51 @@ impl ParentLink {
             else {
                 return Ok(None);
             };
-            let parameters: orch_provider_contract::models::ModelParameters =
-                serde_json::from_value(model.parameters)?;
+            let parameters = crate::binding::model_parameters(&model)?;
+            if parameters.effort_is_gone(record.effort.as_deref()) {
+                return Ok(None);
+            }
+            if !session_login_current(conn, record.provider, &work).await? {
+                return Ok(None);
+            }
+            let turn = if let Some(input) = work.input {
+                let input = threads::input(conn, input)
+                    .await?
+                    .ok_or(EngineError::StaleToolSource)?;
+                if input.thread_id != self.helper {
+                    return Ok(None);
+                }
+                if let Some(turn) = input.turn_id {
+                    let turn = threads::turn(conn, turn)
+                        .await?
+                        .ok_or(EngineError::StaleToolSource)?;
+                    if turn.thread_id != self.helper
+                        || turn.input_id != input.id
+                        || turn.model != record.model
+                        || turn.effort != record.effort
+                    {
+                        return Ok(None);
+                    }
+                    Some(turn)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let descriptor =
+                crate::harnesses::descriptor_of(&agent)?.ok_or(EngineError::StaleToolSource)?;
+            let tier = turn.as_ref().and_then(|turn| {
+                crate::providers::service_tier(&descriptor.parameters, &turn.params)
+            });
             let use_request = model::ModelUse {
-                place: record.call.thread,
+                place: record.origin.node(),
                 provider: record.provider,
                 offering: &record.model,
                 groups: &model.groups,
-                effort: parameters.default_effort.as_deref(),
+                effort: record.effort.as_deref(),
             };
-            for caller in origins.callers() {
+            for caller in &origins.callers {
                 if model::offering_use(conn, caller, &use_request, clock)
                     .await?
                     .is_none()
@@ -238,12 +720,12 @@ impl ParentLink {
             if !crate::caps::own_room(
                 conn,
                 &crate::caps::OwnCapAsk {
-                    place: record.call.thread,
+                    place: record.origin.node(),
                     provider: record.provider,
                     model: &record.model,
-                    tier: parameters.service_tier_start(),
+                    tier: tier.as_deref(),
                     purpose: &record.capability,
-                    person: origins.attribution().user_id,
+                    person: origins.person,
                 },
                 clock.now(),
             )
@@ -253,7 +735,7 @@ impl ParentLink {
             }
             Ok((clock.time() < record.deadline).then(|| {
                 origins
-                    .callers()
+                    .callers
                     .iter()
                     .cloned()
                     .map(|caller| (Some(caller), Some(record.deadline)))
@@ -265,24 +747,98 @@ impl ParentLink {
 
 /// The actual sign-in profile and its same-resolver native capability support.
 /// This is metadata for a prospective helper, not current Use or an installed paid executor.
-pub(crate) async fn native_available(
+pub(crate) async fn backend_state(
     conn: &mut Conn,
     sources: &BuiltinSources,
-    provider: Id,
-    model: &str,
     capability: &str,
-) -> Result<bool, EngineError> {
-    Ok(native_state(conn, sources, provider, model, capability)
-        .await?
-        .is_ok())
+    backend: &orch_provider_contract::capabilities::BackendRef,
+) -> Result<Result<(), CapabilityFailure>, EngineError> {
+    if let Err(message) =
+        orch_provider_contract::capabilities::ProgramPlacement::read(&backend.config)
+    {
+        return Ok(Err(CapabilityFailure::unavailable(
+            capability,
+            "program_placement_invalid",
+            message,
+        )));
+    }
+    let Some(reference) = backend.offering.as_ref() else {
+        return Ok(Err(CapabilityFailure::unavailable(
+            capability,
+            "offering_not_selected",
+            "Choose a model for this delegated program.",
+        )));
+    };
+    let Some(required) = sources
+        .capabilities()
+        .declarations()
+        .routes
+        .get(&backend.route)
+        .filter(|route| {
+            route.executor.as_deref() == Some("program-session")
+                && route.capabilities.iter().any(|id| id == capability)
+        })
+        .and_then(|route| route.execution.as_ref())
+    else {
+        return Ok(Err(CapabilityFailure::unavailable(
+            capability,
+            "execution_codec_unavailable",
+            "The selected route has no implemented consumer codec.",
+        )));
+    };
+    native_state_for(
+        conn,
+        sources,
+        reference.provider,
+        &reference.offering,
+        capability,
+        required,
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(crate) async fn native_state(
     conn: &mut Conn,
     sources: &BuiltinSources,
     provider: Id,
     model: &str,
     capability: &str,
+) -> Result<Result<(), CapabilityFailure>, EngineError> {
+    let route = sources
+        .capabilities()
+        .declarations()
+        .routes
+        .iter()
+        .find(|(_, route)| {
+            route.executor.as_deref() == Some("program-session")
+                && route.capabilities.iter().any(|id| id == capability)
+        })
+        .map(|(id, _)| id.clone())
+        .ok_or(EngineError::StaleToolSource)?;
+    backend_state(
+        conn,
+        sources,
+        capability,
+        &orch_provider_contract::capabilities::BackendRef {
+            route,
+            offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                provider,
+                offering: model.into(),
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn native_state_for(
+    conn: &mut Conn,
+    sources: &BuiltinSources,
+    provider: Id,
+    model: &str,
+    capability: &str,
+    required: &ExecutionSupport,
 ) -> Result<Result<(), CapabilityFailure>, EngineError> {
     use orch_provider_contract::capabilities as cap;
     let Some(account) = resources::thread_engine::provider(conn, provider).await? else {
@@ -294,7 +850,9 @@ pub(crate) async fn native_state(
     };
     if account.kind != "subscription"
         || account.deleted_at.is_some()
-        || !crate::providers::request_status_available(&account.status)
+        || !(crate::providers::request_status_available(&account.status)
+            || account.status == "offline"
+                && crate::provider_runtime::waits_for_runtime(conn, &account).await?)
     {
         return Ok(Err(CapabilityFailure::unavailable(
             capability,
@@ -405,9 +963,43 @@ pub(crate) async fn native_state(
         .filter_map(Json::as_str)
         .map(str::to_owned)
         .collect();
+    let program_support = registry
+        .declarations()
+        .programs
+        .get(&descriptor.kind)
+        .and_then(|program| program.access.get("native"))
+        .and_then(|access| access.native.get(capability));
+    let installed = execution_support();
+    let implemented = {
+        installed.iter().any(|support| support.satisfies(required))
+            && program_support.is_some_and(|program| {
+                program
+                    .execution
+                    .iter()
+                    .any(|support| support.satisfies(required))
+            })
+    };
+    if required.confined_tools
+        && !descriptor
+            .side_thread_modes
+            .contains(&orch_agent_contract::descriptor::SideReading::NoTools)
+    {
+        return Ok(Err(CapabilityFailure::unavailable(
+            capability,
+            "program_execution_unavailable",
+            "The selected program cannot provide this model turn's tool-free execution context.",
+        )));
+    }
+    if !implemented {
+        return Ok(Err(CapabilityFailure::unavailable(
+            capability,
+            "program_execution_unavailable",
+            "The selected program has no verified input and result codec for this capability.",
+        )));
+    }
     let context = cap::ThreadContext {
         choices: BTreeMap::from([(capability.into(), Some(mode))]),
-        program: descriptor.kind,
+        program: descriptor.kind.clone(),
         access: "native".into(),
         current: Some(cap::OfferingRef {
             provider,
@@ -442,6 +1034,13 @@ pub(crate) async fn native_state(
         .as_ref()
         .is_some_and(|route| route.kind == "native-program")
     {
+        let codec = codecs::installed()
+            .map_err(EngineError::unreadable)?
+            .get(required)?;
+        if codec.requires_unit() {
+            return unit::availability(conn, &descriptor, provider, account.machine_id, capability)
+                .await;
+        }
         return Ok(Ok(()));
     }
     let fact = row
@@ -464,17 +1063,25 @@ pub(crate) async fn native_state(
 }
 
 impl Engine {
-    /// Prepare one ordinary private helper under the actual actor's re-admitted creator credential.
-    /// The private tool journal and input condition retain the separate original tool throughout.
-    pub async fn start_delegated_capability_helper(
+    /// Reconcile already-generated native evidence before asking for another paid effect.
+    pub(crate) async fn recover_program_capability_result(
+        &self,
+        call: &CallContext,
+        capability: &str,
+    ) -> Result<Option<accepted::AcceptedCapabilityResult>, EngineError> {
+        run::reconcile(self, call, capability).await
+    }
+
+    /// Prepare the exact ordinary private helper under its actual producer's admission.
+    /// Its journal and input retain every original tool credential throughout.
+    pub(super) async fn start_delegated_capability_helper(
         &self,
         call: &CallContext,
         capability: &str,
         input: Json,
+        selected: selection::Selection,
+        required: &ExecutionSupport,
     ) -> Result<Id, EngineError> {
-        use crate::binding::{Birth, BirthAgentAccess, NewThread};
-        use orch_access_contract::pages::{PageChange, Whole};
-        use orch_api_contract::nodes::FirstInput;
         let sources = self
             .inner
             .capability_services
@@ -482,14 +1089,22 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .ok_or(EngineError::StaleToolSource)?;
-        let selected = {
-            let mut conn = self.db().acquire().await?;
-            source::check_call(&mut conn, call).await?;
-            backend(&mut conn, call.thread, &sources, capability).await?
-        };
         if selected.executor != "program-session" {
             return Err(EngineError::StaleToolSource);
         }
+        if sources
+            .capabilities()
+            .declarations()
+            .routes
+            .get(&selected.reference.route)
+            .and_then(|route| route.execution.as_ref())
+            != Some(required)
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        let codec = codecs::installed()
+            .map_err(EngineError::unreadable)?
+            .get(required)?;
         if sources
             .capabilities()
             .declarations()
@@ -517,15 +1132,9 @@ impl Engine {
                 self.inner.access.as_ref(),
             )
             .await?;
-            native_state(
-                &mut conn,
-                &sources,
-                reference.provider,
-                &reference.offering,
-                capability,
-            )
-            .await?
-            .map_err(EngineError::from)?;
+            backend_state(&mut conn, &sources, capability, &selected.reference)
+                .await?
+                .map_err(EngineError::from)?;
             let parent = threads::thread(&mut conn, call.thread)
                 .await?
                 .ok_or(EngineError::StaleToolSource)?;
@@ -556,55 +1165,44 @@ impl Engine {
                 .or_else(|| person.get("username").and_then(Json::as_str))
                 .unwrap_or("")
                 .to_owned();
-            if input.get("prompt").and_then(Json::as_str).is_none() {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            let count = input.get("n").and_then(Json::as_u64).unwrap_or(1);
-            let mut content = vec![ContentPart::Text {
-                text: format!(
-                    "Use your native {capability} capability to produce {count} result(s) for this request. The prompt and admitted options follow as JSON. Do not read other conversations or change workspace files. Return the native result, without substituting a viewed or attached image.\n{}",
-                    serde_json::to_string(&input)?
-                ),
-            }];
+            let material = accepted::images();
+            let mut content = codec.prepare(capability, &input, &material)?;
             if let Some(ContentPart::Text { text }) = content.first_mut() {
                 text.push_str(&format!("\n\n[Requesting thread](/thread/{})", call.thread));
             }
-            for image in accepted::images() {
-                let orch_model_contract::generation::GenerationPart::ImageRef {
-                    blob,
-                    media_type,
-                    name,
-                    ..
-                } = image
-                else {
-                    return Err(EngineError::ToolCallIdentity);
-                };
-                content.push(serde_json::from_value(
-                    json!({"type":"image","blob":blob,"media_type":media_type,"name":name}),
-                )?);
-            }
+            let placement = placement::Placement::for_thread(&mut conn, &parent).await?;
+            let effort = helper_effort(
+                &mut conn,
+                provider.id,
+                &reference.offering,
+                placement.topic,
+                None,
+            )
+            .await?;
             Record {
-                source: source::Source::captured()?,
-                call: call.clone(),
-                selected: selected.clone(),
-                recovery: recovery_binding::binding(),
+                origin: origin::Producer::capture_tool(
+                    call,
+                    &selected,
+                    origins
+                        .callers()
+                        .iter()
+                        .map(CapturedCaller::capture)
+                        .collect(),
+                )?,
                 attempt,
                 helper,
                 actor: origins.actor(),
+                person: origins.attribution().user_id,
                 capability: capability.into(),
+                execution: required.clone(),
                 agent,
                 provider: provider.id,
-                environment: parent.environment_id.ok_or(EngineError::StaleToolSource)?,
-                topic: parent.topic_id,
-                directory: parent.workspace_dir,
+                placement,
                 model: reference.offering.clone(),
+                effort,
                 content,
                 input: input.clone(),
-                limits: origins
-                    .callers()
-                    .iter()
-                    .map(CapturedCaller::capture)
-                    .collect(),
+                material,
                 deadline: source::capability_deadline(&mut conn, call).await?,
                 profile: source::hash_json(profile.profile)?,
                 actor_name,
@@ -614,97 +1212,117 @@ impl Engine {
         };
         let saved = source::value(self, &slot, serde_json::to_value(&record)?).await?;
         let record: Record = serde_json::from_value(saved)?;
-        if record.source != source::Source::captured()?
+        if !record.origin.matches_tool(&selected)?
             || record.helper != helper
-            || record.selected != selected
             || record.capability != capability
             || record.attempt != attempt
+            || record.execution != *required
         {
             return Err(EngineError::StaleToolSource);
         }
+        #[cfg(test)]
+        source::tests::pause(call, source::tests::Point::ProgramCaptured).await;
+        let link = self.start_program_record(&record).await?;
+        self.publish_delegated_helper(call, &record).await?;
+        Ok(link.helper)
+    }
+
+    async fn start_program_record(&self, record: &Record) -> Result<ParentLink, EngineError> {
+        let slot = format!("{SLOT}:{}", record.attempt);
         let link = ParentLink {
-            answer: record.source.answer(),
-            helper,
-            slot,
+            work: crate::ids::derived("capability.work", &[record.attempt.as_bytes()]),
+            helper: record.helper,
         };
-        let mut tx = self.db().begin().await?;
-        source::check_call(&mut tx, call).await?;
-        // Birth and the later native command share the same original callers and current Use.
-        // A metadata-eligible sign-in is not permission to create work on that provider.
-        if !link
-            .current_use(
-                &mut tx,
-                self.inner.clock.as_ref(),
-                self.inner.access.as_ref(),
-            )
+        // This transaction creates only the helper, its private page and its first input.
+        // Like an ordinary thread birth it checks the source's authority at commit while
+        // leaving existing authority intact for other people and recovering workers.
+        let mut tx = orch_db::queries::transaction_guard::request_scope(
+            orch_db::queries::transaction_guard::Scope::Creation,
+            self.db().begin(),
+        )
+        .await?;
+        record
+            .origin
+            .lock_source(&mut tx, self.inner.clock.as_ref())
+            .await?;
+        if !record
+            .origin
+            .current_act(&mut tx, self.inner.clock.as_ref())
             .await?
         {
             return Err(EngineError::StaleToolSource);
         }
-        if threads::thread(&mut tx, helper).await?.is_none() {
-            let origins = source::original_callers_with_limits(
+        if threads::thread(&mut tx, record.helper).await?.is_some() {
+            // The first worker committed the helper and its input together. A second observer
+            // rejoins that exact input. Any still-unissued command has its own live Use check.
+            let input = threads::input_by_client(
                 &mut tx,
-                call,
-                self.inner.clock.as_ref(),
-                self.inner.access.as_ref(),
-                &record.limits,
+                record.helper,
+                Some(record.actor),
+                &format!("capability-helper:{}", record.attempt),
             )
-            .await?;
-            let actor = origins
-                .callers()
-                .iter()
-                .find(|caller| caller.user() == record.actor)
-                .ok_or(EngineError::StaleToolSource)?;
-            let actor = CapturedCaller::capture(actor)
-                .restore_current(&mut tx, self.inner.clock.as_ref())
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+            let journal = capability_work::program(&mut tx, link.work)
                 .await?
                 .ok_or(EngineError::StaleToolSource)?;
-            let principal = Principal::load(&mut tx, actor, self.inner.clock.time()).await?;
-            let new = NewThread {
-                topic: record.topic,
-                name: "Capability helper".into(),
-                agent: record.agent,
-                provider: record.provider,
-                environment: record.environment,
-                directory: record.directory.clone(),
-                arrangement: None,
-                model: Some(record.model.clone()),
-                effort: None,
-            };
-            let birth = Birth {
-                agent_access: BirthAgentAccess::nothing(),
-                prepare_source: Some(false),
-                page: Some(PageChange {
-                    whole: Some(Whole::Private),
-                    ..PageChange::default()
-                }),
-                first_input: Some(FirstInput {
-                    content: record.content.clone(),
-                    client_id: format!("capability-helper:{}", record.attempt),
-                }),
-                settings: vec![(keys::ORCH_TOOLS_ENABLED.into(), json!([]))],
-                ..Birth::default()
-            };
-            let prefix = crate::operation_scope::creators::Prefix::prepare(
+            if journal.input != Some(input.id) || link.record(&mut tx).await? != *record {
+                return Err(EngineError::StaleToolSource);
+            }
+        } else {
+            let backend = serde_json::to_value(record.origin.backend())?;
+            let locator = record.origin.locator(&slot);
+            let journal = capability_work::retain_program(
                 &mut tx,
-                &principal,
-                "ThreadCreate",
-                &new,
-                None,
+                &capability_work::NewProgramWork {
+                    id: link.work,
+                    request: record.origin.request(),
+                    source: record.origin.program_origin(),
+                    attempt: record.attempt,
+                    helper: record.helper,
+                    actor: record.actor,
+                    person: record.person,
+                    node: record.origin.node(),
+                    purpose: &record.capability,
+                    backend: &backend,
+                    record: &locator,
+                    at: self.inner.clock.now(),
+                    deadline: record.deadline.get(),
+                },
             )
-            .await
-            .map_err(EngineError::unreadable)?;
-            Box::pin(self.create_thread_staged_in_transaction(
-                &mut tx,
-                prefix,
-                &new,
-                &birth,
-                helper,
-                self.inner.clock.now(),
-            ))
-            .await
-            .map_err(EngineError::unreadable)?;
-            let lane = threads::thread(&mut tx, helper)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+            if journal.input.is_some()
+                || !link
+                    .current_use(
+                        &mut tx,
+                        self.inner.clock.as_ref(),
+                        self.inner.access.as_ref(),
+                    )
+                    .await?
+            {
+                return Err(EngineError::StaleToolSource);
+            }
+            let origins = record
+                .origin
+                .callers(
+                    &mut tx,
+                    self.inner.clock.as_ref(),
+                    self.inner.access.as_ref(),
+                )
+                .await?
+                .ok_or(EngineError::StaleToolSource)?;
+            Box::pin(self.create_program_thread_in_transaction(&mut tx, &link))
+                .await
+                .map_err(EngineError::unreadable)?;
+            if matches!(&record.origin, origin::Producer::Ask { .. }) {
+                sqlx::query("UPDATE nodes SET unlisted=true WHERE id=$1")
+                    .bind(record.helper)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+            }
+            let lane = threads::thread(&mut tx, record.helper)
                 .await?
                 .and_then(|row| row.current_segment_id)
                 .ok_or(EngineError::StaleToolSource)?;
@@ -716,28 +1334,48 @@ impl Engine {
                     "The selected sign-in has no native program path in this environment.",
                 ));
             }
-            let input = threads::input_by_client(
-                &mut tx,
-                helper,
-                Some(record.actor),
-                &format!("capability-helper:{}", record.attempt),
+            let authority = crate::inputs::InputAuthority::for_program(
+                link.clone(),
+                record.actor,
+                &origins.callers,
+            )?;
+            let thread = threads::thread(&mut tx, record.helper)
+                .await?
+                .ok_or(EngineError::StaleToolSource)?;
+            let request = crate::inputs::InputRequest {
+                plan: false,
+                content: record.content.clone(),
+                delivery: orch_api_contract::threads::Delivery::Queue,
+                client_id: format!("capability-helper:{}", record.attempt),
+                bypass: None,
+            };
+            let mut unit = crate::unit::Unit::new(&mut tx, self.inner.clock.now());
+            let callers = crate::inputs::input_authority_for_request(
+                &mut unit,
+                &thread,
+                &request,
+                None,
+                record.actor,
+                &authority,
+                self.inner.clock.as_ref(),
             )
             .await?
             .ok_or(EngineError::StaleToolSource)?;
-            let authority = crate::inputs::saved_authority(input.submission_authority.as_ref())?
-                .ok_or(EngineError::StaleToolSource)?;
-            let authority = authority.with_capability_parent(link.clone())?;
-            let wrote=sqlx::query("UPDATE thread_inputs SET submission_authority=$2 WHERE id=$1 AND thread_id=$3 AND author_id=$4 AND state='pending' AND submission_authority=$5")
-                .bind(input.id).bind(serde_json::to_value(authority)?).bind(helper).bind(record.actor).bind(input.submission_authority)
-                .execute(&mut *tx).await.map_err(orch_db::DbError::from)?.rows_affected();
-            if wrote != 1 {
-                return Err(EngineError::StaleToolSource);
-            }
+            Box::pin(self.submit_with_authority_in(
+                &mut unit,
+                &callers,
+                record.helper,
+                &request,
+                None,
+                crate::inputs::Made::PROGRAM,
+            ))
+            .await
+            .map_err(EngineError::unreadable)?;
+            unit.finish().await?;
         }
         tx.commit().await.map_err(orch_db::DbError::from)?;
-        self.publish_delegated_helper(call, &record).await?;
-        self.wake(helper);
-        Ok(helper)
+        self.wake(record.helper);
+        Ok(link)
     }
     async fn publish_delegated_helper(
         &self,
@@ -784,6 +1422,8 @@ pub struct SessionAuthority {
     segment: Id,
     command: Id,
     machine: Id,
+    peer: Id,
+    unit: Option<unit::Plan>,
     body: Hash,
     kind: String,
     deadline: Time,
@@ -798,6 +1438,7 @@ impl SessionAuthority {
         match self.kind.as_str() {
             "session.open" => "session.open",
             "session.open.fenced" => "session.open.fenced",
+            "node.program.admit" => "node.program.admit",
             _ => "",
         }
     }
@@ -815,7 +1456,13 @@ impl SessionAuthority {
         if command.id != self.command
             || command.machine_id != self.machine
             || command.kind != self.kind
-            || command.serial_key != SerialKey::Thread(self.parent.helper).wire().as_deref()
+            || command.serial_key
+                != if self.kind == "node.program.admit" {
+                    SerialKey::Runtime(self.parent.work).wire()
+                } else {
+                    SerialKey::Thread(self.parent.helper).wire()
+                }
+                .as_deref()
             || source::hash_json(command.body.clone())? != self.body
             || Time::new(command.deadline_at) != self.deadline
             || clock.time() >= self.deadline
@@ -851,7 +1498,6 @@ impl SessionAuthority {
                     clock,
                 )
                 .await?
-            || !self.parent.current_use(conn, clock, access).await?
         {
             return Ok(None);
         }
@@ -872,8 +1518,25 @@ impl SessionAuthority {
                 Some(&segment.arrangement),
                 &provider,
                 environment.machine_id,
-            ) != Some(self.machine)
+            ) != Some(self.peer)
         {
+            return Ok(None);
+        }
+        if self.kind == "node.program.admit" {
+            let Some(plan) = &self.unit else {
+                return Ok(None);
+            };
+            let body: orch_link_contract::commands::NodeProgramAdmit =
+                serde_json::from_value(command.body.clone())?;
+            if plan.node != self.machine
+                || plan.admission.peer != self.peer
+                || body.runtime_id != self.parent.work
+                || body.work != plan.admission
+                || !plan.current(conn, &self.parent, clock).await?
+            {
+                return Ok(None);
+            }
+        } else if self.unit.is_some() || self.machine != self.peer {
             return Ok(None);
         }
         let mut unit = crate::unit::Unit::new(conn, clock.now());
@@ -969,8 +1632,63 @@ pub(crate) async fn seal_session(
     {
         return Err(EngineError::ToolCallIdentity);
     }
-    let mut conn = engine.db().acquire().await?;
-    let record = parent.record(&mut conn).await?;
+    let mut tx = engine.db().begin().await?;
+    let record = parent.record(&mut tx).await?;
+    if codecs::installed()
+        .map_err(EngineError::unreadable)?
+        .get(&record.execution)?
+        .requires_unit()
+    {
+        let opened: orch_link_contract::commands::SessionOpen = match command.kind {
+            orch_link_contract::commands::CommandKind::SessionOpen => {
+                serde_json::from_value(command.body.clone())?
+            }
+            orch_link_contract::commands::CommandKind::SessionOpenFenced => {
+                *serde_json::from_value::<orch_link_contract::continuations::SessionOpenFenced>(
+                    command.body.clone(),
+                )?
+                .session
+            }
+            _ => return Err(EngineError::ToolCallIdentity),
+        };
+        let work = opened.program_work.ok_or(EngineError::StaleToolSource)?;
+        let frozen_images: std::collections::BTreeSet<_> = record
+            .material
+            .iter()
+            .filter_map(|part| match part {
+                orch_model_contract::generation::GenerationPart::ImageRef { blob, .. } => {
+                    Some(*blob)
+                }
+                _ => None,
+            })
+            .collect();
+        if work
+            .input_files
+            .iter()
+            .any(|blob| !frozen_images.contains(blob))
+        {
+            return Err(EngineError::ToolCallIdentity);
+        }
+        let kept: Option<Json> = sqlx::query_scalar(
+            "SELECT unit_admission FROM delegated_program_work WHERE id=$1 AND initial_input_id=$2",
+        )
+        .bind(parent.work)
+        .bind(snapshot.input.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(orch_db::DbError::from)?
+        .flatten();
+        let plan: unit::Plan = serde_json::from_value(kept.ok_or(EngineError::StaleToolSource)?)?;
+        if work.work != parent.work
+            || work.helper != parent.helper
+            || work.node != plan.node
+            || !plan
+                .current(&mut tx, &parent, engine.inner.clock.as_ref())
+                .await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+    }
     let deadline = command
         .deadline
         .unwrap_or(record.deadline)
@@ -983,13 +1701,15 @@ pub(crate) async fn seal_session(
         segment: snapshot.segment.id,
         command: command.id,
         machine: command.machine,
+        peer: snapshot.machine.id,
+        unit: None,
         body: source::hash_json(command.body.clone())?,
         kind: command.kind.as_str().into(),
         deadline,
     };
     authority
         .current_issue_callers(
-            &mut conn,
+            &mut tx,
             &link::NewCommand {
                 id: command.id,
                 machine_id: command.machine,
@@ -1003,6 +1723,23 @@ pub(crate) async fn seal_session(
         )
         .await?
         .ok_or(EngineError::StaleToolSource)?;
+    // Freeze only at an actual native open, after a stopped provider has its real placement.
+    let login = session_login_hash(&mut tx, record.provider)
+        .await?
+        .ok_or(EngineError::StaleToolSource)?;
+    let accepted = sqlx::query(
+        "UPDATE delegated_program_work SET session_login_hash=COALESCE(session_login_hash,$2)
+        WHERE id=$1 AND (session_login_hash IS NULL OR session_login_hash=$2)",
+    )
+    .bind(authority.parent.work)
+    .bind(login.as_bytes().as_slice())
+    .execute(&mut *tx)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    if accepted.rows_affected() != 1 {
+        return Err(EngineError::StaleToolSource);
+    }
+    tx.commit().await.map_err(orch_db::DbError::from)?;
     command.authority = Some(CommandAuthority::CapabilitySession(Box::new(authority)));
     Ok(command)
 }

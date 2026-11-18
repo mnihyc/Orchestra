@@ -37,7 +37,7 @@ pub enum NativeError {
     Internal(#[from] EngineError),
 }
 
-struct LocalOnly;
+pub(crate) struct LocalOnly;
 impl jsonschema::Retrieve for LocalOnly {
     fn retrieve(
         &self,
