@@ -1,8 +1,9 @@
 /** What is kept on the device for the person who is signed in: unsaved text and the viewer chosen for a kind of file, each under their id, and the text gone after seven days. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderHook } from '@testing-library/react';
 
 import { countUnsaved, forgetUnsaved, keepUnsaved, readUnsaved, UNSAVED_KEPT_MS } from '@/features/files/Editing';
-import { readChoices, rememberChoice } from '@/features/files/viewers';
+import { readChoices, rememberChoice, useViewerChoice } from '@/features/files/viewers';
 
 beforeEach(() => localStorage.clear());
 
@@ -39,5 +40,16 @@ describe('the viewer chosen for a kind of file', () => {
     rememberChoice('ada', 'Makefile', 'code');
     expect(readChoices('ada')).toEqual({ '.md': 'code', makefile: 'code' });
     expect(readChoices('grace')).toEqual({});
+  });
+
+  it('keeps both current viewer choices when a second device write fails too', () => {
+    const refused = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('Synthetic quota refusal', 'QuotaExceededError'); });
+    try {
+      rememberChoice('failed-viewer-reader', 'notes.md', 'code');
+      rememberChoice('failed-viewer-reader', 'Makefile', 'code');
+      const current = renderHook(() => [useViewerChoice('failed-viewer-reader', 'notes.md'), useViewerChoice('failed-viewer-reader', 'Makefile')]);
+      expect(current.result.current).toEqual(['code', 'code']); current.unmount();
+      expect(localStorage.getItem('orch.failed-viewer-reader.viewers')).toBeNull();
+    } finally { refused.mockRestore(); }
   });
 });
