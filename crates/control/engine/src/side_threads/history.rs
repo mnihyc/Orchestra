@@ -541,6 +541,7 @@ pub(crate) async fn saved(
                 "A retained child already exists; another native child is not created.",
             ));
         }
+        let session_offer = command.session_offer.take();
         command = Outgoing::new(
             command.id,
             command.machine,
@@ -555,6 +556,7 @@ pub(crate) async fn saved(
                 }),
             },
         )?;
+        command.session_offer = session_offer;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         return Ok(command);
     }
@@ -580,6 +582,7 @@ pub(crate) async fn saved(
             "An unknown side history outcome cannot start another native conversation.",
         )
     })?;
+    let session_offer = command.session_offer.take();
     command = Outgoing::new(
         command.id,
         command.machine,
@@ -590,6 +593,7 @@ pub(crate) async fn saved(
             predecessor: None,
         },
     )?;
+    command.session_offer = session_offer;
     if let Some(old) = cut.artifacts.get(slot) {
         let old: Outgoing = serde_json::from_value(old.clone())?;
         if old.machine != command.machine
@@ -616,6 +620,7 @@ pub(crate) async fn saved(
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            content_transit: false,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -747,21 +752,21 @@ pub(crate) async fn save_first_turn(
             }
         }
     }
-    let old = link::command(&mut tx, command.id).await?;
-    let deadline = old.as_ref().map_or_else(
-        || {
-            Time::new(
-                engine.inner.clock.now()
-                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-            )
-        },
-        |row| Time::new(row.deadline_at),
-    );
+    let deadline = engine
+        .keep_start_wait_in(
+            &mut tx,
+            side.node_id,
+            snap.turn.id,
+            command.id,
+            command.kind,
+        )
+        .await?;
     command.deadline = Some(deadline);
     let key = command.key.wire();
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            content_transit: false,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -994,6 +999,7 @@ async fn verify_child(
         link::insert_command(
             &mut tx,
             &link::NewCommand {
+                content_transit: false,
                 id: read.id,
                 machine_id: read.machine,
                 kind: read.kind.as_str(),
@@ -1275,6 +1281,7 @@ pub(crate) async fn reap_closed(engine: &Engine) -> Result<(), EngineError> {
             link::insert_command(
                 &mut tx,
                 &link::NewCommand {
+                    content_transit: false,
                     id: fence,
                     machine_id: command.machine,
                     kind: CommandKind::MachineProbe.as_str(),
