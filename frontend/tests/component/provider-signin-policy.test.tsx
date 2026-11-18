@@ -12,7 +12,7 @@ import { harnessName } from '../doubles/harness-names';
 const server=vi.hoisted((): {state:'idle'|'awaiting_user'}=>({state:'idle'}));
 beforeEach(()=>{server.state='idle';vi.clearAllMocks();});
 
-vi.mock('@/api/resources',()=>({providerSetupQuery:()=>({queryKey:['signin-setup'],queryFn:()=>Promise.resolve({subscriptions:[{
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),providerSetupQuery:()=>({queryKey:['signin-setup'],queryFn:()=>Promise.resolve({subscriptions:[{
   agent:{id:'profile'},methods:[{id:'import',title:'Import this sign-in',summary:'Native import',kind:'import',yields:'token',
     fields:[],requires:null,recommended:true,lifetime_secs:null}],
 }]})})}));

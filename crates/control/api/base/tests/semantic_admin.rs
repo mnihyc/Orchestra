@@ -315,7 +315,35 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
     let c = cast(&world).await;
     places::join(&world, c.acme, c.acme, &c.root, "admin", &c.boss).await;
     let generation = orch_types::new_id();
-    let provider = orch_types::new_id();
+    let provider = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&c.boss.token)
+        .body(&CreateProvider::Api {
+            runtime_machine_id: None,
+            name: "Embedding recipe".into(),
+            home_id: c.acme,
+            access: None,
+            arrangements: None,
+            runtime_config: None,
+            upstreams: vec![Upstream {
+                protocol: "openai-embeddings".into(),
+                base_url: "https://embeddings.invalid/v1".into(),
+                options: json!({"auth":"none"}),
+            }],
+            api_key: None,
+            secrets: None,
+            key_machine_id: None,
+            sources: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the restore control names an existing provider")
+        .provider
+        .base
+        .id;
     sqlx::query("INSERT INTO search_generations (id,org_id,provider_id,model_name,asked_dimensions,dimensions,query_prefix,document_prefix,chunking,state,created_at)
         VALUES ($1,$2,$3,'old-model',256,256,'query: ','text: ','parts-v1:64','active',$4)")
         .bind(generation).bind(c.acme).bind(provider).bind(world.now()).execute(&world.db.pool).await.unwrap();
