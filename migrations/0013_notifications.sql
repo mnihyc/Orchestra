@@ -276,3 +276,30 @@ CREATE TABLE subscriptions (
     CONSTRAINT subscriptions_node_id_fkey FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
     CONSTRAINT subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+
+-- Recipient work owns only this private receipt; approval and thread writers never wait for its rows.
+CREATE TABLE approval_notification_settlements (
+    id uuid NOT NULL PRIMARY KEY,
+    approval_id uuid NOT NULL,
+    settled_at timestamp with time zone NOT NULL,
+    done_at timestamp with time zone
+);
+CREATE INDEX approval_notification_settlements_pending_idx
+    ON approval_notification_settlements USING btree (settled_at, id) WHERE done_at IS NULL;
+-- One shared decision and at most the already evaluated watching author, never every member.
+CREATE TABLE notification_decisions (
+    turn_id uuid REFERENCES turns(id) ON DELETE CASCADE,
+    item_id uuid REFERENCES items(id) ON DELETE CASCADE,
+    subject_id uuid GENERATED ALWAYS AS (COALESCE(turn_id,item_id)) STORED,
+    subject_kind text GENERATED ALWAYS AS (CASE WHEN turn_id IS NOT NULL THEN 'turn' ELSE 'item' END) STORED,
+    thread_id uuid NOT NULL REFERENCES threads(node_id) ON DELETE CASCADE,
+    user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+    outcome text NOT NULL CHECK (outcome IN ('eligible','suppressed','not_evaluated')),
+    reason text CHECK (reason IN ('interrupted','did_not_start','automatic_recovery','already_watching','subagent_notices_off')),
+    evaluated_at timestamptz NOT NULL,
+    CHECK (num_nonnulls(turn_id,item_id)=1),
+    UNIQUE NULLS NOT DISTINCT(subject_kind,subject_id,user_id)
+);
+CREATE INDEX notifications_turn_decision_idx ON notifications(user_id,(data->>'turn_id')) WHERE kind IN ('turn.completed','turn.failed');
+CREATE INDEX notifications_item_decision_idx ON notifications(user_id,(data->>'item_id')) WHERE kind='subagent.ended';

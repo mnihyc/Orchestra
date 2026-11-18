@@ -207,3 +207,67 @@ async fn a_workspace_configuration_is_asked_about_once_and_the_answer_reaches_ev
         "the session after the answer carries it, with the files it holds for"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_trust_answer_for_new_configuration_refreshes_an_already_open_session() {
+    let world = World::new().await;
+    let thread = world.thread("Configuration appears after opening").await;
+    let caller = Caller::session(world.ada);
+    world
+        .engine()
+        .submit_input(&caller, thread, queued("Before configuration"))
+        .await
+        .unwrap();
+    world.run_turn(thread, 0, "Done").await;
+    world.wait_state(thread, "idle").await;
+    let opened_before = world.began(CommandKind::SessionOpen);
+    world.refuse(
+        CommandKind::TurnStart,
+        vec![CommandError::new(
+            orch_link_contract::commands::ErrorCode::WorkspaceConfiguration,
+            "this workspace now holds native configuration\nfiles appeared-files\n.native-config",
+        )],
+    );
+    let waiting = world
+        .engine()
+        .submit_input(&caller, thread, queued("After configuration appears"))
+        .await
+        .unwrap();
+    world.wait_blocked(thread, "workspace_trust").await;
+    let harness: String = world
+        .scalar("SELECT harness_kind FROM agents WHERE id=$1", world.agent)
+        .await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = Principal::load(&mut tx, caller, Time::new(world.clock.now()))
+        .await
+        .unwrap();
+    world
+        .engine()
+        .set_config_trust_guarded(
+            tx,
+            principal,
+            world.environment,
+            &harness,
+            ConfigTrustAnswer::Trust,
+        )
+        .await
+        .unwrap();
+    world
+        .wait_began(CommandKind::SessionOpen, opened_before + 1)
+        .await;
+    let opened = world.seen.of_kind(CommandKind::SessionOpen);
+    let Some(Command::SessionOpen(last)) = opened.last() else {
+        panic!("the retained session opens with the new answer")
+    };
+    assert_eq!(
+        last.workspace_configuration,
+        Some(WorkspaceConfiguration {
+            answer: ConfigTrust::Trust,
+            files: "appeared-files".to_owned()
+        })
+    );
+    world
+        .run_turn(thread, 2, "The current configuration is used")
+        .await;
+    world.wait_input(waiting.input.id, "delivered").await;
+}

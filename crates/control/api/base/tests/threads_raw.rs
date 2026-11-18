@@ -462,7 +462,7 @@ async fn a_frame_that_cannot_be_masked_is_dropped_and_never_kept_whole() {
 async fn a_frame_larger_than_may_be_kept_is_kept_as_a_note_of_what_it_was() {
     let s = Scene::new().await;
     let (thread, segment) = started(&s).await;
-    let big = "x".repeat(orch_engine::raw_events::FRAME_MAX_BYTES + 10);
+    let big = "x".repeat(orch_engine::raw_events::DEFAULT_FRAME_BYTES + 10);
     s.rig
         .say(thread, frame("out", json!({ "file": big })))
         .await;

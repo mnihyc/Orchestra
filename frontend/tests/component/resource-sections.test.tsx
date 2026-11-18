@@ -1,5 +1,5 @@
 /** Detail navigation exposes every section, keeps drafts, and stops hidden readers without clipping content. */
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect, useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -77,4 +77,32 @@ it('has one entrance per act while retaining Delete and the native callback', as
   await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: 'Research' }) }));
   expect(screen.queryByRole('menuitem', { name: 'Start' })).not.toBeInTheDocument(); expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('menuitem', { name: 'Delete' })); expect(remove).toHaveBeenCalledTimes(1); expect(start).not.toHaveBeenCalled(); expect(edit).not.toHaveBeenCalled();
+});
+
+it('puts every settings section on one page under its heading, marks the one pressed and draws no dropdown', async () => {
+  const user = userEvent.setup();
+  const names = ['Image', 'Network', 'Variables'];
+  show(<DetailSections stacked label="Template sections" sections={names.map((name) => ({ value: name.toLowerCase(), label: name, panel: <p>{name} rows</p> }))} />);
+  for (const name of names) {
+    expect(screen.getByText(`${name} rows`)).toBeVisible();
+    expect(screen.getByRole('heading', { name })).toBeVisible();
+  }
+  const nav = screen.getByRole('navigation', { name: 'Template sections' });
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
+  expect(within(nav).getAllByRole('link')).toHaveLength(names.length);
+  const link = within(nav).getByRole('link', { name: 'Network' });
+  await user.click(link);
+  const href = link.getAttribute('href');
+  if (href === null) throw new Error('The section name has no destination');
+  expect(document.getElementById(href.slice(1))).toHaveFocus();
+  expect(link).toHaveAttribute('aria-current', 'location');
+  expect(within(nav).getAllByRole('link').filter((one) => one.hasAttribute('aria-current'))).toHaveLength(1);
+  for (const name of names) expect(screen.getByText(`${name} rows`)).toBeVisible();
+});
+
+it('draws a single settings section as its own page, with no list and no heading of its own', () => {
+  show(<DetailSections stacked label="Template sections" sections={[{ value: 'image', label: 'Image', panel: <p>Image rows</p> }]} />);
+  expect(screen.getByText('Image rows')).toBeVisible();
+  expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Image' })).not.toBeInTheDocument();
 });

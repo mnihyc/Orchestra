@@ -8,14 +8,15 @@
 //! program, no text conversion filters, no pager, no prompt. A path that is asked for is a path of
 //! the workspace like any other and reaches `git` only after `--`, as a literal path.
 //!
-//! The output is bounded in bytes and the run in time; a difference that is longer than the bound
-//! is cut and says so.
+//! Status reads have their own work bounds; differences keep a streaming native process while
+//! each consumer page has its own byte window and live-read idle deadline.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 
 use orch_api_contract::workspace::{GitChange, GitStatus, GitUnavailable};
+#[cfg(test)]
 use orch_link_contract::commands::GitDiffResult;
 use orch_types::Hash;
 use tokio::io::AsyncReadExt;
@@ -190,14 +191,13 @@ pub(crate) async fn filter_overrides(
         .collect())
 }
 
-async fn run(
+async fn command(
     tool: &GitTool,
     files: &Files,
     cwd: &std::path::Path,
     arguments: &[&str],
     literal: &[OsString],
-    max_bytes: usize,
-) -> Result<Run> {
+) -> Result<tokio::process::Command> {
     let program = tool
         .program
         .as_ref()
@@ -248,6 +248,18 @@ async fn run(
     }
     #[cfg(unix)]
     command.process_group(0);
+    Ok(command)
+}
+
+async fn run(
+    tool: &GitTool,
+    files: &Files,
+    cwd: &std::path::Path,
+    arguments: &[&str],
+    literal: &[OsString],
+    max_bytes: usize,
+) -> Result<Run> {
+    let mut command = command(tool, files, cwd, arguments, literal).await?;
     let mut child = command
         .spawn()
         .map_err(|error| HostError::io("starting git", error))?;
@@ -321,6 +333,44 @@ async fn run(
         stderr: error_text,
         cut,
     })
+}
+
+struct DiffCommand {
+    cwd: PathBuf,
+    literal: Vec<OsString>,
+    arguments: Vec<&'static str>,
+}
+
+// Keep an incomplete UTF-8 suffix for the next native read; invalid bytes retain the old lossy display.
+fn decoded_text(bytes: &mut Vec<u8>, end: bool) -> String {
+    let mut text = String::new();
+    let mut consumed = 0;
+    while consumed < bytes.len() {
+        match std::str::from_utf8(&bytes[consumed..]) {
+            Ok(valid) => {
+                text.push_str(valid);
+                consumed = bytes.len();
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                text.push_str(&String::from_utf8_lossy(&bytes[consumed..consumed + valid]));
+                consumed += valid;
+                match error.error_len() {
+                    Some(length) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        consumed += length;
+                    }
+                    None if end => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        consumed = bytes.len();
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    bytes.drain(..consumed);
+    text
 }
 
 fn kill(pid: Option<u32>) {
@@ -765,33 +815,105 @@ impl Files {
         Ok(Some((top, repository)))
     }
 
-    /// The unified difference of the repository: of the working tree against the index, or with
-    /// `staged` of the index against the last commit, kept to `path` when one is named. Longer than
-    /// the bound it is cut there and says so.
-    pub async fn git_diff(
+    /// Streams the same safe native difference across consumer windows without a byte cut.
+    pub(crate) async fn stream_git_diff<F, Fut>(
         &self,
         tool: &GitTool,
         path: Option<&RelPath>,
         staged: bool,
-    ) -> Result<GitDiffResult> {
-        tokio::time::timeout(
-            self.limits().git_time,
-            self.git_diff_inner(tool, path, staged),
+        cancel: &tokio_util::sync::CancellationToken,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let selected =
+            crate::error::with_cancellation(cancel.clone(), self.diff_command(tool, path, staged))
+                .await?;
+        if selected.literal.is_empty() {
+            return Ok(());
+        }
+        let mut command = command(
+            tool,
+            self,
+            &selected.cwd,
+            &selected.arguments,
+            &selected.literal,
         )
-        .await
-        .map_err(|_| {
-            HostError::Timeout(
-                "git difference is too slow here; use the environment's shell".to_owned(),
-            )
-        })?
+        .await?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| HostError::io("starting git difference", error))?;
+        let pid = child.id();
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| HostError::Internal("git has no output".to_owned()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| HostError::Internal("git has no error output".to_owned()))?;
+        let read = async {
+            let mut bytes = Vec::new();
+            let mut buffer = vec![0u8; READ_BUFFER_BYTES];
+            loop {
+                let count = tokio::select! { biased;
+                    () = cancel.cancelled() => { kill(pid); return Err(HostError::Cancelled); },
+                    count = tokio::time::timeout(self.limits().git_time, stdout.read(&mut buffer)) => match count {
+                        Ok(Ok(count)) => count,
+                        Ok(Err(error)) => { kill(pid); return Err(HostError::io("reading git difference", error)); },
+                        Err(_) => { kill(pid); return Err(HostError::Timeout("git difference stopped producing output".to_owned())); },
+                    },
+                };
+                bytes.extend_from_slice(&buffer[..count]);
+                let text = decoded_text(&mut bytes, count == 0);
+                if !text.is_empty()
+                    && let Err(error) = emit(text).await
+                {
+                    kill(pid);
+                    return Err(error);
+                }
+                if count == 0 {
+                    break;
+                }
+            }
+            Ok(())
+        };
+        let errors = async {
+            let mut bytes = Vec::new();
+            let _ = (&mut stderr)
+                .take(ERROR_TEXT_KEEP_BYTES as u64)
+                .read_to_end(&mut bytes)
+                .await;
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let (result, errors) = tokio::join!(read, errors);
+        let status = match tokio::time::timeout(self.limits().git_time, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            _ => {
+                kill(pid);
+                let _ = child.wait().await;
+                None
+            }
+        };
+        result?;
+        match status.and_then(|status| status.code()) {
+            Some(0 | 1) => Ok(()),
+            _ => Err(HostError::Internal(format!(
+                "git failed: {}",
+                errors.trim()
+            ))),
+        }
     }
 
-    async fn git_diff_inner(
+    async fn diff_command(
         &self,
         tool: &GitTool,
         path: Option<&RelPath>,
         staged: bool,
-    ) -> Result<GitDiffResult> {
+    ) -> Result<DiffCommand> {
         if !tool.available() {
             return Err(HostError::Unsupported("this machine has no git".to_owned()));
         }
@@ -830,20 +952,14 @@ impl Files {
                 literal.push(OsString::from(relative.as_str()));
             }
         }
-        if literal.is_empty() {
-            if let Some(path) = path
-                && self.root().locate(path, Locate::ENTRY)?.meta.is_none()
-            {
-                return Err(HostError::NotFound(format!(
-                    "{path} is not a changed tracked path"
-                )));
-            }
-            return Ok(GitDiffResult {
-                text: String::new(),
-                truncated: false,
-            });
+        if literal.is_empty()
+            && let Some(path) = path
+            && self.root().locate(path, Locate::ENTRY)?.meta.is_none()
+        {
+            return Err(HostError::NotFound(format!(
+                "{path} is not a changed tracked path"
+            )));
         }
-        let limit = self.limits().git_diff_max_bytes;
         let mut arguments = vec![
             "diff",
             "--no-color",
@@ -854,27 +970,38 @@ impl Files {
         if staged {
             arguments.push("--cached");
         }
-        let output = run(tool, self, &cwd, &arguments, &literal, limit).await?;
-        match output.status {
-            Some(0) | Some(1) => {}
-            _ if output.cut => {}
-            _ => {
-                return Err(HostError::Internal(format!(
-                    "git failed: {}",
-                    output.stderr.trim()
-                )));
-            }
-        }
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let truncated = output.cut || text.len() > limit;
-        if text.len() > limit {
-            let mut end = limit;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-        }
-        Ok(GitDiffResult { text, truncated })
+        Ok(DiffCommand {
+            cwd,
+            literal,
+            arguments,
+        })
+    }
+
+    /// Unit fixtures collect one native stream; production callers page it through their owner.
+    #[cfg(test)]
+    async fn git_diff(
+        &self,
+        tool: &GitTool,
+        path: Option<&RelPath>,
+        staged: bool,
+    ) -> Result<GitDiffResult> {
+        let mut text = String::new();
+        self.stream_git_diff(
+            tool,
+            path,
+            staged,
+            &tokio_util::sync::CancellationToken::new(),
+            |chunk| {
+                text.push_str(&chunk);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await?;
+        Ok(GitDiffResult {
+            text,
+            truncated: false,
+            next_cursor: None,
+        })
     }
 }
 
@@ -973,7 +1100,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_nested_repositories_return_their_own_changes_and_bounded_differences() {
+    async fn two_nested_repositories_stream_their_own_changes_without_the_old_byte_cut() {
         let workspace = tempfile::tempdir().unwrap();
         for name in ["first", "second"] {
             let root = workspace.path().join(name);
@@ -987,7 +1114,6 @@ mod tests {
         let files = files_in(
             workspace.path(),
             Limits {
-                git_diff_max_bytes: 1000,
                 ..Limits::default()
             },
         );
@@ -1011,7 +1137,8 @@ mod tests {
                     .text
                     .contains(if name == "first" { "+second" } else { "+first" })
             );
-            assert!(diff.truncated && diff.text.len() <= 1000);
+            assert!(!diff.truncated);
+            assert!(diff.text.len() > 1000);
         }
     }
 
@@ -1231,13 +1358,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_difference_longer_than_the_bound_is_cut_and_says_so() {
+    async fn a_streamed_difference_reaches_the_tail_without_the_old_capture_cut() {
         // The command deadline guards hanging; this test proves byte truncation.
         const GIT_PATIENCE: std::time::Duration = std::time::Duration::from_secs(300);
         let dir = repo();
         std::fs::write(dir.path().join("src/main.rs"), "line\n".repeat(5000)).unwrap();
         let limits = Limits {
-            git_diff_max_bytes: 1000,
             git_time: GIT_PATIENCE,
             ..Limits::default()
         };
@@ -1246,8 +1372,9 @@ mod tests {
             .git_diff(&GitTool::discover(), None, false)
             .await
             .unwrap();
-        assert!(diff.truncated);
-        assert!(diff.text.len() <= 1000);
+        assert!(!diff.truncated);
+        assert!(diff.text.len() > 1000);
+        assert!(diff.text.ends_with("+line\n"));
     }
 
     #[tokio::test]

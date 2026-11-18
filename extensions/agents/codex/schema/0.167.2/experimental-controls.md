@@ -17,8 +17,10 @@ and `processId` and reports `terminated`. The source is the commit recorded by
 
 The native schema case compares the consumed method variants with a fresh
 generation. The byte replay tests the initialized interface, list/re-list/exact
-End, native completion and an unverified build that sends no control probes.
+End, native completion and a later build, which uses the same declarations.
 An acknowledgement never fabricates a command completion. The real process case
 still requires the command's reported end and the actual process to disappear
-within its existing ten-second bounds. Unknown builds remain unavailable until
-their own declarations are verified.
+within its existing ten-second bounds. Every build at or above the oldest proven
+one uses these declarations; one that has changed a method fails at the use of the
+act, with the program's own error or with a plain reason when it answers in a form
+the adapter does not read.

@@ -1,0 +1,4 @@
+# First assembly merge with the fourfold history case, before scale, tabs, frame and access.
+test -p orch-api-core --test thread_opening_scopes -- the_same_first_screen_uses_the_same_statement_budget_when_its_history_grows_fourfold
+test -p orch-api-core --test documents -- independently_created_equal_titles_keep_distinct_paths_and_owners
+test -p orch-api-core --test thread_move -- a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_retained_side_paths
