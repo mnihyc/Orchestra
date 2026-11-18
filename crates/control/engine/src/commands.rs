@@ -11,8 +11,10 @@
 pub mod authority;
 mod host_probe;
 mod http_origin;
+mod input_facts;
 mod receipts;
 pub use http_origin::HttpCommand;
+pub use input_facts::{InputCommandFacts, retain_input_facts};
 pub use receipts::McpImportAck;
 mod machine_controls;
 mod terminal_creation;
@@ -20,8 +22,8 @@ pub(crate) mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
 pub use host_probe::HostPortsProbe;
 pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
+    HostPolicyAuthority, MachineDirectoryAuthority, MachinePolicyAuthority, MachineProbeAuthority,
+    MachineProgramsAuthority, MachineRolesAuthority, role_change_refusal,
 };
 pub use machine_controls::{
     PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,
@@ -78,6 +80,11 @@ pub type BeforeCommand<'a> =
 /// A command to send to a machine.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outgoing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_offer: Option<Box<crate::tools::catalogue::AcceptedOrchTools>>,
+    /// Private observations retained with first durable admission, never sent to a machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_facts: Option<Box<InputCommandFacts>>,
     /// Its identifier: a command asked for twice under one is made once.
     pub id: Id,
     /// The machine it is for.
@@ -142,6 +149,8 @@ impl Outgoing {
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
             deadline: None,
             authority: None,
+            input_facts: None,
+            session_offer: None,
         })
     }
 
@@ -159,6 +168,18 @@ impl Outgoing {
     #[must_use]
     pub fn with_authority(mut self, authority: CommandAuthority) -> Self {
         self.authority = Some(authority);
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_offer(mut self, offer: crate::tools::catalogue::AcceptedOrchTools) -> Self {
+        self.session_offer = Some(Box::new(offer));
+        self
+    }
+
+    #[must_use]
+    pub fn with_input_facts(mut self, facts: Option<InputCommandFacts>) -> Self {
+        self.input_facts = facts.map(Box::new);
         self
     }
 
@@ -363,6 +384,14 @@ pub trait Commands: Send + Sync {
     }
 
     /// Reads one frozen frame so a replay cannot borrow a different recipient, kind or serial lane.
+    /// The original admitted session offer, including when a queued command is replayed after restart.
+    async fn retained_session_offer(
+        &self,
+        _id: Id,
+    ) -> Result<Option<crate::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(None)
+    }
+
     async fn retained_command(&self, id: Id) -> Result<Option<RetainedCommand>, CommandsError> {
         if self.retained_body(id).await?.is_some() {
             return Err(CommandsError::Other(

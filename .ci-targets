@@ -1,0 +1,5 @@
+# Place the normalized native descriptor on the models lane before its trial merge.
+test -p orch-engine --test foreign_machine_streams -- environment_and_harness_reports_are_taken_only_from_the_machine_that_holds_them
+# Exercise the concurrent native publication and interrupted-turn move before the later merges.
+test -p orch-api-core --test documents -- independently_created_equal_titles_keep_distinct_paths_and_owners
+test -p orch-api-core --test thread_move -- a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_retained_side_paths

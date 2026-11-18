@@ -351,6 +351,7 @@ impl Scene {
             match act {
                 Act::Create => {
                     let body = EnvironmentMcpImportCreateBody {
+                        origin: None,
                         source: "fixture".into(),
                         scope: McpScope::User,
                         name: "search".into(),

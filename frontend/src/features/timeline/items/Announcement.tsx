@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { Item } from '@/generated/api-types';
 import { AgentReferences } from '@/features/people/AgentReferences';
+import { InputDeliveryFacts } from '@/features/composer/InputDeliveryFacts';
 import { useTimelineContext } from '@/features/timeline/context';
 import { ItemFrame } from '@/features/timeline/ItemActions';
 import { cx } from '@/ui/cx';
@@ -31,10 +32,11 @@ export function AnnouncementCard({ item }: { item: AnnouncementItem }) {
         aria-label={toThread ? t('timeline.announcement.message') : t('timeline.announcement.title')}
         className={cx('flex flex-col gap-1 rounded-lg border px-3 py-2', severity === 'important' ? 'border-warning/40 bg-warning-subtle' : 'border-border bg-surface')}
       >
-        <p className="flex items-center gap-2 text-sm text-text-muted">
+        <p className="flex flex-wrap items-center gap-2 text-sm text-text-muted">
           <Icon aria-hidden />
           <span>{lead}</span>
           <TimeOfDay at={item.created_at} className="text-xs text-text-subtle" />
+          {(item.payload.delivery_resolution !== undefined || item.payload.delivered_as !== undefined) && <InputDeliveryFacts resolution={item.payload.delivery_resolution} actual={item.payload.delivered_as} thread={threadId} />}
           {severity === 'important' && <span className="text-xs font-medium text-text">· {t('timeline.announcement.important')}</span>}
         </p>
         {!toThread && title !== '' && <p className="text-base font-semibold text-text">{title}</p>}

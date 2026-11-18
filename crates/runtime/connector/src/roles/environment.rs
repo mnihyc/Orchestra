@@ -135,6 +135,7 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsRestore,
     CommandKind::WorkspaceObserve,
     CommandKind::FsMaterialize,
+    CommandKind::FsMaterializeIfAbsent,
     CommandKind::GitStatus,
     CommandKind::GitPrepare,
     CommandKind::GitPrepareCleanup,
@@ -335,8 +336,6 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
     let tunables = &services.config.envhost;
     settings.limits.rescan = Duration::from_secs(tunables.rescan_secs);
     settings.limits.manifest_interval = Duration::from_secs(tunables.manifest_interval_secs);
-    settings.limits.index_max_entries = tunables.index_max_entries;
-    settings.limits.index_scan_max = std::time::Duration::from_secs(tunables.index_scan_max_secs);
     settings.mcp_restarts = tunables.mcp_restarts;
     settings.mcp_restart_window = Duration::from_secs(tunables.mcp_restart_window_secs);
     if let Some(scope) = parts.process_scope {
@@ -358,18 +357,21 @@ struct JobProgressSink {
     queue: Option<watch::Sender<Option<HostJobProgress>>>,
     latest: Arc<Mutex<(Option<HostJobProgress>, std::time::Instant)>>,
     started: std::time::Instant,
+    deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
 }
 
 impl JobProgressSink {
     fn new(
         queue: Option<watch::Sender<Option<HostJobProgress>>>,
         clock: Arc<dyn orch_types::Clock>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     ) -> Self {
         Self {
             queue,
             clock,
             latest: Arc::new(Mutex::new((None, std::time::Instant::now()))),
             started: std::time::Instant::now(),
+            deadline,
         }
     }
 }
@@ -392,6 +394,7 @@ impl Progress for JobProgressSink {
             eta_seconds: None,
             message: None,
             activity: Some(orch_api_contract::workspace::JobActivity {
+                captured_deadline: None,
                 waiting_for: None,
                 updated_at: self.clock.time(),
                 stall_after_seconds: 0,
@@ -402,6 +405,20 @@ impl Progress for JobProgressSink {
     }
     fn report(&self, progress: &HostJobProgress) {
         let mut progress = progress.clone();
+        if let Some(deadline) = &self.deadline {
+            let activity =
+                progress
+                    .activity
+                    .get_or_insert(orch_api_contract::workspace::JobActivity {
+                        captured_deadline: None,
+                        waiting_for: None,
+                        updated_at: deadline.accepted_at,
+                        stall_after_seconds: 0,
+                        directories_done: None,
+                        stopping: false,
+                    });
+            activity.captured_deadline = Some(deadline.clone());
+        }
         let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(before) = &latest.0
             && before.phase == progress.phase
@@ -896,10 +913,11 @@ impl EnvironmentRole {
         command: Id,
         environment_id: Id,
         job: Option<Id>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     ) -> (JobProgressSink, JoinHandle<()>) {
         let Some(job_id) = job else {
             return (
-                JobProgressSink::new(None, Arc::clone(&self.services.clock)),
+                JobProgressSink::new(None, Arc::clone(&self.services.clock), None),
                 tokio::spawn(async {}),
             );
         };
@@ -925,10 +943,27 @@ impl EnvironmentRole {
                 }
             }
         });
-        (
-            JobProgressSink::new(Some(queue), Arc::clone(&self.services.clock)),
-            task,
-        )
+        let progress = JobProgressSink::new(
+            Some(queue),
+            Arc::clone(&self.services.clock),
+            deadline.clone(),
+        );
+        if let Some(deadline) = deadline {
+            progress.report(&HostJobProgress {
+                phase: deadline.phase,
+                phases: Vec::new(),
+                percent: 0,
+                files_done: 0,
+                files_total: None,
+                bytes_done: 0,
+                bytes_total: None,
+                rate_bps: None,
+                eta_seconds: None,
+                message: None,
+                activity: None,
+            });
+        }
+        (progress, task)
     }
 }
 
@@ -937,7 +972,12 @@ impl EnvironmentRole {
         clippy::too_many_lines,
         reason = "one arm for each command of the role is the clearest form of the table"
     )]
-    async fn carry_out(&self, id: Id, command: Command) -> Result<CommandResult, CommandError> {
+    async fn carry_out(
+        &self,
+        id: Id,
+        command: Command,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
+    ) -> Result<CommandResult, CommandError> {
         if let Command::UnitAfterUp(body) = &command {
             if body.provider_id.is_some() || body.agent_id.is_some() {
                 return Err(CommandError::new(
@@ -1123,8 +1163,12 @@ impl EnvironmentRole {
             }
             Command::FsWrite(body) => {
                 if let Some(work) = &body.work {
-                    let (progress, task) =
-                        self.job_progress(id, body.environment_id, Some(work.job_id));
+                    let (progress, task) = self.job_progress(
+                        id,
+                        body.environment_id,
+                        Some(work.job_id),
+                        deadline.clone(),
+                    );
                     let mut reported = HostJobProgress {
                         phase: work.phase.clone(),
                         phases: vec![orch_api_contract::workspace::JobPhase {
@@ -1195,7 +1239,7 @@ impl EnvironmentRole {
             }
             Command::FsRestore(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_restore(&body, &blobs),
@@ -1216,6 +1260,7 @@ impl EnvironmentRole {
                     id,
                     body.environment_id,
                     body.work.as_ref().map(|work| work.job_id),
+                    deadline.clone(),
                 );
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
@@ -1228,7 +1273,7 @@ impl EnvironmentRole {
             }
             Command::FsDataExport(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_data_export(&body, &blobs, &progress),
@@ -1240,7 +1285,7 @@ impl EnvironmentRole {
             }
             Command::FsDataImport(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_data_import(&body, &blobs, &progress),
@@ -1252,7 +1297,7 @@ impl EnvironmentRole {
             }
             Command::FsSnapshot(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_snapshot(&body, &blobs, &progress),
@@ -1262,8 +1307,21 @@ impl EnvironmentRole {
                 let _ = task.await;
                 CommandResult::FsSnapshot(outcome?)
             }
+            Command::FsMaterializeIfAbsent(body) => {
+                let (progress, task) =
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
+                let outcome = orch_envhost::snapshot::with_transfer_progress(
+                    Arc::new(progress.clone()),
+                    self.host.fs_materialize_if_absent(&body, &blobs),
+                )
+                .await;
+                drop(progress);
+                let _ = task.await;
+                CommandResult::FsMaterializeIfAbsent(outcome?)
+            }
             Command::FsMaterialize(body) => {
-                let (progress, task) = self.job_progress(id, body.environment_id, body.job_id);
+                let (progress, task) =
+                    self.job_progress(id, body.environment_id, body.job_id, deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_materialize(&body, &blobs, &progress),
@@ -1312,7 +1370,7 @@ impl EnvironmentRole {
             }
             Command::GitWorktreeSnapshot(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let result = self
                     .host
                     .git_worktree_snapshot(&body, &blobs, &progress)
@@ -1424,12 +1482,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;
@@ -1482,9 +1543,11 @@ impl RoleHandler for EnvironmentRole {
             if crate::reconciliation::environments::Desired::retains(&command) {
                 let _action = self.lifecycle.lock().await;
                 let command = self.services.policy.gate(command)?.command;
-                self.carry_out(call.context.id, command).await
+                self.carry_out(call.context.id, command, call.work_deadline.clone())
+                    .await
             } else {
-                self.carry_out(call.context.id, command).await
+                self.carry_out(call.context.id, command, call.work_deadline.clone())
+                    .await
             }
         })
         .await
@@ -1527,7 +1590,7 @@ impl RoleHandler for EnvironmentRole {
             }
             if self.host.environment(saved.environment).is_err() {
                 let attached = match self.services.policy.gate(saved.attach.command.clone()) {
-                    Ok(gated) => self.carry_out(saved.attach.id, gated.command).await,
+                    Ok(gated) => self.carry_out(saved.attach.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 if attached.is_err() {
@@ -1546,7 +1609,7 @@ impl RoleHandler for EnvironmentRole {
                     continue;
                 }
                 let result = match self.services.policy.gate(kept.command) {
-                    Ok(gated) => self.carry_out(kept.id, gated.command).await,
+                    Ok(gated) => self.carry_out(kept.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 failed |= result.is_err();
@@ -1561,7 +1624,7 @@ impl RoleHandler for EnvironmentRole {
                     continue;
                 }
                 let result = match self.services.policy.gate(kept.command) {
-                    Ok(gated) => self.carry_out(kept.id, gated.command).await,
+                    Ok(gated) => self.carry_out(kept.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 failed |= result.is_err();
@@ -1625,7 +1688,9 @@ async fn publish_reports(
             HostReport::BrowserState(state) => Some(Event::BrowserState(state)),
             HostReport::DisplayState(state) => Some(Event::DisplayState(state)),
             HostReport::Facts(facts) => Some(Event::EnvFacts(*facts)),
-            HostReport::Manifest(manifest) => Some(Event::EnvManifest(manifest)),
+            HostReport::Manifest(manifest) | HostReport::ManifestTransfer(manifest) => {
+                Some(Event::EnvManifest(manifest))
+            }
             HostReport::PtyExited(ended) => Some(Event::PtyExited(ended)),
             HostReport::FsChanged(changed) => {
                 link.report(&stream, at, &LinkReport::FsChanged(changed));
@@ -1740,6 +1805,7 @@ async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
 /// Looks again, every so often, at the tool servers the harnesses here have configured, for each
 /// environment that is attached.
 async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationToken) {
+    let changes = role.upgrade().and_then(|role| role.imports.changes());
     let mut ticker = tokio::time::interval(DISCOVERY_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
@@ -1747,6 +1813,10 @@ async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationTo
         tokio::select! {
             () = stop.cancelled() => return,
             _ = ticker.tick() => {}
+            () = async {
+                if let Some(changes) = &changes { changes.notified().await; }
+                else { std::future::pending::<()>().await; }
+            } => {}
         }
         let Some(role) = role.upgrade() else {
             return;
@@ -1831,7 +1901,7 @@ mod progress_tests {
     #[tokio::test]
     async fn a_million_updates_keep_one_pending_sample_and_flush_the_last_on_close() {
         let (queue, mut reports) = watch::channel(None);
-        let progress = JobProgressSink::new(Some(queue), Arc::new(orch_types::SystemClock));
+        let progress = JobProgressSink::new(Some(queue), Arc::new(orch_types::SystemClock), None);
         for done in 1..=1_000_000 {
             progress.counting(done, done * 4096, done / 10);
         }
