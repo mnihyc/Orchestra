@@ -465,7 +465,7 @@ impl CommandSource {
             .await
             .map_err(DbError::from)?
             .ok_or_else(closed)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.machine)
             .fetch_optional(&mut *conn)
             .await

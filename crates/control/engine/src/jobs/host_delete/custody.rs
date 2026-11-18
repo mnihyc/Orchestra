@@ -227,6 +227,11 @@ impl Deleting {
                     .fetch_all(job.engine().db().pool())
                     .await
                     .map_err(orch_db::DbError::from)?;
+            let child_plans = child_plans
+                .into_iter()
+                .map(orch_types::storable::decode_exact)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(orch_db::DbError::from)?;
             let child_copies = child_plans
                 .iter()
                 .map(mount_copies::of_plan)

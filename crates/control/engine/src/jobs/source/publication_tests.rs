@@ -189,6 +189,8 @@ impl Fixture {
                 token: Some(token),
                 creator_origin: None,
                 scheduled_input: None,
+                workspace_edits: Vec::new(),
+                prepared_source: None,
                 action,
             },
             world.clock.now(),

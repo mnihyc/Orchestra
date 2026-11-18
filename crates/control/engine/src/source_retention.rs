@@ -14,11 +14,6 @@ const PAGE: i64 = 200;
 /// Native collection uses the existing short machine-command expiry rather than holding an offline sweep.
 const PRUNE_MINUTES: i64 = 5;
 
-fn hash(bytes: &[u8]) -> Result<Hash, EngineError> {
-    Hash::from_slice(bytes)
-        .map_err(|_| EngineError::unreadable("a retained source hash is not 32 bytes"))
-}
-
 impl Engine {
     /// The same held clock and job lease govern startup and later expiry; offline stores retry next time. A
     /// lease and not a lock kept in an open transaction: the run commits page by page and waits on machines.
@@ -99,22 +94,9 @@ impl Engine {
                 return Ok(());
             }
         }
-        // End namespace facts stay in the turn; the separately uploaded manifest need not outlive
-        // its immutable before-state deadline. Detachment and pin release share one transaction.
+        // Semantic end metadata has no file bytes. Its existing turn pin keeps attribution available
+        // after restore content expires; deleting the turn releases that same association.
         let mut tx = self.db().begin().await?;
-        let expired_ends: Vec<Vec<u8>> = sqlx::query_scalar("WITH due AS (
-            SELECT t.id, t.end_manifest_blob FROM turns t JOIN snapshots s ON s.id = t.before_snapshot_id
-             WHERE t.end_manifest_blob IS NOT NULL AND t.completed_at IS NOT NULL AND s.expires_at <= $1 FOR UPDATE OF t
-            ) UPDATE turns t SET end_manifest_blob = NULL FROM due d WHERE t.id = d.id RETURNING d.end_manifest_blob")
-            .bind(now).fetch_all(&mut *tx).await.map_err(orch_db::DbError::from)?;
-        let hashes = expired_ends
-            .iter()
-            .map(|bytes| hash(bytes))
-            .collect::<Result<Vec<_>, _>>()?;
-        // Each turn owns one pin, so equal hashes remain repeated in this list intentionally.
-        for hash in hashes {
-            storage::unpin_blobs(&mut tx, &[hash], now).await?;
-        }
         let plans: Vec<Json> = sqlx::query_scalar("DELETE FROM preflights WHERE kind = 'workspace_restore' AND expires_at <= $1 RETURNING plan")
             .bind(now).fetch_all(&mut *tx).await.map_err(orch_db::DbError::from)?;
         for plan in plans {
@@ -160,8 +142,9 @@ impl Engine {
                 let command = Outgoing::new(
                     new_id(),
                     machine,
-                    SerialKey::Environment(environment),
+                    SerialKey::None,
                     &FsRecordPrune {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         environment_id: environment,
                         expired_snapshot_ids: ids,
                     },

@@ -190,6 +190,7 @@ fn probe(desk: &mut Desk, hash: Hash, pause: bool) -> Arc<Probe> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(probe.clone(), probe.inner.uploads_dir()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
