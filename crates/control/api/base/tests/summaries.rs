@@ -171,7 +171,7 @@ async fn switching_off_each_source_or_deleting_its_provider_stops_an_accepted_su
         });
         configure(
             &s,
-            json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
         )
         .await;
         s.rig
@@ -430,7 +430,7 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
     let calls = script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     for (key, value) in [
@@ -593,7 +593,7 @@ async fn a_person_wins_a_race_with_a_real_summary_call_and_that_call_does_not_de
     script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -737,7 +737,7 @@ async fn no_chosen_producer_or_a_setting_writer_without_provider_use_makes_no_ca
     let provider = api_provider(&s).await;
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     // A historical writer who has since lost Use remains the writer; authority is read at issue.
@@ -767,7 +767,7 @@ async fn malformed_text_is_charged_and_backed_off_while_a_full_shared_cap_skips_
     script(&s, true);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -875,7 +875,7 @@ async fn a_handoff_uses_the_chosen_producer_and_keeps_an_indexed_full_file_and_t
     script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     let text = handoff(&s.rig.engine, id, None, request).await.unwrap();
@@ -908,7 +908,7 @@ async fn material_sent_to_a_different_explicitly_chosen_provider_is_redacted_bef
     let seen = script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -994,7 +994,7 @@ async fn recovering_an_already_counted_completion_adds_neither_a_model_call_nor_
     script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -1078,7 +1078,7 @@ async fn a_long_threads_handoff_sends_the_newest_turns_in_brief_and_the_older_on
     let seen = script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     // The model's entry names no window, so the one every such model has (32 000 tokens) is taken; three percent of
@@ -1171,7 +1171,7 @@ async fn the_plan_of_a_summary_shows_what_it_will_send_and_what_that_costs_befor
     let provider = api_provider(&s).await;
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     let with = preflight(&s, id, &request).await;
@@ -1253,7 +1253,7 @@ async fn a_report_of_met_is_checked_by_the_helper_and_a_not_yet_starts_the_next_
         });
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     let ada = Caller::session(s.ada.id());

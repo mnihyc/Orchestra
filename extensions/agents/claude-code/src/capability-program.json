@@ -133,6 +133,19 @@
           ],
           "default_mode": "native"
         },
+        "summary": {
+          "enabled": true,
+          "modes": ["native"],
+          "default_mode": "native",
+          "delegated_mode": "native",
+          "execution": [
+            { "input": "summary.request", "result": "summary.result", "confined_tools": true }
+          ],
+          "delegation_label": {
+            "en": "Claude Code",
+            "zh-CN": "Claude Code"
+          }
+        },
         "image_input": {
           "enabled": true,
           "modes": [

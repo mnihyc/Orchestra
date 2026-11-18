@@ -416,6 +416,9 @@ impl Engine {
         .await
         {
             Ok(answer) => answer,
+            Err(error @ EngineError::Commands(crate::commands::CommandsError::Stopping)) => {
+                return Err(error);
+            }
             Err(EngineError::Capability(failure)) => Answer::Done(failure.reply()),
             Err(EngineError::CapabilityPaused(pause)) => Answer::Done(pause.reply()),
             Err(error @ (EngineError::StaleToolSource | EngineError::ToolCallIdentity)) => {

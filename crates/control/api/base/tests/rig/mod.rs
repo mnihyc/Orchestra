@@ -249,6 +249,7 @@ pub fn engine_config() -> EngineConfig {
 // ---------------------------------------------------------------- the engine's commands
 
 struct Issued {
+    link: ControllerLink,
     authority: Option<orch_engine::commands::CommandAuthority>,
     return_source: Option<orch_engine::credentials::handover_authority::ReturnSource>,
     machine: Id,
@@ -268,8 +269,10 @@ pub struct ScriptedCommands {
     db: Db,
     access: Arc<dyn orch_engine::access::ResourceAccess>,
     link: ControllerLink,
+    peers: Mutex<HashMap<Id, ControllerLink>>,
     issued: Mutex<HashMap<Id, Issued>>,
     issue_stops: Mutex<HashMap<CommandKind, tokio::sync::oneshot::Sender<Outgoing>>>,
+    turn_wire: Mutex<Option<std::sync::Weak<AppState>>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -293,6 +296,11 @@ fn outcome_of(progress: &Progress) -> Option<Outcome> {
 }
 
 impl ScriptedCommands {
+    /// Check each stored turn start on the real API wire path before the machine receives it.
+    pub fn check_turn_starts_on_wire(&self, app: &Arc<AppState>) {
+        *lock(&self.turn_wire) = Some(Arc::downgrade(app));
+    }
+
     /// Observe the next real attempt of this kind before journal or link delivery, then
     /// keep its owning future pending until cancelled. There is no release that could
     /// resume work under a source checked before the stop.
@@ -439,6 +447,21 @@ impl Commands for ScriptedCommands {
             let _ = stopped.send(command);
             return std::future::pending().await;
         }
+        if matches!(
+            command.kind,
+            CommandKind::TurnStart | CommandKind::TurnStartFenced
+        ) {
+            let wire = lock(&self.turn_wire).clone();
+            if let Some(wire) = wire {
+                let app = wire.upgrade().ok_or(CommandsError::Stopping)?;
+                if !orch_api_base::testing::admit_stored_command(&app, command.id)
+                    .await
+                    .map_err(CommandsError::Other)?
+                {
+                    return Err(CommandsError::AuthorityMismatch);
+                }
+            }
+        }
         let before = if paid_commands::needs_journal(&command) {
             command.deadline = Some(paid_commands::journal(self, &command, before).await?);
             None
@@ -478,10 +501,15 @@ impl Commands for ScriptedCommands {
         if let Some(check) = before {
             check().map_err(CommandsError::BeforeEffect)?;
         }
-        let handle = self.link.commands().issue(cmd);
+        let link = lock(&self.peers)
+            .get(&command.machine)
+            .cloned()
+            .unwrap_or_else(|| self.link.clone());
+        let handle = link.commands().issue(cmd);
         issued.insert(
             command.id,
             Issued {
+                link,
                 authority,
                 return_source,
                 machine: command.machine,
@@ -520,18 +548,21 @@ impl Commands for ScriptedCommands {
     }
 
     async fn cancel(&self, id: Id) -> Result<bool, CommandsError> {
-        let open = lock(&self.issued)
+        let issued = lock(&self.issued);
+        if let Some(entry) = issued
             .get(&id)
-            .is_some_and(|entry| !entry.handle.progress().is_final());
-        if open {
-            self.link.commands().cancel(id);
+            .filter(|entry| !entry.handle.progress().is_final())
+        {
+            entry.link.commands().cancel(id);
+            return Ok(true);
         }
-        Ok(open)
+        Ok(false)
     }
 
     async fn stopped(&self, id: Id) -> Result<bool, CommandsError> {
-        // Missing fixture commands were never issued; an issued command needs the native handler's answer.
-        Ok(!lock(&self.issued).contains_key(&id) || self.link.commands().answered(id))
+        Ok(lock(&self.issued)
+            .get(&id)
+            .is_none_or(|entry| entry.link.commands().answered(id)))
     }
 }
 
@@ -683,6 +714,7 @@ pub type BlobLayer = Box<
 
 /// The application, its database, a machine behind a hub, and the thread engine between them.
 pub struct Rig {
+    pki: TestPki,
     pub world: World,
     pub hub: Hub,
     pub machine: Arc<ScriptedMachine>,
@@ -708,6 +740,52 @@ impl Rig {
     /// A system with one machine that is online and has the roles of an agent, an environment and a provider.
     pub async fn new() -> Self {
         Self::with_world(World::new().await).await
+    }
+
+    /// Connect an independently addressed node alongside the fixture's provider connector.
+    pub async fn program_node(
+        &self,
+    ) -> (
+        Id,
+        ScriptedMachine,
+        tokio::sync::mpsc::UnboundedReceiver<Notice>,
+    ) {
+        let mut conn = self.db.acquire().await.unwrap();
+        let id = insert_machine(&mut conn, "image-node", "connected")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE machines SET roles=ARRAY['node'],online=true,last_seen_at=clock_timestamp() WHERE id=$1")
+            .bind(id).execute(&mut *conn).await.unwrap();
+        drop(conn);
+        let (link, notices) = self.hub.add_machine(
+            id,
+            vec![Role::Node],
+            Default::default(),
+            MachineRecord {
+                active: true,
+                fingerprint: None,
+            },
+        );
+        let node = ScriptedMachine::start(
+            &self.hub,
+            &self.commands.clock,
+            &self.pki.machine(id),
+            &MachineSpec {
+                roles: vec![Role::Node],
+                ..Default::default()
+            },
+        );
+        node.handler.on(CommandKind::NodeProgramAdmit, |_| {
+            Ok(CommandResult::NodeProgramAdmit(
+                orch_link_contract::commands::Empty {},
+            ))
+        });
+        lock(&self.commands.peers).insert(id, link);
+        eventually("the capability node connects", || async {
+            self.hub.session_of(id).is_some()
+        })
+        .await;
+        (id, node, notices)
     }
 
     /// A rig whose API and engine share the deployed request profile.
@@ -778,8 +856,10 @@ impl Rig {
             db: db.clone(),
             access: Arc::clone(&access),
             link: link.clone(),
+            peers: Mutex::new(HashMap::new()),
             issued: Mutex::new(HashMap::new()),
             issue_stops: Mutex::new(HashMap::new()),
+            turn_wire: Mutex::new(None),
             clock: Arc::clone(&clock),
         });
         let engine = Engine::new(EngineParts {
@@ -831,6 +911,7 @@ impl Rig {
         orch_api_core::routes::mount(&mut registry);
         world.app = TestApp::over(state, world.app.clock.clone(), registry);
         let mut rig = Self {
+            pki,
             world,
             hub,
             machine,

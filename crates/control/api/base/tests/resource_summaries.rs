@@ -7,6 +7,8 @@
 #[path = "resource_summaries/batch.rs"]
 mod batch;
 mod desk;
+#[path = "resource_summaries/native.rs"]
+mod native;
 #[path = "resource_summaries/permission_rules.rs"]
 mod permission_rules;
 mod places;
@@ -277,11 +279,11 @@ async fn a_plain_reader_with_model_use_can_refresh_without_configuring_automatio
     assert_eq!(accepted.requested_by, Some(scene.cai.id()));
     assert_eq!(accepted.paying_user, Some(scene.cai.id()));
     assert_eq!(
-        accepted.accepted_source["model"]["provider_id"],
+        accepted.accepted_source["selection"]["backend"]["offering"]["provider"],
         json!(scene.on.provider)
     );
     assert_eq!(
-        accepted.accepted_source["model"]["model"],
+        accepted.accepted_source["selection"]["backend"]["offering"]["offering"],
         json!(rig::MODEL)
     );
     let configured: i64 =
@@ -679,6 +681,42 @@ async fn a_document_id_does_not_masquerade_as_a_thread_and_ranges_stay_native() 
     assert!(receipt.get("text").is_none() && receipt.get("producer").is_none());
 }
 
+async fn document_summary_key(
+    scene: &rig::Scene,
+    document: Id,
+    operation: &str,
+    actions: &[&str],
+) -> (Id, String) {
+    let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(json!({
+        "rules": [{
+            "target": {"kind": "document", "id": document, "reach": "self"},
+            "resources": ["document"],
+            "allow": [{"operation": operation, "actions": actions}]
+        }]
+    }))
+    .unwrap();
+    assert!(scope.validate().is_empty());
+    let secret = new_token(API_TOKEN_PREFIX);
+    let token = new_id();
+    identity::create_api_token_scoped(
+        &mut *scene.rig.world.conn().await,
+        &NewApiToken {
+            id: token,
+            user_id: scene.ada.id(),
+            name: "One document summary act",
+            token_hash: &token_hash(&secret),
+            scopes: &[],
+            node_id: None,
+            at: scene.rig.world.now(),
+            expires_at: Some(scene.rig.world.now() + chrono::Duration::minutes(5)),
+        },
+        Some(&serde_json::to_value(scope).unwrap()),
+    )
+    .await
+    .unwrap();
+    (token, secret)
+}
+
 #[tokio::test]
 async fn a_real_document_scoped_refresh_retains_its_original_http_token_and_closes_on_revocation() {
     use orch_api_contract::{
@@ -704,34 +742,27 @@ async fn a_real_document_scoped_refresh_retains_its_original_http_token_and_clos
         .unwrap();
     sqlx::query("UPDATE providers SET kind='api',harness_kind=NULL,agent_id=NULL,protocols=ARRAY['openai-responses'],upstreams=$2,key_machine_id=$3,status='ready' WHERE id=$1")
         .bind(scene.on.provider).bind(json!([{"protocol":"openai-responses","base_url":"https://fixture.example.invalid/v1","options":{"auth":"none"}}])).bind(scene.rig.machine_id).execute(scene.rig.db.pool()).await.unwrap();
-    let scope:orch_access_contract::key_scope::KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"document","id":document.base.id,"reach":"self"},"resources":["document"],"allow":[{"operation":"SummaryRefresh","actions":["read","write"]}]}]})).unwrap();
-    assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
-    let token = new_id();
-    identity::create_api_token_scoped(
-        &mut *scene.rig.world.conn().await,
-        &NewApiToken {
-            id: token,
-            user_id: scene.ada.id(),
-            name: "One document summary act",
-            token_hash: &token_hash(&secret),
-            scopes: &[],
-            node_id: None,
-            at: scene.rig.world.now(),
-            expires_at: Some(scene.rig.world.now() + chrono::Duration::minutes(5)),
-        },
-        Some(&serde_json::to_value(scope).unwrap()),
+    let (token, secret) = document_summary_key(
+        &scene,
+        document.base.id,
+        "SummaryRefresh",
+        &["read", "write"],
     )
-    .await
-    .unwrap();
+    .await;
     let receipt = app
         .call(SummaryRefresh, &[&"document", &document.base.id])
         .token(&secret)
         .body(&SummaryRefreshBody {
             client_id: new_id(),
             model: Some(SummaryModelChoice {
-                provider_id: scene.on.provider,
-                model: rig::MODEL.into(),
+                backend: orch_provider_contract::capabilities::BackendRef {
+                    route: "summarizer-model.complete".into(),
+                    offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                        provider: scene.on.provider,
+                        offering: rig::MODEL.into(),
+                    }),
+                    ..Default::default()
+                },
                 params: None,
             }),
             range: None,

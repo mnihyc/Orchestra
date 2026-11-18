@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test resource_summaries
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
+test -p orch-engine --lib -- summaries::
+test -p orch-db --test usage_ledger
