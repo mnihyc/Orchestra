@@ -1365,6 +1365,11 @@ pub(crate) struct AttachWith {
     /// Whether the machine indexes the whole tree for use while it is offline, or only lists it when asked:
     /// the resolved `workspace.index`.
     pub(crate) index: IndexMode,
+    /// Resolved working allowances sent with the same attachment.
+    pub(crate) workspace: orch_link_contract::commands::WorkspaceLimits,
+    /// What the index, the recordings and the listings of the workspace leave out: the resolved
+    /// `workspace.ignore`, patterns written as in a gitignore file.
+    pub(crate) ignore: Vec<String>,
 }
 
 impl Default for AttachWith {
@@ -1382,8 +1387,77 @@ impl Default for AttachWith {
             executors: Vec::new(),
             // The same fallback as attach_with when workspace.index has not been set.
             index: IndexMode::Full,
+            workspace: Default::default(),
+            ignore: Vec::new(),
         }
     }
+}
+
+/// Resolves the same workspace defaults used by native attachment and interactive requests.
+pub async fn workspace_limits(
+    conn: &mut orch_db::Conn,
+    environment: Id,
+) -> Result<orch_link_contract::commands::WorkspaceLimits, EngineError> {
+    workspace_limits_at(conn, SettingsPlace::Environment(environment)).await
+}
+
+/// Resolves file-reader defaults for an independently authorized place or environment.
+pub async fn workspace_limits_at(
+    conn: &mut orch_db::Conn,
+    place: orch_settings::Place,
+) -> Result<orch_link_contract::commands::WorkspaceLimits, EngineError> {
+    let names = [
+        keys::WORKSPACE_DIRECTORY_ENTRIES,
+        keys::WORKSPACE_SEARCH_RESULTS,
+        keys::WORKSPACE_ARCHIVE_RESULTS,
+        keys::WORKSPACE_INDEX_ENTRIES,
+        keys::WORKSPACE_INDEX_SCAN_SECS,
+        keys::WORKSPACE_IGNORE_MAX_BYTES,
+        keys::WORKSPACE_IGNORE_CACHE_BYTES,
+        keys::WORKSPACE_DIRECTORY_IDLE_SECS,
+        keys::WORKSPACE_DIRECTORY_SLOTS,
+        keys::WORKSPACE_DIRECTORY_CACHE_BYTES,
+        keys::WORKSPACE_DIRECTORY_BUILDS,
+        keys::WORKSPACE_DIRECTORY_PAGE_BYTES,
+        keys::WORKSPACE_SEARCH_SLICE_SECS,
+        keys::WORKSPACE_GIT_DIFF_BYTES,
+    ];
+    let defs = names
+        .into_iter()
+        .map(|key| {
+            orch_settings_contract::registry::get(key).ok_or_else(|| {
+                EngineError::unreadable("workspace working allowances are not registered")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot =
+        orch_settings::Snapshot::load(conn, place, orch_settings::Wanted::Keys(&defs)).await?;
+    let value = |key| -> Result<u64, EngineError> {
+        let def = orch_settings_contract::registry::get(key).ok_or_else(|| {
+            EngineError::unreadable("a workspace working allowance is not registered")
+        })?;
+        snapshot
+            .resolve(def)
+            .value
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| EngineError::unreadable("a workspace working allowance is invalid"))
+    };
+    Ok(orch_link_contract::commands::WorkspaceLimits {
+        directory_entries: value(keys::WORKSPACE_DIRECTORY_ENTRIES)?,
+        search_results: value(keys::WORKSPACE_SEARCH_RESULTS)?,
+        archive_results: value(keys::WORKSPACE_ARCHIVE_RESULTS)?,
+        index_entries: value(keys::WORKSPACE_INDEX_ENTRIES)?,
+        index_scan_secs: value(keys::WORKSPACE_INDEX_SCAN_SECS)?,
+        ignore_max_bytes: value(keys::WORKSPACE_IGNORE_MAX_BYTES)?,
+        ignore_cache_bytes: value(keys::WORKSPACE_IGNORE_CACHE_BYTES)?,
+        directory_idle_secs: value(keys::WORKSPACE_DIRECTORY_IDLE_SECS)?,
+        directory_slots: value(keys::WORKSPACE_DIRECTORY_SLOTS)?,
+        directory_cache_bytes: value(keys::WORKSPACE_DIRECTORY_CACHE_BYTES)?,
+        directory_builds: value(keys::WORKSPACE_DIRECTORY_BUILDS)?,
+        directory_page_bytes: value(keys::WORKSPACE_DIRECTORY_PAGE_BYTES)?,
+        search_slice_secs: value(keys::WORKSPACE_SEARCH_SLICE_SECS)?,
+        git_diff_bytes: value(keys::WORKSPACE_GIT_DIFF_BYTES)?,
+    })
 }
 
 /// Works out what an attach carries, from what the environment and its home node give it.
@@ -1430,6 +1504,13 @@ pub(crate) async fn attach_with(
     )
     .await?
     .unwrap_or(IndexMode::Full);
+    let ignore = setting::<Vec<String>>(
+        conn,
+        SettingsPlace::Environment(environment),
+        keys::WORKSPACE_IGNORE,
+    )
+    .await?
+    .unwrap_or_default();
     let sources = orch_settings::resolve(
         conn,
         SettingsPlace::Environment(environment),
@@ -1479,6 +1560,8 @@ pub(crate) async fn attach_with(
         secrets,
         executors,
         index,
+        workspace: workspace_limits(conn, environment).await?,
+        ignore,
     })
 }
 
@@ -1536,13 +1619,15 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
         with.data_sources.clone()
     };
     EnvAttach {
+        workspace: with.workspace.clone(),
+
         resources: with.resources,
         data_generation: with.data_generation,
         storage: with.storage.clone(),
         data_sources,
         environment_id: environment,
         workspace_root: root.map(str::to_owned),
-        ignore: Vec::new(),
+        ignore: with.ignore.clone(),
         index: with.index,
         mounts: root.map(|_| with.mounts.clone()),
         variables: with.variables.clone(),
@@ -1552,7 +1637,124 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
 
 // ---------------------------------------------------------------- directories on people's machines
 
+/// Whether a key changes the effective file coverage or working allowances of a running workspace.
+#[must_use]
+pub fn is_workspace_setting(key: &str) -> bool {
+    matches!(
+        key,
+        keys::WORKSPACE_IGNORE
+            | keys::WORKSPACE_INDEX
+            | keys::WORKSPACE_INDEX_ENTRIES
+            | keys::WORKSPACE_INDEX_SCAN_SECS
+            | keys::WORKSPACE_IGNORE_MAX_BYTES
+            | keys::WORKSPACE_IGNORE_CACHE_BYTES
+            | keys::WORKSPACE_DIRECTORY_IDLE_SECS
+            | keys::WORKSPACE_DIRECTORY_SLOTS
+            | keys::WORKSPACE_DIRECTORY_CACHE_BYTES
+            | keys::WORKSPACE_DIRECTORY_BUILDS
+            | keys::WORKSPACE_DIRECTORY_PAGE_BYTES
+            | keys::WORKSPACE_DIRECTORY_ENTRIES
+            | keys::WORKSPACE_SEARCH_RESULTS
+            | keys::WORKSPACE_ARCHIVE_RESULTS
+            | keys::WORKSPACE_SEARCH_SLICE_SECS
+            | keys::WORKSPACE_GIT_DIFF_BYTES
+    )
+}
+
 impl Engine {
+    /// Tells the machine of every environment under `node` what its workspace leaves out and whether it
+    /// indexes, as they are now, without waiting for the environment to be attached again: a changed
+    /// list of ignored paths or index mode would otherwise reach a running environment only at its next
+    /// attach.
+    pub async fn workspace_scope_changed(&self, node: Id) -> Result<(), EngineError> {
+        let mut conn = self.db().acquire().await?;
+        let environments = if node == orch_db::queries::access::SYSTEM_ID {
+            sqlx::query_scalar("SELECT id FROM environments WHERE deleted_at IS NULL ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(orch_db::DbError::from)?
+        } else if orch_db::queries::environments::hosting::environment(&mut conn, node)
+            .await?
+            .is_some()
+        {
+            vec![node]
+        } else {
+            orch_db::queries::environments::hosting::environments_under(&mut conn, node).await?
+        };
+        drop(conn);
+        for environment in environments {
+            if let Err(error) = self.resend_workspace_settings(environment).await {
+                tracing::warn!(%error, %environment, "the machine was not told of the changed workspace settings; it learns them at its next attach");
+            }
+        }
+        Ok(())
+    }
+
+    /// The attach the machine was given last, with the ignored paths, the index mode and what its
+    /// commands find in their environment as they are now. False when there is nothing to tell: no
+    /// running environment on a machine that is here.
+    async fn resend_workspace_settings(&self, environment: Id) -> Result<bool, EngineError> {
+        let (machine, generation, body) = {
+            let mut conn = self.db().acquire().await?;
+            let Some(env) =
+                orch_db::queries::environments::hosting::environment(&mut conn, environment)
+                    .await?
+            else {
+                return Ok(false);
+            };
+            let Some(machine) = env.machine_id else {
+                return Ok(false);
+            };
+            if env.deleted_at.is_some()
+                || env.status != "running"
+                || orch_db::queries::resources::machine(&mut conn, machine)
+                    .await?
+                    .is_none_or(|machine| !machine.online || !machine.is_active())
+            {
+                return Ok(false);
+            }
+            let Some(last) =
+                orch_db::queries::resources::mounts::last_attach(&mut conn, environment, machine)
+                    .await?
+            else {
+                return Ok(false);
+            };
+            let with = attach_with(&mut conn, environment, self.inner.clock.now()).await?;
+            let mut body: EnvAttach = serde_json::from_value(last)?;
+            body.ignore = with.ignore;
+            body.index = with.index;
+            body.workspace = with.workspace;
+            body.variables = with.variables;
+            body.secrets = with.secrets;
+            (machine, env.generation, body)
+        };
+        let command = Outgoing::new(
+            orch_types::new_id(),
+            machine,
+            SerialKey::Environment(environment),
+            &body,
+        )?;
+        let Some(Outcome::Succeeded(facts)) = self.ask_bounded(command).await? else {
+            return Ok(false);
+        };
+        let mut conn = self.db().acquire().await?;
+        if orch_db::queries::environments::hosting::environment(&mut conn, environment)
+            .await?
+            .is_some_and(|env| env.machine_id == Some(machine) && env.generation == generation)
+        {
+            orch_db::queries::environments::hosting::record_facts(
+                &mut conn,
+                environment,
+                &facts,
+                None,
+                self.inner.clock.now(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Brings the status of the environments on people's machines in step with their machines, which
     /// the sweep does each time it comes round: one whose machine has a session that it has not been
     /// attached in is attached; one whose machine has none is `offline`.
@@ -1564,12 +1766,9 @@ impl Engine {
 
     async fn follow_machines(&self) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
-        let pause =
-            chrono::Duration::from_std(self.inner.config.hosting.attach_retry).unwrap_or_default();
         let due = {
             let mut conn = self.inner.db.acquire().await?;
-            rows::connected_out_of_step(&mut conn, now - pause, self.inner.config.sweep_batch)
-                .await?
+            rows::connected_out_of_step(&mut conn, now, self.inner.config.sweep_batch).await?
         };
         for item in due {
             if !item.here {
@@ -1584,9 +1783,7 @@ impl Engine {
                 )
                 .await?;
             } else if !item.serves {
-                let mut conn = self.inner.db.acquire().await?;
-                rows::connected_attach_failed(&mut conn, item.id, item.session, NOT_SERVED, now)
-                    .await?;
+                self.attach_refused(&item, NOT_SERVED).await?;
             } else {
                 self.attach_in_background(item);
             }
@@ -1617,6 +1814,8 @@ impl Engine {
     async fn attach_connected(&self, item: &Connected) -> Result<(), EngineError> {
         let mut with = {
             let mut conn = self.inner.db.acquire().await?;
+            rows::connected_attempting(&mut conn, item.id, item.session, self.inner.clock.now())
+                .await?;
             attach_with(&mut conn, item.id, self.inner.clock.now()).await?
         };
         let mut skipped = None;
@@ -1643,11 +1842,13 @@ impl Engine {
             }
         }
         // The identifier names the session, so that a process that asks again in the same session asks
-        // for the same command; a retry after a refusal names the moment of the refusal, so that it is
+        // for the same command; a retry after a refusal names its captured eligibility, so that it is
         // a command of its own.
         let session = item.session.map_or(0, |at| at.timestamp_micros());
         let attempt = if item.status == status::FAILED {
-            item.updated_at.timestamp_micros()
+            item.attach_retry_at
+                .unwrap_or(item.updated_at)
+                .timestamp_micros()
         } else {
             0
         };
@@ -1784,15 +1985,39 @@ impl Engine {
         command: Outgoing,
     ) -> Result<Option<Outcome>, EngineError> {
         let command = crate::jobs::environment_move::preparation::command(self, command).await?;
+        let input = matches!(
+            command.kind,
+            orch_link_contract::commands::CommandKind::NodeRuntimeCreate
+                | orch_link_contract::commands::CommandKind::NodeMountsApply
+        )
+        .then(|| command.clone());
         let id = command.id;
+        let attaching = command.kind == orch_link_contract::commands::CommandKind::EnvAttach;
+        let issued = command.clone();
         self.inner.commands.issue(command).await?;
+        if attaching && let Err(error) = self.record_environment_attach(&issued).await {
+            tracing::warn!(%error, command=%id, "the issued attach has no current preparation receipt");
+        }
         match tokio::time::timeout(
             self.inner.config.hosting.attach_wait,
             self.inner.commands.wait(id),
         )
         .await
         {
-            Ok(outcome) => Ok(Some(outcome?)),
+            Ok(outcome) => {
+                let outcome = outcome?;
+                if let (Some(command), Outcome::Succeeded(result)) = (&input, &outcome) {
+                    let mut conn = self.db().acquire().await?;
+                    crate::resource_facts::applications::inputs::record_command(
+                        &mut conn,
+                        command,
+                        result,
+                        self.inner.clock.now(),
+                    )
+                    .await?;
+                }
+                Ok(Some(outcome))
+            }
             Err(_) => {
                 self.inner.commands.cancel(id).await?;
                 Ok(None)
@@ -1808,12 +2033,20 @@ impl Engine {
             .await?
             .is_some_and(|standing| standing.here);
         if still_here {
+            let at = self.inner.clock.now();
+            let pause = chrono::Duration::from_std(self.inner.config.hosting.attach_retry)
+                .map_err(EngineError::unreadable)?;
+            let retry_at = at.checked_add_signed(pause).ok_or_else(|| {
+                EngineError::unreadable("the attach retry time is outside the supported range")
+            })?;
             rows::connected_attach_failed(
                 &mut conn,
                 item.id,
                 item.session,
                 why,
-                self.inner.clock.now(),
+                at,
+                retry_at,
+                item.revision,
             )
             .await?;
         }
@@ -1875,6 +2108,23 @@ impl Engine {
 
 // ---------------------------------------------------------------- what idle and unused mean
 
+/// Resolves a declared removal window by the same rule used when removal is accepted.
+pub fn bounded_removed_keep_days(
+    requested: i64,
+    is_default: bool,
+    maximum: i64,
+) -> Result<i64, EngineError> {
+    crate::retention::bounded_days(requested, is_default, maximum).map(i64::from)
+}
+
+/// Native work that holds the idle clock, fetched together for a resource projection.
+pub async fn environments_with_background_work(
+    conn: &mut orch_db::Conn,
+    environments: &[Id],
+) -> Result<Vec<Id>, EngineError> {
+    crate::background_wake::running_environments(conn, environments).await
+}
+
 /// When an environment will be stopped for being idle: its last activity and the minutes its
 /// `env.idle_stop_minutes` allows; none for a stopped one, or when the setting is zero (never).
 pub async fn idle_stop_at(
@@ -1920,6 +2170,17 @@ mod storage_tests {
         assert!(
             check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
         );
+    }
+
+    #[test]
+    fn attaching_carries_the_ignored_paths_of_the_workspace_to_the_machine() {
+        let id = orch_types::new_id();
+        let with = AttachWith {
+            ignore: vec!["bulk/".to_owned(), "target/".to_owned()],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(attach_body(id, None, &with)).unwrap();
+        assert_eq!(wire["ignore"], serde_json::json!(["bulk/", "target/"]));
     }
 
     #[test]

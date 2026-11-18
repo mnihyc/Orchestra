@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test binding_options -- placement_choices_show_the_room_on_the_current_machine_or_host
+test -p orch-api-core --test binding_options -- directory_capacity_follows_the_machine_admitted_for_this_choice
+test -p orch-connector-core --test environment_role -- a_directory_machine_reports_available_room_without_attaching_a_workspace
+test -p orch-api-core --test hosted_environments -- place_scopes::
+test -p orch-api-core --test hosts -- host_choices_distinguish_measured_load_from_declared_memory
+web typecheck
+web lint
+web test -- tests/component/start-environment-options.test.tsx tests/component/start-flow.test.tsx tests/component/change-compact.test.tsx tests/component/thread-status-data.test.tsx tests/component/resource-facts.test.tsx tests/component/resource-picker.test.tsx tests/component/resource-status-agreement.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

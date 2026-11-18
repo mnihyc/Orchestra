@@ -869,6 +869,8 @@ async fn host_places_inner(
             mount_sources: names.iter().map(|(id, _)| *id).collect(),
             owner: host.owner_id,
             place: PlaceHost {
+                room: None,
+                running_threads: None,
                 grouping: Default::default(),
                 host: HostRef {
                     id: host.id,

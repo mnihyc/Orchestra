@@ -18,8 +18,8 @@ import { LocalAddressRewrite } from '@/lib/markdown';
 import { portAddressFor } from '@/features/ports/model';
 import type { PortOpeningPlan } from '@/generated/api-types';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/ports/Request', () => ({ PortRequests: () => null }));
 vi.mock('@/api/search', () => ({ namesQuery: () => ({ queryKey: ['port-test-names'], queryFn: () => Promise.resolve([]) }) }));
 
