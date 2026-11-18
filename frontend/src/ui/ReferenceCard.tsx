@@ -167,7 +167,7 @@ function ReferenceDetails({ reference, cacheScope, enabled, onDone, onOpenFile }
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const open = useOpenPath();
-  const read = useQuery({ ...referencePreviewQuery(reference, cacheScope), ...(cacheScope === undefined ? {} : { staleTime: 0, refetchOnMount: 'always' as const }), enabled });
+  const read = useQuery({ ...referencePreviewQuery(reference, cacheScope), ...(cacheScope === undefined ? {} : { refetchOnMount: 'always' as const }), enabled });
   const frame = 'flex w-[min(20rem,calc(100vw-2rem))] flex-col gap-2 p-3 text-text';
   if (read.isError) return <div className={frame}>{read.error instanceof ApiError && read.error.is('not_found') ? <DeletedReference reference={reference} /> : <ErrorAlert error={read.error} action={<Button size="sm" onClick={() => void read.refetch()}>{t('common.tryAgain')}</Button>} />}</div>;
   if (!enabled || read.data === undefined || read.isFetching && (cacheScope !== undefined || read.data.refresh_at !== undefined && read.data.refresh_at !== null)) {

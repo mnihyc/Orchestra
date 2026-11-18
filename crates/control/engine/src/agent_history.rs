@@ -364,21 +364,38 @@ impl Engine {
                     continue;
                 };
                 // A recently deleted thread keeps its place's retention policy until purge.
-                let days = orch_db::queries::trace::read_scope(
+                let policy = orch_db::queries::trace::read_scope(
                     &[row.thread_id],
-                    setting::<i64>(
+                    orch_settings::resolve(
                         &mut tx,
                         Place::Node(row.thread_id),
                         keys::RETENTION_AGENT_HISTORY_IDLE_DAYS,
                     ),
                 )
-                .await?
-                .unwrap_or(DEFAULT_IDLE_DAYS);
+                .await?;
+                let days = policy
+                    .value()
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(DEFAULT_IDLE_DAYS);
+                use orch_api_contract::workspace::JobWaitTime;
+                let eligible = if days == 0 {
+                    JobWaitTime::NotApplicable
+                } else {
+                    chrono::Duration::try_days(days)
+                        .and_then(|age| row.last_turn_at.checked_add_signed(age))
+                        .map_or(JobWaitTime::Unreported, |at| JobWaitTime::At {
+                            at: orch_types::Time::new(at),
+                        })
+                };
+                rows::record_policy(&mut tx, row.id, &row.native_session_ref,
+                    &serde_json::json!({"days":days,"source":policy.resolved.source.scope,"eligible_at":eligible,"observed_at":orch_types::Time::new(self.inner.clock.now())})).await?;
                 if !idle_due(row.last_turn_at, self.inner.clock.now(), days) {
+                    tx.commit().await.map_err(orch_db::DbError::from)?;
                     continue;
                 }
                 let command = new_id();
                 if !rows::claim(&mut tx, &row, command, None, self.inner.clock.now()).await? {
+                    tx.commit().await.map_err(orch_db::DbError::from)?;
                     continue;
                 }
                 tx.commit().await.map_err(orch_db::DbError::from)?;
@@ -580,6 +597,14 @@ impl Engine {
                 )
                 .await?;
             }
+            let seq = match unit.seq_given(row.thread_id) {
+                Some(seq) => seq,
+                None => unit.stamp(row.thread_id).await?,
+            };
+            sqlx::query("UPDATE segments s SET seq_updated=$3 FROM segments requested WHERE requested.id=$1 AND s.thread_id=$2
+                AND s.machine_id IS NOT DISTINCT FROM requested.machine_id AND s.provider_id=requested.provider_id
+                AND s.agent_id=requested.agent_id AND s.native_session_ref=requested.native_session_ref")
+                .bind(row.id).bind(row.thread_id).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
             unit.finish().await?
         };
         self.commit(tx, finished).await?;

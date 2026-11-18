@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test forks -- side
+test -p orch-authz --lib
+test -p orch-authz --test properties --test key_scope_boundaries --test thread_viewer_creation_cycle
+test -p orch-engine --test forks -- side
