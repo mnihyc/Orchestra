@@ -680,6 +680,14 @@ impl Engine {
             }
         }
         let files = FilesPlan {
+            source_policy: live.then(crate::fork_source::workspace_copy_policy),
+            home_policy: home
+                .as_ref()
+                .filter(|home| home.measured)
+                .map(|_| crate::fork_source::owned_copy_policy()),
+            file_states_policy: file_states
+                .complete
+                .then(crate::fork_source::owned_copy_policy),
             file_states: Some(file_states),
             kept_image_bytes: kept_image.as_ref().map(|image| image.bytes),
             source: if live {

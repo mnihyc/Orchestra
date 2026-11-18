@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/timeline-scroll-reads.test.tsx tests/component/virtual-list.test.tsx tests/component/thread-frame.test.tsx tests/unit/thread-timeline.test.ts tests/unit/help-content.test.ts tests/component/live-thread-decision.test.tsx tests/component/recovery-turn-actions.test.tsx tests/component/thread-now.test.tsx tests/component/turn-shape.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/component/thread-hover-actions.test.tsx tests/component/turn-restore-affordance.test.tsx tests/component/context-usage.test.tsx

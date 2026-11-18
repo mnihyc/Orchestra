@@ -176,9 +176,22 @@ impl Use {
     /// The allowances that allow all of what is wanted together.
     #[must_use]
     pub fn allowing(&self, wanted: &options::Wanted<'_>) -> Vec<&Allowance> {
+        self.allowing_for(
+            wanted,
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        )
+    }
+
+    /// The complete allowances that permit this use and its requested limits together.
+    #[must_use]
+    pub fn allowing_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> Vec<&Allowance> {
         self.each
             .iter()
-            .filter(|allowance| options::entry_allows(&allowance.provider, wanted))
+            .filter(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
             .collect()
     }
 
@@ -188,6 +201,18 @@ impl Use {
         self.each
             .iter()
             .any(|allowance| options::entry_allows(&allowance.provider, wanted))
+    }
+
+    /// Whether one complete allowance permits the specified use without borrowing limits from another.
+    #[must_use]
+    pub fn allows_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
     }
 
     /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
@@ -875,6 +900,9 @@ async fn judge_provider(
         at,
     } = *judging;
     let wanted_options = MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        ]),
         services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
