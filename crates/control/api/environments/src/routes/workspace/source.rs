@@ -232,22 +232,6 @@ pub(super) async fn prepare_native(
         .map_err(ApiError::internal)?
         .flatten();
     let action = if let Some(choice) = worktree {
-        let record_days = orch_settings::get::<i64>(
-            conn,
-            orch_settings::Place::Environment(environment),
-            orch_settings_contract::registry::keys::WORKSPACE_RECORD_DAYS,
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal("recording days are unset"))?;
-        let max_bytes = orch_settings::get::<i64>(
-            conn,
-            orch_settings::Place::Environment(environment),
-            orch_settings_contract::registry::keys::WORKSPACE_RECORD_MAX_BYTES,
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal("recording bytes are unset"))?;
         Action::Worktree {
             body: orch_link_contract::source::GitWorktree {
                 environment_id: environment,
@@ -256,8 +240,6 @@ pub(super) async fn prepare_native(
                 snapshot_id: None,
             },
             source: frozen,
-            record_days,
-            max_bytes,
         }
     } else {
         let credential = source::credential(conn, row.topic_id, &frozen)

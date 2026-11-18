@@ -12,7 +12,7 @@ import { useAppearance } from '@/lib/appearance';
 import { CATALOGUE, pageFor } from '../unit/general-access-fixtures';
 import { show } from './support';
 
-interface ReadOptions { params: { path: { object: string; id: string }; query: { cursor?: string; depth: string } } }
+interface ReadOptions { params: { path: { object: string; id: string }; query: { cursor?: string; depth: string; q?: string } } }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options: ReadOptions) => Promise<{ data: HistoryLinePage; response: Response }>>() }));
 vi.mock('@/api/client', async (load) => ({ ...await load<typeof ClientApi>(), api: { GET: calls.read } }));
 // The access-grid controls have their own suites; the real disclosure, API query and history stay mounted.
@@ -71,4 +71,14 @@ it.each(['en', 'zh-CN'] as const)('shows a resource read failure and retries the
   await user.click(await screen.findByRole('button', { name: i18n.t('common.tryAgain') }));
   expect(await screen.findByText(i18n.t('access.history.none'))).toBeVisible();
   await waitFor(() => expect(calls.read).toHaveBeenCalledTimes(2));
+});
+
+it.each(kinds)('searches %s history natively while its disclosure and current text stay open', async (kind, path) => {
+  calls.read.mockImplementation((_route, options) => Promise.resolve({ data: { items: [line('match', options.params.query.q === 'needle' ? 'Late native needle' : 'First history only')], next_cursor: null }, response: new Response(null, { status: 200 }) }));
+  const user = userEvent.setup(), target = history(kind);
+  await user.click(screen.getByRole('button', { name: i18n.t('access.history.title') })); await screen.findByText('First history only');
+  await user.type(screen.getByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('access.history.title') }) }), 'needle');
+  await screen.findByText('Late native needle');
+  expect(calls.read.mock.calls.at(-1)?.[1].params).toMatchObject({ path: { object: path, id: target.id }, query: { q: 'needle', depth: 'every' } });
+  expect(screen.queryByText('First history only')).toBeNull();
 });

@@ -831,6 +831,26 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
+}
+
+/// Reads an environment, optionally selecting a page of its visible bound threads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentGetQuery {
+    /// Apply the environment's current restoration authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspect_deleted: Option<bool>,
+    /// Words in the visible bound-thread, topic, owner or directory text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_q: Option<String>,
+    /// Entries in the requested bound-thread page; ordinary reads keep the complete set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_limit: Option<u32>,
+    /// The preceding bound-thread page's continuation for this reader and query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_cursor: Option<String>,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that
@@ -883,6 +903,9 @@ pub struct Environment {
     pub config_trust: Vec<crate::trust::ConfigTrust>,
     /// The threads bound to it that the caller may view.
     pub threads: Vec<EnvironmentThread>,
+    /// Continuation of an explicitly requested bound-thread page, absent for an ordinary complete read or its final page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_next_cursor: Option<String>,
     /// How many more threads are bound to it than the caller may view.
     pub threads_hidden: i64,
     /// How many people reach into it now: through one of its doors, or through an agent there that
@@ -1120,10 +1143,54 @@ pub struct McpImportRight {
     pub reason: Option<McpImportReason>,
 }
 
+/// Which native environment catalogue this page continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentMcpCollection {
+    /// The configured server connections.
+    Servers,
+    /// The server definitions discovered by the native programs.
+    Found,
+}
+
+/// Search and continue one environment's MCP catalogue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentMcpListQuery {
+    /// Servers by default, or discovered definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<EnvironmentMcpCollection>,
+    /// Words in the admitted visible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Requested page size; any positive u32, defaulting to fifty.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// The continuation returned for this collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl EnvironmentMcpListQuery {
+    /// Shared native search and continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// The MCP servers of one environment: those switched on for it and what became of each there,
 /// and those found in the harness configuration there that nobody imported yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMcp {
+    /// Continuation of the selected catalogue, or null after its last row.
+    pub next_cursor: Option<String>,
     /// The servers switched on for it.
     pub servers: Vec<EnvironmentMcpServer>,
     /// When a change here reaches a thread that is at work.
@@ -2197,6 +2264,9 @@ pub struct DeletedEnvironment {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDeletedEnvironmentListQuery {
+    /// Words in the kept environment's visible name, matched before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Also include environments whose home lies below this place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub under: Option<bool>,
@@ -2442,7 +2512,7 @@ crate::endpoints! {
     EnvironmentCreate: POST "/environments", Rule("what creating an environment needs in its home"), none, json NewEnvironment, json EnvironmentCreateResponse, 201,
         operation Op::receipt(&Op::facets(&crate::environment_sources::CREATE_FACETS));
     /// Reads an environment.
-    EnvironmentGet: GET "/environments/{id}", Rule("any permission on the environment, or node.view on a thread bound to it"), query crate::nodes::DeletedInspectionQuery, none, json Environment, 200,
+    EnvironmentGet: GET "/environments/{id}", Rule("any permission on the environment, or node.view on a thread bound to it"), query EnvironmentGetQuery, none, json Environment, 200,
         operation Op::variants(&[
             Variant {
                 name: "read",
@@ -2479,7 +2549,7 @@ crate::endpoints! {
     EnvironmentUpdate: PATCH "/environments/{id}", Rule("environment.manage, and for another home also node.interact on the new home"), none, json EnvironmentUpdateBody, json EnvironmentUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::environment_sources::UPDATE_FACETS));
     /// Lists the MCP servers of an environment and those found in the harness configuration there that nobody imported.
-    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), none, none, json EnvironmentMcp, 200,
+    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), query EnvironmentMcpListQuery, none, json EnvironmentMcp, 200,
         operation Op::facets(&crate::environment_sources::MCP_GET_FACETS);
     /// Imports an MCP server found in the harness configuration of an environment; the connector keeps a copy of its definition.
     EnvironmentMcpImportCreate: POST "/environments/{id}/mcp/imports", Rule("environment.manage; on a person's machine also being the machine's owner, or managing every environment of that machine once its owner handed the policy key for imports over"), none, json EnvironmentMcpImportCreateBody, json EnvironmentMcpCreateResponse, 201,

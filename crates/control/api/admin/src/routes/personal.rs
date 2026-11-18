@@ -2,7 +2,7 @@
 //!
 //! Everything here acts on the caller and on nobody else. A favorite or a
 //! recent is a kind/id the caller may view; one they lost the right to is no
-//! longer listed. The interface state is kept under nine keys and no
+//! longer listed. The interface state is kept under its declared keys and no
 //! others, whole, and no value is larger than the limit; the last view of a
 //! project is also kept one project at a time, beside the others. Drafts and the
 //! chat states belong to the threads and the chats, and the read position
@@ -47,6 +47,11 @@ use orch_api_contract::personal::MeItemFavoriteDelete;
 use orch_api_contract::personal::MeItemFavoriteSet;
 
 use orch_api_contract::personal::MeItemFavoriteSetBody;
+
+use orch_api_contract::personal::{
+    MePickerRecentChoice, MePickerRecentCreate, MePickerRecentReceipt, MePickerRecents,
+    MePickerRecentsGet,
+};
 
 use orch_api_contract::personal::MeProjectViewDelete;
 
@@ -133,6 +138,8 @@ pub fn mount(registry: &mut Registry) {
         )
         .on(MeStateGet, state_get)
         .on(MeStateSet, state_set)
+        .on(MePickerRecentsGet, picker_recents_get)
+        .on(MePickerRecentCreate, picker_recent_create)
         .on(MeProjectViewSet, project_view_set)
         .on(MeProjectViewDelete, project_view_delete);
 }
@@ -250,6 +257,7 @@ async fn require_target(
         &orch_db::queries::search::Names {
             identifiers: Some(&ids),
             starred: false,
+            picker_count: None,
             at: at.get(),
             user: principal.user(),
             trees: principal.member_of(),
@@ -380,8 +388,30 @@ async fn state_set(ctx: Ctx, (): (), mut value: Json) -> ApiResult<()> {
     if known.is_none() {
         return Err(invalid(
             "key",
-            "is none of help, layouts, viewers, timeline, sidebar, project_views, keys, reactions and inbox",
+            "is none of help, layouts, viewers, timeline, interface, sidebar, project_views, keys, reactions, picker_recents and inbox",
         ));
+    }
+    if known == Some(PersonalStateKey::PickerRecents) && value != serde_json::json!({}) {
+        return Err(invalid(
+            "picker_recents",
+            "clear with an empty object; record selections through the picker choices request",
+        ));
+    }
+    if known == Some(PersonalStateKey::Interface) {
+        use orch_settings_contract::registry::{self, keys};
+        let choices = value
+            .as_object()
+            .ok_or_else(|| invalid("interface", "must be an object"))?;
+        for (field, setting) in [
+            ("kept_closed_tabs", keys::INTERFACE_KEPT_CLOSED_TABS),
+            ("progress_delay_ms", keys::INTERFACE_PROGRESS_DELAY_MS),
+            ("read_freshness_ms", keys::INTERFACE_READ_FRESHNESS_MS),
+        ] {
+            if let Some(choice) = choices.get(field) {
+                registry::validate(setting, choice)
+                    .map_err(|error| invalid(&format!("interface.{field}"), &error.to_string()))?;
+            }
+        }
     }
     // A person's keys are kept only as keys of actions there are, none of them meeting another's.
     if known == Some(PersonalStateKey::Keys) {
@@ -434,6 +464,60 @@ async fn state_set(ctx: Ctx, (): (), mut value: Json) -> ApiResult<()> {
     .await?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
+}
+
+async fn picker_recents_get(ctx: Ctx, (): (), (): ()) -> ApiResult<MePickerRecents> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    orch_api_base::picker_recents::read(&mut conn, principal.user()).await
+}
+
+async fn picker_recent_create(
+    ctx: Ctx,
+    (): (),
+    body: MePickerRecentChoice,
+) -> ApiResult<MePickerRecentReceipt> {
+    if body.kind != "model"
+        && serde_json::from_value::<orch_api_contract::search::NameKind>(Json::String(
+            body.kind.clone(),
+        ))
+        .is_err()
+    {
+        return Err(invalid("kind", "is no resource or model kind"));
+    }
+    if body.key.trim().is_empty() {
+        return Err(invalid("key", "is empty"));
+    }
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    let user = guard.principal().user();
+    let count = orch_api_base::picker_recents::count(&mut conn).await?;
+    if count == 0 {
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        return Ok(MePickerRecentReceipt {
+            count,
+            remembered: false,
+        });
+    }
+    identity::note_picker_choice(
+        &mut conn,
+        user,
+        &body.kind,
+        &body.key,
+        i64::try_from(count).map_err(ApiError::internal)?,
+        guard.now().get(),
+    )
+    .await?;
+    orch_db::sequences::notify_user_event(
+        &mut conn,
+        &[user],
+        &serde_json::json!({"what":"state","key":"picker_recents"}),
+    )
+    .await?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(MePickerRecentReceipt {
+        count,
+        remembered: true,
+    })
 }
 
 /// Keeps the caller's last view of one project they may view, beside the views of the others: two

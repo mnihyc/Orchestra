@@ -49,6 +49,8 @@ pub struct Names<'a> {
     pub identifiers: Option<&'a [Id]>,
     /// Limit to the caller's favorites, including with no query words.
     pub starred: bool,
+    /// Picker mode includes all available names, with this many private recent keys first.
+    pub picker_count: Option<i64>,
     /// The request's sampled clock, for decaying personal visit counts.
     pub at: DateTime<Utc>,
     /// The caller.
@@ -368,11 +370,17 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
             .replace('%', "\\%")
             .replace('_', "\\_")
     );
-    let sql = r"WITH document_hits AS MATERIALIZED (
+    let sql = r"WITH picker_recent AS MATERIALIZED (
+            SELECT kind, choice, position FROM user_state state
+              CROSS JOIN LATERAL jsonb_each(state.value) kinds(kind,choices)
+              CROSS JOIN LATERAL jsonb_array_elements_text(choices) WITH ORDINALITY keys(choice,position)
+             WHERE state.user_id=$1 AND state.key='picker_recents' AND $4='' AND $16::bigint IS NOT NULL AND position<=$16
+        ), document_hits AS MATERIALIZED (
             -- A title that is only a title is matched here, by its own trigram index, under the same kind, org
             -- and root tests the batch applies below, before any place is read.
             SELECT d.id, d.title, d.node_id, d.org_id, d.owner_id, d.updated_at FROM documents d
              WHERE d.deleted_at IS NULL AND __DOCUMENT_NAME__ AND 'document' = ANY($6) AND ($7::uuid IS NULL OR d.org_id = $7)
+               AND ($12::uuid[] IS NULL OR d.id = ANY($12))
                AND ($3 OR $12::uuid[] IS NOT NULL OR d.org_id IS NULL OR d.org_id = ANY($11::uuid[]) OR d.owner_id = $1)
         ), document_places AS MATERIALIZED (
             -- Each live place of those documents is read once, not once for every document in it.
@@ -474,14 +482,15 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
              WHERE m.runtime_id IS NULL AND m.deleted_at IS NULL
                AND (m.owner_id=$1 OR $3 OR (CASE WHEN h.id IS NULL THEN m.org_id ELSE h.org_id END)=ANY($2::uuid[]))
         ), matched AS (
-            SELECT a.*, r.visited_at, f.position favorite_position, (f.id IS NOT NULL) starred,
+            SELECT a.*, r.visited_at, p.position picker_position, f.position favorite_position, (f.id IS NOT NULL) starred,
                    name ILIKE $5 ESCAPE '\' starts_name, __NAME_RANK__ match_rank, __VISIT_SCORE__ visit_score
               FROM all_names a LEFT JOIN recents r ON r.user_id=$1 AND r.kind=a.kind AND r.id=a.id
               LEFT JOIN favorites f ON f.user_id=$1 AND f.kind=a.kind AND f.id=a.id
+              LEFT JOIN picker_recent p ON p.kind=a.kind AND p.choice=a.id::text
              WHERE a.kind = ANY($6) AND ($7::uuid IS NULL OR a.org_id = $7)
                AND ($3 OR $12::uuid[] IS NOT NULL OR a.org_id IS NULL OR a.org_id = ANY($11::uuid[]) OR a.owner_id = $1)
                AND ($12::uuid[] IS NULL OR a.id=ANY($12)) AND (NOT $13::boolean OR f.id IS NOT NULL)
-               AND ($12 IS NOT NULL OR ($4 = '' AND (r.visited_at IS NOT NULL OR $13)) OR ($4 <> '' AND (__NAME_MATCH__)))
+               AND ($12 IS NOT NULL OR ($4 = '' AND (r.visited_at IS NOT NULL OR $13 OR $16::bigint IS NOT NULL)) OR ($4 <> '' AND (__NAME_MATCH__)))
         ), unique_names AS (
             SELECT DISTINCT ON (kind, id) * FROM matched ORDER BY kind, id, match_rank DESC, address
         )
@@ -498,6 +507,7 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
                END END AS state
           FROM unique_names
          ORDER BY match_rank DESC,
+                  CASE WHEN $4 = '' AND $16::bigint IS NOT NULL THEN picker_position END ASC NULLS LAST,
                   CASE WHEN $4 = '' AND $13 THEN favorite_position END ASC NULLS LAST,
                   CASE WHEN $4 = '' AND NOT $13 THEN visited_at END DESC NULLS LAST,
                   visit_score DESC, updated_at DESC, kind, id
@@ -545,6 +555,7 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
         .bind(ask.starred)
         .bind(ask.at)
         .bind(query.terms())
+        .bind(ask.picker_count)
         .fetch_all(conn)
         .await?)
 }
@@ -843,7 +854,11 @@ pub(super) fn advanced_source_sql(selection: &str, kind: &str, source: &str, par
         "(SELECT COALESCE(adv_m.edited_at,adv_m.created_at) FROM chat_messages adv_m WHERE adv_m.id={part})"
     );
     let edited = fact("adv_d.updated_at", "adv_n.updated_at", &chat_edited);
-    advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited)
+    let facts = advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited);
+    format!(
+        "({facts}) AND ({selection}->>'stream' IS NULL OR ({kind}='item' AND EXISTS \
+        (SELECT 1 FROM items adv_i WHERE adv_i.id={part} AND adv_i.stream={selection}->>'stream')))"
+    )
 }
 
 /// Compare the recorded source facts without changing the ordering of candidate streams.
@@ -871,7 +886,7 @@ pub(super) fn advanced_source_needed(selection: Option<&orch_types::Json>) -> bo
             .and_then(|value| value.get(key))
             .is_some_and(|value| !value.is_null())
     };
-    ["owner_id", "created_by_id", "edited_by_id"]
+    ["owner_id", "created_by_id", "edited_by_id", "stream"]
         .iter()
         .any(|key| present(key))
         || present("date_field") && (present("from") || present("to"))

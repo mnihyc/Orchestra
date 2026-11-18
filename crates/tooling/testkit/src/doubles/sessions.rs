@@ -51,11 +51,11 @@ pub async fn prepare(
         "archive": null, "history": null, "upto_turn_ordinal": null,
         "workspace_root": root, "instruction_root_marker": false,
         "directory": directory, "cwd": directory, "mounts": [], "model": "fake-1", "effort": null,
-        "params": {}, "approval_mode": "auto", "sandbox_mode": "workspace", "instructions": "", "memory": null,
+        "params": {}, "approval_mode": "auto", "web_action_wait_secs": 120, "sandbox_mode": "workspace", "instructions": "", "memory": null,
         "arrangement": row.try_get::<String, _>("arrangement")?, "provider": {"path":"native", "provider_id":provider},
         "exec": {"executor":row.try_get::<Option<String>, _>("executor")?, "tool_set":row.try_get::<Option<String>, _>("tool_set")?,
             "environment_id":row.try_get::<Id, _>("environment_id")?, "generation":row.try_get::<i32, _>("env_generation")?, "ticket":null},
-        "mcp": [], "orch_tools": [], "raw_events": true, "raw_after": row.try_get::<i64, _>("raw_last_n")?
+        "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": true, "raw_after": row.try_get::<i64, _>("raw_last_n")?
     })).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
     let assigned = sqlx::query("UPDATE segments SET machine_id = $3 WHERE id = $2 AND thread_id = $1 AND machine_id IS NULL")
         .bind(thread).bind(segment).bind(machine).execute(pool).await?.rows_affected();

@@ -451,7 +451,6 @@ impl SourceCommand {
             Some("fs.stat") => "fs.stat",
             Some("fs.mkdir") => "fs.mkdir",
             Some("git.prepare") => "git.prepare",
-            Some("fs.record") => "fs.record",
             Some("git.worktree") => "git.worktree",
             _ => "unknown",
         }

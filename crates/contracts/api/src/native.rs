@@ -14,6 +14,30 @@ pub const SNAPSHOT_COMMANDS: usize = 2_000;
 /// Half a link frame leaves room for its envelope and identity metadata.
 pub const PAGE_BYTES: usize = 128 * 1_024;
 
+/// Resolved native roster transfer defaults; they bound one page, never the complete list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundReadLimits {
+    /// Renewed idle retention in seconds.
+    pub idle_seconds: u64,
+    /// Preferred commands per native page.
+    pub page_items: u64,
+    /// Preferred serialized native page bytes; one complete command can exceed this target.
+    pub page_bytes: u64,
+    /// Command preview bytes, retaining explicit truncation facts.
+    pub preview_bytes: u64,
+}
+impl Default for BackgroundReadLimits {
+    fn default() -> Self {
+        Self {
+            idle_seconds: 30,
+            page_items: 200,
+            page_bytes: 131_072,
+            preview_bytes: 4_096,
+        }
+    }
+}
+
 /// Owned work whose lifetime can extend beyond its starting foreground turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BackgroundTask {

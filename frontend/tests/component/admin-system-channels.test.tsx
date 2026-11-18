@@ -1,5 +1,10 @@
+import { collectionQuery } from '@/api/collection';
+import { OutsideOrch } from '@/features/settings/personal/Routes';
+import type * as Notifications from '@/api/notifications';
+import type * as Away from '@/api/away';
 /** System channels use the ordinary notifier form, explicit tests and native scope-bound writes. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Settings from '@/api/settings';
@@ -11,15 +16,29 @@ import { i18n, setLocale } from '@/i18n';
 import { meta } from '../doubles/fixtures';
 import { systemChannel, systemNotifier } from './admin-system-fixtures';
 import { show } from './support';
+import { SECRET_DOTS } from '@/ui/SecretField';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<NotificationChannel[]>>(), notifiers: vi.fn<() => Promise<Notifier[]>>(), scope: vi.fn<(scope: string) => void>(),
   create: vi.fn<typeof Settings.createSystemChannel>(), orgCreate: vi.fn<typeof Settings.createOrgChannel>(), update: vi.fn<typeof Settings.updateChannel>(),
   remove: vi.fn<typeof Settings.deleteChannel>(), test: vi.fn<typeof Settings.testChannel>(), policies: vi.fn() }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof Settings>(),
   channelsQuery: (scope: string) => { calls.scope(scope); return { queryKey: ['channels', scope], queryFn: calls.read }; },
+  channelsPageQuery: (scope: string, q: string) => { calls.scope(scope); return { queryKey: ['channels', scope, 'pages', q], initialPageParam: null,
+    queryFn: async () => { const all = await calls.read(); return { items: all.filter((row) => row.name.includes(q)).slice(0, 37), kinds: [...new Set(all.map((row) => row.kind))], next_cursor: null }; }, getNextPageParam: () => null }; },
   notifiersQuery: { queryKey: ['notifiers'], queryFn: calls.notifiers },
   createSystemChannel: calls.create, createOrgChannel: calls.orgCreate, updateChannel: calls.update, deleteChannel: calls.remove, testChannel: calls.test,
 }));
+vi.mock('@/api/notifications', async (load) => ({ ...await load<typeof Notifications>(),
+  notifiersQuery: { queryKey: ['notifiers'], queryFn: calls.notifiers },
+  notificationChannelsPageQuery: (q: string) => collectionQuery(['notification-channels'], q, async () => {
+    const all = await calls.read(); return { items: all.filter((row) => row.name.includes(q)).slice(0, 37), kinds: ['webhook'], next_cursor: null };
+  }),
+}));
+vi.mock('@/api/away', async (load) => ({ ...await load<typeof Away>(),
+  routesQuery: { queryKey: ['away', 'routes'], queryFn: () => Promise.resolve([]) },
+  routesPageQuery: (q: string) => collectionQuery(['away', 'routes', 'retained'], q, () => Promise.resolve({ items: [], next_cursor: null })),
+}));
+vi.mock('@/features/settings/personal/away/live', () => ({ useAwayLive: () => undefined }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), metaQuery: { queryKey: ['meta'], queryFn: () => Promise.resolve(meta()) } }));
 vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: (props: { target: Settings.SettingsTarget; only?: readonly string[] }) => { calls.policies(props); return null; } }));
 beforeEach(() => {
@@ -28,6 +47,17 @@ beforeEach(() => {
   calls.test.mockReset().mockResolvedValue({ ok: false, error: 'The synthetic relay refused this sender.' });
 });
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+it('keeps a channel draft while its native list page changes', async () => {
+  const channel = systemChannel(); calls.read.mockResolvedValue([channel]);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }); show(<Channels />, cache);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: i18n.t('settings.channels.editNamed', { name: channel.name }) }));
+  const dialog = screen.getByRole('dialog'), name = within(dialog).getByRole('textbox', { name: i18n.t('settings.channels.name') });
+  await user.clear(name); await user.paste('Unfinished channel');
+  act(() => { cache.setQueryData(['channels', 'system', 'pages', ''], { pages: [{ items: [], kinds: [channel.kind], next_cursor: null }], pageParams: [null] }); });
+  expect(dialog).toBeVisible(); expect(name).toHaveValue('Unfinished channel');
+});
 
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`creates a system channel with write-only secret fields and updates the list from its answer in ${locale}`, async () => {
@@ -79,8 +109,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
     let dialog = screen.getByRole('dialog');
     const optional = i18n.t('ui.field.optional').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
     const keptSecret = within(dialog).getByLabelText(new RegExp(`^Relay token\\s*${optional}$`, 'u'));
-    expect(keptSecret).toHaveValue('');
-    expect(keptSecret).toHaveAttribute('type', 'password');
+    // The saved token is dots that are set, never an empty box; nothing of it is read back.
+    expect(keptSecret).toHaveValue(SECRET_DOTS);
+    expect(within(dialog).getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
     const name = within(dialog).getByRole('textbox', { name: i18n.t('settings.channels.name') });
     await user.clear(name); await user.type(name, 'Changed relay');
     await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.save') }));
@@ -100,7 +131,19 @@ for (const locale of ['en', 'zh-CN'] as const) {
     dialog = screen.getByRole('alertdialog', { name: i18n.t('settings.channels.removeTitle', { name: 'Changed relay' }) });
     await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.channels.removeConfirm', { name: 'Changed relay' }) }));
     await waitFor(() => expect(calls.remove).toHaveBeenCalledExactlyOnceWith(original.id));
-    expect(screen.queryByRole('heading', { name: 'Changed relay' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Changed relay' })).not.toBeInTheDocument());
     expect(calls.read).toHaveBeenCalledOnce(); expect(calls.orgCreate).not.toHaveBeenCalled();
   });
 }
+
+it('finds a late personal delivery channel through native search in its own scroll', async () => {
+  calls.read.mockResolvedValue(Array.from({ length: 1001 }, (_, index) => ({ ...systemChannel(), id: `hook-${index}`, name: `Personal-${index}`, owner: 'me' as const, kind: 'webhook' })));
+  show(<OutsideOrch />);
+  await screen.findByText(/Personal-0/);
+  expect(screen.queryByText(/Personal-1000/)).toBeNull();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('searchbox'));
+  await user.paste('Personal-1000');
+  expect(await screen.findByText(/Personal-1000/)).toBeVisible();
+  expect(screen.getByRole('region', { name: i18n.t('notifications.outside.title') })).toBeVisible();
+});
