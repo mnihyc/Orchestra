@@ -10,7 +10,7 @@ import { TooltipProvider } from '@/ui/Tooltip';
 import { enrollmentMachine } from '../doubles/enrollment-row';
 
 const info = vi.hoisted((): {secure:boolean;public_url:string;configure:string|undefined;returned:boolean} => ({ secure: false, public_url: 'https://orch.example.com', configure: 'public_url', returned: false }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/resources', async (load) => {
   const actual = await load<typeof ResourcesApi>();
   return { ...actual, enrollMachineAgain: vi.fn(),

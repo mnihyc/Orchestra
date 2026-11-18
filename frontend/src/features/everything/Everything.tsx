@@ -53,7 +53,7 @@ export function SelectionSharing({ rows }: { rows: readonly Pick<EverythingRow, 
     })}</span>}
   </>;
 }
-const SORT_COLUMNS = ['name', 'where', 'opened', 'activity_by', ...OPTIONAL_COLUMNS.filter((column) => column !== 'admin_access')] as const;
+const SORT_COLUMNS = ['name', 'where', 'opened', 'activity_by', ...OPTIONAL_COLUMNS] as const;
 const RESOURCE_GUIDES: Partial<Record<EverythingKind, string>> = {
   environment: 'environments-and-their-doors', provider: 'providers-and-models', machine: 'profiles-hosts-and-computers',
   host: 'profiles-hosts-and-computers', mount: 'mounts-and-tool-servers', template: 'templates-and-updates',
@@ -139,9 +139,8 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
   const participating = focus ?? choice.participating;
   const setParticipating = (value: boolean) => { choose({ participating: value }); onParticipation?.(value); };
   const chosenColumns = arrangement === 'recent' ? recentColumns : columns;
-  const availableColumns = OPTIONAL_COLUMNS.filter((column) => (column !== 'admin_access' || mode.data?.as_admin === true)
-    && (arrangement !== 'recent' || column !== 'state' && (recentOrder !== 'active' || column !== 'last_activity')));
-  const shownColumns = chosenColumns.filter((column) => column !== 'admin_access' || mode.data?.as_admin === true);
+  const availableColumns = OPTIONAL_COLUMNS.filter((column) => arrangement !== 'recent' || column !== 'state' && (recentOrder !== 'active' || column !== 'last_activity'));
+  const shownColumns = chosenColumns;
   const [expansion, setExpansion] = useState<'all' | 'none' | 'manual'>('manual');
   const [expansionVersion, setExpansionVersion] = useState(0);
   const words = useDebounced(typed.trim());

@@ -1,5 +1,5 @@
 /** The complete tree grid as a reader uses it: remembered columns, server sorting, keyboard branches and minimal paths. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -28,12 +28,12 @@ const reads: { parent: string | null; filter: EverythingFilter }[] = [];
 const openGuide = vi.hoisted(() => vi.fn());
 const namesRead = vi.hoisted(() => vi.fn());
 const shareMany = vi.hoisted(() => vi.fn());
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['inventory-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['inventory-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
 vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), namesQuery: (...args: Parameters<typeof SearchApi.namesQuery>) => ({
   queryKey: ['inventory-owner', ...args], queryFn: () => { namesRead(...args); return Promise.resolve([]); },
 }) }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/features/access/AdminMode', () => ({ useAdminMode: () => ({ data: { as_admin: adminMode, available: true } }) }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAdminMode: () => ({ data: { as_admin: adminMode, available: true } }) }));
 vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: string | null, filter: EverythingFilter) => ({
   queryKey: ['everything', person, parent, filter], initialPageParam: null,
   // These cases exercise a loaded hierarchy; identity and fixture rows need no scheduling race before the first action.
@@ -41,8 +41,8 @@ vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: s
   queryFn: () => { reads.push({ parent, filter }); return Promise.resolve({ items: levels.get(parent) ?? [], next_cursor: null }); },
   getNextPageParam: () => undefined,
 }) }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn(), openAccessToMany: shareMany }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openGuide }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn(), openAccessToMany: shareMany }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openGuide }));
 
 const root = inventoryRow({ id: 'acme', kind: 'org', name: 'Acme', href: '/org/acme', has_children: true });
 const project = inventoryRow({ id: 'web', kind: 'project', name: 'Web', parent_id: 'acme', place_label: 'Acme', href: '/project/web', has_children: true, owner: userRef(reader), created_at: '2026-10-08T10:00:00.000Z' });
@@ -172,7 +172,32 @@ describe('the complete hierarchy', () => {
     expect(screen.queryByText('This screen could not be shown')).not.toBeInTheDocument();
   });
 
-  it('offers Created and keeps the remembered admin column only while the session switch is on', async () => {
+  it.each([[1440, 420], [400, 360]])('fits its %i px screen with only %i px available to the table', async (screenWidth, paneWidth) => {
+    vi.stubGlobal('innerWidth', screenWidth);
+    const observers = new Map<Element, (entries: Partial<ResizeObserverEntry>[]) => void>();
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private notify: (entries: Partial<ResizeObserverEntry>[]) => void) {}
+      observe(element: Element) { observers.set(element, this.notify); }
+      unobserve(element: Element) { observers.delete(element); }
+      disconnect() { for (const [element, notify] of observers) if (notify === this.notify) observers.delete(element); }
+    });
+    try {
+      adminMode = true;
+      show(<EverythingBrowser />);
+      const table = await screen.findByRole('treegrid');
+      await screen.findByRole('link', { name: 'Acme' });
+      const viewport = table.closest<HTMLElement>('[data-scroll-allow="table"]')!;
+      act(() => observers.get(viewport)?.([{ target: viewport, contentRect: new DOMRect(0, 0, paneWidth, 600) }]));
+      expect(table).toHaveAttribute('data-table-layout', 'compact');
+      expect(table.querySelector('[data-column="owner"]')).toBeInTheDocument();
+      expect(table.querySelector('[data-column="last_activity"]')).toBeInTheDocument();
+      expect(table.querySelector('[data-column="admin_access"]')).not.toBeInTheDocument();
+      act(() => observers.get(viewport)?.([{ target: viewport, contentRect: new DOMRect(0, 0, 1200, 600) }]));
+      expect(table).toHaveAttribute('data-table-layout', 'wide');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('keeps Created available while the admin session state stays outside the table', async () => {
     const user = userEvent.setup();
     const view = show(<EverythingBrowser />);
     await screen.findByRole('link', { name: 'Acme' });
@@ -185,7 +210,7 @@ describe('the complete hierarchy', () => {
     expect(screen.getByRole('columnheader', { name: 'Created' })).toBeVisible();
     adminMode = true;
     view.rerender(<EverythingBrowser />);
-    expect(await screen.findByRole('columnheader', { name: 'As admin' })).toBeVisible();
+    expect(screen.queryByRole('columnheader', { name: 'As admin' })).not.toBeInTheDocument();
     adminMode = false;
     view.rerender(<EverythingBrowser />);
     expect(screen.queryByRole('columnheader', { name: 'As admin' })).not.toBeInTheDocument();
