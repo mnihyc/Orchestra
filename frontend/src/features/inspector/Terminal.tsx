@@ -37,8 +37,6 @@ import { HelpHint } from '@/ui/HelpHint';
 import { ThreadViewFrame } from './parts';
 import { TerminalScreen } from './TerminalScreen';
 
-/** The round trip above which a tab shows it: a key that appears late is then understood and not typed again. */
-export const SLOW_ROUND_TRIP_MS = 150;
 /** A shell closed longer ago than this is no longer offered: a day is long enough to find out what happened to it. */
 const CLOSED_SHOWN_MS = 24 * 60 * 60 * 1000;
 /** How long a shell is kept for a person who is away, until the place says otherwise: the shipped setting. */
@@ -185,7 +183,7 @@ export function TerminalPanel({ access, tab }: { access: EnvironmentWorkspaceAcc
             const state =
               shell.state === 'closed' ? t('terminal.strip.closed') : takeoverOf(shell) ? t('terminal.strip.elsewhere') : shell.busy ? t('terminal.strip.running', { time: formatTimeOfDay(shell.last_io_at, format) }) : t('terminal.strip.prompt');
             const trip = live?.roundTripMs ?? 0;
-            const slow = active && trip > SLOW_ROUND_TRIP_MS ? trip : null;
+            const slow = active && live?.phase === 'attached' && live.slow ? trip : null;
             const closeIt = () => {
               if (shell.state === 'closed') setDismissed((before) => new Set([...before, shell.id]));
               else close.mutate(shell.id);

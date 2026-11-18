@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test forks -- side
+test -p orch-engine --test forks -- side
+test -p orch-adapter-claude-code --test turns -- an_acting_side_ --nocapture
+test -p orch-adapter-acp --test turns -- an_acting_side_ --nocapture
+test -p orch-adapter-codex --test sessions -- two_sessions_of_one_harness_run_turns_at_the_same_time_and_their_events_stay_apart --exact --nocapture
