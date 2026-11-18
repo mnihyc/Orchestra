@@ -13,6 +13,16 @@ function enumValues(schema: unknown): string[] {
 }
 
 describe('named product choices', () => {
+  it('names the model-add choice by the controls it enables in both languages', async () => {
+    try {
+      for (const locale of ['en', 'zh-CN'] as const) {
+        await setLocale(locale);
+        const choice = settingChoice(i18n.t, 'models.add_switches_on', 'all');
+        expect(choice?.name).toBe(locale === 'en' ? 'Context, speeds and access' : '上下文、速度和访问计划');
+        expect(choice?.description).toContain(locale === 'en' ? 'other options need separate setup' : '其他选项需要单独配置');
+      }
+    } finally { await setLocale('en'); }
+  });
   it('keeps retired description automation out of both the shipped registry and choice tables', async () => {
     try {
       for (const locale of ['en', 'zh-CN'] as const) {

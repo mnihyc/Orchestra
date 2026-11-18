@@ -32,9 +32,6 @@ const HEAD_BYTES: usize = 128 * 1024;
 /// The longest title a session gets.
 const TITLE_CHARS: usize = 120;
 
-/// The most sessions that are listed, the newest first.
-const MOST_SESSIONS: usize = 500;
-
 /// The names of variables whose values are secrets, by what they contain.
 const SECRET_WORDS: [&str; 7] = [
     "KEY",
@@ -177,7 +174,6 @@ pub fn sessions_of(home: &Path) -> Vec<NativeSession> {
         }
     }
     found.sort_by_key(|found| std::cmp::Reverse(found.0));
-    found.truncate(MOST_SESSIONS);
     found.into_iter().map(|(_, session)| session).collect()
 }
 
@@ -493,6 +489,26 @@ mod tests {
             .find(|s| s.native_session_ref.starts_with("2222"))
             .unwrap();
         assert_eq!(second.title.as_deref(), Some("Refactor billing"));
+    }
+
+    #[test]
+    fn every_session_remains_available_when_a_home_has_more_than_a_thousand() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("projects/-workspace-web");
+        for index in 0..1_200 {
+            write(
+                &project.join(format!("00000000-0000-4000-8000-{index:012}.jsonl")),
+                &json!({ "type": "summary", "summary": format!("Session {index}") }).to_string(),
+            );
+        }
+        let sessions = sessions_of(home.path());
+        assert_eq!(sessions.len(), 1_200);
+        let names: std::collections::HashSet<_> = sessions
+            .iter()
+            .filter_map(|session| session.title.as_deref())
+            .collect();
+        assert_eq!(names.len(), 1_200);
+        assert!(names.contains("Session 0") && names.contains("Session 1199"));
     }
 
     #[test]

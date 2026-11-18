@@ -323,6 +323,13 @@ async fn native_tool_answers_have_only_one_model_facing_form() {
 }
 
 #[tokio::test]
+async fn a_command_left_running_is_listed_and_ended_by_the_name_it_was_listed_with() {
+    let result = observed("background_commands").await;
+    assert_eq!(result.feature.as_deref(), Some("background_commands"));
+    assert!(result.passed && result.error.is_none(), "{result:?}");
+}
+
+#[tokio::test]
 async fn a_fork_is_read_back_from_the_harness_as_the_turns_it_was_forked_through() {
     let result = observed("history.native_import").await;
     assert_eq!(result.feature.as_deref(), Some("import_native"));

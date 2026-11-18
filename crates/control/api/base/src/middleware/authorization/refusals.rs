@@ -173,6 +173,7 @@ pub async fn missing_access(
             options: missing.options.as_ref().map(|options| AccessOptions {
                 models: options.models.clone(),
                 services: options.services.clone(),
+                purposes: options.purposes.clone(),
                 efforts: options.efforts.clone(),
                 r#where: options.r#where.clone(),
             }),

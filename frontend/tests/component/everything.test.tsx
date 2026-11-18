@@ -1,15 +1,18 @@
 /** The complete tree grid as a reader uses it: remembered columns, server sorting, keyboard branches and minimal paths. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EverythingFilter } from '@/api/everything';
+import { client } from '@/api/client';
 import type * as SearchApi from '@/api/search';
 import type * as Screen from '@/shell/screen';
 import { EverythingBrowser, EverythingScreen } from '@/features/everything/Everything';
-import { KindIcon } from '@/features/everything/EverythingTable';
+import { visibleRows, type Branch } from '@/features/everything/rows';
+import { EverythingTable, KindIcon } from '@/features/everything/EverythingTable';
 import { OrgEverything } from '@/features/settings/org/Everything';
 import type { EverythingRow, Me } from '@/generated/api-types';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
@@ -18,7 +21,9 @@ import { inventoryRow } from '../doubles/everything-row';
 import { display } from '../doubles/thread-display';
 import { CATALOGUE } from '../doubles/catalogue';
 import { me, org, userRef } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 import { retiredCopy } from './retired-copy';
 
 let reader: Me = me(1, 'reader', 'Reader');
@@ -28,12 +33,12 @@ const reads: { parent: string | null; filter: EverythingFilter }[] = [];
 const openGuide = vi.hoisted(() => vi.fn());
 const namesRead = vi.hoisted(() => vi.fn());
 const shareMany = vi.hoisted(() => vi.fn());
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['inventory-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['inventory-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
 vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), namesQuery: (...args: Parameters<typeof SearchApi.namesQuery>) => ({
   queryKey: ['inventory-owner', ...args], queryFn: () => { namesRead(...args); return Promise.resolve([]); },
 }) }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/features/access/AdminMode', () => ({ useAdminMode: () => ({ data: { as_admin: adminMode, available: true } }) }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAdminMode: () => ({ data: { as_admin: adminMode, available: true } }) }));
 vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: string | null, filter: EverythingFilter) => ({
   queryKey: ['everything', person, parent, filter], initialPageParam: null,
   // These cases exercise a loaded hierarchy; identity and fixture rows need no scheduling race before the first action.
@@ -41,8 +46,8 @@ vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: s
   queryFn: () => { reads.push({ parent, filter }); return Promise.resolve({ items: levels.get(parent) ?? [], next_cursor: null }); },
   getNextPageParam: () => undefined,
 }) }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn(), openAccessToMany: shareMany }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openGuide }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn(), openAccessToMany: shareMany }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openGuide }));
 
 const root = inventoryRow({ id: 'acme', kind: 'org', name: 'Acme', href: '/org/acme', has_children: true });
 const project = inventoryRow({ id: 'web', kind: 'project', name: 'Web', parent_id: 'acme', place_label: 'Acme', href: '/project/web', has_children: true, owner: userRef(reader), created_at: '2026-10-08T10:00:00.000Z' });
@@ -51,16 +56,19 @@ const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
 const appearanceBefore = useAppearance.getState();
 const themeBefore = document.documentElement.dataset.theme;
 const darkBefore = document.documentElement.classList.contains('dark');
+const sessionBefore = client.session.getState();
 
 beforeEach(() => {
   reader = me(1, 'reader', 'Reader');
+  client.session.setState({ status: 'signed_in', userId: reader.id, readerVersion: (client.session.getState().readerVersion ?? 0) + 1 });
   adminMode = false;
   localStorage.clear(); reads.length = 0;
   openGuide.mockClear(); namesRead.mockClear(); shareMany.mockClear();
   levels = new Map([[null, [root]], ['acme', [project]], ['web', [leaf]]]);
 });
 afterEach(async () => {
-  cleanup(); useAppearance.setState(appearanceBefore); document.documentElement.classList.toggle('dark', darkBefore);
+  cleanup(); vi.restoreAllMocks(); useAppearance.setState(appearanceBefore); document.documentElement.classList.toggle('dark', darkBefore);
+  client.session.setState(sessionBefore);
   if (themeBefore === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = themeBefore;
   await setLocale('en');
 });
@@ -306,6 +314,7 @@ describe('the complete hierarchy', () => {
     expect(screen.queryByRole('columnheader', { name: 'Kind' })).not.toBeInTheDocument();
     again.unmount();
     reader = me(2, 'another', 'Another reader');
+    client.session.setState({ userId: reader.id, readerVersion: (client.session.getState().readerVersion ?? 0) + 1 });
     show(<EverythingBrowser />);
     expect(await screen.findByRole('columnheader', { name: 'Kind' })).toBeVisible();
     expect(screen.queryByRole('columnheader', { name: 'Created' })).not.toBeInTheDocument();
@@ -432,6 +441,13 @@ describe('the complete hierarchy', () => {
     await screen.findByRole('treegrid');
     expect(screen.getByRole('button', { name: 'Tree view' })).toHaveAttribute('aria-pressed', 'true');
     expect(readViewChoice(reader.id, 'everything', 'view', '', 'mine:all')).toBe(saved);
+    expect(screen.getByText('Using default · Saved choice unavailable')).toBeVisible();
+    const before = namesRead.mock.calls.length;
+    await user.click(screen.getByRole('button', { name: i18n.t('everything.filters') }));
+    expect(document.querySelector('[data-fact-disclosure-body]')).toHaveTextContent('Default');
+    expect(document.querySelector('[data-fact-disclosure-body]')).not.toHaveTextContent(/a_removed_view|a_removed_column/);
+    expect(namesRead).toHaveBeenCalledTimes(before);
+    await user.keyboard('{Escape}');
     await user.click(screen.getByRole('button', { name: 'Recent items' }));
     expect(JSON.parse(readViewChoice(reader.id, 'everything', 'view', '', 'mine:all'))).toMatchObject({ arrangement: 'recent', sort: 'opened' });
   });
@@ -449,4 +465,58 @@ describe('the complete hierarchy', () => {
     await waitFor(() => expect(reads.slice(before).map((read) => read.parent ?? 'root').sort()).toEqual(['acme', 'root']));
     expect(screen.queryByRole('link', { name: 'Release plan · Acme / Web' })).not.toBeInTheDocument();
   });
+});
+
+
+it('keeps every expanded loaded row selectable and reachable while mounting only the visible window', async () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(384);
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+  const entries = Array.from({ length: 1_200 }, (_, index) => inventoryRow({ id: 'entry-' + String(index), kind: 'project', name: 'Entry ' + String(index), parent_id: root.id, href: '/project/entry-' + String(index), can_share: true }));
+  levels.set(root.id, entries);
+  const user = userEvent.setup(); show(<EverythingBrowser />);
+  await user.click(await screen.findByRole('button', { name: 'Expand all' }));
+  const grid = screen.getByRole('treegrid', { name: i18n.t('everything.tree') });
+  await waitFor(() => expect(grid).toHaveAttribute('aria-rowcount', '1202'));
+  expect(grid.querySelectorAll('[data-everything-row]').length).toBeLessThan(30);
+  const org = grid.querySelector<HTMLElement>('[data-everything-row="org:acme"]');
+  if (org === null) throw new Error('The root row stays reachable');
+  const viewport = grid.closest<HTMLElement>('[data-scroll-allow="table"]');
+  if (viewport === null) throw new Error('The inventory owns its viewport');
+  viewport.scrollTo = (options?: ScrollToOptions | number) => { if (typeof options === 'object') viewport.scrollTop = options.top ?? 0; fireEvent.scroll(viewport); };
+  fireEvent.keyDown(org, { key: 'End' });
+  await waitFor(() => expect(screen.getByRole('link', { name: 'Entry 1199' }).closest('tr')).toHaveFocus());
+  expect(grid.querySelectorAll('[data-everything-row]').length).toBeLessThan(30);
+  vi.restoreAllMocks();
+});
+
+it('keeps a deeply nested loaded hierarchy independent of the JavaScript call stack', () => {
+  const branches = new Map<string | null, Branch>();
+  for (let index = 0; index < 5_000; index += 1) {
+    branches.set(index === 0 ? null : 'deep-' + String(index - 1), {
+      rows: [inventoryRow({ id: 'deep-' + String(index), kind: 'project', name: 'Level ' + String(index), has_children: index < 4_999 })],
+      pending: false, error: null, retired: false, hasMore: false, loadingMore: false, more: vi.fn(), retry: vi.fn(),
+    });
+  }
+  const rows = visibleRows(branches, null, (row) => row.has_children, { empty: 'empty', filtering: false, order: (rows) => rows, heading: () => null });
+  expect(rows).toHaveLength(5_000);
+  expect(rows.at(-1)).toMatchObject({ type: 'item', depth: 4_999, row: { id: 'deep-4999' } });
+  expect(Math.max(...rows.map((row) => row.position.length))).toBeLessThan(100);
+});
+
+it('selects the complete loaded inventory independently of the mounted row window', async () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(384);
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+  const all = vi.fn();
+  levels.set(null, Array.from({ length: 1_200 }, (_, index) => inventoryRow({ id: 'loaded-' + String(index), kind: 'project', name: 'Loaded ' + String(index), can_share: true })));
+  const filter: EverythingFilter = { scope: 'mine', kinds: [], q: '', owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc' };
+  show(<ScrollRegion label="Inventory window" kind="table"><EverythingTable reader={reader.id} filter={filter} columns={['name', 'kind']} expansion="none" onSort={vi.fn()}
+    selection={{ selected: new Set(), toggle: vi.fn(), clear: vi.fn(), all }} /></ScrollRegion>);
+  const grid = screen.getByRole('treegrid');
+  await waitFor(() => expect(grid).toHaveAttribute('aria-rowcount', '1201'));
+  const header = grid.querySelector('thead');
+  if (header === null) throw new Error('The inventory has its shared selection heading');
+  await userEvent.click(within(header).getByRole('button', { name: i18n.t('navigation.recentAll') }));
+  expect(all).toHaveBeenCalledOnce();
+  expect(all.mock.calls[0]?.[0]).toHaveLength(1_200);
+  expect(grid.querySelectorAll('[data-everything-row]').length).toBeLessThan(30);
 });

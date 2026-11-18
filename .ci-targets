@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/component/owned-page-heading.test.tsx tests/component/resource-detail-pages.test.tsx tests/component/provider-page-compact.test.tsx tests/component/resource-profile-help.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
+web-e2e tests/e2e/resource-details.spec.ts --grep "resource tabs start in the top quarter" --project=chromium
