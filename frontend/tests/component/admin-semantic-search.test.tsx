@@ -1,5 +1,7 @@
 /** Search by meaning in Management: each org's state in the reader's language, progress with the time left, the disk against its share, and the two choices a waiting index offers with the size and time shown first. */
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from '@tanstack/react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 
@@ -7,7 +9,7 @@ import { SemanticSearch } from '@/features/admin/SemanticSearch';
 import type { SemanticSearchOrg, SemanticSearchOverview } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import { formatBytes, formatTokens } from '@/lib/format';
+import { formatBytes, formatNumber, formatTokens } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
 import { show } from './support';
 
@@ -30,7 +32,7 @@ vi.mock('@/api/settings', () => ({ settingsKey: (id: string) => ['settings', id]
 vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: () => <div data-testid="settings-editor" /> }));
 
 vi.mock('@/features/resources/providers/AddProvider', () => ({AddProviderDialog: (props: {initialHome: string; initialPreset: string}) => <div role="dialog" aria-label={props.initialPreset}>{props.initialHome}</div>}));
-vi.mock('@/api/resources', () => ({providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(),providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
 
 afterEach(() => { calls.templateId = null; vi.clearAllMocks(); });
 
@@ -83,6 +85,86 @@ const overview = (available = true): SemanticSearchOverview => ({
   ],
 });
 
+it.each(['en', 'zh-CN'] as const)('names the configured and current index models with known partial coverage in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  calls.overview.mockResolvedValue(overview());
+  const view = show(<SemanticSearch />);
+  try {
+    const row = await screen.findByRole('row', { name: /Acme/ });
+    const { locale: formatting } = useAppearance.getState();
+    expect(row).toHaveTextContent(i18n.t('admin.semantic.modelComparison', {
+      selected: `embeddinggemma-2 · ${formatNumber(256, formatting)}`, current: `old-model · ${formatNumber(256, formatting)}`,
+    }));
+    expect(row).toHaveTextContent(i18n.t('admin.semantic.indexedOf', {
+      indexed: formatTokens(3_000, formatting), total: formatTokens(4_000, formatting),
+    }));
+    const waiting = screen.getByRole('row', { name: /Bureau/ });
+    expect(waiting).toHaveTextContent(locale === 'en' ? 'Space for both indexes required' : '需要足够空间保留两个索引');
+    expect(row).not.toHaveTextContent(active.id);
+  } finally { view.unmount(); await setLocale(previous); }
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps a retry batch with its recorded model when current choices and cadence change in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  const data = overview();
+  data.orgs = [org('retry-org', 'Acme', { state: 'paused', reason: 'error', active,
+    retry: { provider_id: active.provider_id, model_name: 'attempt-model', generation_id: active.id,
+      batch_pieces: 3, next: 'indexer_pass', next_eligible_at: null, reason: 'provider', observed_at: '2026-10-20T00:00:00Z' },
+  })];
+  calls.overview.mockResolvedValue(data);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = show(<SemanticSearch />, cache);
+  const user = userEvent.setup();
+  try {
+    const row = await screen.findByRole('row', { name: /Acme/ });
+    await user.click(within(row).getByRole('button', { name: i18n.t('common.details') }));
+    let body = document.querySelector('[data-fact-disclosure-body]');
+    expect(body).toHaveTextContent('attempt-model');
+    expect(body).toHaveTextContent(locale === 'en' ? '3 pieces' : '3 个片段');
+    expect(body).toHaveTextContent(locale === 'en' ? 'Next indexing pass' : '下一次索引检查');
+    act(() => { cache.setQueryData(['admin', 'semantic-search'], { ...data, interval_secs: 500, orgs: data.orgs.map((entry) => ({ ...entry, model_name: 'new-choice' })) }); });
+    body = document.querySelector('[data-fact-disclosure-body]');
+    expect(body).toHaveTextContent('attempt-model');
+    expect(body).not.toHaveTextContent('500');
+    expect(body?.querySelector('time[datetime="2026-10-20T00:00:00Z"]')).not.toBeNull();
+  } finally { view.unmount(); cache.clear(); await setLocale(previous); }
+});
+
+it.each(['en', 'zh-CN'] as const)('does not turn an old index without a retry receipt into a scheduled retry in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  calls.overview.mockResolvedValue({ ...overview(), interval_secs: 500, orgs: [org('older-index', 'Acme', { active })] });
+  const view = show(<SemanticSearch />), user = userEvent.setup();
+  try {
+    const row = await screen.findByRole('row', { name: /Acme/ });
+    await user.click(within(row).getByRole('button', { name: i18n.t('common.details') }));
+    const body = document.querySelector('[data-fact-disclosure-body]');
+    expect(body).toHaveTextContent(i18n.t('factDisclosure.notReported'));
+    expect(body).not.toHaveTextContent('500');
+    expect(screen.queryByText(locale === 'en' ? /Index retry eligible/ : /可重试索引时间/)).not.toBeInTheDocument();
+  } finally { view.unmount(); await setLocale(previous); }
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the current index explicit when its model name matches or search is off in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  const data = overview();
+  const named = data.orgs[0]!;
+  const matching = { ...active, provider_id: named.provider_id!, model_name: named.model_name!, dimensions: 128 };
+  calls.overview.mockResolvedValue({ ...data, orgs: [
+    { ...named, state: 'idle', active: matching },
+    { ...data.orgs[1]!, enabled: false, state: 'off', provider_id: null, model_name: null, active },
+  ] });
+  const view = show(<SemanticSearch />);
+  try {
+    const { locale: formatting } = useAppearance.getState();
+    expect(await screen.findByRole('row', { name: /Acme/ })).toHaveTextContent(i18n.t('admin.semantic.modelComparison', {
+      selected: `embeddinggemma-2 · ${formatNumber(256, formatting)}`, current: `embeddinggemma-2 · ${formatNumber(128, formatting)}`,
+    }));
+    expect(screen.getByRole('row', { name: /Bureau/ })).toHaveTextContent(i18n.t('admin.semantic.modelComparison', {
+      selected: i18n.t('admin.semantic.notSet'), current: `old-model · ${formatNumber(256, formatting)}`,
+    }));
+  } finally { view.unmount(); await setLocale(previous); }
+});
+
 for (const locale of ['en', 'zh-CN'] as const) for (const tokens of [0, 4000]) it.each(['provider_disabled', 'provider_removed'] as const)(`keeps the reason and known progress during a provider pause (%s, ${locale}, ${tokens} tokens)`, async (reason) => {
   const previous = currentLocale();
   await setLocale(locale);
@@ -123,7 +205,9 @@ it.each(['en', 'zh-CN'] as const)('says where each org stands and what a waiting
     expect(within(waiting).getByRole('button', { name: i18n.t('admin.semantic.keep') })).toBeEnabled();
     const unnamed = screen.getByRole('row', { name: /Cafe/ });
     expect(within(unnamed).getByRole('button', { name: i18n.t('admin.semantic.addLocal') })).toBeEnabled();
-    expect(within(indexing).queryByRole('button')).toBeNull();
+    expect(within(indexing).getByRole('button', { name: i18n.t('common.details') })).toBeEnabled();
+    expect(within(indexing).queryByRole('button', { name: i18n.t('admin.semantic.rebuild') })).toBeNull();
+    expect(within(indexing).queryByRole('button', { name: i18n.t('admin.semantic.keep') })).toBeNull();
     expect(screen.getByTestId('settings-editor')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).toBeNull();
   } finally {
@@ -177,9 +261,11 @@ it.each([400, 1440])('keeps the model, progress and disk readable once at %i px'
   const view = show(<SemanticSearch />);
   try {
     const indexing = await screen.findByRole('row', { name: /Acme/ });
-    expect(within(indexing).getAllByText('embeddinggemma-2 · 256')).toHaveLength(1);
-    expect(within(indexing).getAllByRole('meter')).toHaveLength(1);
     const { locale } = useAppearance.getState();
+    expect(within(indexing).getAllByText(i18n.t('admin.semantic.modelComparison', {
+      selected: `embeddinggemma-2 · ${formatNumber(256, locale)}`, current: `old-model · ${formatNumber(256, locale)}`,
+    }))).toHaveLength(1);
+    expect(within(indexing).getAllByRole('meter')).toHaveLength(1);
     expect(indexing).toHaveTextContent(i18n.t('admin.semantic.diskOf', { used: `~${formatBytes(1_000_000, locale)}`, allowed: formatBytes(2_000_000, locale) }));
   } finally {
     view.unmount();

@@ -7,7 +7,7 @@ summary: Distinguish changing a thread’s environment, moving an environment an
 
 # Switch a thread or move an environment
 
-**Move to another environment…** changes where one thread runs. **Move to another machine…** relocates a supported environment. **Move to topic…** changes a thread's place in the organization. Read the named action and plan to choose the change you intend.
+**Move to another environment…** changes where one thread runs. **Move to another machine…** relocates a supported environment. **Move to…** selects the thread’s destination topic. Across organizations, its owner reviews the conversation copy and source deletion together. Read the named action and plan to choose the change you intend.
 
 ## Where
 

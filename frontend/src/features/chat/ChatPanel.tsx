@@ -16,6 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useTranslation } from 'react-i18next';
 
 import { useViewChoice } from '@/lib/viewChoices';
+import { DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
 import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { ApiError } from '@/api/client';
 import { ChatView, type ChatViewProps } from '@/features/chat/ChatView';
@@ -105,7 +106,7 @@ function PanelChat(props: Omit<ChatViewProps, 'onReady'>) {
 function PanelOf({ nodeId, shown, named }: { nodeId: string; shown: boolean; named: boolean }) {
   const { t } = useTranslation();
   const link = useChatLink();
-  const [scope, chooseScope] = useViewChoice<string>('chat', 'scope', 'thread');
+  const [scope, chooseScope, scopeReceipt] = useViewChoice<string>('chat', 'scope', 'thread');
   const requestedChat = useRequestedChat();
   const { segments, failed, empty, retry } = useSegments(nodeId, shown, scope, requestedChat ?? link.chat);
   const [expanded, setExpanded] = useState(false);
@@ -122,9 +123,9 @@ function PanelOf({ nodeId, shown, named }: { nodeId: string; shown: boolean; nam
   const requestedKind = requested?.kind;
   useEffect(() => {
     if (requestedKind === undefined) return;
-    if (scope !== requestedKind) chooseScope(requestedKind);
+    if (scope !== requestedKind && segments.some((segment) => segment.kind === scope)) chooseScope(requestedKind);
     clearLink();
-  }, [requestedKind, scope, chooseScope, clearLink]);
+  }, [requestedKind, scope, chooseScope, clearLink, segments]);
 
   if (segments.length === 0) {
     if (empty) return <EmptyState compact className="h-full" icon={<MessageSquareOff aria-hidden />} title={t('chat.panel.none')} />;
@@ -138,9 +139,13 @@ function PanelOf({ nodeId, shown, named }: { nodeId: string; shown: boolean; nam
   if (chosen === undefined) return null;
   const chatId = chosen.chatId;
   const several = segments.length > 1;
+  const savedScope = segments.find((segment) => segment.kind === scopeReceipt?.saved);
+  const scopeObservation = scopeReceipt === undefined ? undefined : { ...scopeReceipt, effective: chosen.kind,
+    origin: requested !== undefined || link.chat !== null ? 'address' as const : chosen.kind !== scope ? 'default' as const : scopeReceipt.origin,
+    saved_choice_availability: scopeReceipt.saved === undefined ? scopeReceipt.saved_choice_availability : savedScope === undefined ? 'unavailable' as const : 'available' as const };
 
   const expand = (
-    <IconButton size="sm" label={t('chat.expand')} icon={<Maximize2 aria-hidden />} onClick={() => setExpanded(true)} />
+    <span className="inline-flex min-w-0 flex-wrap items-center gap-1"><DeviceChoiceFacts observation={scopeObservation} current={t(`chat.segment.${chosen.kind}`)} saved={savedScope === undefined ? undefined : t(`chat.segment.${savedScope.kind}`)} /><IconButton size="sm" label={t('chat.expand')} icon={<Maximize2 aria-hidden />} onClick={() => setExpanded(true)} /></span>
   );
   const scopes = several ? <ChatScope segments={segments} value={chatId} restoreFocusRef={scopeFocus} onValueChange={(id) => { const target = segments.find((segment) => segment.chatId === id); if (target !== undefined) { clearChatFocus(); scopeFocus.current = true; chooseScope(target.kind); clearLink(); } }} /> : undefined;
   return (
@@ -167,7 +172,7 @@ function PanelOf({ nodeId, shown, named }: { nodeId: string; shown: boolean; nam
         title={t('chat.title.node', { name: chosen.name, kind: t(`chat.kind.${chosen.kind}`) })}
         className="[--right-bar-width:80vw]"
       >
-        {expanded && <PanelChat key={`expanded-${chatId}`} chatId={chatId} shown heading="none" scope={scopes} />}
+        {expanded && <PanelChat key={`expanded-${chatId}`} chatId={chatId} shown heading="none" scope={scopes} actions={<DeviceChoiceFacts observation={scopeObservation} current={t(`chat.segment.${chosen.kind}`)} saved={savedScope === undefined ? undefined : t(`chat.segment.${savedScope.kind}`)} />} />}
       </Drawer>
     </div>
   );

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::commands::{Commands, CommandsError, Info, Outcome};
+use orch_db::queries::storage;
 use orch_envhost::{
     environment::{GateState, Gates, Limits},
     file_states::FileStates,
@@ -14,6 +15,7 @@ use orch_envhost::{
     state_store::ObjectStore,
 };
 use orch_link_contract::commands::{Command, CommandError};
+use orch_link_contract::source::{FsRecord, FsRecordResult, RecordKind, RecordState};
 use orch_link_contract::streams::Stream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -261,7 +263,7 @@ impl Native {
     fn record(&self, fixture: &Fixture, snapshot: Id) -> TestResult<FsRecordResult> {
         let index = Index::new(
             orch_link_contract::commands::IndexMode::Full,
-            Limits::default().index_max_entries,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
         );
         self.states.request(
             &self.files.parse("repo")?,
@@ -272,19 +274,31 @@ impl Native {
             self.files.ignore().ok_or("fixture ignore rules absent")?,
         )?;
         self.states.refresh(&self.files, &index, None, true)?;
-        let result = self.states.record(
-            &self.files,
-            &FsRecord {
-                environment_id: fixture.world.environment,
-                snapshot_id: snapshot,
-                directory: "repo".into(),
-                kind: RecordKind::Turn,
-                record_days: 7,
-                max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
-            },
-            self.generation,
-            Time::new(self.clock.now()),
-        )?;
+        let now = Time::new(self.clock.now());
+        self.states
+            .prepare_recordings(&self.files, self.generation, now)?;
+        let result = self
+            .states
+            .capture(
+                &self.files,
+                &FsRecord {
+                    environment_id: fixture.world.environment,
+                    snapshot_id: snapshot,
+                    directory: "repo".into(),
+                    wait_for_indexing: true,
+                    kind: RecordKind::Turn,
+                    record_days: 7,
+                    max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
+                },
+                self.generation,
+                now,
+                &orch_envhost::file_states::RecordOperation {
+                    id: new_id(),
+                    until: Time::new(now.get() + chrono::Duration::minutes(1)),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                },
+            )?
+            .result;
         assert_eq!(result.state, RecordState::Complete);
         Ok(result)
     }
@@ -720,8 +734,6 @@ async fn inline_from_now_recovers_complete_and_expired_capture_with_its_full_rec
                 },
             },
             source: frozen,
-            record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
-            max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
         };
         write_inline_recipe(&fixture, &preparing).await?;
         let mut prior = preparing.plan.clone();
@@ -1068,6 +1080,83 @@ async fn inline_retained_native_success_preserves_repository_identity_with_a_mar
             fixture.world.began(CommandKind::GitPrepare),
             1,
             "the command receipt is replayed, never rerun"
+        );
+        pending_input_only(&fixture).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn current_files_preparation_ignores_automatic_history_limits_and_keeps_the_source_unchanged()
+-> TestResult {
+    for days in [0, 7] {
+        let (fixture, native, _) = fixture().await?;
+        fixture
+            .world
+            .set(
+                fixture.world.root,
+                orch_settings_contract::registry::keys::WORKSPACE_RECORD_DAYS,
+                json!(days),
+            )
+            .await;
+        fixture
+            .world
+            .set(
+                fixture.world.root,
+                orch_settings_contract::registry::keys::WORKSPACE_RECORD_MAX_BYTES,
+                json!(1),
+            )
+            .await;
+        native.states.store().keep_policy(
+            &native.files.parse("repo")?,
+            orch_envhost::state_store::RecordPolicy {
+                record_days: days,
+                max_bytes: 1,
+            },
+        )?;
+        std::fs::write(
+            native.files.root().root_path().join("repo/code"),
+            b"current dirty source beyond the history ceiling",
+        )?;
+        std::fs::write(
+            native.files.root().root_path().join("repo/untracked"),
+            BINARY,
+        )?;
+        let original_index = native.read("repo", ".git/index")?;
+        let mut plan = fixture.plan(true).await?;
+        let Action::Worktree { body, .. } = &mut plan.action else {
+            return Err("worktree plan absent".into());
+        };
+        body.choice.from = WorktreeFrom::Now {
+            state: orch_api_contract::source::WorktreeNow::Now,
+        };
+        let target = body.choice.directory.clone();
+        let (job, preparing, _) = fixture.begin(plan).await?;
+        applied_checkpoint(&job, &preparing).await?;
+        assert_eq!(
+            native.read(&target, "code")?,
+            b"current dirty source beyond the history ceiling"
+        );
+        assert_eq!(native.read(&target, "untracked")?, BINARY);
+        assert_eq!(native.read("repo", ".git/index")?, original_index);
+        assert_eq!(
+            native.read("repo", "code")?,
+            b"current dirty source beyond the history ceiling"
+        );
+        assert!(
+            fixture.world.commands.issued_bodies("fs.record").is_empty(),
+            "an explicit Current files job does not borrow automatic history recording"
+        );
+        assert_eq!(
+            native
+                .states
+                .store()
+                .policy(&native.files.parse("repo")?)?
+                .unwrap(),
+            orch_envhost::state_store::RecordPolicy {
+                record_days: days,
+                max_bytes: 1
+            }
         );
         pending_input_only(&fixture).await?;
     }
