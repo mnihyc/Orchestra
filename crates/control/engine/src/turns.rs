@@ -377,6 +377,7 @@ impl Engine {
         // Earlier cleanup can stamp queue markers and approvals. Publish the
         // thread row after those changes so readers see the whole end.
         let seq = unit.stamp(thread_id).await?;
+        self.retire_unit_turn(unit, thread, turn, seq).await?;
         threads::set_current(
             &mut *unit.conn,
             thread_id,
@@ -501,12 +502,16 @@ impl Engine {
     /// the session, then `turn.start`. Every step looks at the database
     /// again first, so it is safe to call at any time and from any process;
     /// it returns when the turn has been handed to the harness, or has failed.
+    pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
+        crate::summaries::with_program_source_checks(self.drive_start_in_scope(thread_id)).await
+    }
+
     // A repair raises `repairs` and continues the outer `'driving` loop, which starts a new range from it.
     #[allow(
         clippy::mut_range_bound,
         reason = "the outer driving loop rebuilds the range after a state change"
     )]
-    pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
+    async fn drive_start_in_scope(&self, thread_id: Id) -> Result<(), EngineError> {
         let mut repairs: u32 = 0;
         'driving: loop {
             if self.is_stopped() {
@@ -536,7 +541,13 @@ impl Engine {
                 }
                 StartLoad::Ready(snap) => *snap,
             };
-            self.scope_agent_history_notices(&mut snap).await?;
+            if !self.unit_released_for_start(&snap).await? {
+                return Ok(());
+            }
+            let frozen = self.frozen_unit_input(&snap).await?;
+            if frozen.is_none() {
+                self.scope_agent_history_notices(&mut snap).await?;
+            }
             let own_side_recovery = self.agent_history_side_recipient(&snap).await?;
             if snap.segment.native_session_ref.is_some()
                 && self.agent_history_was_removed(snap.segment.id).await?
@@ -683,7 +694,9 @@ impl Engine {
                 }
             }
             // The directory the thread works in, where it is not made yet.
-            self.make_thread_directory(&snap).await?;
+            if frozen.is_none() {
+                self.make_thread_directory(&snap).await?;
+            }
             // The harness process.
             if !self.harness_is_online(snap.key).await? {
                 self.set_step(thread_id, "harness").await?;
@@ -737,7 +750,11 @@ impl Engine {
                     .and_then(|wake| wake.native_wake);
             // The skills the thread is given now. A program takes its skills when its session opens, so a change
             // reaches the thread by opening its session anew before this turn.
-            let mut skills = self.skills_for_thread(thread_id).await?;
+            let mut skills = if frozen.is_some() {
+                Default::default()
+            } else {
+                self.skills_for_thread(thread_id).await?
+            };
             if snap.descriptor.capabilities.skills
                 == orch_agent_contract::descriptor::SkillsSupport::None
             {
@@ -778,25 +795,27 @@ impl Engine {
                 self.defer_background_refresh(&snap).await?;
                 return Ok(());
             }
-            let open = !background_running
-                && native_wake.is_none()
-                && {
-                    let sessions = lock(&self.inner.sessions);
-                    snap.segment.native_session_ref.is_none()
+            let open = !background_running && native_wake.is_none() && {
+                let sessions = lock(&self.inner.sessions);
+                let missing = snap.segment.native_session_ref.is_none()
                     || side_unverified
-                    || !sessions.is_open(snap.segment.id, snap.key)
-                    || sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
-                    || sessions.subagent_limits_changed(snap.segment.id, snap.settings.subagent_limits)
-                    || sessions.configuration_changed(snap.segment.id,&configuration)
-                    || sessions.mcp_changed(snap.segment.id, mcp_revision)
-                    || sessions.orch_tools_changed(snap.segment.id, orch_tools_revision)
-                    || sessions.skills_changed(snap.segment.id, &skills_fingerprint)
-                    // A program that keeps a directory's files while its session is open takes up changes only
-                    // when the session is opened again.
-                    || (snap.descriptor.capabilities.session_reload
+                    || !sessions.is_open(snap.segment.id, snap.key);
+                if missing || frozen.is_some() {
+                    missing
+                } else {
+                    let reload_on_turn = snap.descriptor.capabilities.session_reload
                         == orch_agent_contract::descriptor::SessionReload::Turn
-                        && snap.thread.executor.is_none())
-                };
+                        && snap.thread.executor.is_none();
+                    reload_on_turn
+                        || sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
+                        || sessions
+                            .subagent_limits_changed(snap.segment.id, snap.settings.subagent_limits)
+                        || sessions.configuration_changed(snap.segment.id, &configuration)
+                        || sessions.mcp_changed(snap.segment.id, mcp_revision)
+                        || sessions.orch_tools_changed(snap.segment.id, orch_tools_revision)
+                        || sessions.skills_changed(snap.segment.id, &skills_fingerprint)
+                }
+            };
             if open {
                 self.set_step(thread_id, "session").await?;
                 // A session that exists already (a person began it by hand) is opened as one that was adopted
@@ -835,8 +854,12 @@ impl Engine {
                     Err(error) => return Err(error),
                 };
                 let mut body = sessions::session_open_body_importing(&snap, mode, &import)?;
-                body.mcp = self.mcp_for_session(snap.environment.id, thread_id).await?;
-                body.skills = crate::skills::session_open_skills(&skills);
+                if let Some(frozen) = &frozen {
+                    self.prepare_program_body(&snap, &mut body, frozen).await?;
+                } else {
+                    body.mcp = self.mcp_for_session(snap.environment.id, thread_id).await?;
+                    body.skills = crate::skills::session_open_skills(&skills);
+                }
                 body.raw_after = orch_db::queries::raw_events::last_number(
                     &mut *self.inner.db.acquire().await?,
                     snap.segment.id,
@@ -844,6 +867,7 @@ impl Engine {
                 .await?;
                 if snap.descriptor.capabilities.instruction_root_marker
                     && body.exec.executor.is_none()
+                    && body.program_work.is_none()
                 {
                     let marker = Outgoing::new(
                         ids::instruction_root(snap.turn.id, repairs),
@@ -856,7 +880,7 @@ impl Engine {
                             path: orch_agent_contract::session::INSTRUCTION_ROOT_MARKER.to_owned(),
                         },
                     )?;
-                    match crate::commands::run(self.inner.commands.as_ref(), marker).await? {
+                    match self.run_noted(thread_id, marker).await? {
                         Outcome::Succeeded(_) => body.instruction_root_marker = true,
                         Outcome::Failed(ref failure)
                             if failure.code == "policy.remote_write_disabled" => {}
@@ -890,6 +914,11 @@ impl Engine {
                     )
                 };
                 // What the session is opened with is kept before it is sent; nothing is sent where it cannot be.
+                let (instructions, tools) = if frozen.is_some() {
+                    (Vec::new(), Vec::new())
+                } else {
+                    (snap.instruction_blocks(), snap.tool_blocks())
+                };
                 let record = self
                     .record_model_input(
                         &Delivery {
@@ -900,7 +929,7 @@ impl Engine {
                             purpose: "session",
                             reference: &opening.to_string(),
                         },
-                        &snap.instruction_blocks(),
+                        &instructions,
                     )
                     .await?;
                 let tool_record = self
@@ -913,7 +942,7 @@ impl Engine {
                             purpose: "tool",
                             reference: &format!("{opening}/tools"),
                         },
-                        &snap.tool_blocks(),
+                        &tools,
                     )
                     .await?;
                 let command = {
@@ -923,13 +952,15 @@ impl Engine {
                         opening,
                         snap.key.machine,
                         &body,
-                        snap.segment.native_session_ref.as_ref().map(|native| {
-                            orch_agent_contract::history::NativePrefixSource {
+                        snap.segment
+                            .native_session_ref
+                            .as_ref()
+                            .filter(|_| frozen.is_none())
+                            .map(|native| orch_agent_contract::history::NativePrefixSource {
                                 thread_id,
                                 segment_id: snap.segment.id,
                                 native_session_ref: native.clone(),
-                            }
-                        }),
+                            }),
                     )
                     .await?
                 };
@@ -981,6 +1012,7 @@ impl Engine {
                             &result.native_session_ref,
                             &result.instruction_sources,
                             result.approval_reviewer.as_ref(),
+                            frozen.is_some(),
                         )
                         .await?;
                         sqlx::query("UPDATE segments SET background_wake=$2,session_configuration=$3 WHERE id=$1")
@@ -1073,35 +1105,40 @@ impl Engine {
             if !self.revalidate_native_start(&snap, false).await? {
                 return Ok(());
             }
-            // The files of the input, written into the thread's directory before the turn begins.
-            let Some(placement) = self.deliver_input_files(&snap).await? else {
-                return Ok(());
-            };
-            // Copies have now been verified in this environment; their first-reading index can
-            // accompany this very first input rather than waiting until the following turn.
-            snap.material = {
-                let mut conn = self.inner.db.acquire().await?;
-                self.topic_material(&mut conn, thread_id).await?
-            };
             // The turn. A plan is never worked as ordinary work: a program that lost plan mode since the
             // message was taken fails the turn instead, and the message can be sent again without it.
             if snap.turn.plan && !snap.descriptor.capabilities.plan_mode {
                 return self.fail_start_as(&snap, no_plan_mode()).await;
             }
             self.set_step(thread_id, "turn").await?;
-            // The turn records the skill versions it was given.
-            self.record_turn_skills(snap.turn.id, &skills).await?;
-            self.scope_agent_history_notices(&mut snap).await?;
-            threads::notices::pin_delivery(
-                &mut *self.db().acquire().await?,
-                snap.thread.node_id,
-                snap.turn.id,
-                &snap.pending_notice_positions,
-            )
-            .await?;
-            // A concurrent retry uses the first prepared page, and exact lane checks still apply.
-            self.scope_agent_history_notices(&mut snap).await?;
-            let (text, blocks) = self.turn_text(&snap, &placement).await?;
+            let (text, blocks) = if let Some(frozen) = &frozen {
+                let text = frozen.text.clone();
+                let blocks = vec![ModelBlock::new("input", "input", text.text.clone())];
+                (text, blocks)
+            } else {
+                let Some(placement) = self.deliver_input_files(&snap).await? else {
+                    return Ok(());
+                };
+                // Copies have now been verified in this environment; their first-reading index can
+                // accompany this very first input rather than waiting until the following turn.
+                snap.material = {
+                    let mut conn = self.inner.db.acquire().await?;
+                    self.topic_material(&mut conn, thread_id).await?
+                };
+                // The turn records the skill versions it was given.
+                self.record_turn_skills(snap.turn.id, &skills).await?;
+                self.scope_agent_history_notices(&mut snap).await?;
+                threads::notices::pin_delivery(
+                    &mut *self.db().acquire().await?,
+                    snap.thread.node_id,
+                    snap.turn.id,
+                    &snap.pending_notice_positions,
+                )
+                .await?;
+                // A concurrent retry uses the first prepared page, and exact lane checks still apply.
+                self.scope_agent_history_notices(&mut snap).await?;
+                self.turn_text(&snap, &placement).await?
+            };
             let body = TurnStart {
                 native_model: snap.native_model.clone(),
                 native_wake,
@@ -1161,8 +1198,10 @@ impl Engine {
                 .await?;
             // What of where the agent is goes with it, given once the harness says the turn began.
             let reference = snap.turn.id.to_string();
-            self.context_sending(snap.segment.id, &reference, &snap.context_lines())
-                .await?;
+            if frozen.is_none() {
+                self.context_sending(snap.segment.id, &reference, &snap.context_lines())
+                    .await?;
+            }
             // What the model is given is kept before it is sent; nothing is sent where it cannot be.
             let record = self
                 .record_model_input(
@@ -1193,6 +1232,8 @@ impl Engine {
                     .await;
                 return Ok(());
             };
+            #[cfg(test)]
+            crate::tools::source::tests::pause_program_start(thread_id).await;
             self.inner.commands.issue(command).await?;
             let waited = tokio::time::timeout(
                 self.inner.config.start_timeout,
@@ -1541,7 +1582,7 @@ impl Engine {
                 path,
             },
         )?;
-        let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
+        let outcome = self.run_noted(snap.thread.node_id, command).await?;
         if !matches!(outcome, Outcome::Succeeded(_)) {
             tracing::info!(thread = %snap.thread.node_id, ?outcome, "the directory of the thread could not be made; the turn goes on");
         }
@@ -1772,6 +1813,7 @@ impl Engine {
         native_ref: &str,
         reported: &[orch_agent_contract::session::InstructionFile],
         reviewer: Option<&orch_agent_contract::review::ApprovalReviewer>,
+        isolated: bool,
     ) -> Result<(), EngineError> {
         let mut tx = self.inner.db.begin().await?;
         let finished = {
@@ -1798,23 +1840,27 @@ impl Engine {
                 threads::set_native_session_ref(&mut *unit.conn, snap.segment.id, native_ref, seq)
                     .await?;
                 // What the session was opened with, source by source: what the agent reads, for its readers.
-                let current: Json =
-                    sqlx::query_scalar("SELECT instruction_sources FROM segments WHERE id=$1")
-                        .bind(snap.segment.id)
-                        .fetch_one(&mut *unit.conn)
-                        .await
-                        .map_err(orch_db::DbError::from)?;
-                let early_reports = current
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|source| source["evidence"] == "reported")
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let sources = crate::instruction_sources::merge(
-                    &snap.instruction_sources(reported),
-                    &early_reports,
-                );
+                let sources = if isolated {
+                    json!([])
+                } else {
+                    let current: Json =
+                        sqlx::query_scalar("SELECT instruction_sources FROM segments WHERE id=$1")
+                            .bind(snap.segment.id)
+                            .fetch_one(&mut *unit.conn)
+                            .await
+                            .map_err(orch_db::DbError::from)?;
+                    let early_reports = current
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|source| source["evidence"] == "reported")
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    crate::instruction_sources::merge(
+                        &snap.instruction_sources(reported),
+                        &early_reports,
+                    )
+                };
                 threads::set_instruction_sources(&mut *unit.conn, snap.segment.id, &sources, seq)
                     .await?;
                 // A session that was waiting to be adopted is adopted now.
@@ -1833,7 +1879,11 @@ impl Engine {
         self.commit(tx, finished).await?;
         let mut opened = lock(&self.inner.sessions);
         opened.opened(snap.segment.id, snap.thread.node_id, snap.key);
-        opened.instructions_requested(snap.segment.id, &snap.instructions().text);
+        if isolated {
+            opened.instructions_requested(snap.segment.id, "");
+        } else {
+            opened.instructions_requested(snap.segment.id, &snap.instructions().text);
+        }
         opened.subagent_limits_requested(snap.segment.id, snap.settings.subagent_limits);
         Ok(())
     }
@@ -3095,8 +3145,10 @@ impl Engine {
                     // is the thread's own (its binding, its place) and still there.
                     thread_state::BLOCKED => {
                         let recovered_source = row.blocked_reason.as_deref() == Some("error")
-                            && row.blocked_detail.as_deref()
-                                == Some(crate::preparation::SOURCE_FAILED)
+                            && row
+                                .blocked_detail
+                                .as_deref()
+                                .is_some_and(crate::preparation::is_source_failed_detail)
                             && crate::source::ready(&row)?;
                         (row.blocked_reason.as_deref() != Some("error") || recovered_source)
                             && row.current_turn_id.is_none()

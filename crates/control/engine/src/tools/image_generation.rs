@@ -498,7 +498,7 @@ impl Engine {
                 return Ok(Refusal::new(Code::TooLarge,"The complete image destinations and outcomes exceed max_bytes; shorten output_paths or increase the ordinary reply budget before generating.").into());
             }
             let answer = crate::ids::tool_result(call.thread, &call.call_ref);
-            let mut record = if let Some(reference) = args.delivery_ref {
+            if args.delivery_ref.is_some() {
                 if args.prompt.is_some()
                     || args.options.is_some()
                     || !args.images.is_empty()
@@ -506,126 +506,48 @@ impl Engine {
                 {
                     return Ok(Refusal::invalid("A delivery retry has delivery_ref and output_paths, without a new prompt or options.").into());
                 }
-                let mut conn = self.db().acquire().await?;
-                let record = optional_record(&mut conn, call.thread, reference).await?;
-                let pending: Option<Json> = if record.is_none() {
-                    sqlx::query_scalar("SELECT plan->'accepted_service_result' FROM thread_tool_calls WHERE answer_id=$1 AND thread_id=$2 AND turn_id=$3 AND tool='image_generation' AND NOT retired")
-                        .bind(reference).bind(call.thread).bind(call.turn).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?.flatten()
-                } else {
-                    None
-                };
-                drop(conn);
-                if let Some(record) = record {
-                    result_read(self, call, &record).await?;
+            } else if args
+                .prompt
+                .as_deref()
+                .is_none_or(|prompt| prompt.trim().is_empty())
+            {
+                return Ok(
+                    Refusal::invalid("A new generation needs prompt and output_paths.").into(),
+                );
+            }
+            let reference = args.delivery_ref.unwrap_or(answer);
+            let mut record =
+                if let Some(record) = self.retained_image_record(call, reference).await? {
                     record
                 } else {
-                    let receipt: super::capability_service::CapabilityResultReceipt =
-                        serde_json::from_value(pending.ok_or(EngineError::StaleToolSource)?)?;
-                    let accepted = self.read_accepted_capability_result(call, &receipt).await?;
-                    match self
-                        .materialize_image_result(
-                            call,
-                            reference,
-                            &accepted,
-                            args.output_paths.len(),
-                        )
-                        .await
-                    {
-                        Ok(record) => record,
-                        Err(error) => return accepted_pending(call, reference, &error),
-                    }
-                }
-            } else {
-                if args
-                    .prompt
-                    .as_deref()
-                    .is_none_or(|prompt| prompt.trim().is_empty())
-                {
-                    return Ok(
-                        Refusal::invalid("A new generation needs prompt and output_paths.").into(),
-                    );
-                }
-                let existing = {
-                    let mut conn = self.db().acquire().await?;
-                    source::check_call(&mut conn, call).await?;
-                    sqlx::query_scalar::<_, Option<Json>>(
-                        "SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1",
-                    )
-                    .bind(answer)
-                    .bind(SLOT)
-                    .fetch_one(&mut *conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?
-                };
-                if let Some(existing) = existing {
-                    let record: Record = serde_json::from_value(existing)?;
-                    result_read(self, call, &record).await?;
-                    record
-                } else {
-                    let pending = {
-                        let mut conn = self.db().acquire().await?;
-                        source::check_call(&mut conn, call).await?;
-                        sqlx::query_scalar::<_,Option<Json>>("SELECT plan->'accepted_service_result' FROM thread_tool_calls WHERE answer_id=$1").bind(answer).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?
-                    };
-                    let accepted = if let Some(pending) = pending {
-                        let receipt: super::capability_service::CapabilityResultReceipt =
-                            serde_json::from_value(pending)?;
-                        self.read_accepted_capability_result(call, &receipt).await?
-                    } else {
-                        let input = {
-                            let mut conn = self.db().acquire().await?;
-                            source::check_call(&mut conn, call).await?;
-                            neutral_input(self, &mut conn, call, &args).await?
-                        };
-                        let mut images = self.image_inputs(call, &args).await?;
-                        let mut input = input;
-                        if let Some(binding) = input.inline_images {
-                            let mut pixels = Vec::with_capacity(images.len());
-                            for part in &images {
-                                let orch_model_contract::generation::GenerationPart::ImageRef {
-                                    blob,
-                                    size,
-                                    media_type,
-                                    name,
-                                    ..
-                                } = part
-                                else {
-                                    return Err(EngineError::ToolCallIdentity);
-                                };
-                                pixels.push(orch_image_backends::InputImage {
-                                    name: name.clone(),
-                                    media_type: media_type.clone(),
-                                    bytes: self.image_blob_bytes(*blob, *size).await?,
-                                });
-                            }
-                            input.value = orch_image_backends::materialize_inline_inputs(
-                                &binding,
-                                input.value,
-                                &pixels,
-                                orch_link_contract::version::MAX_FRAME_BYTES as usize,
+                    match self.accept_image_result(call, &args, reference).await {
+                        Ok(accepted) => match self
+                            .materialize_image_result(
+                                call,
+                                reference,
+                                &accepted,
+                                args.output_paths.len(),
                             )
-                            .map_err(EngineError::unreadable)?;
-                            // The verified pixels are now part of neutral JSON itself. No unresolved
-                            // image reference is discarded or delegated to a JSON-only keeper.
-                            images.clear();
+                            .await
+                        {
+                            Ok(record) => record,
+                            Err(error) => return accepted_pending(call, reference, &error),
+                        },
+                        Err(EngineError::CapabilityPacketUnavailable(receipt)) => {
+                            // A concurrent reader can publish the images and release the
+                            // temporary packet between our first lookup and our receipt read.
+                            let Some(record) = self
+                                .retained_image_record(call, reference)
+                                .await?
+                                .filter(|record| record.receipt == *receipt)
+                            else {
+                                return Err(EngineError::CapabilityPacketUnavailable(receipt));
+                            };
+                            record
                         }
-                        self.execute_materialized_capability_service(
-                            call,
-                            "image_generation",
-                            input.value,
-                            images,
-                        )
-                        .await?
-                    };
-                    match self
-                        .materialize_image_result(call, answer, &accepted, args.output_paths.len())
-                        .await
-                    {
-                        Ok(record) => record,
-                        Err(error) => return accepted_pending(call, answer, &error),
+                        Err(error) => return Err(error),
                     }
-                }
-            };
+                };
             if record.images.len() != args.output_paths.len() {
                 return Ok(Answer::Done(
                     json!({"state":"retained","delivery_ref":record.reference,"count":record.images.len(),"reason":"output_paths must name one destination for each retained image; retry this delivery_ref with that many paths. No image was regenerated."}),
@@ -698,6 +620,89 @@ impl Engine {
             image_bytes: largest,
             total_bytes: largest,
         })
+    }
+
+    async fn retained_image_record(
+        &self,
+        call: &CallContext,
+        reference: Id,
+    ) -> Result<Option<Record>, EngineError> {
+        let record = {
+            let mut conn = self.db().acquire().await?;
+            source::check_call(&mut conn, call).await?;
+            optional_record(&mut conn, call.thread, reference).await?
+        };
+        if let Some(record) = &record {
+            result_read(self, call, record).await?;
+        }
+        Ok(record)
+    }
+
+    async fn accept_image_result(
+        &self,
+        call: &CallContext,
+        args: &Arguments,
+        reference: Id,
+    ) -> Result<super::capability_service::AcceptedCapabilityResult, EngineError> {
+        let pending: Option<Json> = {
+            let mut conn = self.db().acquire().await?;
+            source::check_call(&mut conn, call).await?;
+            sqlx::query_scalar("SELECT plan->'accepted_service_result' FROM thread_tool_calls WHERE answer_id=$1 AND thread_id=$2 AND turn_id=$3 AND tool='image_generation' AND NOT retired")
+                .bind(reference).bind(call.thread).bind(call.turn).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?.flatten()
+        };
+        if let Some(pending) = pending {
+            let receipt = serde_json::from_value(pending)?;
+            return self.read_accepted_capability_result(call, &receipt).await;
+        }
+        if args.delivery_ref.is_some() {
+            return Err(EngineError::StaleToolSource);
+        }
+        if let Some(recovered) = self
+            .recover_program_capability_result(call, "image_generation")
+            .await?
+        {
+            return Ok(recovered);
+        }
+        let mut input = {
+            let mut conn = self.db().acquire().await?;
+            source::check_call(&mut conn, call).await?;
+            neutral_input(self, &mut conn, call, args).await?
+        };
+        let mut images = self.image_inputs(call, args).await?;
+        if let Some(binding) = input.inline_images {
+            let mut pixels = Vec::with_capacity(images.len());
+            for part in &images {
+                let orch_model_contract::generation::GenerationPart::ImageRef {
+                    blob,
+                    size,
+                    media_type,
+                    name,
+                    ..
+                } = part
+                else {
+                    return Err(EngineError::ToolCallIdentity);
+                };
+                pixels.push(orch_image_backends::InputImage {
+                    name: name.clone(),
+                    media_type: media_type.clone(),
+                    bytes: self.image_blob_bytes(*blob, *size).await?,
+                });
+            }
+            input.value = orch_image_backends::materialize_inline_inputs(
+                &binding,
+                input.value,
+                &pixels,
+                // Half of what a message may be leaves the other half for the rest of the
+                // request; the link carries what does not fit a frame in parts.
+                orch_link_contract::version::MAX_MESSAGE_BYTES as usize / 2,
+            )
+            .map_err(EngineError::unreadable)?;
+            // The verified pixels are now part of neutral JSON itself. No unresolved
+            // image reference is discarded or delegated to a JSON-only keeper.
+            images.clear();
+        }
+        self.execute_materialized_capability_service(call, "image_generation", input.value, images)
+            .await
     }
 
     async fn materialize_image_result(

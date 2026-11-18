@@ -217,6 +217,10 @@ impl ClaudeCodeAdapter {
 
     fn turn_settings(spec: &SessionSpec) -> TurnSettings {
         TurnSettings {
+            program_output: crate::sessions::native_program_output(
+                spec.settings.native_model.as_deref(),
+                &spec.settings.model,
+            ),
             cache_lifetimes: sessions::native_cache_lifetimes(
                 spec.settings.native_model.as_deref(),
                 &spec.settings.model,

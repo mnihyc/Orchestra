@@ -645,15 +645,27 @@ impl Dispatcher {
                 && inserted
                 && let Some(authority) = &command.authority
             {
-                let current = authority
-                    .current_callers(
-                        &mut tx,
-                        &row,
-                        inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
+                let current = if let Some(issued) = issue_callers.as_ref() {
+                    authority
+                        .current_callers_after_issue(
+                            &mut tx,
+                            &row,
+                            issued,
+                            inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                        )
+                        .await
+                } else {
+                    authority
+                        .current_callers(
+                            &mut tx,
+                            &row,
+                            inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                        )
+                        .await
+                }
+                .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
                 let allowed = current
                     .is_some_and(|callers| issuing_deadlines_allow(&callers, inner.clock.as_ref()));
                 if !allowed {
@@ -1170,9 +1182,32 @@ impl Link {
             orch_db::queries::transaction_guard::lock_action(&mut tx)
                 .await
                 .map_err(|_| internal())?;
+            let mut checked_before_row = None;
             if let Some(value) = &private.authority {
                 let authority: orch_engine::commands::CommandAuthority =
                     serde_json::from_value(value.clone()).map_err(|_| internal())?;
+                if authority
+                    .refused_without_fence(&mut tx, &row)
+                    .await
+                    .map_err(|_| internal())?
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the native command is no longer current",
+                    )
+                    .into());
+                }
+                if authority.reads_before_fence() {
+                    let checked = authority
+                        .current_callers(
+                            &mut tx,
+                            &row,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await;
+                    checked_before_row = Some((authority.clone(), checked));
+                }
                 authority
                     .lock_native_source(&mut tx)
                     .await
@@ -1209,6 +1244,16 @@ impl Link {
                 return Ok(None);
             }
             if current.state != "accepted"
+                && checked_before_row.is_some()
+                && private.authority.is_none()
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native command's source disappeared during admission",
+                )
+                .into());
+            }
+            if current.state != "accepted"
                 && let Some(stored) = private.authority
             {
                 let authority: orch_engine::commands::CommandAuthority =
@@ -1218,15 +1263,36 @@ impl Link {
                             format!("{operation} command authority is invalid"),
                         )
                     })?;
-                let Some(checked) = authority
-                    .current_callers(
-                        &mut tx,
-                        &current,
-                        self.inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|_| internal())?
+                let checked = if let Some((opened, checked)) = checked_before_row {
+                    if !authority.same_origin(&opened) {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native command's source changed during admission",
+                        )
+                        .into());
+                    }
+                    checked
+                } else {
+                    authority
+                        .current_callers(
+                            &mut tx,
+                            &current,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await
+                };
+                let Some(checked) = checked.map_err(|error| {
+                    if let Some(change) = orch_engine::summaries::resource::source_change(&error) {
+                        WireAdmissionError::Command(CommandError::new(ErrorCode::Conflict, change.sentence())
+                            .with_details(serde_json::json!({"source_change":change.reason(),"before_effect":true})))
+                    } else {
+                        match error {
+                            orch_engine::EngineError::Db(DbError::Retry) => WireAdmissionError::Database(DbError::Retry),
+                            _ => WireAdmissionError::Command(internal()),
+                        }
+                    }
+                })?
                 else {
                     return Err(CommandError::new(
                         ErrorCode::Conflict,
@@ -1423,6 +1489,29 @@ impl Link {
                         )
                         .into());
                     }
+                }
+            }
+            if current.state != "accepted" {
+                if canonical.kind == "provider.complete"
+                    && let Some(value) = queries::command_authority(&mut tx, current.id)
+                        .await
+                        .map_err(|_| internal())?
+                {
+                    let authority: orch_engine::commands::CommandAuthority =
+                        serde_json::from_value(value).map_err(|_| internal())?;
+                    authority
+                        .mark_model_admitted(&mut tx, self.inner.clock.time())
+                        .await
+                        .map_err(|_| internal())?;
+                }
+                if matches!(canonical.kind.as_str(), "turn.start" | "turn.start.fenced") {
+                    orch_engine::inputs::native_delivery::mark_model_admitted(
+                        &mut tx,
+                        &current,
+                        self.inner.clock.time(),
+                    )
+                    .await
+                    .map_err(|_| internal())?;
                 }
             }
             #[cfg(any(test, feature = "test-support"))]
