@@ -17,6 +17,8 @@ export interface RequestOptionsProps {
   onChange: (value: unknown) => void;
   /** The surrounding ModelEffort picker owns effort, so it has one control and one value. */
   managedEffort?: boolean;
+  /** The surrounding part already shows the title (a row that opens these options). */
+  hideHeading?: boolean;
 }
 
 const EFFORT_PATHS = [['effort'], ['reasoning_effort'], ['reasoning', 'effort'], ['output_config', 'effort']] as const;
@@ -41,13 +43,13 @@ export function managedEffortForm(schema: unknown, value: unknown) {
   };
 }
 
-export function RequestOptions({ label, schema, value, disabled = false, onChange, managedEffort = false }: RequestOptionsProps) {
+export function RequestOptions({ label, schema, value, disabled = false, onChange, managedEffort = false, hideHeading = false }: RequestOptionsProps) {
   const { t } = useTranslation();
   const form = managedEffort ? managedEffortForm(schema, value) : { schema, value, restore: (next: unknown) => next };
   const change = (next: unknown) => onChange(form.restore(next ?? {}));
   if (form.schema === undefined) return <OtherJson label={label ?? t('providerOptions.title')} objectOnly value={form.value} disabled={disabled} onChange={change} />;
   const root: Schema = { ...record(form.schema), title: label ?? t('providerOptions.title') };
-  return <SchemaManagedPaths.Provider value={managedEffort ? EFFORT_PATHS : []}><SchemaInput root={root} schema={root} value={value} parts={[]} disabled={disabled} problems={[]} driver="provider-options" onChange={change} /></SchemaManagedPaths.Provider>;
+  return <SchemaManagedPaths.Provider value={managedEffort ? EFFORT_PATHS : []}><SchemaInput root={root} schema={root} value={value} parts={[]} disabled={disabled} problems={[]} driver="provider-options" hideHeading={hideHeading} onChange={change} /></SchemaManagedPaths.Provider>;
 }
 
 /** Configuration editors fetch only the selected provider/model; no trial requests discover options. */
@@ -56,7 +58,7 @@ export function ModelRequestOptions({ providerId, model, protocol, ...props }: O
   const provider = useQuery({ ...providerQuery(providerId), enabled: providerId !== '' && model !== '', retry: false });
   const selected = models.data?.find((entry) => entry.model_name === model);
   const schemas = record(selected?.option_constraints);
-  const format = protocol === null ? undefined : protocol ?? provider.data?.protocols[0];
+  const format = protocol === null ? undefined : protocol ?? (provider.data?.kind === 'subscription' ? 'native' : provider.data?.protocols[0]);
   const schema = format === undefined ? undefined : schemas[format];
   const failure = models.error ?? provider.error;
   if (models.isLoading || provider.isLoading) return <SkeletonRows reads={[models, provider]} rows={2} />;

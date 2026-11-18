@@ -28,6 +28,7 @@ pub(crate) type Prepared = Result<Saved, &'static str>;
 /// The path is supplied by the native thread's own opening/started metadata, not an image path.
 #[derive(Debug)]
 pub(crate) struct Sources {
+    local_files: bool,
     home: Option<PathBuf>,
     paths: BTreeMap<String, PathBuf>,
     indices: BTreeMap<String, Results>,
@@ -37,6 +38,7 @@ pub(crate) struct Sources {
 impl Default for Sources {
     fn default() -> Self {
         Self {
+            local_files: true,
             home: None,
             paths: BTreeMap::new(),
             indices: BTreeMap::new(),
@@ -46,6 +48,13 @@ impl Default for Sources {
     }
 }
 impl Sources {
+    pub(crate) fn isolated(mut self) -> Self {
+        self.local_files = false;
+        self.home = None;
+        self.paths.clear();
+        self.indices.clear();
+        self
+    }
     pub(crate) fn with_web_version(mut self, version: &str) -> Self {
         self.web_verified = crate::descriptor::is_pinned_build(version);
         self
@@ -60,6 +69,9 @@ impl Sources {
     }
     /// The caller accepts this only for its registered root or already known child.
     pub(crate) fn observe(&mut self, thread: &Json) {
+        if !self.local_files {
+            return;
+        }
         if let (Some(native), Some(path)) = (thread["id"].as_str(), thread["path"].as_str()) {
             self.paths.insert(native.into(), path.into());
         }
@@ -75,6 +87,7 @@ impl Sources {
             self.indices.clear();
         }
         Self {
+            local_files: self.local_files,
             home: self.home.clone(),
             paths: self.paths.clone(),
             indices: std::mem::take(&mut self.indices),
@@ -92,6 +105,18 @@ impl Sources {
         keys: &[Key],
         outputs: &OutputStore,
     ) -> BTreeMap<Key, Prepared> {
+        if !self.local_files {
+            return keys
+                .iter()
+                .cloned()
+                .map(|key| {
+                    (
+                        key,
+                        Err("native image paths are kept inside this isolated work"),
+                    )
+                })
+                .collect();
+        }
         let mut refreshed = BTreeMap::new();
         keys.iter()
             .map(|key| {

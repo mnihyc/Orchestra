@@ -1531,6 +1531,18 @@ impl World {
         change(&mut lock(&self.config));
     }
 
+    /// An independent worker shares durable rows and the real command supplier, with its own engine state.
+    pub fn recovery_worker(&self) -> Engine {
+        build_engine(
+            &self.pool,
+            &self.clock,
+            &lock(&self.config),
+            &self.commands,
+            &self.access,
+            &self.live,
+        )
+    }
+
     /// The API restarts: the engine is built anew on the same database, the machine's link is made anew
     /// from the cursors the database holds, and the commands that did not end are handed to it.
     pub async fn restart_api(&self) {
@@ -1542,6 +1554,15 @@ impl World {
     pub async fn restart_api_using(
         &self,
         wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+    ) {
+        self.restart_api_configured(wrap, |_| {}).await;
+    }
+
+    /// Restore the deployment's installed services before the new supervisor can pick up work.
+    pub async fn restart_api_configured(
+        &self,
+        wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+        configure: impl FnOnce(&Engine),
     ) {
         let before = self.hub.session_of(self.machine_id);
         self.engine().stop();
@@ -1578,6 +1599,7 @@ impl World {
         engine.attach_capability_services(Arc::new(
             orch_provider_contract::builtins::BuiltinSources::default(),
         ));
+        configure(&engine);
         engine.start();
         *lock(&self.engine) = Some(engine);
         self.spawn_applier(link, notices);

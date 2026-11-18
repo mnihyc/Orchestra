@@ -501,12 +501,16 @@ impl Engine {
     /// the session, then `turn.start`. Every step looks at the database
     /// again first, so it is safe to call at any time and from any process;
     /// it returns when the turn has been handed to the harness, or has failed.
+    pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
+        crate::summaries::with_program_source_checks(self.drive_start_in_scope(thread_id)).await
+    }
+
     // A repair raises `repairs` and continues the outer `'driving` loop, which starts a new range from it.
     #[allow(
         clippy::mut_range_bound,
         reason = "the outer driving loop rebuilds the range after a state change"
     )]
-    pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
+    async fn drive_start_in_scope(&self, thread_id: Id) -> Result<(), EngineError> {
         let mut repairs: u32 = 0;
         'driving: loop {
             if self.is_stopped() {
@@ -837,6 +841,7 @@ impl Engine {
                 let mut body = sessions::session_open_body_importing(&snap, mode, &import)?;
                 body.mcp = self.mcp_for_session(snap.environment.id, thread_id).await?;
                 body.skills = crate::skills::session_open_skills(&skills);
+                self.prepare_program_body(&snap, &mut body).await?;
                 body.raw_after = orch_db::queries::raw_events::last_number(
                     &mut *self.inner.db.acquire().await?,
                     snap.segment.id,
@@ -844,6 +849,7 @@ impl Engine {
                 .await?;
                 if snap.descriptor.capabilities.instruction_root_marker
                     && body.exec.executor.is_none()
+                    && body.program_work.is_none()
                 {
                     let marker = Outgoing::new(
                         ids::instruction_root(snap.turn.id, repairs),
@@ -856,7 +862,7 @@ impl Engine {
                             path: orch_agent_contract::session::INSTRUCTION_ROOT_MARKER.to_owned(),
                         },
                     )?;
-                    match crate::commands::run(self.inner.commands.as_ref(), marker).await? {
+                    match self.run_noted(thread_id, marker).await? {
                         Outcome::Succeeded(_) => body.instruction_root_marker = true,
                         Outcome::Failed(ref failure)
                             if failure.code == "policy.remote_write_disabled" => {}
@@ -1193,6 +1199,8 @@ impl Engine {
                     .await;
                 return Ok(());
             };
+            #[cfg(test)]
+            crate::tools::source::tests::pause_program_start(thread_id).await;
             self.inner.commands.issue(command).await?;
             let waited = tokio::time::timeout(
                 self.inner.config.start_timeout,
@@ -1541,7 +1549,7 @@ impl Engine {
                 path,
             },
         )?;
-        let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
+        let outcome = self.run_noted(snap.thread.node_id, command).await?;
         if !matches!(outcome, Outcome::Succeeded(_)) {
             tracing::info!(thread = %snap.thread.node_id, ?outcome, "the directory of the thread could not be made; the turn goes on");
         }
@@ -3095,8 +3103,10 @@ impl Engine {
                     // is the thread's own (its binding, its place) and still there.
                     thread_state::BLOCKED => {
                         let recovered_source = row.blocked_reason.as_deref() == Some("error")
-                            && row.blocked_detail.as_deref()
-                                == Some(crate::preparation::SOURCE_FAILED)
+                            && row
+                                .blocked_detail
+                                .as_deref()
+                                .is_some_and(crate::preparation::is_source_failed_detail)
                             && crate::source::ready(&row)?;
                         (row.blocked_reason.as_deref() != Some("error") || recovered_source)
                             && row.current_turn_id.is_none()

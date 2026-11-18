@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-driver-docker --lib --test networks
+test -p orch-adapter-codex --test confined_image
+test -p orch-engine --lib -- tools::source::tests::image_services::
+test -p orch-engine --lib -- summaries::resource::tests::
+test -p orch-api-core --test thread_read_tools
+test -p orch-engine --test model_inputs
+test -p orch-db --test usage_ledger
+web test -- tests/component/capability-helper.test.tsx

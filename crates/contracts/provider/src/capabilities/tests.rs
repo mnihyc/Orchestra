@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, reason = "a test fails by panicking")]
 use super::*;
-use orch_types::new_id;
+use orch_types::{Id, new_id};
 
 fn fixture() -> (Registry, ThreadContext, OfferingRef) {
     let provider = new_id();
@@ -45,6 +45,131 @@ fn fixture() -> (Registry, ThreadContext, OfferingRef) {
         .credential_roles
         .insert(provider, vec!["model".into()]);
     (registry, context, reference)
+}
+
+#[test]
+fn a_backend_keeps_its_identity_when_object_members_are_reordered() {
+    let first: BackendRef = serde_json::from_str(
+        r#"{"route":"delegated","config":{"environment_id":"first","options":{"a":1,"b":2}},"offering":null,"future":{"x":1,"y":2}}"#,
+    )
+    .unwrap();
+    let reordered: BackendRef = serde_json::from_str(
+        r#"{"future":{"y":2,"x":1},"offering":null,"config":{"options":{"b":2,"a":1},"environment_id":"first"},"route":"delegated"}"#,
+    )
+    .unwrap();
+    assert_eq!(first.identity().unwrap(), reordered.identity().unwrap());
+    let mut elsewhere = reordered;
+    elsewhere.config["environment_id"] = json!("second");
+    assert_ne!(first.identity().unwrap(), elsewhere.identity().unwrap());
+}
+
+#[test]
+fn a_declared_executor_without_its_consumer_codec_is_not_offered() {
+    let (mut registry, mut context, reference) = fixture();
+    let mut declared = registry.extension("fixture").unwrap().clone();
+    let required = ExecutionSupport {
+        input: "fixture.request".into(),
+        result: "fixture.result".into(),
+        streaming: true,
+        read_tools: true,
+        confined_tools: true,
+    };
+    declared.routes.get_mut("auxiliary").unwrap().execution = Some(required.clone());
+    registry.register("fixture", declared).unwrap();
+    context
+        .choices
+        .insert("lookup".into(), Some("service".into()));
+    context.backends.insert(
+        "lookup".into(),
+        BackendRef {
+            route: "auxiliary".into(),
+            offering: Some(reference),
+            ..BackendRef::default()
+        },
+    );
+    assert_eq!(
+        registry.resolve(&context)[0].reason.as_deref(),
+        Some("execution_codec_unavailable")
+    );
+    let mut incomplete = required.clone();
+    incomplete.confined_tools = false;
+    context
+        .executor_support
+        .insert("model-backed".into(), vec![incomplete]);
+    assert!(registry.resolve(&context)[0].route.is_none());
+    context
+        .executor_support
+        .insert("model-backed".into(), vec![required.clone()]);
+    let route = registry.resolve(&context)[0].route.clone().unwrap();
+    assert_eq!(route.execution.as_ref(), Some(&required));
+    context
+        .executor_support
+        .insert("another-executor".into(), vec![required]);
+    context.executor_support.remove("model-backed");
+    assert!(
+        registry.resolve(&context)[0].route.is_none(),
+        "another route's codec never enables this choice"
+    );
+}
+
+#[test]
+fn an_incomplete_backend_cannot_become_a_valid_model_choice() {
+    let mut backend = BackendRef {
+        route: "fixture".into(),
+        offering: Some(OfferingRef {
+            provider: Id::nil(),
+            offering: "model".into(),
+        }),
+        ..BackendRef::default()
+    };
+    assert!(backend.validate().is_err());
+    backend.offering.as_mut().unwrap().provider = new_id();
+    assert!(backend.validate().is_ok());
+    backend.offering.as_mut().unwrap().offering = " ".into();
+    assert!(backend.validate().is_err());
+    backend.offering = None;
+    backend.route.clear();
+    assert!(backend.validate().is_err());
+}
+
+#[test]
+fn a_program_placement_keeps_explicit_references_and_rejects_invalid_ones() {
+    let environment = new_id();
+    let topic = new_id();
+    let placement =
+        ProgramPlacement::read(&json!({"environment_id":environment,"helper_topic_id":topic}))
+            .unwrap();
+    assert_eq!(placement.environment_id, Some(environment));
+    assert_eq!(placement.helper_topic_id, Some(topic));
+    assert_eq!(
+        ProgramPlacement::read(&Json::Null).unwrap(),
+        ProgramPlacement::default()
+    );
+    for bad in [
+        json!({"environment_id":Id::nil()}),
+        json!({"helper_topic_id":"not-an-id"}),
+        json!({"api_key":"not a placement"}),
+        json!("first online"),
+    ] {
+        assert!(ProgramPlacement::read(&bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_native_execution_failure_keeps_its_original_cause_without_disclosing_it() {
+    let failure = crate::capabilities::CapabilityError::native(
+        crate::SourceError::new(
+            crate::SourceErrorCode::Unavailable,
+            "The program could not finish.",
+        ),
+        std::io::Error::other("private native cause"),
+    );
+    assert_eq!(failure.code, crate::SourceErrorCode::Unavailable);
+    assert!(!format!("{failure:?}").contains("private native cause"));
+    let (portable, native) = failure.into_parts();
+    assert_eq!(portable.message, "The program could not finish.");
+    let original = native.unwrap().downcast::<std::io::Error>().unwrap();
+    assert_eq!(original.to_string(), "private native cause");
 }
 
 #[test]
