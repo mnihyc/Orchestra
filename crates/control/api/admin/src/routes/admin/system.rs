@@ -223,6 +223,65 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
             commands_open: link::count_open_commands(&mut conn).await?,
             jobs_running: jobs::running_jobs(&mut conn).await?,
         },
+        effective_configuration: running_configuration(&ctx),
+    })
+}
+
+fn running_configuration(ctx: &Ctx) -> Option<orch_api_contract::admin::EffectiveConfiguration> {
+    use orch_api_contract::admin::{
+        ConfigurationApplication, ConfigurationKey, ConfigurationValue, EffectiveConfiguration,
+        EffectiveConfigurationValue,
+    };
+    use orch_api_contract::common::{ConfigurationOrigin, Page};
+    let captured = ctx.app.config.startup_facts.as_ref()?;
+    let applied = ctx.app.db.configured_limits()?;
+    let wanted = [
+        (
+            ConfigurationKey::DatabaseAcquireTimeout,
+            "database.acquire_timeout_ms",
+            applied.acquire_timeout,
+        ),
+        (
+            ConfigurationKey::DatabaseRequestStatementTimeout,
+            "database.request_statement_timeout_ms",
+            applied.statement.unwrap_or_default(),
+        ),
+        (
+            ConfigurationKey::DatabaseIdleTransactionTimeout,
+            "database.idle_transaction_timeout_ms",
+            applied.idle_in_transaction,
+        ),
+    ];
+    let values = wanted
+        .into_iter()
+        .map(|(public_key, key, applied)| {
+            let fact = captured.values.iter().find(|fact| fact.key == key)?;
+            if u128::from(fact.milliseconds) != applied.as_millis() {
+                return None;
+            }
+            Some(EffectiveConfigurationValue {
+                public_key,
+                typed_value: if fact.milliseconds == 0 {
+                    ConfigurationValue::Indefinite
+                } else {
+                    ConfigurationValue::Finite {
+                        milliseconds: fact.milliseconds.to_string(),
+                    }
+                },
+                origin: fact.origin.map(|origin| match origin {
+                    orch_config::observed::Origin::Compiled => ConfigurationOrigin::Compiled,
+                    orch_config::observed::Origin::File => ConfigurationOrigin::File,
+                    orch_config::observed::Origin::Environment => ConfigurationOrigin::Environment,
+                }),
+                application: ConfigurationApplication::Restart,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(EffectiveConfiguration {
+        service: SystemComponentName::Api,
+        process_revision: captured.revision.clone(),
+        measured_at: Time::new(chrono::DateTime::<chrono::Utc>::from(captured.observed_at)),
+        values: Page::last(values),
     })
 }
 

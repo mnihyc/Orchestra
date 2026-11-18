@@ -14,6 +14,8 @@ mod thread_history_scope;
 mod creation_replays;
 #[path = "skills/read_scopes.rs"]
 mod read_scopes;
+#[path = "skills/session_outcome.rs"]
+mod session_outcome;
 
 use crate::support::FullSkillVersionReply as _;
 use futures::FutureExt as _;

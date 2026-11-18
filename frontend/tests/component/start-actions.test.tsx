@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { NewThreadDialog } from '@/features/start/BindingDialog';
 import type { PlaceRef } from '@/features/navigation/places';
-import { setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 
 import { show } from './support';
 
@@ -58,3 +58,14 @@ for (const locale of ['en', 'zh-CN'] as const) for (const phase of ['loading', '
     expect(closed).toHaveBeenCalledOnce();
   });
 }
+
+
+it.each(['en', 'zh-CN'] as const)('offers the optional thread name before setup without opening Options in %s', async (locale) => {
+  await setLocale(locale);
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  const name = screen.getByRole('textbox', { name: `${i18n.t('start.options.name')} ${i18n.t('ui.field.optional')}` });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
+  expect(screen.getByRole('button', { name: i18n.t('start.options.title') })).toHaveAttribute('aria-expanded', 'false');
+  await userEvent.type(name, 'Review routing');
+  expect(name).toHaveValue('Review routing');
+});
