@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-authz --test environments
+test -p orch-envhost --test ports_discovery
+test -p orch-connector-core --test ports_carrier
+test -p orch-api-core --test ports_core
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test -- tests/component/port-display.test.tsx tests/component/ports.test.tsx tests/component/access-where-field.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

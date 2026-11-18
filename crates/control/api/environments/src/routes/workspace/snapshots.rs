@@ -600,6 +600,7 @@ async fn recorded_read(
                 machine,
                 orch_link_contract::commands::SerialKey::None,
                 &FsRecordRead {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: source.row.environment_id,
                     snapshot_id: source.row.id,
                     path,
@@ -688,6 +689,7 @@ async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirL
     let truncated = listing::cut(&mut entries);
     read.check().await?;
     Ok(DirListing {
+        facts: None,
         path,
         mount: None,
         source: orch_api_contract::forks::FilesSource::Cached,

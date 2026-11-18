@@ -21,6 +21,7 @@ pub use drivers::{ImageRules, MachineDrivers, ProcessRules};
 pub use orch_api_contract::resources::{
     MachinePolicyDefinition as PolicyDefinition, MachinePolicySection as PolicySection,
 };
+pub use orch_api_contract::workspace::FileReach;
 
 /// The entry of [`PolicyKey::PolicyDelegated`] that hands every key over.
 pub const ALL_KEYS: &str = "*";
@@ -144,6 +145,8 @@ policy_keys! {
     /// The directories inside which an environment of the machine may
     /// have its root, and a mount its location.
     EnvironmentRoots = "environment.roots", Machine;
+    /// The widest human file reach this machine accepts; entries still default to roots.
+    EnvironmentFilesReach = "environment.files_reach", Environments;
     /// Whether files written through the system are accepted.
     EnvironmentRemoteWrite = "environment.remote_write", Environments;
     /// Whether shells may be opened on the machine through the system.
@@ -271,6 +274,7 @@ impl PolicyKey {
         match self {
             Self::EnvironmentRoots => &[S::Environment, S::Node],
             Self::EnvironmentRemoteWrite
+            | Self::EnvironmentFilesReach
             | Self::EnvironmentTerminal
             | Self::EnvironmentAfterUp
             | Self::EnvironmentBrowser
@@ -346,6 +350,7 @@ impl PolicyKey {
             Self::Storages => "Storage",
             Self::ResourceMax => "Resource limits",
             Self::EnvironmentRoots => "Directories Orch may expose",
+            Self::EnvironmentFilesReach => "File reach",
             Self::EnvironmentRemoteWrite => "File writes",
             Self::EnvironmentTerminal => "Shells",
             Self::EnvironmentAfterUp => "Commands after start",
@@ -422,6 +427,9 @@ pub struct MachineHooks {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MachinePorts {
+    /// Exact TCP ports that personal Machine reach may open on this machine's loopback interface.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub loopback_tcp: std::collections::BTreeSet<u16>,
     /// Which audiences can ever be admitted; templates may only narrow these.
     pub allowed: Vec<orch_api_contract::ports::PortOpeningKind>,
     /// No reachable address means publishing on the machine is unavailable.
@@ -450,36 +458,38 @@ impl MachinePorts {
                 .iter()
                 .all(|range| range.from > 0 && range.from <= range.to)
         };
-        self.limits.as_ref().is_none_or(|limits| {
-            limits
-                .incoming_address
-                .as_ref()
-                .is_none_or(|address| !address.trim().is_empty())
-                && limits.listen.as_deref().is_none_or(listen)
-                && limits.ranges.as_deref().is_none_or(ranges)
-        }) && self.publish.as_ref().is_none_or(|publish| {
-            !publish.incoming_address.trim().is_empty()
-                && !publish.ranges.is_empty()
-                && ranges(&publish.ranges)
-                && listen(&publish.listen)
-                && self.limits.as_ref().is_none_or(|limits| {
-                    limits
-                        .incoming_address
-                        .as_ref()
-                        .is_none_or(|fixed| fixed == &publish.incoming_address)
-                        && limits
-                            .listen
-                            .as_deref()
-                            .is_none_or(|fixed| fixed == "all" || fixed == publish.listen)
-                        && limits.ranges.as_ref().is_none_or(|allowed| {
-                            publish.ranges.iter().all(|range| {
-                                allowed
-                                    .iter()
-                                    .any(|outer| outer.from <= range.from && range.to <= outer.to)
+        !self.loopback_tcp.contains(&0)
+            && self.limits.as_ref().is_none_or(|limits| {
+                limits
+                    .incoming_address
+                    .as_ref()
+                    .is_none_or(|address| !address.trim().is_empty())
+                    && limits.listen.as_deref().is_none_or(listen)
+                    && limits.ranges.as_deref().is_none_or(ranges)
+            })
+            && self.publish.as_ref().is_none_or(|publish| {
+                !publish.incoming_address.trim().is_empty()
+                    && !publish.ranges.is_empty()
+                    && ranges(&publish.ranges)
+                    && listen(&publish.listen)
+                    && self.limits.as_ref().is_none_or(|limits| {
+                        limits
+                            .incoming_address
+                            .as_ref()
+                            .is_none_or(|fixed| fixed == &publish.incoming_address)
+                            && limits
+                                .listen
+                                .as_deref()
+                                .is_none_or(|fixed| fixed == "all" || fixed == publish.listen)
+                            && limits.ranges.as_ref().is_none_or(|allowed| {
+                                publish.ranges.iter().all(|range| {
+                                    allowed.iter().any(|outer| {
+                                        outer.from <= range.from && range.to <= outer.to
+                                    })
+                                })
                             })
-                        })
-                })
-        })
+                    })
+            })
     }
     /// Whether an audience is allowed, including a reachable declaration for a host listener.
     #[must_use]
@@ -551,6 +561,9 @@ pub struct LocalPolicy {
     /// See [`PolicyKey::EnvironmentRoots`].
     #[serde(rename = "environment.roots")]
     pub environment_roots: Vec<String>,
+    /// See [`PolicyKey::EnvironmentFilesReach`].
+    #[serde(rename = "environment.files_reach")]
+    pub environment_files_reach: orch_api_contract::workspace::FileReach,
     /// See [`PolicyKey::EnvironmentRemoteWrite`].
     #[serde(rename = "environment.remote_write")]
     pub environment_remote_write: bool,
@@ -629,6 +642,7 @@ impl Default for LocalPolicy {
             local_values: PolicyValues::new(),
             hooks: MachineHooks::default(),
             environment_roots: Vec::new(),
+            environment_files_reach: orch_api_contract::workspace::FileReach::Machine,
             environment_remote_write: false,
             environment_terminal: false,
             environment_after_up: false,
@@ -709,7 +723,9 @@ impl LocalPolicy {
     ) -> EnvironmentSwitches {
         EnvironmentSwitches {
             remote_write: self.environment_remote_write && remote_write.unwrap_or(true),
-            terminal: self.environment_terminal && terminal.unwrap_or(true),
+            terminal: self.environment_terminal
+                && self.environment_files_reach == FileReach::Machine
+                && terminal.unwrap_or(true),
             browser: self.environment_browser && browser.unwrap_or(true),
             vnc: self.environment_vnc && vnc.unwrap_or(true),
         }
@@ -868,6 +884,7 @@ impl LocalPolicy {
             PolicyKey::ResourceMax => serde_json::json!(self.resource_max),
             PolicyKey::LifecycleHooks => serde_json::json!(self.hooks),
             PolicyKey::EnvironmentRoots => texts(&self.environment_roots),
+            PolicyKey::EnvironmentFilesReach => serde_json::json!(self.environment_files_reach),
             PolicyKey::EnvironmentRemoteWrite => Json::Bool(self.environment_remote_write),
             PolicyKey::EnvironmentTerminal => Json::Bool(self.environment_terminal),
             PolicyKey::EnvironmentAfterUp => Json::Bool(self.environment_after_up),
@@ -968,6 +985,10 @@ impl LocalPolicy {
                     .ok_or_else(|| wrong("absolute hook programs and a nonzero timeout_secs"))?;
             }
             PolicyKey::EnvironmentRoots => self.environment_roots = texts("a list of directories")?,
+            PolicyKey::EnvironmentFilesReach => {
+                self.environment_files_reach =
+                    serde_json::from_value(value.clone()).map_err(|_| wrong("roots or machine"))?;
+            }
             PolicyKey::EnvironmentRemoteWrite => self.environment_remote_write = flag()?,
             PolicyKey::EnvironmentTerminal => self.environment_terminal = flag()?,
             PolicyKey::EnvironmentAfterUp => self.environment_after_up = flag()?,
@@ -1499,6 +1520,25 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<LocalPolicy>(written).unwrap(),
             LocalPolicy::default()
+        );
+    }
+
+    #[test]
+    fn a_machine_can_bound_human_file_reach_without_changing_the_agent_sandbox() {
+        use orch_api_contract::workspace::FileReach;
+        let mut policy = LocalPolicy::default();
+        let sandbox = policy.agent_max_sandbox;
+        assert_eq!(policy.environment_files_reach, FileReach::Machine);
+        policy
+            .set(PolicyKey::EnvironmentFilesReach, &json!("roots"))
+            .unwrap();
+        assert_eq!(policy.environment_files_reach, FileReach::Roots);
+        assert_eq!(policy.get(PolicyKey::EnvironmentFilesReach), json!("roots"));
+        assert_eq!(policy.agent_max_sandbox, sandbox);
+        assert!(
+            policy
+                .set(PolicyKey::EnvironmentFilesReach, &json!("anywhere"))
+                .is_err()
         );
     }
 

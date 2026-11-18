@@ -56,6 +56,22 @@ async fn next_of(client: &mut Client, op: &str) -> Value {
     }
 }
 
+/// Register one small selector through the same control frames the browser sends.
+async fn follow_hierarchy_page(
+    client: &mut Client,
+    feed: &str,
+    root: Id,
+    window: u64,
+    query: Value,
+) {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&query).unwrap());
+    let frame = json!({"op":"sub","id":1,"feed":feed,"window":{"kind":"query","root":root,"window":window,"data":data,"complete":true}});
+    assert!(orch_realtime_contract::frames::ClientFrame::decode(&frame.to_string()).is_ok());
+    client.send(frame).await;
+}
+
 // ---------------------------------------------------------------- announcements and the sweep
 
 /// Notification cases disable periodic repair, so delivery proves its source without a timing race.
@@ -610,4 +626,451 @@ async fn a_topic_follows_its_own_sequence_and_is_followed_by_those_who_may_view_
     assert_eq!(frame["seq"], seq);
     assert_eq!(frame["data"]["topic"]["name"], "Login, renamed");
     assert_eq!(frame["data"]["topic"]["seq"], frame["seq"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unread_work_inside_a_closed_branch_changes_its_folded_row_without_sending_descendants() {
+    let rig = Rig::tuned(|tuning| tuning.sweep_every = Duration::ZERO).await;
+    let thread = rig.thread("Hidden below the folded project").await;
+    {
+        let mut conn = rig.pool.acquire().await.unwrap();
+        sqlx::query("INSERT INTO thread_reads(user_id,thread_id,continuation_id,last_read_seq) SELECT $1,node_id,active_continuation_id,activity_seq FROM threads WHERE node_id=$2")
+            .bind(rig.ada).bind(thread).execute(&mut *conn).await.unwrap();
+        hierarchy::put_subscription(
+            &mut conn,
+            rig.ada,
+            rig.root,
+            "all",
+            "manual",
+            rig.clock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    let feed = orch_realtime_contract::feeds::Feed::DocumentTree(
+        orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy {},
+    )
+    .to_string();
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, &feed, None).await;
+    client.expect("subscribed").await;
+    follow_hierarchy_page(
+        &mut client,
+        &feed,
+        rig.root,
+        1,
+        json!({"parent_id":rig.root}),
+    )
+    .await;
+    let opening = next_of(&mut client, "event").await;
+    follow_hierarchy_page(
+        &mut client,
+        &feed,
+        rig.root,
+        2,
+        json!({"parent_id":rig.project}),
+    )
+    .await;
+    let first = &opening["data"]["hierarchy"]["nodes"];
+    assert_eq!(first.as_array().unwrap().len(), 1);
+    assert_eq!(first[0]["id"], rig.project.to_string());
+    assert_eq!(first[0]["folded"]["unread"], false);
+    let mut tx = rig.pool.begin().await.unwrap();
+    sqlx::query("UPDATE threads SET activity_seq=activity_seq+1 WHERE node_id=$1")
+        .bind(thread)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    hierarchy::stamp(&mut tx, thread).await.unwrap();
+    tx.commit().await.unwrap();
+    let changed = loop {
+        let frame = next_of(&mut client, "event").await;
+        if frame["data"]["window"] == 1
+            && frame["data"]["hierarchy"]["nodes"][0]["folded"]["unread"] == true
+        {
+            break frame;
+        }
+    };
+    let nodes = changed["data"]["hierarchy"]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], rig.project.to_string());
+    assert!(
+        !serde_json::to_string(nodes)
+            .unwrap()
+            .contains(&thread.to_string())
+    );
+    let before = hierarchy::tree_seq(&mut rig.pool.acquire().await.unwrap(), rig.root)
+        .await
+        .unwrap();
+    let mut tx = rig.pool.begin().await.unwrap();
+    let read:i64=sqlx::query_scalar("UPDATE thread_reads r SET last_read_seq=t.activity_seq FROM threads t WHERE r.thread_id=t.node_id AND r.thread_id=$1 AND r.user_id=$2 AND r.continuation_id=t.active_continuation_id RETURNING r.last_read_seq")
+        .bind(thread).bind(rig.ada).fetch_one(&mut *tx).await.unwrap();
+    assert!(
+        orch_db::sequences::notify_user_event(
+            &mut tx,
+            &[rig.ada],
+            &json!({"what":"read_state","thread_id":thread,"last_read_seq":read})
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+    loop {
+        let frame = next_of(&mut client, "event").await;
+        if frame["data"]["window"] == 1
+            && frame["data"]["hierarchy"]["nodes"][0]["folded"]["unread"] == false
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        hierarchy::tree_seq(&mut rig.pool.acquire().await.unwrap(), rig.root)
+            .await
+            .unwrap(),
+        before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_private_node_chat_changes_neither_its_visible_parent_signals_nor_its_message_position() {
+    use orch_access_contract::permissions::Permission;
+    use orch_db::queries::access::{self, PageKey, RowWrite};
+    let rig = Rig::tuned(|tuning| tuning.sweep_every = Duration::ZERO).await;
+    let (reader, token) = rig.person("chat-reader").await;
+    access::testing::give_role(
+        &mut rig.pool.acquire().await.unwrap(),
+        rig.root,
+        "user",
+        reader,
+        "viewer",
+        rig.ada,
+        None,
+    )
+    .await
+    .unwrap();
+    let chat: Id = sqlx::query_scalar("SELECT id FROM chats WHERE node_id=$1")
+        .bind(rig.topic)
+        .fetch_one(rig.pool.pool())
+        .await
+        .unwrap();
+    let read_chat = || {
+        Request::builder()
+            .uri(format!("/api/v1/chats/{chat}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        router(&rig).oneshot(read_chat()).await.unwrap().status(),
+        200
+    );
+    let mut tx = rig.pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO chat_states(user_id,chat_id,level,engaged,last_read_seq) VALUES($1,$2,'all',true,0) ON CONFLICT(user_id,chat_id) DO UPDATE SET level='all',engaged=true,last_read_seq=0")
+        .bind(reader).bind(chat).execute(&mut *tx).await.unwrap();
+    for permission in
+        std::iter::once(Permission::ChatView).chain(Permission::ChatView.held_through())
+    {
+        access::write_row(
+            &mut tx,
+            &RowWrite {
+                page: &PageKey::new("node", rig.topic, "live"),
+                profile: "any",
+                permission: permission.as_str(),
+                inherit: false,
+                locked: false,
+            },
+            Some(rig.ada),
+            rig.clock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    access::bump_epoch(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        router(&rig).oneshot(read_chat()).await.unwrap().status(),
+        403
+    );
+    let page = |parent: Id| {
+        Request::builder()
+            .uri(format!("/api/v1/orgs/{}/tree?parent_id={parent}", rig.root))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = router(&rig).oneshot(page(rig.project)).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let child: Value = serde_json::from_slice(&bytes).unwrap();
+    let topic = child["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == json!(rig.topic))
+        .unwrap();
+    assert!(
+        topic["chat"]["seq"].is_null(),
+        "Node View does not expose the private chat's position"
+    );
+    let response = router(&rig).oneshot(page(rig.root)).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let before: Value = serde_json::from_slice(&bytes).unwrap();
+    let feed = before["feed"].as_str().unwrap();
+    let mut client = Client::signed_in(rig.server.addr, &token).await;
+    client.sub(1, feed, None).await;
+    client.expect("subscribed").await;
+    follow_hierarchy_page(
+        &mut client,
+        feed,
+        rig.root,
+        1,
+        json!({"parent_id":rig.root}),
+    )
+    .await;
+    let opening = next_of(&mut client, "event").await;
+    assert_eq!(
+        opening["data"]["hierarchy"]["nodes"][0]["folded"]["unread"],
+        false
+    );
+    let posted = router(&rig)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/chats/{chat}/messages"))
+                .header("authorization", format!("Bearer {}", rig.token))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&orch_api_contract::chats::ChatMessageCreateBody {
+                        parts: vec![orch_api_contract::chats::ChatPart::Text {
+                            text: "Private message after the chat grant ended".to_owned(),
+                        }],
+                        reply_to: None,
+                        agent_review: None,
+                        client_id: orch_types::new_id().to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(posted.status(), 201);
+    sqlx::query("UPDATE chat_states SET mentions_unread=1 WHERE user_id=$1 AND chat_id=$2")
+        .bind(reader)
+        .bind(chat)
+        .execute(rig.pool.pool())
+        .await
+        .unwrap();
+    rename(&rig, rig.project, "Current project").await;
+    loop {
+        let frame = next_of(&mut client, "event").await;
+        let rows = frame["data"]["hierarchy"]["nodes"].as_array().unwrap();
+        let project = rows
+            .iter()
+            .find(|node| node["id"] == json!(rig.project))
+            .unwrap();
+        assert_eq!(project["folded"]["unread"], false);
+        assert_eq!(project["folded"]["mentions"], 0);
+        if project["name"] == "Current project" {
+            break;
+        }
+    }
+    let response = router(&rig).oneshot(page(rig.root)).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let current: Value = serde_json::from_slice(&bytes).unwrap();
+    let project = current["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == json!(rig.project))
+        .unwrap();
+    assert_eq!(project["folded"]["unread"], false);
+    assert_eq!(project["folded"]["mentions"], 0);
+    rig.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hundred_browsed_pages_stay_live_beside_the_inbox_without_a_growing_subscription_frame() {
+    use base64::Engine as _;
+    use orch_realtime_contract::frames::ClientFrame;
+    let rig = Rig::tuned(|tuning| tuning.sweep_every = Duration::ZERO).await;
+    sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at)
+        SELECT id,'project',$1,$1,ARRAY[$1,id],'Page ' || n,$2,$2,$3,$3
+        FROM (SELECT gen_random_uuid() id,n FROM generate_series(1,5000) n) made")
+        .bind(rig.root).bind(rig.ada).bind(rig.clock.now())
+        .execute(&mut *rig.pool.acquire().await.unwrap()).await.unwrap();
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(2, "user", None).await;
+    client.expect("subscribed").await;
+    let mut cursor = None::<String>;
+    let mut feed = String::new();
+    let mut ends = Vec::new();
+    let root = rig.root;
+    for window in 1..=100 {
+        let mut query = format!("parent_id={}&limit=50", rig.root);
+        if let Some(cursor) = &cursor {
+            query.push_str(&format!("&cursor={cursor}"));
+        }
+        let request = Request::builder()
+            .uri(format!("/api/v1/orgs/{}/tree?{query}", rig.root))
+            .header("authorization", format!("Bearer {}", rig.token))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(&rig).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: OrgTreeGetReply = serde_json::from_slice(&bytes).unwrap();
+        let selector = json!({"parent_id":rig.root,"limit":50,"cursor":cursor});
+        cursor = page.next_cursor.clone();
+        if window == 1 {
+            feed = page.feed.clone().unwrap();
+            client.sub(1, &feed, None).await;
+            client.expect("subscribed").await;
+        }
+        assert_eq!(page.feed.as_deref(), Some(feed.as_str()));
+        let data = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&selector).unwrap());
+        let frame = json!({"op":"sub","id":1,"feed":feed,"window":{"kind":"query","root":root,"window":window,"data":data,"complete":true}});
+        let encoded = frame.to_string();
+        assert!(ClientFrame::decode(&encoded).is_ok());
+        client.send(frame).await;
+        let event = next_of(&mut client, "event").await;
+        assert_eq!(event["data"]["window"], window);
+        client.heartbeat().await;
+        if window == 1 || window == 100 {
+            ends.push((
+                window,
+                serde_json::from_value::<Id>(event["data"]["hierarchy"]["nodes"][0]["id"].clone())
+                    .unwrap(),
+            ));
+        }
+    }
+    for (window, node) in ends {
+        client.heartbeat().await;
+        rename(&rig, node, &format!("Changed page {window}")).await;
+        loop {
+            let event = next_of(&mut client, "event").await;
+            if event["data"]["window"] == window
+                && event["data"]["hierarchy"]["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["name"] == format!("Changed page {window}"))
+            {
+                break;
+            }
+        }
+    }
+    let seq = write_to_inbox(&rig, rig.ada, "The inbox remains live", None).await;
+    loop {
+        let frame = next_of(&mut client, "sync").await;
+        if frame["feed"] == "user" {
+            assert_eq!(frame["seq"], seq);
+            break;
+        }
+    }
+    client.ping().await;
+    rig.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_saved_personal_order_replaces_the_live_first_page_without_a_node_change_or_reconnect() {
+    let rig = Rig::tuned(|tuning| tuning.sweep_every = Duration::ZERO).await;
+    let one = orch_types::new_id();
+    let two = orch_types::new_id();
+    let (a, b) = (one.min(two), one.max(two));
+    for (id, name) in [(a, "Ordered Alpha"), (b, "Ordered Zulu")] {
+        sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at) VALUES($1,'project',$2,$2,ARRAY[$2,$1],$3,$4,$4,$5,$5)")
+            .bind(id).bind(rig.root).bind(name).bind(rig.ada).bind(rig.clock.now()).execute(&mut *rig.pool.acquire().await.unwrap()).await.unwrap();
+    }
+    {
+        let order =
+            std::collections::BTreeMap::from([(rig.root.to_string(), json!({"by":"name"}))]);
+        let response = router(&rig)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/me/state/sidebar")
+                    .header("authorization", format!("Bearer {}", rig.token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"order":order})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 204);
+    }
+    let before = hierarchy::tree_seq(&mut rig.pool.acquire().await.unwrap(), rig.root)
+        .await
+        .unwrap();
+    let response = router(&rig)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/orgs/{}/tree?parent_id={}&q=Ordered&sort=navigation&limit=1",
+                    rig.root, rig.root
+                ))
+                .header("authorization", format!("Bearer {}", rig.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let page: OrgTreeGetReply = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(page.readable()[0].id, a);
+    let feed = page.feed.unwrap();
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, &feed, None).await;
+    client.expect("subscribed").await;
+    follow_hierarchy_page(
+        &mut client,
+        &feed,
+        rig.root,
+        1,
+        json!({"parent_id":rig.root,"q":"Ordered","sort":"navigation","limit":1}),
+    )
+    .await;
+    let initial = next_of(&mut client, "event").await;
+    assert_eq!(initial["data"]["hierarchy"]["nodes"][0]["id"], json!(a));
+    let order = std::collections::BTreeMap::from([(rig.root.to_string(), json!({"by":"newest"}))]);
+    let response = router(&rig)
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/me/state/sidebar")
+                .header("authorization", format!("Bearer {}", rig.token))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"order":order})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 204);
+    let changed = next_of(&mut client, "event").await;
+    assert_eq!(changed["data"]["hierarchy"]["nodes"][0]["id"], json!(b));
+    assert_eq!(changed["data"]["hierarchy"]["ordering"]["by"], "newest");
+    assert_eq!(
+        hierarchy::tree_seq(&mut rig.pool.acquire().await.unwrap(), rig.root)
+            .await
+            .unwrap(),
+        before
+    );
+    rig.shutdown().await;
 }

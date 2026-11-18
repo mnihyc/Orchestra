@@ -97,7 +97,7 @@ import { i18n } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { readViewChoice, writeViewChoice, useViewChoice } from '@/lib/viewChoices';
 import { holds } from '@/lib/permissions';
-import { reloadOrgTree, useOrgTreeFeed } from '@/realtime/live';
+import { reloadOrgTree, useOrgTreeFeed, useScopedTreeBranches, loadMoreTree } from '@/realtime/live';
 import { useChatStates } from '@/realtime/stores/chat';
 import { pathTo, useOrgTree } from '@/realtime/stores/tree';
 import { useActionKeys, useKeyAction } from '@/shell/keys';
@@ -361,7 +361,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
     if (orgId !== null && orgId !== selected) selectOrg(userId, orgId);
   }, [orgId, selected, userId]);
 
-  useOrgTreeFeed(shown ? orgId : null);
+  useOrgTreeFeed(shown ? orgId : null,treeOrder.revision);
   useAttentionFeed(shown ? orgId : null);
   const tree = useOrgTree(orgId);
   const attention = useAttention(orgId);
@@ -391,7 +391,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   const keptOpen = useMemo(() => (orgId === null ? null : readOpen(userId, orgId)), [orgId, userId]);
   const expanded = useMemo<ReadonlySet<string>>(() => {
     if (opened !== null && opened.orgId === orgId) return opened.ids;
-    return keptOpen ?? new Set(tree.loaded ? firstExpanded(tree) : []);
+    return keptOpen ?? new Set(tree.loaded?(tree.initialOpen===undefined?firstExpanded(tree):tree.initialOpen??[]):[]);
   }, [opened, orgId, keptOpen, tree]);
   const setExpanded = useCallback(
     (next: ReadonlySet<string>) => {
@@ -506,6 +506,8 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
 
   // What the reader typed to narrow the tree by a name.
   const [filter, setFilter] = useState('');
+  useScopedTreeBranches(shown?orgId:null,expanded,currentId??currentThread,filter);
+
   const filterField = useRef<HTMLInputElement>(null);
   // Once the rows are drawn again, the tree's own row takes the keyboard.
   const toFirstRow = () => requestAnimationFrame(() => bar.current?.querySelector<HTMLElement>('[role="treeitem"][tabindex="0"]')?.focus());
@@ -649,7 +651,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
           acts.push(() => markThreadRead(id, seq).then((read) => attentionWriter.read(id, read)));
         }
         const chat = chatStanding(node.chat, chats);
-        if (chat.unread || chat.mentions > 0) readChat(node.chat.id, Math.max(node.chat.seq, chats.latest.get(node.chat.id)?.seq ?? 0));
+        if (node.chat.seq !== null && (chat.unread || chat.mentions > 0)) readChat(node.chat.id, Math.max(node.chat.seq, chats.latest.get(node.chat.id)?.seq ?? 0));
         pending.push(...(below().get(node.id) ?? []));
       }
       void allDone(acts).then((done) => {
@@ -990,6 +992,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
               <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />
             ) : hasRows ? (
               <NodeTree
+                orgId={orgId}
                 tree={tree}
                 rootId={rootId}
                 view={view}
@@ -1008,6 +1011,10 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
               <EmptyState compact icon={<FolderOpen aria-hidden />} title={t(beginning === null ? 'navigation.noProjects' : 'navigation.begins.empty')} />
             )}
           </div>
+          {orgId!==null && <Pagination hasMore={tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.cursor!==null && tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.cursor!==undefined}
+            loading={tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.pending===true}
+            error={tree.branches?.get(filter.trim()===''?orgId:`search:${filter.trim()}`)?.error}
+            onMore={()=>loadMoreTree(orgId,filter.trim()===''?orgId:`search:${filter.trim()}`)} />}
           {show.chats && <Pagination hasMore={mine.hasNextPage} loading={mine.isFetchingNextPage} error={mine.error} onMore={() => void mine.fetchNextPage()} />}
           {tree.loaded && tree.error !== null && orgId !== null && <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />}
           </>}

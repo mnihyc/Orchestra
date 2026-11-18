@@ -492,6 +492,7 @@ async fn review_host_content_needs_its_actual_publisher_read_and_no_fabricated_h
     let (world, manager, _, env, project, machine) = setup().await;
     port_policy(&world, "port_host", "ask").await;
     let ports = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(HostPorts {
             incoming_address: "review-native-publisher.example.test".into(),
