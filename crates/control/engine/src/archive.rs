@@ -863,6 +863,7 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    native_target: None,
                     authority: None,
                     id: row.id,
                     machine: row.machine_id,
@@ -915,6 +916,7 @@ impl Engine {
                 link::insert_command(
                     &mut tx,
                     &link::NewCommand {
+                        native_target: None,
                         id,
                         machine_id: previous.machine_id,
                         kind: &previous.kind,
@@ -925,6 +927,7 @@ impl Engine {
                     now,
                 )
                 .await?;
+                link::narrow_command_authority_until(&mut tx, id, previous.authority_until).await?;
             }
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
@@ -943,6 +946,7 @@ pub(crate) async fn persist(
     link::insert_command(
         conn,
         &link::NewCommand {
+            native_target: None,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
