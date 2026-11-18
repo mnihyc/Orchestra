@@ -31,17 +31,27 @@ export async function threadOpening(world: World, person: Person, threadId: stri
   }
   const opening: ThreadOpening = {
     sync,
+    screen: { status: 'ready', data: world.threads.screenFacts(person, threadId) },
     draft: await optional(`/threads/${threadId}/draft`) as ThreadOpening['draft'],
-    parameters: await optional(`/threads/${choices}/parameters`) as ThreadOpening['parameters'],
+    parameters: structuredClone(await optional(`/threads/${choices}/parameters`)) as ThreadOpening['parameters'],
     limits: await optional(`/threads/${choices}/limits`) as ThreadOpening['limits'],
-    settings: await read(`/nodes/${choices}/settings`) as ThreadOpening['settings'],
-    outline: parent === undefined
-      ? await read(`/threads/${threadId}/outline`, new URLSearchParams({ limit: String(limit) })) as ThreadOpening['outline']
-      : world.workspace.outlineSnapshot(sync, new URLSearchParams({ limit: String(limit) })),
     gateway: sync.projection?.follows_active === false ? null : {
       status: 'ready' as const, data: await read(`/threads/${threadId}/gateway`) as NonNullable<Extract<NonNullable<ThreadOpening['gateway']>, { status: 'ready' }>['data']>,
     },
     ...(pending === undefined ? {} : { pending_agent_schedules: pending }),
   };
+  if (opening.parameters !== null) {
+    const visibleTurns = new Set(sync.items.flatMap((item) => item.turn_id === null ? [] : [item.turn_id]));
+    if (sync.thread.current_turn_id !== null) visibleTurns.add(sync.thread.current_turn_id);
+    const models = new Set([opening.parameters.model.value, ...sync.turns.filter((turn) => visibleTurns.has(turn.id))
+      .flatMap((turn) => [turn.model, ...(turn.usage_detail?.effective_model ? [turn.usage_detail.effective_model] : [])])]);
+    opening.parameters.model.options = opening.parameters.model.options.filter((option) => models.has(option.model_name));
+    for (const option of opening.parameters.model.options) {
+      option.option_constraints = {};
+      delete option.parameters.request_options;
+      delete option.parameters.offered;
+    }
+    opening.parameters.model.options_partial = true;
+  }
   return opening;
 }

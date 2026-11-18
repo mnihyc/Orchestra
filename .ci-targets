@@ -1,0 +1,1 @@
+web test -- tests/component/settings-collection.test.tsx -t 'opens Acme Defaults'

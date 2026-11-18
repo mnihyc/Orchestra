@@ -14,14 +14,11 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{str::FromStr, time::Duration};
+use tracing::instrument::WithSubscriber as _;
 
 /// One connection, alone or inside a transaction.
 pub type Conn = sqlx::PgConnection;
 
-/// How long a caller waits for a free connection before the request
-/// fails: long enough to ride out a burst, short enough that a stuck
-/// database shows as errors and not as hanging requests.
-const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The default warning boundary for a statement or a successful pool acquisition: one second.
 const SLOW_DEFAULT: Duration = Duration::from_secs(1);
 
@@ -29,6 +26,8 @@ const SLOW_DEFAULT: Duration = Duration::from_secs(1);
 /// hold rows, a pooled connection or the vacuum horizon for long.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
+    /// How long acquiring a pool connection, including opening it, may take.
+    pub acquire_timeout: Duration,
     /// How long a session may sit inside a transaction doing nothing before PostgreSQL ends it.
     pub idle_in_transaction: Duration,
     /// How long one statement may run before PostgreSQL cancels it; none for no bound.
@@ -41,16 +40,50 @@ impl Limits {
     /// builds and loaded machines. Statements are cancelled after 15 s, fifteen times the
     /// one-second statement budget and longer than the 10 s pool acquisition timeout,
     /// so a statement blocked on a lock fails instead of retaining a connection indefinitely.
-    pub const REQUESTS: Self = Self {
-        idle_in_transaction: Duration::from_secs(10),
-        statement: Some(Duration::from_secs(15)),
-    };
+    pub const REQUESTS: Self = Self::milliseconds(
+        orch_config::server::DATABASE_ACQUIRE_TIMEOUT_MS,
+        orch_config::server::DATABASE_REQUEST_STATEMENT_TIMEOUT_MS,
+        orch_config::server::DATABASE_IDLE_TRANSACTION_TIMEOUT_MS,
+    );
     /// A background service's (the worker): the same 10 s for a transaction left idle, and no statement bound,
     /// for the rare long statement of a purge, a rollup or a migration of data that it runs.
-    pub const BACKGROUND: Self = Self {
-        idle_in_transaction: Duration::from_secs(10),
-        statement: None,
-    };
+    pub const BACKGROUND: Self = Self::milliseconds(
+        orch_config::server::DATABASE_ACQUIRE_TIMEOUT_MS,
+        orch_config::server::DATABASE_BACKGROUND_STATEMENT_TIMEOUT_MS,
+        orch_config::server::DATABASE_IDLE_TRANSACTION_TIMEOUT_MS,
+    );
+
+    /// Request limits from the configuration already loaded before opening the database.
+    #[must_use]
+    pub fn requests(config: &orch_config::server::Database) -> Self {
+        Self::configured(config, config.request_statement_timeout_ms)
+    }
+
+    /// Worker and maintenance limits from that process's startup configuration.
+    #[must_use]
+    pub fn background(config: &orch_config::server::Database) -> Self {
+        Self::configured(config, config.background_statement_timeout_ms)
+    }
+
+    fn configured(config: &orch_config::server::Database, statement_ms: u64) -> Self {
+        Self::milliseconds(
+            config.acquire_timeout_ms,
+            statement_ms,
+            config.idle_transaction_timeout_ms,
+        )
+    }
+
+    const fn milliseconds(acquire_ms: u64, statement_ms: u64, idle_ms: u64) -> Self {
+        Self {
+            acquire_timeout: Duration::from_millis(acquire_ms),
+            idle_in_transaction: Duration::from_millis(idle_ms),
+            statement: if statement_ms == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(statement_ms))
+            },
+        }
+    }
 
     /// The settings a connection of the pool starts with: these limits, and no JIT compilation.
     /// PostgreSQL compiles a statement with LLVM once the planner's estimate passes
@@ -65,9 +98,10 @@ impl Limits {
             "idle_in_transaction_session_timeout",
             millis(self.idle_in_transaction),
         )];
-        if let Some(statement) = self.statement {
-            settings.push(("statement_timeout", millis(statement)));
-        }
+        settings.push((
+            "statement_timeout",
+            millis(self.statement.unwrap_or_default()),
+        ));
         settings.push(("jit", "off".to_owned()));
         settings
     }
@@ -269,8 +303,17 @@ impl Tx {
     /// Commits. The commit runs what the transaction left for it (`orch_commit_work`): a change
     /// of authority it decided under refuses it as [`DbError::Retry`].
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        let Self { inner, held } = self;
-        let done = inner.commit().await;
+        let Self { mut inner, held } = self;
+        let done = finish_boundary(async move {
+            // Run deferred checks while a rejected transaction still needs its
+            // rollback. A failed PostgreSQL COMMIT has already ended it, while
+            // SQLx would otherwise queue another rollback on the same session.
+            sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+                .execute(&mut *inner)
+                .await?;
+            inner.commit().await
+        })
+        .await;
         drop(held);
         done
     }
@@ -278,10 +321,22 @@ impl Tx {
     /// Rolls back.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         let Self { inner, held } = self;
-        let done = inner.rollback().await;
+        let done = finish_boundary(async move { inner.rollback().await }).await;
         drop(held);
         done
     }
+}
+
+/// Once BEGIN, COMMIT or ROLLBACK is sent, one task owns it through the
+/// server's answer. Cancelling its waiter cannot return a half-finished boundary
+/// to the pool. A BEGIN whose caller disappeared drops its completed transaction
+/// normally; a COMMIT already begun finishes even if the HTTP request goes away.
+async fn finish_boundary<T: Send + 'static>(
+    work: impl Future<Output = Result<T, sqlx::Error>> + Send + 'static,
+) -> Result<T, sqlx::Error> {
+    tokio::spawn(work.with_current_subscriber())
+        .await
+        .map_err(|error| sqlx::Error::Io(std::io::Error::other(error)))?
 }
 
 /// What went wrong in the database, by what a caller can do about it.
@@ -371,6 +426,7 @@ impl DbError {
 #[derive(Debug, Clone)]
 pub struct Db {
     pool: sqlx::PgPool,
+    configured_limits: Option<Limits>,
 }
 
 impl Db {
@@ -413,7 +469,7 @@ impl Db {
         );
         let pool = PgPoolOptions::new()
             .max_connections(connections)
-            .acquire_timeout(ACQUIRE_TIMEOUT)
+            .acquire_timeout(limits.acquire_timeout)
             .acquire_slow_level(log::LevelFilter::Warn)
             .acquire_slow_threshold(slow_acquire)
             .connect_with(options)
@@ -434,7 +490,10 @@ impl Db {
         metrics::gauge!(metrics_names::MAX).set(f64::from(connections));
         metrics::counter!(metrics_names::ACQUIRE_OVER_BAR).increment(0);
         metrics::counter!(metrics_names::HELD_OVER_GUARD).increment(0);
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            configured_limits: Some(limits),
+        })
     }
 
     /// Notes that a caller asks for a connection, before it waits for one: a pool whose connections are all
@@ -468,7 +527,16 @@ impl Db {
     /// The database behind an existing pool.
     #[must_use]
     pub fn from_pool(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            configured_limits: None,
+        }
+    }
+
+    /// Limits applied when this pool was opened; an externally supplied pool is unreported.
+    #[must_use]
+    pub fn configured_limits(&self) -> Option<Limits> {
+        self.configured_limits
     }
 
     /// The pool, for the few things that need it as such (a listener).
@@ -501,7 +569,8 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let inner = finish_boundary(async move { pool.begin().await }).await?;
         self.measure(asked.elapsed());
         let mut tx = Tx {
             inner,
@@ -524,7 +593,8 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let mut inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let mut inner = finish_boundary(async move { pool.begin().await }).await?;
         self.measure(asked.elapsed());
         sqlx::query(isolation).execute(&mut *inner).await?;
         let mut tx = Tx {
@@ -595,7 +665,7 @@ mod tests {
     fn every_pool_starts_its_connections_without_jit_and_within_its_limits() {
         for (limits, statement) in [
             (Limits::REQUESTS, Some("15000")),
-            (Limits::BACKGROUND, None),
+            (Limits::BACKGROUND, Some("0")),
         ] {
             let settings = limits.settings();
             let value = |name: &str| {
@@ -614,6 +684,76 @@ mod tests {
                     .is_some_and(|text| text.contains("-c jit=off"))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_pool_applies_the_configured_deadlines_and_reports_only_known_limits() {
+        let test = TestDb::fresh().await;
+        let limits = Limits {
+            acquire_timeout: Duration::from_millis(31_000),
+            idle_in_transaction: Duration::from_millis(9_876),
+            statement: Some(Duration::from_millis(23_456)),
+        };
+        let db = Db::connect_with_limits(&test.url, 1, SLOW_DEFAULT, SLOW_DEFAULT, limits)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.pool.options().get_acquire_timeout(),
+            limits.acquire_timeout
+        );
+        for (name, expected) in [
+            ("statement_timeout", 23_456_i64),
+            ("idle_in_transaction_session_timeout", 9_876),
+        ] {
+            let applied: i64 =
+                sqlx::query_scalar("SELECT setting::bigint FROM pg_settings WHERE name=$1")
+                    .bind(name)
+                    .fetch_one(db.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(applied, expected);
+        }
+        assert_eq!(db.configured_limits(), Some(limits));
+        assert_eq!(Db::from_pool(test.pool.clone()).configured_limits(), None);
+    }
+
+    #[test]
+    fn each_service_profile_uses_its_loaded_deadlines_instead_of_another_profiles_defaults() {
+        let config = orch_config::server::Database {
+            acquire_timeout_ms: 70_000,
+            request_statement_timeout_ms: 0,
+            background_statement_timeout_ms: 90_000,
+            idle_transaction_timeout_ms: 0,
+            ..Default::default()
+        };
+        let request = Limits::requests(&config);
+        let background = Limits::background(&config);
+        assert_eq!(request.acquire_timeout, Duration::from_secs(70));
+        assert_eq!(background.acquire_timeout, request.acquire_timeout);
+        assert_eq!(request.idle_in_transaction, Duration::ZERO);
+        assert_eq!(request.statement, None);
+        assert_eq!(background.statement, Some(Duration::from_secs(90)));
+        assert_eq!(Limits::requests(&Default::default()), Limits::REQUESTS);
+        assert_eq!(Limits::background(&Default::default()), Limits::BACKGROUND);
+    }
+
+    #[test]
+    fn an_explicitly_unbounded_pool_clears_the_databases_own_statement_default() {
+        let limits = Limits {
+            idle_in_transaction: Duration::ZERO,
+            ..Limits::BACKGROUND
+        };
+        let settings = limits.settings();
+        assert!(
+            settings
+                .iter()
+                .any(|(key, value)| *key == "statement_timeout" && value == "0")
+        );
+        assert!(
+            settings
+                .iter()
+                .any(|(key, value)| *key == "idle_in_transaction_session_timeout" && value == "0")
+        );
     }
 
     #[tokio::test]
