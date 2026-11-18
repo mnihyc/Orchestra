@@ -118,9 +118,11 @@ fn context(clock: &dyn Clock) -> CommandContext {
 
 fn record() -> Command {
     Command::FsRecord(FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: new_id(),
         snapshot_id: new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 1,
         max_bytes: 1024,
@@ -129,6 +131,8 @@ fn record() -> Command {
 
 fn result() -> CommandResult {
     CommandResult::FsRecord(FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,

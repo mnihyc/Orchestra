@@ -17,7 +17,7 @@ provider.facts.credential=null;
 for(const member of FACT_MEMBERS)provider.facts_state[member]='not_read_yet';
 provider.facts.available_resets=null;
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),providerQuery:()=>({queryKey:['compact-provider'],queryFn:()=>Promise.resolve(provider)})}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#resource">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#resource">{children}</a>}));
 vi.mock('@/features/resources/trail',()=>({useResourceHeading:()=>undefined}));
 vi.mock('@/features/resources/providers/acts',()=>({useProviderActs:()=>({page:()=>({primary:null,edit:null,menu:[]}),dialogs:null})}));
 vi.mock('@/shell/Page',async(load)=>({...await load<object>(),Page:({children}:{children:ReactNode})=><main>{children}</main>,PageHeader:({title,actions}:PageHeaderProps)=><header><h1>{title}</h1>{actions}</header>}));

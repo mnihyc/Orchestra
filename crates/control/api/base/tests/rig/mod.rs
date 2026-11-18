@@ -249,6 +249,7 @@ pub fn engine_config() -> EngineConfig {
 // ---------------------------------------------------------------- the engine's commands
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     authority: Option<orch_engine::commands::CommandAuthority>,
     return_source: Option<orch_engine::credentials::handover_authority::ReturnSource>,
     machine: Id,
@@ -277,7 +278,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -423,6 +424,14 @@ impl Commands for ScriptedCommands {
     async fn retained_body(&self, id: Id) -> Result<Option<Json>, CommandsError> {
         Ok(lock(&self.issued).get(&id).map(|entry| entry.body.clone()))
     }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
+    }
     async fn retained_command(
         &self,
         id: Id,
@@ -482,6 +491,7 @@ impl Commands for ScriptedCommands {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 authority,
                 return_source,
                 machine: command.machine,
@@ -816,6 +826,7 @@ impl Rig {
                 .expect("a link without gateways can be made");
         let state = Arc::new(AppState {
             builtin_sources: old.builtin_sources.clone(),
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             db: db.clone(),
             config: Arc::clone(&old.config),
@@ -985,6 +996,7 @@ impl Rig {
                         descriptor: serde_json::from_value(descriptor()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -993,6 +1005,13 @@ impl Rig {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: format!("native-{}", open.session.segment_id),
                             resumed: open.session.mode == SessionMode::Resume,
                             import_report: None,
