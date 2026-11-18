@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test notifications
+test -p orch-db --lib -- queries::notifications::subscribers::tests::
+test -p orch-api-core --test notifications_told --test notifications_feed
+web typecheck
+web lint
+web test -- tests/component/timeline-accessibility.test.tsx tests/component/fnotify-away.test.tsx tests/component/thread-hover-actions.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts

@@ -103,6 +103,7 @@ services:
       - ./config/secrets/orch_ca_cert.pem:/run/secrets/orch_ca_cert.pem:ro
       - ./config/secrets/orch_ca_key.pem:/run/secrets/orch_ca_key.pem:ro
       - ./config/secrets/orch_master_key:/run/secrets/orch_master_key:ro
+      - ./config/secrets/orch_vapid_private_key:/run/secrets/orch_vapid_private_key:ro
       - ./config/secrets/orch_ports_assertion_key:/run/secrets/orch_ports_assertion_key:ro
       - ./config/secrets/service_api_cert.pem:/run/secrets/service_api_cert.pem:ro
       - ./config/secrets/service_api_key.pem:/run/secrets/service_api_key.pem:ro

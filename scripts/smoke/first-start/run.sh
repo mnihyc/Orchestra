@@ -15,6 +15,10 @@ TAG="$(release_tag "$A")"
 new_stack first-start 41200 "$A"
 trap 'finish' EXIT
 
+# Web Push uses the installation's public HTTPS address as its sender contact.
+# The scenario reaches this stack through its loopback edge for readiness and API calls.
+sed -i 's|^public_url = .*|public_url = "https://orch.example.test"|' "$STACK/config/orch.toml"
+
 step "a release that does not match its manifest is refused before anything is installed"
 DAMAGED="$SMOKE_DIR/first-start/damaged"
 rm -rf "$DAMAGED"; cp -al "$A" "$DAMAGED"
@@ -74,6 +78,18 @@ case "$COOKIES" in *orch_session=*HttpOnly*Secure*SameSite=Strict*) pass "signin
 if sign_in; then pass "signing in works through the edge"; else fail "signing in works through the edge"; fi
 refuses "a wrong password is refused" curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/auth/login" \
   -d "{\"login\":\"$ADMIN_NAME\",\"password\":\"not the password\"}"
+
+step "browser notifications after first sign-in"
+push_key_offered() {
+  edge_get /api/v1/meta | jq -e '.push_public_key | type == "string" and length > 0'
+}
+push_channel_offered() {
+  edge_get /api/v1/notification-channels -H "authorization: Bearer $TOKEN" |
+    jq -e '[.[] | select(.kind == "push" and .owner == "system")] |
+           length == 1 and .[0].enabled == true and .[0].route.enabled == false and .[0].route.needs == "device"'
+}
+check "the web edge offers a browser registration key" push_key_offered
+check "the first account can choose the system push channel and has no subscribed device" push_channel_offered
 
 step "the edge, tried from inside the stack as a browser and a machine would"
 # From the API's container the web edge is the service `frontend`, and the pinned endpoint

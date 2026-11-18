@@ -117,6 +117,7 @@ async fn a_paste_at_the_share_boundary_is_read_from_its_blob_and_sent_in_the_mes
         public.inline_text.is_none(),
         "opening the timeline must not preload the folded text"
     );
+    let start = world.turn_start(thread, 0).await;
     let stored: serde_json::Value =
         sqlx::query_scalar("SELECT content FROM thread_inputs WHERE id=$1")
             .bind(accepted.input.id)
@@ -129,7 +130,6 @@ async fn a_paste_at_the_share_boundary_is_read_from_its_blob_and_sent_in_the_mes
     };
     assert_eq!(paste.inline_text.as_deref(), Some(text.as_str()));
     assert!(orch_engine::delivery::plan(accepted.input.id, &stored).is_empty());
-    let start = world.turn_start(thread, 0).await;
     assert!(start.text.contains(&text));
     assert!(!start.text.contains("forged inline words"));
 }
@@ -170,6 +170,9 @@ async fn the_sender_can_choose_inline_past_the_default_or_a_file_under_the_alway
             .submit_input(&Caller::session(world.ada), thread, request)
             .await
             .unwrap();
+        if inline {
+            world.turn_start(thread, 0).await;
+        }
         let stored: serde_json::Value =
             sqlx::query_scalar("SELECT content FROM thread_inputs WHERE id=$1")
                 .bind(accepted.input.id)
@@ -296,6 +299,7 @@ async fn four_byte_unicode_at_the_context_boundary_is_not_mistaken_for_an_oversi
         .submit_input(&Caller::session(world.ada), thread, request)
         .await
         .unwrap();
+    world.turn_start(thread, 0).await;
     let stored: serde_json::Value =
         sqlx::query_scalar("SELECT content FROM thread_inputs WHERE id=$1")
             .bind(accepted.input.id)
@@ -545,4 +549,253 @@ async fn a_steer_taken_by_the_program_cannot_be_recalled() {
         error,
         orch_engine::inputs::InputError::NotPending { .. }
     ));
+}
+
+struct UnlockedStore {
+    local: Arc<LocalBlobStore>,
+    db: orch_db::Db,
+    thread: orch_types::Id,
+    reads: std::sync::atomic::AtomicUsize,
+    pause: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl BlobStore for UnlockedStore {
+    async fn put(
+        &self,
+        hash: &Hash,
+        size: Option<i64>,
+        body: orch_blob_contract::store::ByteStream,
+    ) -> Result<orch_blob_contract::store::Stored, orch_blob_contract::store::BlobError> {
+        self.local.put(hash, size, body).await
+    }
+    async fn get(
+        &self,
+        hash: &Hash,
+        range: Option<orch_blob_contract::range::ByteRange>,
+    ) -> Result<orch_blob_contract::store::BlobRead, orch_blob_contract::store::BlobError> {
+        let mut tx = self.db.begin().await.unwrap();
+        assert!(
+            orch_db::queries::threads::lock_if_free(&mut tx, self.thread)
+                .await
+                .unwrap(),
+            "paste reads leave the thread row free for another person"
+        );
+        tx.rollback().await.unwrap();
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let pause = self.pause.lock().unwrap().take();
+        if let Some((entered, resume)) = pause {
+            entered.send(()).unwrap();
+            resume.await.unwrap();
+        }
+        self.local.get(hash, range).await
+    }
+    async fn exists(&self, hash: &Hash) -> Result<bool, orch_blob_contract::store::BlobError> {
+        self.local.exists(hash).await
+    }
+    async fn size(&self, hash: &Hash) -> Result<Option<i64>, orch_blob_contract::store::BlobError> {
+        self.local.size(hash).await
+    }
+    async fn delete(&self, hash: &Hash) -> Result<bool, orch_blob_contract::store::BlobError> {
+        self.local.delete(hash).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sending_and_editing_a_paste_leave_the_thread_free_while_its_bytes_are_read() {
+    let world = World::new().await;
+    let root = tempfile::tempdir().unwrap();
+    let local = Arc::new(
+        LocalBlobStore::open(root.path().to_path_buf())
+            .await
+            .unwrap(),
+    );
+    let thread = world.thread("Pastes keep the thread free").await;
+    let observed = Arc::new(UnlockedStore {
+        local: Arc::clone(&local),
+        db: world.pool.clone(),
+        thread,
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        pause: std::sync::Mutex::new(None),
+    });
+    world.engine().attach_blobs(observed.clone());
+    world
+        .set(thread, "composer.paste_inline_context_share", json!(100))
+        .await;
+    let (running, _) = world.running_turn(thread, "First").await;
+    let mut request = queued("");
+    request.content = vec![ContentPart::PastedText(
+        kept(&world, &local, "First paste").await,
+    )];
+    let sent = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, request)
+        .await
+        .unwrap();
+    let changed = kept(&world, &local, "Edited paste").await;
+    world
+        .engine()
+        .edit_input(
+            &Caller::session(world.ada),
+            thread,
+            sent.input.id,
+            Some(vec![ContentPart::PastedText(changed)]),
+            None,
+        )
+        .await
+        .unwrap();
+    world
+        .say(
+            thread,
+            common::turn_ended(
+                running.turn_id,
+                orch_link_contract::events::TurnOutcome::Completed,
+            ),
+        )
+        .await;
+    let next = world.turn_start(thread, 1).await;
+    assert!(next.text.contains("Edited paste"));
+    assert!(!next.text.contains("First paste"));
+    assert!(observed.reads.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_during_a_paste_read_keeps_the_new_words_and_rechecks_its_budget() {
+    let world = World::new().await;
+    let root = tempfile::tempdir().unwrap();
+    let local = Arc::new(
+        LocalBlobStore::open(root.path().to_path_buf())
+            .await
+            .unwrap(),
+    );
+    let thread = world.thread("Edit while paste loads").await;
+    world
+        .set(thread, "composer.paste_inline_context_share", json!(100))
+        .await;
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    let observed = Arc::new(UnlockedStore {
+        local: Arc::clone(&local),
+        db: world.pool.clone(),
+        thread,
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        pause: std::sync::Mutex::new(Some((entered, resume))),
+    });
+    world.engine().attach_blobs(observed);
+    let mut request = queued("");
+    request.content = vec![ContentPart::PastedText(
+        kept(&world, &local, "Old words").await,
+    )];
+    let sent = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        world
+            .engine()
+            .submit_input(&Caller::session(world.ada), thread, request),
+    )
+    .await
+    .expect("sending does not await the stored text")
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut changed = kept(&world, &local, "New words").await;
+    changed.delivery = Some(orch_api_contract::threads::PasteDelivery::Inline);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        world.engine().edit_input(
+            &Caller::session(world.ada),
+            thread,
+            sent.input.id,
+            Some(vec![ContentPart::PastedText(changed)]),
+            None,
+        ),
+    )
+    .await
+    .expect("editing does not await the old blob read")
+    .unwrap();
+    release.send(()).unwrap();
+    let start = world.turn_start(thread, 0).await;
+    assert!(start.text.contains("New words"));
+    assert!(!start.text.contains("Old words"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_paste_read_does_not_hold_back_the_edited_message_after_resume() {
+    let world = World::new().await;
+    let root = tempfile::tempdir().unwrap();
+    let local = Arc::new(
+        LocalBlobStore::open(root.path().to_path_buf())
+            .await
+            .unwrap(),
+    );
+    let thread = world.thread("Stop a parked paste read").await;
+    world
+        .set(thread, "composer.paste_inline_context_share", json!(100))
+        .await;
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    let observed = Arc::new(UnlockedStore {
+        local: Arc::clone(&local),
+        db: world.pool.clone(),
+        thread,
+        reads: std::sync::atomic::AtomicUsize::new(0),
+        pause: std::sync::Mutex::new(Some((entered, resume))),
+    });
+    world.engine().attach_blobs(observed);
+    let mut request = queued("");
+    request.content = vec![ContentPart::PastedText(
+        kept(&world, &local, "Parked paste").await,
+    )];
+    let caller = Caller::session(world.ada);
+    let sent = world
+        .engine()
+        .submit_input(&caller, thread, request)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    world
+        .engine()
+        .stop_thread(&caller, thread, None)
+        .await
+        .unwrap();
+    world.wait_state(thread, "idle").await;
+    world
+        .engine()
+        .edit_input(
+            &caller,
+            thread,
+            sent.input.id,
+            Some(vec![ContentPart::Text {
+                text: "Edited after Stop".to_owned(),
+            }]),
+            None,
+        )
+        .await
+        .unwrap();
+    let queue = world.sync(thread).await.thread.queue;
+    world
+        .engine()
+        .resume_queue(&caller, thread, queue.revision)
+        .await
+        .unwrap();
+    let start = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        world.turn_start(thread, 0),
+    )
+    .await
+    .expect("the new start does not await the old blob read");
+    assert!(start.text.contains("Edited after Stop"));
+    assert!(
+        release.send(()).is_err(),
+        "Stop withdrew the old read instead of leaving it alive"
+    );
 }
