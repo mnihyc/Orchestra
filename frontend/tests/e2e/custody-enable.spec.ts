@@ -8,7 +8,7 @@ import {resourceFixture as fixture,resourceLive as live,type Fixture} from './cu
 
 function impact(source:Fixture):ResourceImpact {
   const empty={count:0,threads:0,visible:[],hidden:0,since:null};
-  return {target:source.target,name:source.name,stopping:false,facts:{subject:{kind:'resource',object:source.target.object},as_of:'2026-10-28T00:00:00Z',dependents:[],dependents_complete:true,uses:null},
+  return {target:source.target,name:source.name,stopping:false,applications:[],application_complete:true,facts:{subject:{kind:'resource',object:source.target.object},as_of:'2026-10-28T00:00:00Z',dependents:[],dependents_complete:true,uses:null},
     activity:{running:empty,stopped:empty,waiting:{count:6,threads:4,hidden:3,since:'2026-03-03T00:00:00Z',visible:[{object:{kind:'thread',id:'019a0000-0000-7000-8000-000000000042'},name:'Waiting work',relation:'binding',until:null}]}}};
 }
 

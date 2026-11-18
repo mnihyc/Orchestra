@@ -1,4 +1,5 @@
 /** Defines a tag at an authorized place and assigns it separately, preserving a failed name or a created-but-unassigned tag. */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { LoaderCircle, Plus, Tags } from 'lucide-react';
 import { useState } from 'react';
@@ -10,6 +11,7 @@ import { createPickerTag } from '@/api/day100';
 import { nodeQuery, tagsQuery, setNodeTags } from '@/api/nodes';
 import { settingsQuery } from '@/api/settings';
 import { useHelpOpener } from '@/features/help/open';
+import { AutomaticFieldFacts, automaticFieldFragment } from '@/features/summaries/AutomaticFieldFacts';
 import type { Tag, Node } from '@/generated/api-types';
 import { denial, holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
@@ -50,7 +52,7 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
       try { return await createPickerTag(scopeId, text, key); }
       catch (error) {
         if (!(error instanceof ApiError) || !error.is('conflict.exists')) throw error;
-        const tags = await client.query({ ...tagsQuery(place.id), staleTime: 0 });
+        const tags = await client.query({ ...tagsQuery(place.id), ...READ_NOW });
         const existing = tags.find((tag) => tag.name.toLocaleLowerCase() === text.toLocaleLowerCase());
         if (existing === undefined) throw error;
         return existing;
@@ -63,11 +65,15 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
   const most = typeof limit === 'number' ? limit : null;
   const busy = define.isPending || assign.isPending;
   const atLimit = most === null || chosen.size >= most;
+  const automaticCaption = automaticFieldFragment(place, 'tags', t);
   return (
     <div className="flex flex-wrap items-center gap-1" aria-busy={busy || undefined}>
       {place.tags.map((tag) => <TagChip key={tag.id} name={tag.name} color={tag.color} {...(allowed && !busy ? { onRemove: () => assign.mutate([...chosen].filter((id) => id !== tag.id)) } : {})} />)}
+      {!allowed && <AutomaticFieldFacts node={place} field="tags" />}
+      {allowed && automaticCaption !== null && automaticCaption !== undefined && <span className="min-w-0 text-sm text-text-muted">{automaticCaption}</span>}
       {busy && <LoaderCircle className="animate-spin text-text-subtle" role="img" aria-label={t('places.menu.working')} />}
       {allowed && <Popover open={open} onOpenChange={setOpen} label={t('placeTags.title')} trigger={<Button size="sm" variant="ghost" icon={<Tags aria-hidden />}>{place.tags.length === 0 ? t('placeTags.add') : t('placeTags.edit')}</Button>} className="flex w-[min(22rem,calc(100vw-2rem))] max-w-full flex-col gap-3">
+        <AutomaticFieldFacts node={place} field="tags" inline />
         <Input label={t('day100.tags.name')} value={name} disabled={busy || created !== null} onChange={(event) => setName(event.target.value)} autoComplete="off" />
         {available.isPending ? <SkeletonRows read={available} rows={2} /> : available.isError ? <ErrorState compact error={available.error} onRetry={() => void available.refetch()} /> : <>
           {available.data.filter((tag) => tag.id !== created?.id && (typed === '' || tag.name.toLocaleLowerCase().includes(typed.toLocaleLowerCase()))).map((tag) => <Checkbox key={tag.id} presentation="picker"

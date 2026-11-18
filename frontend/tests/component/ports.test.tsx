@@ -17,15 +17,36 @@ import { Markdown } from '@/ui/Markdown';
 import { LocalAddressRewrite } from '@/lib/markdown';
 import { portAddressFor } from '@/features/ports/model';
 import type { PortOpeningPlan } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+import { targetView } from '@/features/ports/wire';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/ports/Request', () => ({ PortRequests: () => null }));
 vi.mock('@/api/search', () => ({ namesQuery: () => ({ queryKey: ['port-test-names'], queryFn: () => Promise.resolve([]) }) }));
 
 const sessionBefore = client.session.getState();
 beforeEach(() => { client.session.setState({ status: 'signed_in', userId: 'ports-reader' }); });
-afterEach(() => { client.session.setState(sessionBefore); });
+afterEach(async () => { client.session.setState(sessionBefore); await setLocale('en'); });
+
+for(const locale of ['en','zh-CN'] as const) it(`names the missing stable domain on its target while retaining helper entry (${locale})`,async()=>{
+  await setLocale(locale);
+  const data=portsProjection();
+  const port=data.ports[0];
+  if(port===undefined) throw new Error('The fixture needs a port');
+  const target=wireTarget({...port,url:null},environment.id);
+  data.ports=[targetView(target)];data.browser_available=false;
+  const view=show(<PortsSnapshot environment={environment} data={data} onRefresh={vi.fn()} />);
+  const row=screen.getByTestId(`port-${target.port}`);
+  const reason=locale==='en'?'Stable address needs a ports domain':'固定地址需要端口域名';
+  expect(within(row).getByText(reason,{exact:false})).toBeVisible();
+  const helper=within(row).getByRole('button',{name:i18n.t('craftJoined.showHelper')});
+  expect(helper).toBeEnabled();
+  await userEvent.click(helper);
+  expect(await screen.findByRole('dialog',{name:i18n.t('ports.withHelper')})).toBeVisible();
+  view.rerender(<PortsSnapshot environment={environment} data={{...data,ports:[]}} onRefresh={vi.fn()} />);
+  expect(screen.queryByText(reason,{exact:false})).not.toBeInTheDocument();
+});
 
 describe('Ports shows what the environment actually knows', () => {
   it('shows TCP and UDP, first seen and visible origin, while Internal has no outside action', async () => {

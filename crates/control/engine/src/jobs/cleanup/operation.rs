@@ -490,7 +490,7 @@ async fn locks(conn: &mut Conn, input: &Input, value: &Value) -> Result<(), Erro
         .iter()
         .map(|(id, _)| *id)
         .collect::<Vec<_>>();
-    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE")
         .bind(machines)
         .fetch_all(&mut *conn)
         .await

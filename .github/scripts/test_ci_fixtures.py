@@ -15,6 +15,33 @@ import ci_fixtures
 
 
 class NativeFixtures(unittest.TestCase):
+    def test_api_and_engine_tests_receive_the_deployment_search_extensions(self):
+        for package in ("orch-api-core", "orch-api-collaboration", "orch-engine"):
+            for arguments in (("--lib",), ("--test", "semantic_index")):
+                with self.subTest(package=package, arguments=arguments):
+                    planned = [["cargo", "test", "--locked", "-p", package, *arguments]]
+                    self.assertTrue(ci_fixtures.needs_search_extensions(planned))
+                    self.assertTrue(ci_fixtures.describe_fixtures(planned)["search_extensions"])
+        for command in (["cargo", "test", "-p", "orch-api-contract", "--lib"],
+                        ["cargo", "test", "-p", "orch-node", "--lib", "--", "-p", "orch-engine"],
+                        ["cargo", "clippy", "-p", "orch-engine", "--all-targets"]):
+            with self.subTest(command=command):
+                self.assertFalse(ci_fixtures.needs_search_extensions([command]))
+
+    def test_targeted_semantic_proof_installs_extensions_before_running_native_checks(self):
+        workflow = (Path(__file__).resolve().parents[1] / "workflows/ci-targeted.yml").read_text()
+        plan = workflow.index("name: Plan the assigned native fixtures")
+        install = workflow.index("name: Install the deployment database search extensions")
+        run = workflow.index("name: Run the Rust checks .ci-targets names")
+        self.assertLess(plan, install)
+        self.assertLess(install, run)
+        step = workflow[install:run]
+        self.assertIn("fromJSON(steps.native-fixtures.outputs.plan).search_extensions", step)
+        self.assertIn("job.services.postgres.id", step)
+        self.assertIn("./deploy/postgres", step)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS vector", step)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS pg_bigm", step)
+
     def test_node_conformance_and_default_package_tests_need_a_static_runner_and_the_harness(self):
         for arguments in (("--test", "conformance"), (), ("--tests",), ("--all-targets",)):
             with self.subTest(arguments=arguments):
@@ -29,7 +56,7 @@ class NativeFixtures(unittest.TestCase):
                 planned = [["cargo", "test", "-p", "orch-node", "--test", target]]
                 self.assertEqual(ci_fixtures.describe_fixtures(planned), {
                     "images": [(ci_fixtures.BUSYBOX_IMAGE, "busybox:latest")], "harness": False,
-                    "node_runner": False, "node_connector": True,
+                    "node_runner": False, "node_connector": True, "search_extensions": False,
                 })
 
     def test_node_fixture_selection_covers_every_actual_lab_consumer(self):
@@ -57,7 +84,7 @@ class NativeFixtures(unittest.TestCase):
                     patch.object(ci_fixtures.subprocess, "Popen", side_effect=AssertionError("unexpected build")), \
                     contextlib.redirect_stdout(output):
                 self.assertEqual(ci_fixtures.main(), 0)
-            self.assertEqual(json.loads(output.getvalue()), {"images": [], "harness": True, "node_runner": True, "node_connector": False})
+            self.assertEqual(json.loads(output.getvalue()), {"images": [], "harness": True, "node_runner": True, "node_connector": False, "search_extensions": False})
 
     def cargo_process(self, messages, returncode=0):
         process = MagicMock()
