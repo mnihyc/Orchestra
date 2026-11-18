@@ -246,21 +246,27 @@ async fn batched_native_observations_preserve_aliases_stale_identity_and_failed_
     world.shutdown().await;
 }
 
-fn serve_native_generations(world: &World, missing: bool) {
+fn serve_native_generations(world: &World, missing: bool) -> Arc<AtomicBool> {
     let missing = Arc::new(AtomicBool::new(missing));
-    world.machine.handler.on(K::SessionOpen, move |command| {
-        let Command::SessionOpen(body) = command else {
-            panic!("the command kind is exact");
-        };
-        let resume = matches!(body.mode, SessionMode::Resume | SessionMode::Adopt);
-        if resume && missing.swap(false, Ordering::SeqCst) {
-            return Err(CommandError::new(
-                ErrorCode::SessionNotFound,
-                "The native history is missing",
-            ));
-        }
-        Ok(CommandResult::SessionOpen(
-            orch_link_contract::commands::SessionOpenResult {
+    let refused = Arc::new(AtomicBool::new(false));
+    for kind in [K::SessionOpen, K::SessionOpenFenced] {
+        let missing = missing.clone();
+        let refused = refused.clone();
+        world.machine.handler.on(kind, move |command| {
+            let (body, fenced) = match command {
+                Command::SessionOpen(body) => (body, false),
+                Command::SessionOpenFenced(body) => (body.session.as_ref(), true),
+                _ => panic!("the command kind is exact"),
+            };
+            let resume = matches!(body.mode, SessionMode::Resume | SessionMode::Adopt);
+            if resume && missing.swap(false, Ordering::SeqCst) {
+                refused.store(true, Ordering::SeqCst);
+                return Err(CommandError::new(
+                    ErrorCode::SessionNotFound,
+                    "The native history is missing",
+                ));
+            }
+            let result = orch_link_contract::commands::SessionOpenResult {
                 native_session_ref: if resume {
                     body.native_session_ref.clone().unwrap()
                 } else {
@@ -270,9 +276,15 @@ fn serve_native_generations(world: &World, missing: bool) {
                 import_report: None,
                 instruction_sources: Vec::new(),
                 approval_reviewer: None,
-            },
-        ))
-    });
+            };
+            Ok(if fenced {
+                CommandResult::SessionOpenFenced(result)
+            } else {
+                CommandResult::SessionOpen(result)
+            })
+        });
+    }
+    refused
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1171,7 +1183,7 @@ async fn an_outstanding_native_command_holds_admission_through_a_server_restart(
 async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
     let world = quiet().await;
     serve_history(&world);
-    serve_native_generations(&world, missing);
+    let missing_reply = serve_native_generations(&world, missing);
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(LocalBlobStore::open(directory.path()).await.unwrap());
     world.engine().attach_blobs(store.clone());
@@ -1181,6 +1193,17 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
     sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,ARRAY[$2::text],'200000'::jsonb) WHERE provider_id=$1")
         .bind(world.provider).bind(orch_agent_contract::parameters::MODEL_WINDOW_KEY).execute(world.pool.pool()).await.unwrap();
     let (thread, segment) = completed(&world).await;
+    if missing {
+        // A restored opening receipt keeps the session known after an API restart. Change its
+        // instructions so the next turn really asks the native peer to resume it.
+        world
+            .set(
+                thread,
+                "agent.instructions",
+                json!("Reopen the retained conversation before its next turn"),
+            )
+            .await;
+    }
     let obsolete = format!("agent-history:{segment}");
     sqlx::query("UPDATE threads SET pending_notices=$2 WHERE node_id=$1")
         .bind(thread).bind(json!([{"id":obsolete,"kind":"handoff","text":"Obsolete recovery context must stay with its old native recipient"}]))
@@ -1258,6 +1281,12 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
         )
         .await;
         let held = held.unwrap();
+        if missing {
+            assert!(
+                missing_reply.load(Ordering::SeqCst),
+                "the native peer refused the old session before its replacement turn"
+            );
+        }
         assert!(
             !held.text.contains("Obsolete recovery context"),
             "{}",
@@ -1282,6 +1311,12 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
         None
     };
     let next = world.turn_start(thread, 1).await;
+    if missing {
+        assert!(
+            missing_reply.load(Ordering::SeqCst),
+            "the native peer really reported the session missing"
+        );
+    }
     if let Some(held) = held {
         assert_eq!(
             next, held,
@@ -1293,13 +1328,15 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
         "{}",
         next.text
     );
-    let opens = world.commands.issued_bodies("session.open");
-    let opened = opens
-        .iter()
-        .filter_map(|(_, body)| {
-            serde_json::from_value::<orch_link_contract::commands::SessionOpen>(body.clone()).ok()
+    let opened = [K::SessionOpen, K::SessionOpenFenced]
+        .into_iter()
+        .flat_map(|kind| world.commands.issued_commands(kind.as_str()))
+        .filter_map(|(_, command)| match command.command().unwrap() {
+            Command::SessionOpen(open) => Some(open),
+            Command::SessionOpenFenced(open) => Some(*open.session),
+            _ => None,
         })
-        .find(|open| open.segment_id != segment)
+        .find(|open| open.thread_id == thread && open.segment_id != segment)
         .unwrap();
     if choice == "none" {
         assert_eq!(opened.mode, SessionMode::New);

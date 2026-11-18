@@ -327,9 +327,10 @@ pub async fn lock_decision(
         }));
     }
     match orch_authz::approvals::authority(&initial.kind) {
+        // A harness decision is recorded on its approval alone. Thread effects settle after commit.
+        Some(orch_authz::approvals::Authority::HarnessThread) => {}
         Some(
-            orch_authz::approvals::Authority::HarnessThread
-            | orch_authz::approvals::Authority::PlanThread
+            orch_authz::approvals::Authority::PlanThread
             | orch_authz::approvals::Authority::ModelUseThread,
         ) => {
             let Some(thread) = initial.thread_id else {

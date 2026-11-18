@@ -1104,9 +1104,29 @@ pub(crate) fn decode_body<B: DeserializeOwned>(route: &Route, bytes: &[u8]) -> A
     } else {
         bytes
     };
-    let mut json = serde_json::Deserializer::from_slice(bytes);
+    let normalized = if bytes.windows(6).any(|part| part == b"\\u0000") {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| faults_of("", &error.to_string()))?;
+        if storable_body::normalize(route, &mut value) != 0 {
+            Some(serde_json::to_vec(&value).map_err(ApiError::internal)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut json = serde_json::Deserializer::from_slice(normalized.as_deref().unwrap_or(bytes));
     serde_path_to_error::deserialize(&mut json)
         .map_err(|error| faults_of(&error.path().to_string(), &error.inner().to_string()))
+}
+
+fn source_text_replacements(route: &Route, bytes: &[u8]) -> u64 {
+    if !bytes.windows(6).any(|part| part == b"\\u0000") {
+        return 0;
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .map(|mut value| storable_body::normalize(route, &mut value))
+        .unwrap_or_default()
 }
 
 /// Whether a request whose commit was refused because who may do what changed meanwhile is
@@ -2089,8 +2109,9 @@ impl Registry {
                                 let ctx: Ctx = $ctx;
                                 let scope = lock_scope(&ctx);
                                 let work = Box::pin(handler(ctx, $query, $body));
-                                orch_db::pool::serving_watched(
+                                orch_db::pool::serving_watched_with_text(
                                     route.name,
+                                    source_text_replacements(&route,&body_bytes),
                                     transaction_guard::watch(orch_db::audit::scope_origin(
                                         audit_origin.clone(),
                                         orch_db::queries::transaction_guard::request_scope(
@@ -2769,6 +2790,9 @@ impl Registry {
 
 #[path = "registry/contextual_read.rs"]
 pub mod contextual_read;
+
+#[path = "registry/storable_body.rs"]
+mod storable_body;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "registry/action_guard_state_tests.rs"]
