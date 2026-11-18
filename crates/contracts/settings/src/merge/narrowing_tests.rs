@@ -293,3 +293,26 @@ fn preferences_and_parameters_keep_their_existing_replace_choices() {
     assert_eq!(definition(keys::AGENT_MODEL).merge, Merge::Replace);
     assert_eq!(definition(keys::REDACTION_PATTERNS).merge, Merge::Union);
 }
+
+#[test]
+fn writing_a_ceiling_uses_the_same_precision_and_unbounded_spellings_as_reading_it() {
+    let credits = definition(keys::THREAD_GOAL_MAX_CREDITS);
+    let exact = json!("9007199254740993.0000000001");
+    assert!(exceeds_ceiling(
+        credits,
+        &json!("9007199254740993.0000000002"),
+        &exact
+    ));
+    assert!(!exceeds_ceiling(
+        credits,
+        &json!("9007199254740993.00000000010"),
+        &exact
+    ));
+    assert!(exceeds_ceiling(credits, &json!("0.00"), &exact));
+    let bytes = definition(keys::IMPORT_MAX_BYTES);
+    assert!(exceeds_ceiling(bytes, &Json::Null, &json!(1000)));
+    assert!(!exceeds_ceiling(bytes, &json!(1000), &Json::Null));
+    let messages = definition(keys::BROADCAST_THREAD_MESSAGES_PER_HOUR);
+    assert!(!exceeds_ceiling(messages, &json!(0), &json!(10)));
+    assert!(exceeds_ceiling(messages, &json!(1), &json!(0)));
+}

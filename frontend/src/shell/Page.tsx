@@ -20,10 +20,10 @@ import { ScrollArea } from '@/ui/ScrollArea';
 import { compactControls } from '@/ui/FilterBar';
 
 /** The scrolling column of a screen. It is as wide as reading is comfortable, and keeps a margin on a small screen. */
-export function Page({ children, className }: { children: ReactNode; className?: string }) {
+export function Page({ children, className, wide = false }: { children: ReactNode; className?: string; wide?: boolean }) {
   return (
     <ScrollArea className="h-full">
-      <div className={cx('mx-auto flex w-full max-w-(--container-page) flex-col gap-6 p-(--page-padding)', className)}>{children}</div>
+      <div className={cx('mx-auto flex w-full min-w-0 flex-col gap-6 p-(--page-padding)', !wide && 'max-w-(--container-page)', className)}>{children}</div>
     </ScrollArea>
   );
 }

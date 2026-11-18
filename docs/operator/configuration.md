@@ -7,6 +7,11 @@ its configuration. The complete defaults and field descriptions are in the
 [server configuration](../../crates/platform/config/src/server.rs) and the deployment's
 [example file](../../deploy/config/orch.toml).
 
+The bundled node's permissions live in `runtime/node/config.toml`, initialized from
+`config/node.toml` on first start. In that file, `[drivers.images] builds` permits
+Dockerfile builds together with unrestricted image and registry rules. See
+[driver policy](driver-policy.md#the-bundled-node) ([简体中文](zh-CN/driver-policy.md)).
+
 ## Runtime worker stacks
 
 ```toml
@@ -41,10 +46,32 @@ every operation. SQLx logs the statement text with its parameter placeholders, e
 it does not log bound values. Do not put secrets into SQL text or enable logging of credentials yourself.
 
 The two [monitoring counters](monitoring.md) count these events even if `ORCH_LOG` suppresses their
-printed warnings. Acquiring a connection still times out after ten seconds; these thresholds do not
-change that timeout, a pool's size, or statement execution limits. A failed/timed-out acquisition is an
+printed warnings. Pool acquisition defaults to ten seconds; these warning thresholds do not
+change the configured deadlines below, a pool's size, or statement execution limits. A failed/timed-out acquisition is an
 error, not a successful slow acquisition in that counter. Investigate the statement/plan and connection
 ownership before changing pool sizes. Never hold a connection while awaiting another machine.
+
+## Database deadlines
+
+The API, worker and deployment commands read their deadlines before opening the database.
+They are startup configuration, with compiled defaults and ordinary file/environment overrides.
+Restart the affected process after changing them; they are not database-backed settings.
+
+| Key in `[database]` | Default | Meaning |
+|---|---|---|
+| `acquire_timeout_ms` | 10000 | Pool acquisition, including opening and checking a connection; must be positive. |
+| `request_statement_timeout_ms` | 15000 | API statement deadline; zero disables it. |
+| `background_statement_timeout_ms` | 0 | Worker and maintenance statement deadline; zero disables it. |
+| `idle_transaction_timeout_ms` | 10000 | Idle time inside a transaction; zero disables it. |
+
+For example, `ORCH_DATABASE_ACQUIRE_TIMEOUT_MS=30000` selects a thirty-second acquisition deadline.
+PostgreSQL's statement and idle-transaction deadlines use signed 32-bit milliseconds; this is a native
+representation limit, not a product ceiling. See the [PostgreSQL timeout settings](https://www.postgresql.org/docs/17/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-STATEMENT).
+These deadlines do not repair slow queries or excessive lock ownership; those causes still need repair.
+
+Management → System → Details shows the API process’s captured safe running values and their compiled, file or environment origins. Later edits do not relabel that running process. Unreported processes stay Not reported; the API does not infer another service’s environment.
+
+[简体中文](zh-CN/configuration.md)
 
 ## Logs and measurements
 

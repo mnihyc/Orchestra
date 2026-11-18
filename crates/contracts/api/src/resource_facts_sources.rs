@@ -59,6 +59,8 @@ pub const IMPACT_FACETS: [FacetSpec; 2] = [
             KeyTargetKind::Object(ObjectKind::Provider),
             KeyTargetKind::Object(ObjectKind::Agent),
             KeyTargetKind::Object(ObjectKind::Environment),
+            KeyTargetKind::Object(ObjectKind::McpServer),
+            KeyTargetKind::Object(ObjectKind::Mount),
         ],
         TargetResolver::Resolved("requested_resources"),
     ),

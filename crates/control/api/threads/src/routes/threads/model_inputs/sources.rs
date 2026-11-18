@@ -211,6 +211,7 @@ impl native::Selected for Reader {
     type Query = ModelInputListQuery;
     type Value = Read;
     type Reply = Page<ModelInput>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Role> = &LIST;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

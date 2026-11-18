@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test settings
+web typecheck
+web lint
+web test -- tests/component/settings-policy-narrowing.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts

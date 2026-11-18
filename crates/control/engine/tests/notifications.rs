@@ -44,6 +44,70 @@ async fn follow(world: &World, person: Id, node: Id, level: &str) {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grouped_operation_does_not_publish_after_its_recipient_loses_resource_access() {
+    use orch_db::queries::access::{PageKey, remove_entry, testing::add_entry};
+    use orch_engine::notifications::{
+        NotificationOperation, OperationRecipient, attach_operation, notify_operation,
+    };
+    let world = World::new().await;
+    let person = world.person("Former provider manager").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let mut grants = Vec::new();
+    for permission in ["provider.view", "provider.manage"] {
+        grants.push(
+            add_entry(
+                &mut conn,
+                &PageKey::new("provider", world.provider, "live"),
+                "any",
+                permission,
+                ("user", Some(person), None),
+                None,
+                world.clock.now(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let operation = NotificationOperation {
+        id: new_id(),
+        kind: "recover".into(),
+        name: "Private provider".into(),
+        notify: true,
+        path: format!("/resources/providers/{}", world.provider),
+        subject: Some(("provider".into(), world.provider)),
+        recipients: vec![OperationRecipient {
+            user: person,
+            providers: [world.provider].into(),
+            ..Default::default()
+        }],
+    };
+    attach_operation(&mut conn, &[], &operation, world.clock.now())
+        .await
+        .unwrap();
+    for grant in grants {
+        assert!(
+            remove_entry(&mut conn, grant, world.ada, world.clock.now())
+                .await
+                .unwrap()
+        );
+    }
+    notify_operation(&mut conn, &operation, "done", world.clock.now())
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+    )
+    .bind(person)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "an accepted recipient list cannot retain withdrawn resource disclosure"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_subscribed_member_of_a_large_group_role_or_everyone_holder_receives_the_event() {
     use orch_db::queries::access::{PageKey, testing::add_entry};
@@ -781,8 +845,16 @@ async fn an_approval_notifies_the_eligible_turn_starter_while_other_managers_can
         .decide_approval(&Caller::session(always), approval, &option("allow_once"))
         .await
         .unwrap();
-    let rows = inbox_of(&world, world.ada, "approval.requested").await;
-    assert!(rows[0].2, "the starter need not look at what was decided");
+    common::eventually(
+        "the accepted decision settles the starter's Inbox",
+        || async {
+            inbox_of(&world, world.ada, "approval.requested")
+                .await
+                .first()
+                .is_some_and(|row| row.2)
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1283,4 +1355,89 @@ async fn the_person_a_machine_belongs_to_is_told_once_when_it_drops_with_a_threa
     world.wait_blocked(thread, "agent_offline").await;
     common::meanwhile(Duration::from_millis(500)).await;
     assert_eq!(told_of(&world, world.ada, "machine.offline").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chosen_operation_uses_an_immediate_push_route_and_keeps_one_inbox_identity() {
+    use orch_engine::notifications::{
+        NotificationOperation, OperationRecipient, attach_operation, notify_operation,
+    };
+    let world = World::new().await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let channel = channels::insert_channel(
+        &mut conn,
+        &NewChannel {
+            id: new_id(),
+            org_id: None,
+            user_id: None,
+            kind: "push",
+            name: "Web Push",
+            config: &json!({}),
+            templates: &json!({}),
+            enabled: true,
+            created_by: world.ada,
+            at: world.clock.now(),
+        },
+    )
+    .await
+    .unwrap();
+    // Infrastructure alone creates no route or delivery. The person explicitly enables this route.
+    let route = routes::put_route(
+        &mut conn,
+        new_id(),
+        world.ada,
+        channel.id,
+        &RouteChange {
+            enabled: Some(true),
+            ..Default::default()
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let operation = NotificationOperation {
+        id: new_id(),
+        kind: "recover".into(),
+        name: "Unrelated private initiator".into(),
+        notify: true,
+        path: format!("/resources/providers/{}", world.provider),
+        subject: Some(("provider".into(), world.provider)),
+        recipients: vec![OperationRecipient {
+            user: world.ada,
+            providers: [world.provider].into(),
+            ..Default::default()
+        }],
+    };
+    attach_operation(&mut conn, &[], &operation, world.clock.now())
+        .await
+        .unwrap();
+    notify_operation(&mut conn, &operation, "running", world.clock.now())
+        .await
+        .unwrap();
+    notify_operation(&mut conn, &operation, "done", world.clock.now())
+        .await
+        .unwrap();
+    let ids: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM notifications WHERE user_id=$1 AND data->>'operation_id'=$2",
+    )
+    .bind(world.ada)
+    .bind(operation.id.to_string())
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(ids.len(), 1);
+    let payloads: Vec<Json> = sqlx::query_scalar("SELECT payload FROM outbox WHERE route_id=$1")
+        .bind(route.id)
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !payloads.is_empty(),
+        "the ordinary immediate route must receive the accepted grouped item"
+    );
+    assert!(
+        payloads
+            .iter()
+            .all(|value| !value.to_string().contains("Unrelated private initiator"))
+    );
 }
