@@ -420,6 +420,16 @@ impl Connector {
             Arc::clone(&params.clock),
         )?;
         let loopback = Arc::new(Loopback::start().await.map_err(StartError::Listener)?);
+        let gateway_link = link.clone();
+        let gateway_control = Arc::new(crate::gateway_control::Requests::new(
+            data.root().to_owned(),
+            Arc::clone(&policy),
+            Arc::new(move |choice| {
+                if gateway_link.gateway_status().choice != choice {
+                    gateway_link.select_gateway(choice);
+                }
+            }),
+        ));
         let blobs: Arc<dyn BlobEndpoint> = match params.blobs.clone() {
             Some(blobs) => blobs,
             None => {
@@ -611,6 +621,7 @@ impl Connector {
             facts
         });
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
+        dispatcher.gateway_control(Arc::clone(&gateway_control));
         dispatcher.local_harnesses(
             Arc::clone(&services.local_harnesses),
             Arc::clone(&services.publisher),
@@ -725,6 +736,7 @@ impl Connector {
         let identity_reload = Arc::new(tokio::sync::Notify::new());
         if !params.managed || params.roles.contains(&Role::Node) {
             let state = crate::local_socket::LocalState {
+                gateway_control: Arc::clone(&gateway_control),
                 identity_reload: supervised_roles.then(|| Arc::clone(&identity_reload)),
                 identity_fingerprint: params.identity.certificate.fingerprint(),
                 link: link.clone(),
