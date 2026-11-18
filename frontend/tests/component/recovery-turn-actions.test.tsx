@@ -12,7 +12,7 @@ import { show } from './support';
 
 vi.mock('@/features/source/Restore', () => ({ RestoreFromTurn: () => null }));
 const THREAD = 'review-recovery-actions';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Recover work', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Recover work', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 const originalLocale = currentLocale();
 afterEach(async () => { threadWriter.evict(THREAD); await setLocale(originalLocale); });
@@ -42,4 +42,17 @@ describe.each(['en', 'zh-CN'] as const)('manual action ownership in %s', (locale
     expect(screen.getByRole('button', { name: i18n.t('timeline.footer.retry') })).not.toHaveAttribute('aria-disabled');
     expect(screen.queryByText(i18n.t('timeline.failure.incomplete'))).not.toBeInTheDocument();
   });
+});
+
+it.each(['en', 'zh-CN'] as const)('shows when the turn was lost and offers a deliberate next input in %s', async (locale) => {
+  await setLocale(locale);
+  const at = '2026-11-18T15:01:02Z';
+  const ended = { ...turn('lost', { ordinal: 2, inputId: 'send-once', state: 'failed' }), completed_at: at,
+    error: { code: 'turn_lost', message: 'The turn could not be reattached.', retryable: true, incomplete: true, window: null, said: null, resets_at: null } };
+  threadWriter.reset(THREAD, { thread: { id: THREAD, state: 'idle', current_turn_id: null, seq: 2, lock: null, blocked: null } as Thread, turns: [ended] }, false);
+  const view = show(<TimelineContextValue.Provider value={context}><TurnFooter turnId={ended.id} /></TimelineContextValue.Provider>);
+  expect(screen.getByText(i18n.t('timeline.failure.turnLost'))).toBeVisible();
+  expect(view.container.querySelector(`time[datetime="${at}"]`)).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('timeline.failure.continue') })).toBeEnabled();
+  expect(screen.queryByText(i18n.t('timeline.footer.failed'))).not.toBeInTheDocument();
 });
