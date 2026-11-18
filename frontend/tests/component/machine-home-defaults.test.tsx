@@ -29,6 +29,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const override of [false, tr
   await setLocale(locale); const user = userEvent.setup();
   const machine = { ...detailMachine, home: detailHome, agents: [detailAgent] };
   show(<RegisterProviderDialog machine={machine} open onClose={vi.fn()} />);
+  const name = screen.getByRole('textbox', { name: i18n.t('machines.provider.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],[role="radio"],select')).toBe(name);
   const home = await screen.findByRole('combobox', { name: i18n.t('resources.home.label') });
   await waitFor(() => expect(home).toHaveDisplayValue(i18n.t('resourceGroups.machineHomeNamed', { name: detailHome.name })));
   expect(writes.register).not.toHaveBeenCalled();

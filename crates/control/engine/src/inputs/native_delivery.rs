@@ -129,6 +129,23 @@ pub async fn current_callers(
     clock: &dyn Clock,
     access: &dyn ResourceAccess,
 ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+    crate::summaries::with_program_source_checks(current_callers_in_scope(
+        conn,
+        command,
+        steer_input,
+        clock,
+        access,
+    ))
+    .await
+}
+
+async fn current_callers_in_scope(
+    conn: &mut Conn,
+    command: &CommandRow,
+    steer_input: Option<Id>,
+    clock: &dyn Clock,
+    access: &dyn ResourceAccess,
+) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
     if steer_input.is_some() && command.kind != "turn.steer" {
         // Present typed evidence must never fall through to unrelated maintenance.
         return Ok(None);
@@ -331,4 +348,28 @@ pub async fn current_callers(
         return Ok(None);
     }
     Ok(Some(callers))
+}
+
+/// Record possible program model work after this command's successful current-callers
+/// check, on the same native wire transaction. Session opening and Steer are not model starts.
+pub async fn mark_model_admitted(
+    conn: &mut Conn,
+    command: &CommandRow,
+    at: Time,
+) -> Result<(), EngineError> {
+    if !matches!(command.kind.as_str(), "turn.start" | "turn.start.fenced") {
+        return Ok(());
+    }
+    let Some(delivery) = delivery(conn, command, None).await? else {
+        return Ok(());
+    };
+    let input = threads::input(conn, delivery.input)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("The native model input is gone"))?;
+    if let Some(parent) = super::saved_authority(input.submission_authority.as_ref())?
+        .and_then(|authority| authority.capability_parent().cloned())
+    {
+        parent.mark_model_admitted(conn, &input, at).await?;
+    }
+    Ok(())
 }

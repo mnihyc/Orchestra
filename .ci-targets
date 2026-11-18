@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orchctl --test provider_login
+test -p orch-api-core --test resource_summaries -- native::

@@ -149,19 +149,81 @@ impl InputAuthority {
     ) -> Option<&crate::tools::capability_service::delegation::ParentLink> {
         self.capability_parent.as_ref()
     }
-    pub(crate) fn with_capability_parent(
-        mut self,
+    /// A program input retains actual credential ceilings; its operation belongs to its producer.
+    pub(crate) fn for_program(
         parent: crate::tools::capability_service::delegation::ParentLink,
+        actor: Id,
+        callers: &[Caller],
     ) -> Result<Self, EngineError> {
-        if self
-            .capability_parent
-            .as_ref()
-            .is_some_and(|old| old != &parent)
+        let result = Self {
+            credentials: Vec::new(),
+            boundaries: callers
+                .iter()
+                .filter(|caller| caller.user() == actor)
+                .map(CapturedCaller::capture)
+                .collect(),
+            origins: Vec::new(),
+            scheduled: None,
+            chat: None,
+            forward: None,
+            snapshot_comment: None,
+            announcement_provenance: None,
+            capability_parent: Some(parent),
+        };
+        result.validate_actor(actor)?;
+        Ok(result)
+    }
+
+    /// Only a freshly re-entered real producer can restore these captured boundaries.
+    pub(super) async fn restore_program(
+        &self,
+        conn: &mut Conn,
+        actor: Id,
+        current: Vec<Caller>,
+        clock: &dyn Clock,
+    ) -> Result<Option<(RestoredInputAuthority, Vec<Caller>)>, EngineError> {
+        self.validate_actor(actor)?;
+        if self.capability_parent.is_none()
+            || !self.origins.is_empty()
+            || !self.credentials.is_empty()
+            || current.len() != self.boundaries.len()
+            || current.iter().any(|caller| caller.user() != actor)
         {
-            return Err(EngineError::ToolCallIdentity);
+            return Ok(None);
         }
-        self.capability_parent = Some(parent);
-        Ok(self)
+        let mut callers = Vec::with_capacity(current.len());
+        for (boundary, current) in self.boundaries.iter().zip(current) {
+            let Some(restored) = boundary.restore_current(conn, clock).await? else {
+                return Ok(None);
+            };
+            let caller = if current
+                .grant()
+                .is_some_and(|grant| grant.operation_scope().is_some())
+            {
+                restored.narrow_current_admission(&current)
+            } else {
+                current.intersect_restrictions(&restored)
+            };
+            let Ok(caller) = caller else {
+                return Ok(None);
+            };
+            if !caller.key_deadline_allows(clock) {
+                return Ok(None);
+            }
+            callers.push(caller);
+        }
+        let restored = RestoredInputAuthority {
+            actor,
+            captured: self.clone(),
+            origins: callers
+                .iter()
+                .map(|caller| RestoredInputOrigin {
+                    operation: None,
+                    caller: caller.clone(),
+                })
+                .collect(),
+        };
+        Ok(Some((restored, callers)))
     }
     /// A native future-input delegation may narrow an actual accepted starter
     /// origin to ordinary holdings, but never replace its keys or operation.
@@ -748,35 +810,27 @@ mod tests {
         assert!(narrowed(Some(&raw), &Caller::session(new_id())).is_err());
     }
     #[test]
-    fn a_helper_condition_preserves_every_acting_origin_and_cannot_become_one() {
+    fn a_program_input_keeps_credential_ceilings_without_claiming_a_public_operation() {
         let actor = new_id();
-        let original = InputAuthority::from_caller(&admitted(actor, "ThreadInputCreate")).unwrap();
+        let caller = admitted(actor, "ThreadInputCreate");
         let link: crate::tools::capability_service::delegation::ParentLink =
-            serde_json::from_value(
-                json!({"answer":new_id(),"helper":new_id(),"slot":"delegated_capability:attempt"}),
-            )
-            .unwrap();
-        let conditioned = original
-            .clone()
-            .with_capability_parent(link.clone())
-            .unwrap();
-        assert_eq!(conditioned.origins, original.origins);
-        assert_eq!(conditioned.boundaries, original.boundaries);
-        let edited = conditioned
+            serde_json::from_value(json!({"work":new_id(),"helper":new_id()})).unwrap();
+        let native =
+            InputAuthority::for_program(link.clone(), actor, std::slice::from_ref(&caller))
+                .unwrap();
+        assert_eq!(native.capability_parent(), Some(&link));
+        assert!(native.origins.is_empty());
+        assert_eq!(native.boundaries, vec![CapturedCaller::capture(&caller)]);
+        let edited = native
             .retaining_current(
                 actor,
                 &InputAuthority::from_caller(&Caller::session(actor)).unwrap(),
             )
             .unwrap();
         assert_eq!(edited.capability_parent(), Some(&link));
-        assert_eq!(edited.origins, original.origins);
+        assert!(edited.origins.is_empty());
         assert!(edited.has_actor_origins());
-        let wrong: crate::tools::capability_service::delegation::ParentLink =
-            serde_json::from_value(
-                json!({"answer":new_id(),"helper":new_id(),"slot":"delegated_capability:another"}),
-            )
-            .unwrap();
-        assert!(conditioned.clone().with_capability_parent(wrong).is_err());
+        assert!(InputAuthority::for_program(link.clone(), new_id(), &[caller]).is_err());
         assert!(
             saved(Some(&json!({"capability_parent":link}))).is_err(),
             "a condition supplies no actor, credential or admitted operation"
