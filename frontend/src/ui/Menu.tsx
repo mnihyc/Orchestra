@@ -8,6 +8,7 @@
  * arrow keys, with the reason under its name or, when explicitly chosen, in a short tooltip. Entries that destroy come last, apart, in the colour
  * of danger. Each entry shows its shortcut.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { Check, ChevronRight } from 'lucide-react';
 import { DropdownMenu } from 'radix-ui';
 import { isValidElement, useCallback, useRef, type Ref, type ComponentProps, type ComponentType, type ReactNode } from 'react';
@@ -193,7 +194,7 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
                 {...(off ? { 'aria-disabled': true } : {})}
                 onSelect={(event) => { if (off) event.preventDefault(); else if (entry.href === undefined) entry.onSelect(); }}
                 className={cx(ROW, 'min-w-0 flex-1', entry.shortcut !== undefined && 'flex-wrap', off ? 'text-text-muted' : entry.danger === true ? 'text-danger-text data-[highlighted]:bg-danger-subtle' : 'text-text')}>
-                {entry.href !== undefined && !off ? <a href={entry.href}>{row}</a> : row}
+                {entry.href !== undefined && !off ? <PathLink href={entry.href}>{row}</PathLink> : row}
               </parts.Item>;
                 return <ChoiceCard preview={entry.preview} renderInspect={(button) => <parts.Item asChild onSelect={(event) => event.preventDefault()}>{button}</parts.Item>}>{tooltip ? <Tooltip content={entry.disabled} side="right">{item}</Tooltip> : item}</ChoiceCard>;
               }}</Choice>

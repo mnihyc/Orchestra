@@ -15,6 +15,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 
 | Reference | Meaning |
 | --- | --- |
+| `setting:mount.copy_review_secs` | **Copy review time** — A positive number of seconds at the system or organization, 900 (15 minutes) by default. This is an editable review lifetime with no fixed maximum beyond the clock representation. Accepted jobs keep their original review. |
+| `setting:mount.delete_data_fate` | **Mount data on deletion** — Keep as shipped, or preselect Purge now where permitted. Each deletion shows its real choices; destroying owned data still requires the mount name. Existing folders are kept. |
+| `setting:server.update_prepare_timeout_secs` | **Server update preparation** — 60 seconds by default for the bundled node to prepare its fixed host updater. Positive, with no fixed maximum beyond the native clock. Release download, health and rollback remain governed by update.sh. |
+| `setting:public_address.prepare_timeout_secs` | **Address preparation wait** — 60 seconds by default for the managed certificate/worker proof and every candidate origin. Positive, with no fixed maximum beyond the clock representation; failure preserves the effective revision. |
+| `setting:public_address.probe_interval_ms` | **Address probe interval** — 250 milliseconds by default between fresh browser-facing attempts while a certificate generation is loading; positive with no fixed maximum. |
+| `setting:gateways.primary_change_timeout_secs` | **Gateway change wait** — Time for a saved primary choice and its durable native reply, including reconnecting; 30 seconds by default, positive with no hard upper limit beyond the clock representation. |
 | `setting:calls.rules` | **Call recovery** — Ordered rules for retrying, continuing, failing over or waiting after a model call fails. |
 | `setting:calls.repeat_limit` | **Repeat limit** — Automatic recoveries of one failure kind within the repeat window; zero stops automatic recovery. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:calls.repeat_window` | **Repeat window** — The rolling time window used to stop repeated recovery. |
@@ -61,6 +67,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:models.allowed` | **Allowed models** — Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list. |
 | `setting:services.allowed` | **Allowed services** — Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service. |
 | `setting:providers.allowed` | **Allowed providers** — Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here. |
+| `setting:models.add_switches_on` | **Switched on when added** — What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards. |
 | `setting:collab.attribution` | **Attribution** — Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers. |
 | `setting:collab.default_delivery` | **Default delivery** — What an input does when a turn is running, unless its sender says otherwise: wait for the next turn, or steer the running one. |
 | `setting:composer.paste_inline_context_share` | **Pasted text in the message** — The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste. |
@@ -140,6 +147,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:source.secret_name` | **Source secret** — The name of an existing HTTPS Git reading secret; its value is sealed only to the preparation command. |
 | `setting:workspace.record_days` | **Keep turn files** — Days to keep complete turn and restore undo files in the environment; zero disables recording. |
 | `setting:workspace.record_max_bytes` | **Largest recorded directory** — The included file and link bytes eligible for whole-state recording; larger directories use per-file undo. |
+| `setting:workspace.record_wait_secs` | **Wait for turn files** — Seconds a turn waits for the files before it to be recorded; when they are not ready in time the turn starts with per-file undo, and the turn says so. |
 | `setting:broadcast.delivery` | **Announcement delivery** — How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn. |
 | `setting:broadcast.fallback` | **When steering is impossible** — What is done instead when an announcement is to steer an agent that cannot be steered. |
 | `setting:broadcast.wake_idle` | **Allow waking idle threads** — Whether a send may wake an idle thread here; on as shipped. Each announcement or thread message chooses wake explicitly, false when omitted. |
@@ -397,6 +405,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:release.check_days` | **Look for a release** — Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing. |
 | `setting:cleanup.release_keep_count` | **Keep unused releases** — Unused releases kept per payload after an update; 0 keeps all. Current and previous releases are always kept. |
 | `setting:cleanup.unused_keep_days` | **Clean unused caches** — Days to keep images and tool versions that nothing uses; 0 switches automatic cleanup off. Data follows its own retention dates. |
+| `setting:tunnels.control_timeout_ms` | **Tool admission wait** — 5000 milliseconds by default for each Open or Resume to confirm the current physical session and tool member. Positive, with no fixed maximum beyond the native clock; timeout refuses the channel. |
 | `setting:backup.warn_days` | **Database backup warning** — Warn when the last successful database-only backup is older than this many days. A failed attempt does not make it newer. |
 | `setting:registration.email_verification` | **Email verification** — Whether a person has to confirm their address before they sign in. |
 | `setting:auth.local_login` | **Password sign-in** — Whether people other than system admins may sign in with a password or a mailed code. |
@@ -488,10 +497,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:ask.retention_min_days` | **Shortest Ask retention** — The minimum history retention chosen by administrators of the conversation's root organization. A lower scope can only raise this minimum. |
 | `setting:ask.retention_max_days` | **Longest Ask retention** — The maximum history retention allowed by administrators of the conversation's root organization. |
 | `setting:ask.max_steps` | **Ask steps per turn** — The model steps allowed for one question before it asks the person to continue. |
-| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies. |
-| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies. |
+| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies. |
+| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies. |
 | `setting:ask.max_tools` | **Ask tools per turn** — The read operations allowed for one question before it asks the person to narrow the question. |
-| `setting:ask.tool_bytes` | **Ask source size** — The most bytes from one read result supplied to the model, with a canonical link to the full source. |
-| `setting:ask.turn_tool_bytes` | **Ask sources per turn** — The total read-result bytes supplied while answering one question. |
+| `setting:ask.docs_hits` | **Ask guide pages per search** — The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match. |
+| `setting:ask.docs_excerpt_tokens` | **Ask guide excerpt size** — The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it. |
+| `setting:ask.max_operations` | **Ask operations per search** — The most read operations one Ask search of the read catalogue returns. |
+| `setting:ask.max_links` | **Ask links per source** — The most canonical source links Ask keeps from one read. |
 | `setting:providers.model_groups_max` | **Model groups** — The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept. |
 | `option:usage.rates.*.web_fetch_per_call` | Credits per successful page-fetch call. |

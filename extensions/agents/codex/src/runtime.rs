@@ -120,7 +120,7 @@ struct State {
 }
 
 /// The sessions that want their raw frames reported, by the harness's thread id.
-pub type RawTable = Arc<Mutex<HashMap<String, (ThreadId, Id)>>>;
+pub type RawTable = Arc<Mutex<HashMap<String, (ThreadId, Id, Id)>>>;
 
 #[derive(Clone)]
 enum Delivery {
@@ -223,13 +223,18 @@ pub fn raw_tap(sink: EventSink, table: RawTable) -> FrameTap {
                 .get("params")
                 .and_then(thread_of)
                 .and_then(|thread| lock(&table).get(thread).copied());
-            let Some((thread_id, segment_id)) = target else {
+            let Some((thread_id, segment_id, opening_id)) = target else {
                 let sink = sink.clone();
                 return Box::pin(async move { !sink.is_closed() });
             };
             let event = raw_frame(direction.name(), frame);
             let sink = sink.clone();
-            Box::pin(async move { sink.session(thread_id, segment_id, event).await.is_ok() })
+            Box::pin(async move {
+                sink.for_opening(opening_id)
+                    .session(thread_id, segment_id, event)
+                    .await
+                    .is_ok()
+            })
         },
     )
 }
@@ -835,6 +840,7 @@ impl Shared {
 
     fn emit_session(&self, mapper: &Mapper, event: SessionEvent) {
         self.stage_event(AdapterEvent::Session {
+            native_opening_id: Some(mapper.opening_id()),
             thread_id: mapper.thread_id(),
             segment_id: mapper.segment_id(),
             event,
@@ -847,6 +853,7 @@ impl Shared {
             for (turn_id, request) in requests.take().unwrap_or_default() {
                 self.stage_event(AdapterEvent::ModelRequest(Box::new(
                     orch_agent_contract::requests::ModelRequestReport {
+                        native_opening_id: Some(mapper.opening_id()),
                         thread_id: mapper.thread_id(),
                         segment_id: mapper.segment_id(),
                         turn_id,
@@ -907,13 +914,16 @@ impl Shared {
         state.image_sources.remove(&thread);
         if let Some(earlier) = state.sessions.remove(&thread) {
             state.by_native.retain(|_, owner| *owner != thread);
-            lock(&self.raw).retain(|_, (owner, _)| *owner != thread);
+            lock(&self.raw).retain(|_, (owner, _, _)| *owner != thread);
             drop(earlier);
         }
         state.by_native.insert(native.clone(), thread);
         lock(&self.loaded).insert(native.clone());
         if raw_events {
-            lock(&self.raw).insert(native.clone(), (thread, segment));
+            lock(&self.raw).insert(
+                native.clone(),
+                (thread, segment, record.mapper.opening_id()),
+            );
         }
         let resumed = matches!(&opened,SessionEvent::SessionOpened(opened) if opened.resumed)
             && state.unexpectedly_closed.remove(
@@ -924,6 +934,7 @@ impl Shared {
                 },
             );
         self.stage_event(AdapterEvent::Session {
+            native_opening_id: Some(record.mapper.opening_id()),
             thread_id: thread,
             segment_id: segment,
             event: opened,
@@ -941,7 +952,7 @@ impl Shared {
         let mut record = state.sessions.remove(&thread)?;
         state.image_sources.remove(&thread);
         state.by_native.retain(|_, owner| *owner != thread);
-        lock(&self.raw).retain(|_, (owner, _)| *owner != thread);
+        lock(&self.raw).retain(|_, (owner, _, _)| *owner != thread);
         for (reference, asked) in record.approvals.drain() {
             if !asked.pending.answered && !asked.pending.closed {
                 self.refuse(&asked, &reference, &record.mapper);
@@ -1133,7 +1144,11 @@ impl Shared {
         });
         let adopted = method == "thread/started" && record.mapper.follows(thread);
         let children: Vec<String> = record.mapper.child_threads().map(str::to_owned).collect();
-        let raw_target = (record.mapper.thread_id(), record.mapper.segment_id());
+        let raw_target = (
+            record.mapper.thread_id(),
+            record.mapper.segment_id(),
+            record.mapper.opening_id(),
+        );
         self.emit_mapped(&mut record.mapper, events);
         if let Some(metadata) = image_source
             && let Some(source) = state.image_sources.get_mut(&owner)
@@ -1247,6 +1262,11 @@ impl Shared {
                     "this native build does not offer exact background command control",
                 ));
             }
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackground::unsupported(
+                    crate::native_schema::FORM_UNKNOWN,
+                ));
+            }
             Err(error) => return Err(crate::map_rpc(error)),
         };
         let mut items = Vec::new();
@@ -1314,10 +1334,17 @@ impl Shared {
                 reason: None,
             });
         }
-        let (terminals, _) = self
-            .background_terminals(&native)
-            .await
-            .map_err(crate::map_rpc)?;
+        let terminals = match self.background_terminals(&native).await {
+            Ok((terminals, _)) => terminals,
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackgroundEnd {
+                    id: id.to_owned(),
+                    state: BackgroundEndState::Unknown,
+                    reason: Some(crate::native_schema::FORM_UNKNOWN.into()),
+                });
+            }
+            Err(error) => return Err(crate::map_rpc(error)),
+        };
         let Some(terminal) = terminals.into_iter().find(|terminal| {
             command_identity(&native, &terminal.item_id, &terminal.process_id) == id
         }) else {

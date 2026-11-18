@@ -1,4 +1,4 @@
-/** Cold route/frame admission uses current bootstrap Meta; later native repairs remain available. */
+/** Somebody signed in is admitted at the session answer; the shell's first read supplies Meta by itself, and later native repairs remain available. */
 import type * as AuthApi from '@/api/auth';
 import { QueryObserver } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -17,22 +17,25 @@ vi.mock('@/shell/bootstrap', () => ({ shellBootstrapKey: (id: string) => ['shell
 const previous = client.session.getState();
 afterEach(() => { queryClient.clear(); client.session.setState(previous); vi.restoreAllMocks(); });
 
-it('joins the AuthFrame and root loader to one admitted aggregate without a public or authority pre-read', async () => {
+it('lets a signed-in person in at the session answer, with the shell\'s first read still out and no Meta asked of its own', async () => {
   queryClient.clear(); calls.bootstrap.mockReset(); calls.nativeMeta.mockReset();
   const world = new World(); const data = await bootstrap(world, world.people.get('ada')!);
   client.session.setState({ status: 'signed_in', userId: data.person.id });
   vi.spyOn(client, 'restore').mockResolvedValue(true);
-  let publish!: (data: MeBootstrapReply) => void;
-  calls.bootstrap.mockImplementation(() => new Promise((resolve) => { publish = resolve; }));
+  const gate: { publish?: (data: MeBootstrapReply) => void } = {};
+  calls.bootstrap.mockImplementation(() => new Promise((resolve) => { gate.publish = resolve; }));
   const frame = new QueryObserver(queryClient, admissionMetaQuery).subscribe(() => undefined);
-  const admitted = admit({ needs: 'signed_in', href: '/org/acme', pathname: '/org/acme', onward: undefined });
   try {
+    // Admitted while the bootstrap has not answered: the router does not wait for it.
+    await admit({ needs: 'signed_in', href: '/org/acme', pathname: '/org/acme', onward: undefined });
     await vi.waitFor(() => { expect(calls.bootstrap).toHaveBeenCalledOnce(); });
-    expect(calls.nativeMeta).not.toHaveBeenCalled(); expect(queryClient.getQueryData(metaKey)).toBeUndefined();
-    publish(data); await admitted;
-    expect(queryClient.getQueryData(metaKey)).toEqual(data.meta);
+    expect(calls.nativeMeta).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(metaKey)).toBeUndefined();
+    // Its answer then lands in the cache by itself, and is the one Meta there is.
+    gate.publish?.(data);
+    await vi.waitFor(() => { expect(queryClient.getQueryData(metaKey)).toEqual(data.meta); });
     expect(calls.bootstrap).toHaveBeenCalledOnce(); expect(calls.nativeMeta).not.toHaveBeenCalled();
-  } finally { publish(data); frame(); }
+  } finally { gate.publish?.(data); frame(); }
 });
 
 it('keeps the native supplier for an anonymous entrance and a later explicit Meta repair', async () => {

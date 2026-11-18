@@ -249,7 +249,7 @@ impl HandoverFixture {
         assert_eq!(
             serde_json::to_value(&wire[0])?,
             json!({"id":command.id,"k":command.kind.as_str(),"key":command.key.wire(),
-                "deadline":deadline,"b":command.body}),
+                "deadline":deadline,"authority_until":wire[0].authority_until,"b":command.body}),
             "private caller/source evidence never enters the native frame"
         );
         Ok(())

@@ -3,9 +3,9 @@
 //! Who may open a tunnel to whom is decided here and nowhere else. A ticket
 //! names the one who opens it, the machine it ends at and the service there,
 //! and is signed with a key that is made when the system starts; its public
-//! half is given to every gateway over the backplane, which checks tickets
-//! without asking anybody. A ticket opens channels until it expires; a channel
-//! that is open outlives it.
+//! half is given to every gateway over the backplane. Session tool channels also
+//! ask the API about the current physical opening and member on every Open and
+//! Resume; committed withdrawals and control loss close their existing routes.
 //!
 //! The command a harness's machine is given carries its tickets as requests,
 //! not as tickets (`{"$ticket": {"kind": "llm", …}}`), and each time that
@@ -32,6 +32,7 @@ use orch_link_contract::tunnels::Service;
 
 use orch_link_contract::tunnels::TicketSource;
 
+use orch_link_contract::tunnels::ToolSessionScope;
 use orch_link_contract::tunnels::TunnelKind;
 
 use orch_pki::PkiError;
@@ -89,6 +90,100 @@ impl std::fmt::Debug for Tickets {
 }
 
 impl Tickets {
+    /// Malformed declarations are refused before any physical scope lookup or signing.
+    pub fn check_kind(wanted: &TicketWanted) -> Result<(), TicketFault> {
+        let service = wanted
+            .more
+            .get("service")
+            .and_then(Json::as_str)
+            .ok_or_else(|| TicketFault::Request("lacks its service".into()))?
+            .parse::<Service>()
+            .map_err(|_| TicketFault::Request("names an unknown service".into()))?;
+        if service.kind() != wanted.kind {
+            return Err(TicketFault::Request(
+                "asks for one kind of tunnel and names another kind of service".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve only the accepted command's factual member, including its exact original ticket reference.
+    pub fn command_scope(
+        facts: &Json,
+        wanted: &TicketWanted,
+        machine: Id,
+    ) -> Result<ToolSessionScope, TicketFault> {
+        let id = |value: &Json, key: &str| {
+            value
+                .get(key)
+                .and_then(Json::as_str)
+                .and_then(|text| text.parse::<Id>().ok())
+                .ok_or_else(|| TicketFault::Request(format!("lacks its native `{key}`")))
+        };
+        let service: Service = wanted
+            .more
+            .get("service")
+            .and_then(Json::as_str)
+            .ok_or_else(|| TicketFault::Request("lacks its native service".into()))?
+            .parse()
+            .map_err(|_| TicketFault::Request("has an invalid native service".into()))?;
+        let reference = serde_json::to_value(wanted)
+            .map_err(|error| TicketFault::Request(error.to_string()))?;
+        let thread = id(facts, "thread_id")?;
+        if facts.get("live").and_then(Json::as_bool) != Some(true)
+            || id(facts, "machine_id")? != machine
+            || wanted
+                .more
+                .get("thread_id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse::<Id>().ok())
+                != Some(thread)
+        {
+            return Err(TicketFault::Request(
+                "does not match its accepted physical session".into(),
+            ));
+        }
+        let (member, binding) = facts
+            .get("members")
+            .and_then(Json::as_object)
+            .into_iter()
+            .flat_map(|members| members.iter())
+            .find(|(_, value)| {
+                value
+                    .get("binding")
+                    .and_then(|value| value.get("ticket"))
+                    .and_then(|value| value.get("$ticket"))
+                    == Some(&reference)
+            })
+            .ok_or_else(|| {
+                TicketFault::Request("does not belong to the accepted session".into())
+            })?;
+        let scope = ToolSessionScope {
+            opening_epoch: facts
+                .get("opening_epoch")
+                .and_then(Json::as_i64)
+                .filter(|epoch| *epoch > 0)
+                .ok_or_else(|| {
+                    TicketFault::Request("lacks its accepted physical opening order".into())
+                })?,
+            thread_id: thread,
+            segment_id: id(facts, "segment_id")?,
+            opening_id: id(facts, "opening_id")?,
+            member: member.clone(),
+            nonce: id(binding, "nonce")?,
+            revision: facts
+                .get("revision")
+                .and_then(Json::as_i64)
+                .filter(|revision| *revision > 0)
+                .ok_or_else(|| TicketFault::Request("lacks its native session revision".into()))?,
+        };
+        if !scope.accepts(&service) {
+            return Err(TicketFault::Request(
+                "the native member names another service".into(),
+            ));
+        }
+        Ok(scope)
+    }
     /// Opens one independently authenticated display transport for one viewer.
     pub fn display(&self, machine: Id, display: Id) -> Result<String, TicketFault> {
         self.issue(&TicketRequest {
@@ -137,6 +232,7 @@ impl Tickets {
                 tool_environment_id: None,
                 tool_environment_generation: None,
                 tool_executor_version: None,
+                tool_session: None,
                 port: Some(port),
                 exp: expires.unix_millis().div_euclid(1_000),
             })?)
@@ -171,6 +267,7 @@ impl Tickets {
                 tool_environment_id: None,
                 tool_environment_generation: None,
                 tool_executor_version: None,
+                tool_session: None,
                 port: Some(port),
                 exp: expires.unix_millis().div_euclid(1_000),
             })?)
@@ -229,6 +326,25 @@ impl Tickets {
     /// `machine` is the machine the command goes to, which opens the tunnel
     /// unless the request names another.
     pub fn for_request(&self, wanted: &TicketWanted, machine: Id) -> Result<String, TicketFault> {
+        self.for_native_request(wanted, machine, None)
+    }
+
+    /// A session's frozen command context is supplied by its native command reader.
+    pub fn for_session_request(
+        &self,
+        wanted: &TicketWanted,
+        machine: Id,
+        scope: &ToolSessionScope,
+    ) -> Result<String, TicketFault> {
+        self.for_native_request(wanted, machine, Some(scope))
+    }
+
+    fn for_native_request(
+        &self,
+        wanted: &TicketWanted,
+        machine: Id,
+        scope: Option<&ToolSessionScope>,
+    ) -> Result<String, TicketFault> {
         let more = &wanted.more;
         let text = |member: &str| -> Result<Option<&str>, TicketFault> {
             match more.get(member) {
@@ -277,6 +393,16 @@ impl Tickets {
             tool_set: text("tool_set")?.map(str::to_owned),
             expires_at: self.expires_in(seconds),
         };
+        if matches!(
+            wanted.kind,
+            TunnelKind::Exec | TunnelKind::Llm | TunnelKind::Mcp
+        ) && matches!(request.src, TicketSource::Machine(_))
+            && scope.is_none()
+        {
+            return Err(TicketFault::Request(
+                "lacks its native physical session scope".into(),
+            ));
+        }
         if matches!(wanted.kind, TunnelKind::Exec | TunnelKind::Mcp) {
             let environment = id("environment_id")?
                 .ok_or_else(|| TicketFault::Request("lacks its `environment_id`".to_owned()))?;
@@ -287,7 +413,18 @@ impl Tickets {
                 .ok_or_else(|| {
                     TicketFault::Request("lacks a nonnegative `environment_generation`".to_owned())
                 })?;
-            if wanted.kind == TunnelKind::Exec
+            if let Some(scope) = scope {
+                Ok(self.signer.issue_for_session(
+                    &request,
+                    Some((environment, generation)),
+                    if wanted.kind == TunnelKind::Exec {
+                        text("executor_version")?
+                    } else {
+                        None
+                    },
+                    scope,
+                )?)
+            } else if wanted.kind == TunnelKind::Exec
                 && let Some(version) = text("executor_version")?
             {
                 Ok(self
@@ -298,6 +435,8 @@ impl Tickets {
                     .signer
                     .issue_for_tool(&request, environment, generation)?)
             }
+        } else if let Some(scope) = scope {
+            Ok(self.signer.issue_for_session(&request, None, None, scope)?)
         } else {
             self.issue(&request)
         }
@@ -401,6 +540,23 @@ pub mod tests {
         self::a_host_publication_verifies_as_its_named_node_and_keeps_the_opening_separate_from_its_ticket()
     }
 
+    fn native_scope(wanted: &TicketWanted) -> ToolSessionScope {
+        ToolSessionScope {
+            opening_epoch: 1,
+            thread_id: wanted.more["thread_id"].as_str().unwrap().parse().unwrap(),
+            segment_id: new_id(),
+            opening_id: new_id(),
+            nonce: new_id(),
+            revision: 1,
+            member: match wanted.kind {
+                TunnelKind::Exec => "exec".into(),
+                TunnelKind::Llm => "llm".into(),
+                TunnelKind::Mcp => format!("mcp:{}", new_id()),
+                _ => unreachable!(),
+            },
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn a_request_in_a_stored_command_becomes_the_ticket_of_the_machine_it_goes_to() {
         let (tickets, clock) = tickets();
@@ -409,9 +565,11 @@ pub mod tests {
             TunnelKind::Llm,
             &Service::Llm { lease_id: lease },
             environment,
-            None,
+            Some(new_id()),
         );
-        let ticket = tickets.for_request(&wanted, agent).unwrap();
+        let ticket = tickets
+            .for_session_request(&wanted, agent, &native_scope(&wanted))
+            .unwrap();
         let claims = tickets
             .verifier()
             .verify(
@@ -444,7 +602,7 @@ pub mod tests {
                 executor: "codex".into(),
             },
             environment,
-            None,
+            Some(new_id()),
         );
         wanted
             .more
@@ -452,7 +610,9 @@ pub mod tests {
         wanted
             .more
             .insert("environment_generation".into(), Json::from(0));
-        let ticket = tickets.for_request(&wanted, agent).unwrap();
+        let ticket = tickets
+            .for_session_request(&wanted, agent, &native_scope(&wanted))
+            .unwrap();
         let verifier = tickets.verifier();
         assert_eq!(
             verifier.verify(
@@ -493,7 +653,13 @@ pub mod tests {
             wanted
                 .more
                 .insert("environment_generation".into(), Json::from(3));
-            let signed = tickets.for_request(&wanted, agent).unwrap();
+            assert!(
+                tickets.for_request(&wanted, agent).is_err(),
+                "machine tools also need their physical opening"
+            );
+            let signed = tickets
+                .for_session_request(&wanted, agent, &native_scope(&wanted))
+                .unwrap();
             let verifier = tickets.verifier();
             let presenter = TicketSource::Machine(agent);
             let claims = verifier

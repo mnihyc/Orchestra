@@ -540,6 +540,7 @@ async fn host_views(
                 .map(parse::<WhenFull>)
                 .transpose()?;
             Ok(Host {
+                bundled_with_server: row.bundled_with_server,
                 provenance: orch_api_contract::resource_groups::ResourceProvenance {
                     origin_machine: machines.get(&row.machine_id).cloned(),
                     availability: Vec::new(),
