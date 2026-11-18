@@ -257,8 +257,18 @@ async fn an_unproved_readonly_boundary_is_not_offered_and_a_session_requiring_it
 }
 
 #[tokio::test]
+async fn a_native_conversation_with_no_tools_refuses_a_forced_action_on_the_controlled_model() {
+    shared("confinement.no_tools").await;
+}
+
+#[tokio::test]
 async fn native_tool_answers_have_only_one_model_facing_form() {
     shared("tools.result_form").await;
+}
+
+#[tokio::test]
+async fn a_checkpoint_before_an_earlier_message_forks_exactly_there_and_leaves_the_source_whole() {
+    shared("input_prefix").await;
 }
 
 #[tokio::test]

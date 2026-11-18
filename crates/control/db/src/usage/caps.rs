@@ -841,7 +841,7 @@ pub async fn running(
         "SELECT t.id AS turn_id, t.thread_id, t.model, s.provider_id,
                 COALESCE(work.purpose,CASE WHEN s.program='orch' THEN 'ask' ELSE 'turn' END) AS purpose,
                 s.program_protocol AS protocol,
-                i.author_id AS user_id, a.harness_kind,
+                CASE WHEN work.node_id IS NOT NULL THEN work.person_id ELSE i.author_id END AS user_id, a.harness_kind,
                 t.params, a.descriptor -> 'parameters' AS declared,
                 CASE WHEN t.end_work IS NULL THEN t.usage ELSE t.end_work#>'{snapshot,usage}' END AS usage, t.limit_bypass,
                 COALESCE((SELECT sum(e.total_tokens) FROM usage_events e WHERE e.turn_id = t.id AND e.counted), 0)::bigint
@@ -862,7 +862,13 @@ pub async fn running(
     }
     query.push(")");
     push_running_scope(&mut query, cap);
-    push_subject(&mut query, cap, person, "i.author_id", at);
+    push_subject(
+        &mut query,
+        cap,
+        person,
+        "(CASE WHEN work.node_id IS NOT NULL THEN work.person_id ELSE i.author_id END)",
+        at,
+    );
     query.push(" ORDER BY t.created_at, t.id");
     Ok(query.build_query_as().fetch_all(conn).await?)
 }
