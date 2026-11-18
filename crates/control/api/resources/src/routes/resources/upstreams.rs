@@ -16,30 +16,15 @@ use orch_api_contract::resources::Upstream;
 
 use orch_model_contract::endpoint::standard_options;
 
-use orch_model_contract::protocol::ANTHROPIC_MESSAGES;
-
-use orch_model_contract::protocol::OPENAI_CHAT;
-
-use orch_model_contract::protocol::OPENAI_EMBEDDINGS;
-
-use orch_model_contract::protocol::OPENAI_RESPONSES;
-
 use orch_types::Json;
 
 use serde_json::Map;
 
 use serde_json::json;
 
+/// The shared catalogue of native wire formats accepted and offered for a provider.
+pub use orch_model_contract::protocol::SUPPORTED as PROTOCOLS;
 use std::collections::BTreeSet;
-/// The wire protocols an upstream can speak, by name. A translator that is registered adds to them;
-/// none is registered here. The Embeddings format is spoken by no agent: its endpoint makes the vectors of
-/// search by meaning.
-pub const PROTOCOLS: [&str; 4] = [
-    OPENAI_RESPONSES,
-    OPENAI_CHAT,
-    ANTHROPIC_MESSAGES,
-    OPENAI_EMBEDDINGS,
-];
 
 /// How the key may be presented.
 const AUTH_MODES: [&str; 4] = ["bearer", "x-api-key", "header", "none"];

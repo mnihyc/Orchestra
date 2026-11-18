@@ -13,12 +13,15 @@
 //! write over a newer version is refused and leaves the file as it was. A write that is cut off at
 //! any point leaves the old file whole, and the half-received file is removed.
 
+mod relay;
+
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use chrono::DateTime;
-use orch_api_contract::workspace::{DirEntry, DirEntryKind, FileStat};
+use orch_api_contract::workspace::{DirEntry, DirEntryKind, FileRenameResult, FileStat};
 use orch_link_contract::commands::{ExpectedHash, FileVersion, FsFetchResult};
 use orch_types::{Hash, Time};
 
@@ -80,6 +83,132 @@ pub(crate) struct DirectoryVersion {
     identity: crate::platform::Identity,
 }
 
+/// A visible directory streamed through its held native handle, with a checked observation end.
+pub(crate) struct DirectoryStream {
+    prefix: Option<String>,
+    files: Files,
+    path: RelPath,
+    real: RelPath,
+    dir: Dir,
+    scope: Option<crate::ignore::Scope>,
+    names: Box<dyn Iterator<Item = std::io::Result<OsString>>>,
+    before: DirectoryVersion,
+    done: bool,
+    verify_end: bool,
+}
+
+impl DirectoryStream {
+    pub(crate) fn location(&self) -> &DirectoryLocation {
+        &self.before.location
+    }
+
+    pub(crate) fn with_prefix(mut self, prefix: Option<&str>) -> Self {
+        self.prefix = prefix.map(str::to_lowercase);
+        self
+    }
+    pub(crate) fn footprint(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.path.as_str().len()
+            + self.real.as_str().len()
+            + self.prefix.as_ref().map_or(0, String::len)
+    }
+}
+
+impl Iterator for DirectoryStream {
+    type Item = Result<DirEntry>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let name = match self.names.next() {
+                Some(Ok(name)) => name,
+                Some(Err(error)) => {
+                    self.done = true;
+                    return Some(Err(HostError::io(format!("listing {}", self.path), error)));
+                }
+                None => {
+                    self.done = true;
+                    if !self.verify_end {
+                        return None;
+                    }
+                    return match self.files.directory_version(&self.path) {
+                        Ok(version) if version == self.before => None,
+                        Ok(_) => Some(Err(HostError::Changed(
+                            "the directory changed during its metadata observation".to_owned(),
+                        ))),
+                        Err(error) => Some(Err(error)),
+                    };
+                }
+            };
+            let one = || -> Result<Option<DirEntry>> {
+                let Some(text) = name.to_str() else {
+                    return Ok(None);
+                };
+                if self
+                    .prefix
+                    .as_ref()
+                    .is_some_and(|prefix| !text.to_lowercase().starts_with(prefix))
+                {
+                    return Ok(None);
+                }
+                if is_internal_name(text) {
+                    return Ok(None);
+                }
+                let shown = self.path.join(text)?;
+                let real = self.real.join(text)?;
+                let meta = match self.dir.lstat(&name) {
+                    Ok(meta) => meta,
+                    Err(error)
+                        if !self.verify_end && error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(HostError::io(format!("describing {shown}"), error)),
+                };
+                if self
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.is_ignored(&real, meta.is_dir()))
+                {
+                    return Ok(None);
+                }
+                let target = if meta.is_symlink() {
+                    Some(
+                        self.dir
+                            .read_link(&name)
+                            .map_err(|error| HostError::io(format!("reading link {shown}"), error))?
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                } else {
+                    None
+                };
+                Ok(Some(self.files.entry_of(
+                    &shown,
+                    text,
+                    &self.files.displayed_meta(&shown, &meta),
+                    target,
+                )))
+            };
+            match one() {
+                Ok(None) => {}
+                Ok(Some(entry)) => return Some(Ok(entry)),
+                Err(HostError::NotFound(_)) if !self.verify_end => continue,
+                Err(HostError::Io { source, .. })
+                    if !self.verify_end && source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
 /// A file opened for reading, checked to be a regular file, with the version it is.
 #[derive(Debug, Clone)]
 pub struct Opened {
@@ -96,6 +225,7 @@ pub struct Opened {
 pub struct Files {
     inner: Arc<Inner>,
     recorded_operation: Option<Arc<crate::state_store::DestructiveLease>>,
+    machine_reach: bool,
 }
 
 impl Clone for Files {
@@ -103,6 +233,7 @@ impl Clone for Files {
         Self {
             inner: Arc::clone(&self.inner),
             recorded_operation: self.recorded_operation.clone(),
+            machine_reach: self.machine_reach,
         }
     }
 }
@@ -116,6 +247,13 @@ struct Inner {
     gates: Arc<GateState>,
     uploads: Uploads,
     writable: bool,
+    relay: Arc<relay::Stages>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.relay.stop.cancel();
+    }
 }
 
 fn time_of(nanos: i64) -> Time {
@@ -161,6 +299,79 @@ struct Cleanup {
     name: OsString,
     is_dir: bool,
     armed: bool,
+}
+
+/// Copy evidence is streamed to disk, in children-first order, rather than retained for a whole
+/// source tree in memory. Losing the journal leaves the source intact.
+struct CopyJournal(BufWriter<File>);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CopyRecord {
+    path: String,
+    meta: Meta,
+    parent_dev: u64,
+    parent_ino: u64,
+}
+
+impl CopyJournal {
+    fn new() -> Result<Self> {
+        tempfile::tempfile()
+            .map(|file| Self(BufWriter::new(file)))
+            .map_err(|error| HostError::io("recording what a move copied", error))
+    }
+
+    fn record(&mut self, real: &RelPath, meta: Meta, parent: &Dir) -> Result<()> {
+        let parent = parent
+            .stat_self()
+            .map_err(|error| HostError::io("checking a copied entry's parent", error))?;
+        serde_json::to_writer(
+            &mut self.0,
+            &CopyRecord {
+                path: real.to_string(),
+                meta,
+                parent_dev: parent.dev,
+                parent_ino: parent.ino,
+            },
+        )
+        .map_err(|error| {
+            HostError::io("recording what a move copied", std::io::Error::other(error))
+        })?;
+        self.0
+            .write_all(b"\n")
+            .map_err(|error| HostError::io("recording what a move copied", error))
+    }
+
+    fn reader(self) -> Result<BufReader<File>> {
+        let mut file = self
+            .0
+            .into_inner()
+            .map_err(|error| HostError::io("finishing a move's copy record", error.into_error()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| HostError::io("reading a move's copy record", error))?;
+        Ok(BufReader::new(file))
+    }
+}
+
+/// Count the entries observed left at the source, including their containing directories.
+/// An unreadable or excessively deep directory counts once; it is never removed to count it.
+fn entries_left(parent: &Dir, name: &OsStr, depth: usize) -> u64 {
+    let meta = match parent.lstat(name) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(_) => return 1,
+    };
+    if !meta.is_dir() || depth >= WALK_DEPTH_MAX {
+        return 1;
+    }
+    let Ok(dir) = parent.open_child(name) else {
+        return 1;
+    };
+    let mut count = 1u64;
+    let _ = dir.visit_names(&mut |child| {
+        count = count.saturating_add(entries_left(&dir, child, depth + 1));
+        true
+    });
+    count
 }
 
 impl Cleanup {
@@ -247,6 +458,27 @@ impl Files {
         Self::build(workspace, None, cache, limits, gates, true)
     }
 
+    /// An explicitly admitted path in the environment user's native namespace.
+    pub(crate) fn machine(
+        workspace: Workspace,
+        cache: Arc<HashCache>,
+        limits: Limits,
+        gates: Arc<GateState>,
+    ) -> Self {
+        let mut files = Self::build(workspace, None, cache, limits, gates, true);
+        files.machine_reach = true;
+        files
+    }
+
+    fn require_reach(&self) -> Result<()> {
+        if self.machine_reach
+            && self.inner.gates.get().files_reach != orch_link_contract::policy::FileReach::Machine
+        {
+            return Err(HostError::FileReachDenied);
+        }
+        Ok(())
+    }
+
     /// Blocking materialization clones retain destructive admission even if their caller is dropped.
     pub(crate) fn with_recorded_operation(
         mut self,
@@ -277,6 +509,7 @@ impl Files {
     ) -> Self {
         Self {
             recorded_operation: None,
+            machine_reach: false,
             inner: Arc::new(Inner {
                 workspace,
                 ignore,
@@ -285,6 +518,7 @@ impl Files {
                 gates,
                 uploads: Uploads::new(),
                 writable,
+                relay: Arc::new(relay::Stages::default()),
             }),
         }
     }
@@ -305,6 +539,59 @@ impl Files {
     #[must_use]
     pub fn hashes(&self) -> &Arc<HashCache> {
         &self.inner.cache
+    }
+
+    /// Captures only this root and its applicable ancestor rules, never omitted children.
+    pub(crate) fn source_facts(
+        &self,
+        path: &RelPath,
+        observed_at: Time,
+    ) -> Result<orch_api_contract::workspace::FileSourceFacts> {
+        use orch_api_contract::workspace::{
+            FileInclusion, FileSourceFacts, FileSourceKind, FileSourcePolicy,
+        };
+        self.require_reach()?;
+        let kind = if self.machine_reach {
+            FileSourceKind::Machine
+        } else if self.inner.ignore.is_some() {
+            FileSourceKind::Workspace
+        } else if self.inner.writable {
+            FileSourceKind::OwnedData
+        } else {
+            FileSourceKind::Mount
+        };
+        let inclusion = if let Some(rules) = &self.inner.ignore {
+            let stat = self.stat(path)?;
+            let directory = if stat.entry.kind == DirEntryKind::Dir {
+                path.clone()
+            } else {
+                path.parent().unwrap_or_else(RelPath::root)
+            };
+            let scope = rules
+                .scope_at(self.root(), &directory)
+                .ok_or_else(|| HostError::Ignored(path.as_str().to_owned()))?;
+            if let Some(problem) = scope.problem() {
+                return Err(HostError::Unsupported(problem.message()));
+            }
+            Some(FileInclusion {
+                governing_rule_sources: scope.sources(),
+                deeper_rules_override: true,
+                parent_excluded: false,
+                internal_rules_applied: true,
+            })
+        } else {
+            None
+        };
+        Ok(FileSourceFacts {
+            policy: FileSourcePolicy {
+                kind,
+                workspace_exclusions: self.inner.ignore.is_some(),
+                writable: self.inner.writable,
+            },
+            inclusion,
+            watch: None,
+            observed_at,
+        })
     }
 
     /// The limits in force.
@@ -336,6 +623,7 @@ impl Files {
 
     /// Refuses unless Orch may change files here.
     fn require_write(&self) -> Result<()> {
+        self.require_reach()?;
         if !self.inner.writable {
             return Err(HostError::Unsupported(
                 "an attached mount is not written through Orch".to_owned(),
@@ -351,6 +639,7 @@ impl Files {
         located: &Located,
         is_dir: bool,
     ) -> Result<()> {
+        self.require_reach()?;
         if asked.has_component(orch_agent_contract::session::INSTRUCTION_ROOT_MARKER)
             || located
                 .real
@@ -363,9 +652,14 @@ impl Files {
         let Some(rules) = &self.inner.ignore else {
             return Ok(());
         };
-        if rules.is_ignored(self.ws(), asked, is_dir)
-            || rules.is_ignored(self.ws(), &located.real, is_dir)
-        {
+        let ignored = rules
+            .check(self.ws(), asked, is_dir)
+            .map_err(|problem| HostError::Unsupported(problem.message()))?;
+        let real_ignored = &located.real != asked
+            && rules
+                .check(self.ws(), &located.real, is_dir)
+                .map_err(|problem| HostError::Unsupported(problem.message()))?;
+        if ignored || real_ignored {
             return Err(HostError::Ignored(format!(
                 "{asked} is left out by the workspace's ignore rules"
             )));
@@ -457,67 +751,53 @@ impl Files {
         path: &RelPath,
         visit: &mut dyn FnMut(DirEntry) -> Result<()>,
     ) -> Result<DirectoryVersion> {
+        let mut stream = self.directory_stream(path)?;
+        let before = stream.before.clone();
+        for entry in &mut stream {
+            visit(entry?)?;
+        }
+        Ok(before)
+    }
+
+    pub(crate) fn live_directory_stream(&self, path: &RelPath) -> Result<DirectoryStream> {
+        let mut stream = self.directory_stream(path)?;
+        // A live traversal reports an interval, not immutable membership of the whole tree.
+        stream.verify_end = false;
+        Ok(stream)
+    }
+
+    pub(crate) fn directory_stream(&self, path: &RelPath) -> Result<DirectoryStream> {
         let before = self.directory_version(path)?;
         let located = self.ws().locate(path, Locate::THROUGH)?;
         let dir = self.ws().open_dir(&located)?;
-        let scope = match &self.inner.ignore {
-            Some(rules) => Some(rules.scope_at(self.ws(), &located.real).ok_or_else(|| {
-                HostError::Ignored(format!(
-                    "{path} is left out by the workspace's ignore rules"
-                ))
-            })?),
-            None => None,
-        };
-        let mut failed = None;
-        dir.visit_names(&mut |name| {
-            let mut one = || -> Result<()> {
-                let Some(text) = name.to_str() else {
-                    return Ok(());
-                };
-                if is_internal_name(text) {
-                    return Ok(());
-                }
-                let shown = path.join(text)?;
-                let real = located.real.join(text)?;
-                let meta = dir
-                    .lstat(name)
-                    .map_err(|error| HostError::io(format!("describing {shown}"), error))?;
-                if scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.is_ignored(&real, meta.is_dir()))
-                {
-                    return Ok(());
-                }
-                let target = if meta.is_symlink() {
-                    Some(
-                        dir.read_link(name)
-                            .map_err(|error| HostError::io(format!("reading link {shown}"), error))?
-                            .to_string_lossy()
-                            .into_owned(),
-                    )
-                } else {
-                    None
-                };
-                visit(self.entry_of(&shown, text, &self.displayed_meta(&shown, &meta), target))
-            };
-            match one() {
-                Ok(()) => true,
-                Err(error) => {
-                    failed = Some(error);
-                    false
-                }
-            }
+        let scope = self
+            .ignore()
+            .map(|rules| {
+                rules.scope_at(self.ws(), &located.real).ok_or_else(|| {
+                    HostError::Ignored(format!(
+                        "{path} is left out by the workspace's ignore rules"
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(problem) = scope.as_ref().and_then(crate::ignore::Scope::problem) {
+            return Err(HostError::Unsupported(problem.message()));
+        }
+        let names = dir
+            .names_stream()
+            .map_err(|error| HostError::io(format!("listing {path}"), error))?;
+        Ok(DirectoryStream {
+            prefix: None,
+            files: self.clone(),
+            path: path.clone(),
+            real: located.real,
+            dir,
+            scope,
+            names,
+            before,
+            done: false,
+            verify_end: true,
         })
-        .map_err(|error| HostError::io(format!("listing {path}"), error))?;
-        if let Some(error) = failed {
-            return Err(error);
-        }
-        if self.directory_version(path)? != before {
-            return Err(HostError::Changed(
-                "the directory changed during its metadata capture".to_owned(),
-            ));
-        }
-        Ok(before)
     }
 
     /// Lists the directory at `path` (through a link, if it is one): at most
@@ -543,6 +823,7 @@ impl Files {
         if meta.is_dir() {
             let entry = self.entry_of(path, name, &meta, None);
             return Ok(FileStat {
+                facts: None,
                 entry,
                 hash: None,
                 media_type: media::DIRECTORY.to_owned(),
@@ -570,6 +851,7 @@ impl Files {
                     link_target,
                 );
                 return Ok(FileStat {
+                    facts: None,
                     entry,
                     hash,
                     media_type,
@@ -578,6 +860,7 @@ impl Files {
             }
             let entry = self.entry_of(path, name, &Meta { size: 0, ..meta }, link_target);
             return Ok(FileStat {
+                facts: None,
                 entry,
                 hash: None,
                 media_type: media::SYMLINK.to_owned(),
@@ -587,6 +870,7 @@ impl Files {
         if !meta.is_file() {
             let entry = self.entry_of(path, name, &meta, None);
             return Ok(FileStat {
+                facts: None,
                 entry,
                 hash: None,
                 media_type: media::UNKNOWN.to_owned(),
@@ -595,6 +879,7 @@ impl Files {
         }
         let (found, hash, media_type, is_text) = self.read_file_facts(&located, name)?;
         Ok(FileStat {
+            facts: None,
             entry: self.entry_of(path, name, &found, None),
             hash,
             media_type,
@@ -738,6 +1023,11 @@ impl Files {
         }
         sent.map_err(blob_failure)?;
         Ok(FsFetchResult {
+            minimum_reach: if self.machine_reach {
+                orch_link_contract::policy::FileReach::Machine
+            } else {
+                orch_link_contract::policy::FileReach::Roots
+            },
             hash,
             size,
             mtime_ns: opened.meta.mtime_ns,
@@ -925,21 +1215,37 @@ impl Files {
 
     /// Renames the entry at `from` to `to`, which must not exist. A link is renamed, not what it
     /// leads to.
-    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<FileStat> {
+    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<FileRenameResult> {
+        self.rename_into(from, self, to)
+    }
+
+    /// Both native roots retain their independent mutation gates.
+    pub(crate) fn rename_into(
+        &self,
+        from: &RelPath,
+        destination: &Self,
+        to: &RelPath,
+    ) -> Result<FileRenameResult> {
         self.require_write()?;
+        destination.require_write()?;
         let source = self.ws().locate(from, Locate::ENTRY)?;
         let source_meta = source
             .meta
             .ok_or_else(|| HostError::NotFound(format!("{from} is not there")))?;
         let source_name = source.name()?.to_owned();
         self.check_visible(from, &source, source_meta.is_dir())?;
-        let target = self.ws().locate(to, Locate::ENTRY)?;
+        let target = destination.ws().locate(to, Locate::ENTRY)?;
         let target_name = target
             .name()
             .map_err(|_| HostError::Exists("the workspace root is there".to_owned()))?
             .to_owned();
-        self.check_visible(to, &target, source_meta.is_dir())?;
-        if source_meta.is_dir() && target.real.starts_with(&source.real) {
+        destination.check_visible(to, &target, source_meta.is_dir())?;
+        if source_meta.is_dir()
+            && target
+                .real
+                .under(destination.ws().root_path())
+                .starts_with(source.real.under(self.ws().root_path()))
+        {
             return Err(HostError::Exists(format!(
                 "{from} cannot be moved into itself"
             )));
@@ -968,14 +1274,90 @@ impl Files {
         {
             Ok(()) => {}
             Err(error) if is_cross_device(&error) => {
-                self.copy(from, to)?;
-                self.remove_checked(from, true)?;
+                let (stat, journal) = self.copy_for_move_into(from, destination, to)?;
+                let kept_entries = self.remove_copied(from, journal)?;
+                return Ok(FileRenameResult { stat, kept_entries });
             }
             Err(error) => return Err(HostError::io(format!("renaming {from}"), error)),
         }
         self.inner.cache.forget(&source.real);
-        self.note_orch_write(&target.real);
-        self.stat(to)
+        destination.note_orch_write(&target.real);
+        Ok(FileRenameResult {
+            stat: destination.stat(to)?,
+            kept_entries: 0,
+        })
+    }
+
+    #[cfg(test)]
+    fn copy_for_move(&self, from: &RelPath, to: &RelPath) -> Result<(FileStat, CopyJournal)> {
+        self.copy_for_move_into(from, self, to)
+    }
+
+    fn copy_for_move_into(
+        &self,
+        from: &RelPath,
+        destination: &Self,
+        to: &RelPath,
+    ) -> Result<(FileStat, CopyJournal)> {
+        let mut journal = CopyJournal::new()?;
+        let stat = self.copy_recorded(from, destination, to, Some(&mut journal))?;
+        Ok((stat, journal))
+    }
+
+    fn remove_copied(&self, from: &RelPath, journal: CopyJournal) -> Result<u64> {
+        for line in journal.reader()?.lines() {
+            crate::error::check_cancelled()?;
+            let line =
+                line.map_err(|error| HostError::io("reading a move's copy record", error))?;
+            let record: CopyRecord = serde_json::from_str(&line).map_err(|error| {
+                HostError::io("reading a move's copy record", std::io::Error::other(error))
+            })?;
+            // A source without a stable file identity cannot be proved to be this copy.
+            // Leave it available at its old name and include it in the returned count.
+            if record.meta.ino == 0 || record.parent_ino == 0 {
+                continue;
+            }
+            let path = self.parse(&record.path)?;
+            let Ok(located) = self.ws().locate(&path, Locate::ENTRY) else {
+                continue;
+            };
+            let Some(meta) = located.meta else {
+                continue;
+            };
+            let Ok(parent) = located.parent.stat_self() else {
+                continue;
+            };
+            if parent.dev != record.parent_dev
+                || parent.ino != record.parent_ino
+                || meta.kind != record.meta.kind
+            {
+                continue;
+            }
+            let same = if meta.is_dir() {
+                meta.dev == record.meta.dev && meta.ino == record.meta.ino
+            } else {
+                meta.identity() == record.meta.identity()
+            };
+            if !same {
+                continue;
+            }
+            // A writer can still change this entry between this last check and its unlink.
+            // Never recurse here: uncopied, changed and newly created children must survive.
+            let removed = if meta.is_dir() {
+                located.parent.rmdir(located.name()?)
+            } else {
+                located.parent.unlink(located.name()?)
+            };
+            if removed.is_ok() {
+                self.inner.cache.forget(&located.real);
+            }
+        }
+        let source = match self.ws().locate(from, Locate::ENTRY) {
+            Ok(source) => source,
+            Err(HostError::NotFound(_)) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        Ok(entries_left(&source.parent, source.name()?, 0))
     }
 
     /// Removes the entry at `path`; a directory with what is in it only if `recursive` is set. A
@@ -1014,23 +1396,49 @@ impl Files {
     /// Copies the entry at `from` to `to`, which must not exist: a file, or a directory with what
     /// is in it that the ignore rules do not leave out. The copy appears whole or not at all.
     pub fn copy(&self, from: &RelPath, to: &RelPath) -> Result<FileStat> {
-        self.require_write()?;
+        self.copy_into(from, self, to)
+    }
+
+    /// The source needs read reach; only the independently admitted destination needs write reach.
+    pub(crate) fn copy_into(
+        &self,
+        from: &RelPath,
+        destination: &Self,
+        to: &RelPath,
+    ) -> Result<FileStat> {
+        self.copy_recorded(from, destination, to, None)
+    }
+
+    fn copy_recorded(
+        &self,
+        from: &RelPath,
+        destination: &Self,
+        to: &RelPath,
+        journal: Option<&mut CopyJournal>,
+    ) -> Result<FileStat> {
+        self.require_reach()?;
+        destination.require_write()?;
         let source = self.ws().locate(from, Locate::ENTRY)?;
         let source_meta = source
             .meta
             .ok_or_else(|| HostError::NotFound(format!("{from} is not there")))?;
         let source_name = source.name()?.to_owned();
         self.check_visible(from, &source, source_meta.is_dir())?;
-        let target = self.ws().locate(to, Locate::ENTRY)?;
+        let target = destination.ws().locate(to, Locate::ENTRY)?;
         let target_name = target
             .name()
             .map_err(|_| HostError::Exists("the workspace root is there".to_owned()))?
             .to_owned();
-        self.check_visible(to, &target, source_meta.is_dir())?;
+        destination.check_visible(to, &target, source_meta.is_dir())?;
         if target.meta.is_some() {
             return Err(HostError::Exists(format!("{to} is there already")));
         }
-        if source_meta.is_dir() && target.real.starts_with(&source.real) {
+        if source_meta.is_dir()
+            && target
+                .real
+                .under(destination.ws().root_path())
+                .starts_with(source.real.under(self.ws().root_path()))
+        {
             return Err(HostError::Exists(format!(
                 "{from} cannot be copied into itself"
             )));
@@ -1041,11 +1449,21 @@ impl Files {
         };
         let temp = temp_name();
         let mut cleanup = Cleanup::new(&target.parent, &temp, source_meta.is_dir())?;
-        let mut budget = Budget {
-            left: self.inner.limits.max_blob_bytes,
-            limit: self.inner.limits.max_blob_bytes,
+        // A move streams between local filesystems, without storing a blob on the server.
+        let moving = journal.is_some();
+        let mut budget = (!moving).then(|| Budget {
+            left: self
+                .inner
+                .limits
+                .max_blob_bytes
+                .min(destination.inner.limits.max_blob_bytes),
+            limit: self
+                .inner
+                .limits
+                .max_blob_bytes
+                .min(destination.inner.limits.max_blob_bytes),
             what: from.to_string(),
-        };
+        });
         self.copy_entry(
             &source.parent,
             &source_name,
@@ -1056,15 +1474,23 @@ impl Files {
             &temp,
             0,
             &mut budget,
+            journal,
         )?;
         target
             .parent
             .rename_to(&temp, &target.parent, &target_name, false)
             .map_err(|error| HostError::io(format!("putting the copy {to} in place"), error))?;
         cleanup.disarm();
-        let _ = target.parent.sync();
-        self.note_orch_write(&target.real);
-        self.stat(to)
+        if moving {
+            target
+                .parent
+                .sync()
+                .map_err(|error| HostError::io("flushing the destination of a move", error))?;
+        } else {
+            let _ = target.parent.sync();
+        }
+        destination.note_orch_write(&target.real);
+        destination.stat(to)
     }
 
     #[allow(
@@ -1081,16 +1507,29 @@ impl Files {
         to_dir: &Dir,
         to_name: &OsStr,
         depth: usize,
-        budget: &mut Budget,
+        budget: &mut Option<Budget>,
+        mut journal: Option<&mut CopyJournal>,
     ) -> Result<()> {
+        if let Some(problem) = scope.and_then(crate::ignore::Scope::problem) {
+            return Err(HostError::Unsupported(problem.message()));
+        }
         match meta.kind {
             Kind::File => {
                 let source = from_dir
                     .open_read(from_name)
                     .map_err(|error| HostError::io(format!("opening {real}"), error))?;
-                budget.take(meta.size)?;
+                let before = file_meta(&source)
+                    .map_err(|error| HostError::io(format!("looking at {real}"), error))?;
+                if !before.is_file() {
+                    return Err(HostError::Changed(format!(
+                        "{real} changed before it was copied"
+                    )));
+                }
+                if let Some(budget) = budget {
+                    budget.take(before.size)?;
+                }
                 let target = to_dir
-                    .create_new(to_name, meta.mode & WRITABLE_MODE_BITS)
+                    .create_new(to_name, before.mode & WRITABLE_MODE_BITS)
                     .map_err(|error| HostError::io("making the copy of a file", error))?;
                 let mut offset = 0u64;
                 let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
@@ -1121,9 +1560,19 @@ impl Files {
                 let _ = target.set_modified(
                     std::time::UNIX_EPOCH
                         + std::time::Duration::from_nanos(
-                            u64::try_from(meta.mtime_ns).unwrap_or(0),
+                            u64::try_from(before.mtime_ns).unwrap_or(0),
                         ),
                 );
+                target
+                    .sync_all()
+                    .map_err(|error| HostError::io("flushing a copied file", error))?;
+                if let Some(journal) = journal {
+                    let after = file_meta(&source)
+                        .map_err(|error| HostError::io(format!("looking at {real}"), error))?;
+                    if before.identity() == after.identity() {
+                        journal.record(real, before, from_dir)?;
+                    }
+                }
                 Ok(())
             }
             Kind::Symlink => {
@@ -1132,7 +1581,15 @@ impl Files {
                     .map_err(|error| HostError::io(format!("reading the link {real}"), error))?;
                 to_dir
                     .symlink(&target, to_name)
-                    .map_err(|error| HostError::io("making the copy of a link", error))
+                    .map_err(|error| HostError::io("making the copy of a link", error))?;
+                if let Some(journal) = journal
+                    && from_dir
+                        .lstat(from_name)
+                        .is_ok_and(|after| after.identity() == meta.identity())
+                {
+                    journal.record(real, *meta, from_dir)?;
+                }
+                Ok(())
             }
             Kind::Dir => {
                 if depth >= WALK_DEPTH_MAX {
@@ -1146,52 +1603,74 @@ impl Files {
                 let from_child = from_dir
                     .open_child(from_name)
                     .map_err(|error| HostError::io(format!("entering {real}"), error))?;
+                let opened = from_child
+                    .stat_self()
+                    .map_err(|error| HostError::io(format!("looking at {real}"), error))?;
                 let to_child = to_dir
                     .open_child(to_name)
                     .map_err(|error| HostError::io("entering the copy of a directory", error))?;
-                let mut names = from_child
-                    .names()
+                let mut failure = None;
+                from_child
+                    .visit_names(&mut |name| {
+                        let copied = (|| -> Result<()> {
+                            let Some(text) = name.to_str() else {
+                                return Ok(());
+                            };
+                            if is_internal_name(text) {
+                                return Ok(());
+                            }
+                            let Ok(child_real) = real.join(text) else {
+                                return Ok(());
+                            };
+                            let Ok(child_meta) = from_child.lstat(name) else {
+                                return Ok(());
+                            };
+                            if let Some(scope) = scope
+                                && scope.is_ignored(&child_real, child_meta.is_dir())
+                            {
+                                return Ok(());
+                            }
+                            let child_scope = match (scope, child_meta.is_dir()) {
+                                (Some(scope), true) => Some(scope.enter(
+                                    &child_real,
+                                    &from_child.open_child(name).map_err(|error| {
+                                        HostError::io(format!("entering {child_real}"), error)
+                                    })?,
+                                )),
+                                _ => None,
+                            };
+                            self.copy_entry(
+                                &from_child,
+                                name,
+                                &child_meta,
+                                &child_real,
+                                child_scope.as_ref(),
+                                &to_child,
+                                name,
+                                depth + 1,
+                                budget,
+                                journal.as_deref_mut(),
+                            )
+                        })();
+                        if let Err(error) = copied {
+                            failure = Some(error);
+                            false
+                        } else {
+                            true
+                        }
+                    })
                     .map_err(|error| HostError::io(format!("listing {real}"), error))?;
-                names.sort();
-                for name in names {
-                    let Some(text) = name.to_str() else { continue };
-                    if is_internal_name(text) {
-                        continue;
-                    }
-                    let Ok(child_real) = real.join(text) else {
-                        continue;
-                    };
-                    let Ok(child_meta) = from_child.lstat(&name) else {
-                        continue;
-                    };
-                    if let Some(scope) = scope
-                        && scope.is_ignored(&child_real, child_meta.is_dir())
-                    {
-                        continue;
-                    }
-                    let child_scope = match (scope, child_meta.is_dir()) {
-                        (Some(scope), true) => Some(scope.enter(
-                            &child_real,
-                            &from_child.open_child(&name).map_err(|error| {
-                                HostError::io(format!("entering {child_real}"), error)
-                            })?,
-                        )),
-                        _ => None,
-                    };
-                    self.copy_entry(
-                        &from_child,
-                        &name,
-                        &child_meta,
-                        &child_real,
-                        child_scope.as_ref(),
-                        &to_child,
-                        &name,
-                        depth + 1,
-                        budget,
-                    )?;
+                if let Some(error) = failure {
+                    return Err(error);
                 }
                 let _ = to_dir.set_mode(to_name, meta.mode & WRITABLE_MODE_BITS);
                 let _ = to_dir.set_mtime(to_name, meta.mtime_ns);
+                to_child
+                    .sync()
+                    .map_err(|error| HostError::io("flushing a copied directory", error))?;
+                if let Some(journal) = journal {
+                    journal.record(real, opened, from_dir)?;
+                }
                 Ok(())
             }
             Kind::Other => Ok(()),
@@ -1291,6 +1770,38 @@ mod tests {
             link.size, 2,
             "a link to a file shows the version of the file, which is what a read of it will be"
         );
+    }
+
+    #[test]
+    fn a_source_policy_describes_the_native_mount_or_owned_root_without_workspace_rules() {
+        use orch_api_contract::workspace::FileSourceKind;
+        let f = fixture_with(&["*.key"], Gates::OPEN);
+        std::fs::write(f.dir.join("file.key"), "kept outside workspace policy").unwrap();
+        let at = Time::new(chrono::Utc::now());
+        let workspace = f.files.source_facts(&RelPath::root(), at).unwrap();
+        assert_eq!(workspace.policy.kind, FileSourceKind::Workspace);
+        assert!(workspace.policy.workspace_exclusions);
+        let mounted = Files::mount(
+            Workspace::open(&f.dir, &[], PathStyle::Posix, true).unwrap(),
+            Arc::new(HashCache::new()),
+            Limits::default(),
+            Arc::new(GateState::new(Gates::OPEN)),
+        );
+        let mount = mounted.source_facts(&RelPath::root(), at).unwrap();
+        assert_eq!(mount.policy.kind, FileSourceKind::Mount);
+        assert!(!mount.policy.writable);
+        assert!(!mount.policy.workspace_exclusions);
+        let owned = Files::owned_data(
+            Workspace::open(&f.dir, &[], PathStyle::Posix, true).unwrap(),
+            Arc::new(HashCache::new()),
+            Limits::default(),
+            Arc::new(GateState::new(Gates::OPEN)),
+        );
+        let policy = owned.source_facts(&RelPath::root(), at).unwrap().policy;
+        assert_eq!(policy.kind, FileSourceKind::OwnedData);
+        assert!(policy.writable);
+        assert!(!policy.workspace_exclusions);
+        assert!(mounted.stat(&path("file.key")).is_ok());
     }
 
     #[test]
@@ -1808,6 +2319,96 @@ mod tests {
         f.files.copy(&path("proj"), &path("proj2")).unwrap();
         assert!(f.dir.join("proj2/main.c").exists());
         assert!(!f.dir.join("proj2/main.o").exists());
+    }
+
+    #[test]
+    fn a_move_between_filesystems_keeps_ignored_and_new_entries_at_the_source() {
+        let f = fixture_with(&["*.key"], Gates::OPEN);
+        std::fs::create_dir(f.dir.join("src")).unwrap();
+        std::fs::write(f.dir.join("src/copied"), "original").unwrap();
+        std::fs::write(f.dir.join("src/keep.key"), "private").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        std::fs::write(f.dir.join("src/new"), "arrived during the copy").unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 3);
+        assert_eq!(read(&f.dir, "dest/copied"), "original");
+        assert!(!f.dir.join("dest/keep.key").exists());
+        assert!(!f.dir.join("src/copied").exists());
+        assert_eq!(read(&f.dir, "src/keep.key"), "private");
+        assert_eq!(read(&f.dir, "src/new"), "arrived during the copy");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_keeps_a_file_changed_through_an_open_handle() {
+        use std::io::Write;
+        let f = fixture();
+        std::fs::write(f.dir.join("src"), "original").unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.dir.join("src"))
+            .unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        writer.write_all(b" and later work").unwrap();
+        writer.sync_all().unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 1);
+        assert_eq!(read(&f.dir, "src"), "original and later work");
+        assert_eq!(read(&f.dir, "dest"), "original");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_keeps_a_replaced_file_even_when_its_bytes_match() {
+        let f = fixture();
+        std::fs::write(f.dir.join("src"), "original").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        std::fs::write(f.dir.join("replacement"), "original").unwrap();
+        std::fs::rename(f.dir.join("replacement"), f.dir.join("src")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 1);
+        assert_eq!(read(&f.dir, "src"), "original");
+        assert_eq!(read(&f.dir, "dest"), "original");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_does_not_clean_a_replacement_parent() {
+        let f = fixture();
+        std::fs::create_dir(f.dir.join("src")).unwrap();
+        std::fs::write(f.dir.join("src/file"), "original").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        std::fs::rename(f.dir.join("src"), f.dir.join("elsewhere")).unwrap();
+        std::fs::create_dir(f.dir.join("src")).unwrap();
+        std::fs::hard_link(f.dir.join("elsewhere/file"), f.dir.join("src/file")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 2);
+        assert_eq!(read(&f.dir, "src/file"), "original");
+        assert_eq!(read(&f.dir, "elsewhere/file"), "original");
+        assert_eq!(read(&f.dir, "dest/file"), "original");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_removes_only_unchanged_copies_children_first() {
+        let f = fixture();
+        std::fs::create_dir_all(f.dir.join("src/inner")).unwrap();
+        std::fs::write(f.dir.join("src/inner/file"), "original").unwrap();
+        std::os::unix::fs::symlink("inner/file", f.dir.join("src/link")).unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 0);
+        assert!(!f.dir.join("src").exists());
+        assert_eq!(read(&f.dir, "dest/inner/file"), "original");
+        assert_eq!(
+            std::fs::read_link(f.dir.join("dest/link")).unwrap(),
+            std::path::Path::new("inner/file")
+        );
+    }
+
+    #[test]
+    fn a_local_move_does_not_use_the_servers_blob_storage_limit() {
+        let mut f = fixture();
+        Arc::get_mut(&mut f.files.inner)
+            .unwrap()
+            .limits
+            .max_blob_bytes = 1;
+        std::fs::write(f.dir.join("src"), "larger than a stored blob").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 0);
+        assert_eq!(read(&f.dir, "dest"), "larger than a stored blob");
+        assert!(!f.dir.join("src").exists());
     }
 
     #[test]
