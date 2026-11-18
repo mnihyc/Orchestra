@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-driver-docker --lib --test networks
+test -p orch-adapter-codex --lib --test confined_image
+test -p orch-engine --lib -- tools::source::tests::image_services::
+test -p orch-engine --lib -- summaries::resource::tests::
+test -p orch-api-core --lib --test thread_read_tools --test provider_services
+test -p orch-engine --test model_inputs
+test -p orch-engine --test provider_runtime -- a_stopped_managed_sign_in_remains_a_choice_without_starting_its_runtime
+web typecheck
+web lint
+web test -- tests/component/capability-backend-choice.test.tsx tests/component/capability-helper.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue.test.ts

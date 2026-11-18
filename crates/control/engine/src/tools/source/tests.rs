@@ -136,6 +136,10 @@ pub(crate) enum Point {
     NativeDisplay,
     NativePrepared,
     NativeCompleted,
+    ProgramCaptured,
+    ProgramStart,
+    ProgramWaiting,
+    ProgramResult,
     AnswerRetained,
 }
 struct Gate {
@@ -207,6 +211,14 @@ fn gate(thread: Id, call: &str, point: Point) -> (oneshot::Receiver<()>, oneshot
 /// Only a named test call pauses; neither SQL locks nor pool leases enter this boundary.
 pub(crate) async fn pause(call: &CallContext, point: Point) {
     pause_key((call.thread, call.call_ref.clone(), point)).await;
+}
+
+pub(crate) async fn pause_program_start(thread: Id) {
+    pause_key((thread, String::new(), Point::ProgramStart)).await;
+}
+
+pub(crate) async fn pause_program_wait(helper: Id) {
+    pause_key((helper, String::new(), Point::ProgramWaiting)).await;
 }
 
 async fn pause_key(key: GateKey) {
@@ -409,6 +421,7 @@ impl CommandHandler for AttachedPeer {
 }
 
 struct Scene {
+    program_node: Option<(common::Added, Id)>,
     world: common::World,
     thread: Id,
     start: TurnStart,
@@ -510,6 +523,13 @@ async fn source_input_key(
     Ok(prepared.admit(&caller, false)?)
 }
 
+#[derive(Clone, Copy)]
+enum InputAuthorship {
+    Session,
+    Keys,
+    Approved,
+}
+
 impl Scene {
     async fn lend_document(
         &self,
@@ -552,6 +572,17 @@ impl Scene {
         .await
     }
 
+    async fn with_approved_input() -> Proof<Self> {
+        Box::pin(Self::configured_with_authorship(
+            false,
+            false,
+            false,
+            None,
+            InputAuthorship::Approved,
+        ))
+        .await
+    }
+
     async fn configured(display: bool) -> Proof<Self> {
         Self::configured_with_web_services(display, false).await
     }
@@ -582,6 +613,27 @@ impl Scene {
         fetch: bool,
         clock: Option<Arc<dyn orch_types::Clock>>,
         keyed: bool,
+    ) -> Proof<Self> {
+        Box::pin(Self::configured_with_authorship(
+            display,
+            web,
+            fetch,
+            clock,
+            if keyed {
+                InputAuthorship::Keys
+            } else {
+                InputAuthorship::Session
+            },
+        ))
+        .await
+    }
+
+    async fn configured_with_authorship(
+        display: bool,
+        web: bool,
+        fetch: bool,
+        clock: Option<Arc<dyn orch_types::Clock>>,
+        authorship: InputAuthorship,
     ) -> Proof<Self> {
         let world = match clock {
             Some(clock) => common::World::with_clock(clock).await,
@@ -758,10 +810,21 @@ impl Scene {
         if display {
             declare_display(&world, directory.path()).await?;
         }
-        let (start, submitted) = if keyed {
-            Box::pin(Self::key_authored_turn(&world, thread)).await?
-        } else {
-            Self::authored_turn(&world, thread).await?
+        let (start, submitted) = match authorship {
+            InputAuthorship::Keys => Box::pin(Self::key_authored_turn(&world, thread)).await?,
+            InputAuthorship::Session => Self::authored_turn(&world, thread).await?,
+            InputAuthorship::Approved => {
+                let author = world.person("image-author").await;
+                world.give(author, "interactor").await;
+                Self::authored_turn_by(
+                    &world,
+                    thread,
+                    &Caller::session(author),
+                    None,
+                    Some(&Caller::session(world.ada)),
+                )
+                .await?
+            }
         };
         if display {
             let attached: bool = sqlx::query_scalar(
@@ -817,6 +880,7 @@ impl Scene {
             .ok_or("created document path missing")?
             .to_owned();
         Ok(Self {
+            program_node: None,
             world,
             thread,
             start,
@@ -837,7 +901,7 @@ impl Scene {
         world: &common::World,
         thread: Id,
     ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
-        Self::authored_turn_by(world, thread, &Caller::session(world.ada), None).await
+        Self::authored_turn_by(world, thread, &Caller::session(world.ada), None, None).await
     }
 
     async fn authored_turn_by(
@@ -845,7 +909,15 @@ impl Scene {
         thread: Id,
         author: &Caller,
         editor: Option<&Caller>,
+        runner: Option<&Caller>,
     ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
+        if runner.is_some() {
+            world
+                .exec(
+                    "UPDATE environments SET status='failed',status_detail='waiting for approval'",
+                )
+                .await;
+        }
         let submitted = world
             .engine()
             .submit_input(
@@ -873,6 +945,32 @@ impl Scene {
                 .execute(world.pool.pool())
                 .await?;
             world.engine().preflight(thread).await?;
+        }
+        if let Some(runner) = runner {
+            world.wait_blocked(thread, "environment_unavailable").await;
+            world.access.deny(author.user());
+            common::eventually("the input waits for model approval", || async {
+                world.input_state(submitted.input.id).await
+                    == ("pending".into(), Some("model_use_required".into()))
+            })
+            .await;
+            world
+                .exec("UPDATE environments SET status='running',status_detail=NULL")
+                .await;
+            world.wait_state(thread, "idle").await;
+            let ran = world
+                .engine()
+                .run_input(runner, thread, submitted.input.id)
+                .await?;
+            assert_eq!(
+                ran.author.as_ref().map(|person| person.id),
+                Some(author.user())
+            );
+            assert_eq!(
+                ran.run_as.as_ref().map(|person| person.id),
+                Some(runner.user())
+            );
+            world.access.allow(author.user());
         }
         let start = match tokio::time::timeout(common::PATIENCE, async {
             loop {
@@ -933,7 +1031,7 @@ impl Scene {
             source_input_key(world, thread, ThreadInputCreate::ROUTE, "source-author").await?;
         let editor =
             source_input_key(world, thread, ThreadInputUpdate::ROUTE, "source-editor").await?;
-        Self::authored_turn_by(world, thread, &author, Some(&editor)).await
+        Self::authored_turn_by(world, thread, &author, Some(&editor), None).await
     }
 
     /// Enumerated gates only: no free native error text, paths, SQL or input bodies.
