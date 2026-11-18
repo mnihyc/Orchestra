@@ -166,13 +166,13 @@ pub(crate) fn side_reading(
     thread: &ThreadRow,
 ) -> Option<orch_agent_contract::descriptor::SideReading> {
     use orch_agent_contract::descriptor::SideReading;
-    thread
-        .side_of
-        .map(|_| match thread.side_reading.as_deref() {
-            Some("read_only") => SideReading::ReadOnly,
-            Some("approval_gated") => SideReading::ApprovalGated,
-            _ => SideReading::NoTools,
-        })
+    thread.side_of?;
+    match thread.side_reading.as_deref() {
+        Some("acting") => None,
+        Some("read_only") => Some(SideReading::ReadOnly),
+        Some("approval_gated") => Some(SideReading::ApprovalGated),
+        _ => Some(SideReading::NoTools),
+    }
 }
 
 /// The tools a thread's session is opened with: those the thread's settings enable and the engine has built, and
@@ -604,8 +604,8 @@ impl Engine {
             OrchTool::OrchDocs | OrchTool::Open | OrchTool::Search | OrchTool::FindOperation | OrchTool::Read => Box::pin(self.read_tool_call(call, thread)).await,
             OrchTool::UseBrowser => Box::pin(self.use_browser_call(call, thread)).await,
             OrchTool::UseDisplay => Box::pin(self.use_display_call(call,thread)).await,
-            OrchTool::ListShared => self.list_shared_call(call, thread).await,
-            OrchTool::ReadShared => self.read_shared_call(call, thread).await,
+            OrchTool::ListShared => self.list_shared_call(call, thread, &settings.search_budgets).await,
+            OrchTool::ReadShared => self.read_shared_call(call, thread, &settings.search_budgets).await,
             OrchTool::SearchShared => Box::pin(self.search_shared_call(call, thread, &settings.search_budgets)).await,
             OrchTool::DownloadShared => Box::pin(self.download_shared_call(call, thread)).await,
             OrchTool::SendMessage => Box::pin(self.send_message_call(call, thread, &settings)).await,

@@ -125,7 +125,7 @@ impl Fixture {
             self.machine,
             self.server,
             new_id(),
-            (),
+            Default::default(),
             (),
         )
         .await
@@ -315,8 +315,16 @@ async fn native_machine_deletion_reloads_current_owner_after_the_actual_authorit
                 .await
                 .map_err(DbError::from)?;
             let _ = identified.send(pid);
-            effects::apply_owned_from_machine::<Delete>(&app, tx, machine, server, new_id(), (), ())
-                .await
+            effects::apply_owned_from_machine::<Delete>(
+                &app,
+                tx,
+                machine,
+                server,
+                new_id(),
+                Default::default(),
+                (),
+            )
+            .await
         });
         let backend = tokio::time::timeout(Duration::from_secs(30), backend).await??;
         trace.mark(format!(
