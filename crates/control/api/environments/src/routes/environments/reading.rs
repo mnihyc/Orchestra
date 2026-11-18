@@ -287,6 +287,7 @@ pub(crate) fn through_a_thread(view: Environment) -> Environment {
         default_for: view.default_for,
         config_trust: Vec::new(),
         threads: view.threads,
+        threads_next_cursor: view.threads_next_cursor,
         threads_hidden: view.threads_hidden,
         reach: 0,
         workspace_root: String::new(),

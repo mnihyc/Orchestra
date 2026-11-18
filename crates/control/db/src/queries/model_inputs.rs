@@ -208,6 +208,17 @@ pub async fn list_for_sources(
     filter: &ModelInputFilter,
     readable: &[Id],
 ) -> Result<Vec<ModelInputRow>, DbError> {
-    Ok(sqlx::query_as("SELECT m.id,m.node_id,m.segment_id,m.turn_id,m.input_id,m.item_id,m.purpose,m.reference,m.blocks,m.state,m.created_at,m.sent_at,m.seq_created,m.seq_updated FROM model_inputs m WHERE m.node_id=$1 AND ($2::uuid IS NULL OR m.id=$2) AND ($3::uuid IS NULL OR m.turn_id=$3) AND ($4::bigint IS NULL OR m.seq_created<$4) AND ($5::bigint IS NULL OR m.seq_created>$5) AND ((NOT EXISTS(SELECT 1 FROM document_model_inputs d WHERE d.model_input_id=m.id) AND NOT EXISTS(SELECT 1 FROM resource_summary_model_inputs g WHERE g.model_input_id=m.id)) OR m.id=ANY($7)) ORDER BY m.seq_created DESC,m.id DESC LIMIT $6")
-        .bind(node).bind(filter.id).bind(filter.turn).bind(filter.before).bind(filter.after).bind(filter.limit).bind(readable).fetch_all(conn).await?)
+    list_for_sources_search(conn, node, filter, readable, &[]).await
+}
+
+/// Preview words do not turn a full-blob pointer or an unreadable governor into searchable text.
+pub async fn list_for_sources_search(
+    conn: &mut Conn,
+    node: Id,
+    filter: &ModelInputFilter,
+    readable: &[Id],
+    patterns: &[String],
+) -> Result<Vec<ModelInputRow>, DbError> {
+    Ok(sqlx::query_as("SELECT m.id,m.node_id,m.segment_id,m.turn_id,m.input_id,m.item_id,m.purpose,m.reference,m.blocks,m.state,m.created_at,m.sent_at,m.seq_created,m.seq_updated FROM model_inputs m WHERE m.node_id=$1 AND ($2::uuid IS NULL OR m.id=$2) AND ($3::uuid IS NULL OR m.turn_id=$3) AND ($4::bigint IS NULL OR m.seq_created<$4) AND ($5::bigint IS NULL OR m.seq_created>$5) AND ((NOT EXISTS(SELECT 1 FROM document_model_inputs d WHERE d.model_input_id=m.id) AND NOT EXISTS(SELECT 1 FROM resource_summary_model_inputs g WHERE g.model_input_id=m.id)) OR m.id=ANY($7)) AND COALESCE((SELECT string_agg(concat_ws(' ', b->>'key', b->>'source', b->>'text'),' ') FROM jsonb_array_elements(m.blocks) b),'') ILIKE ALL($8::text[]) ORDER BY m.seq_created DESC,m.id DESC LIMIT $6")
+        .bind(node).bind(filter.id).bind(filter.turn).bind(filter.before).bind(filter.after).bind(filter.limit).bind(readable).bind(patterns).fetch_all(conn).await?)
 }

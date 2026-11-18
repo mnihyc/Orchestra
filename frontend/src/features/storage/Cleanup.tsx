@@ -20,9 +20,11 @@ import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { Table } from '@/ui/Table';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { PeopleCount } from '@/ui/PeopleList';
+import { CopyId } from '@/ui/CopyId';
 import { CommandBox } from '@/features/resources/Facts';
-import { Dependents, RecordName } from './Storage';
+import { Dependents, RecordName, recordLabel } from './Storage';
 
 const over = (job: Job) => job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled' || job.state === 'lost';
 
@@ -35,7 +37,7 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
   const [choices, setChoices] = useState<ReadonlyMap<string, CleanupChoice>>(new Map());
   const [typed, setTyped] = useState('');
   const [notify, setNotify] = useState<boolean | null>(null);
-  const preview = useQuery({ queryKey: ['cleanup-plan', request], queryFn: () => planCleanup(request), staleTime: 0, refetchOnWindowFocus: false, retry: false });
+  const preview = useQuery({ queryKey: ['cleanup-plan', request], queryFn: () => planCleanup(request), refetchOnWindowFocus: false, retry: false });
   const plan = preview.data;
   const choice = (item: CleanupItem) => choices.get(item.record.id) ?? item.selected;
   const erases = plan?.items.some((item) => choice(item) === 'purge' || choice(item) === 'stop_and_remove') ?? false;
@@ -43,7 +45,7 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
   const operatorOnly = !actionable && (plan?.items.some((item) => typeof item.record.operator_command === 'string') ?? false);
   const fate = (item: CleanupItem) => item.choices.length < 2
     ? <span className="text-sm text-text-muted">{t(`storage.cleanup.choices.${choice(item)}`)}</span>
-    : <Select size="sm" hideLabel label={t('storage.cleanup.fateFor', { name: item.record.name })} value={choice(item)} options={item.choices.map((value) => ({ value, name: t(`storage.cleanup.choices.${value}`) }))} disabled={start.isPending} onValueChange={(value) => setChoices((before) => new Map(before).set(item.record.id, value))} />;
+    : <Select size="sm" hideLabel label={t('storage.cleanup.fateFor', { name: recordLabel(item.record,t) })} value={choice(item)} options={item.choices.map((value) => ({ value, name: t(`storage.cleanup.choices.${value}`) }))} disabled={start.isPending} onValueChange={(value) => setChoices((before) => new Map(before).set(item.record.id, value))} />;
   const start = useMutation({ mutationFn: (plan: CleanupPlan) => startCleanup({ plan_id: plan.id, choices: plan.items.map((item) => ({ id: item.record.id, choice: choice(item) })), confirmation_name: erases ? typed : null, notify: notify ?? plan.notify }), onSuccess: (job) => { setJobId(job.id); onAccepted?.(job); }, onError: () => onRefused?.() });
   const progress = useQuery({ queryKey: ['cleanup-job', jobId], queryFn: ({ signal }) => readJob(jobId ?? '', signal), enabled: jobId !== null, refetchInterval: (query) => query.state.data === undefined || !over(query.state.data) ? DEFAULT_CLEANUP_POLL_MS : false });
   const stop = useMutation({ mutationFn: () => cancelJob(jobId ?? ''), onSuccess: () => void progress.refetch() });
@@ -75,21 +77,21 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
   </>}>
     {jobId === null ? preview.isPending ? <SkeletonRows read={preview} rows={4} /> : preview.isError ? <ErrorState compact error={preview.error} onRetry={() => void preview.refetch()} /> : plan !== undefined && <>
       <div className="flex items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('storage.cleanup.count', { count: plan.items.length, number: formatNumber(plan.items.length, locale) })}</span><ArticleGuideLink article="storage-cleanup" heading={operatorOnly ? 'server-files' : 'clean-up-kept-items'} title={t('storage.guide')} /></div>
-      <Table label={t('storage.cleanup.plan')} boundedIdentity rows={plan.items} rowKey={(item) => item.record.id} columns={[
+      <CompleteCollection label={t('storage.cleanup.plan')} items={plan.items} textOf={(item) => recordLabel(item.record, t)}>{(rows) => <Table virtual label={t('storage.cleanup.plan')} boundedIdentity rows={rows} rowKey={(item) => item.record.id} columns={[
         { id: 'name', header: t('storage.name'), grow: true, cell: (item, shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={item.record} /><span className="text-sm text-text-muted">{t(`storage.whys.${item.record.why}`)}{item.record.bytes !== null && ` · ${formatBytes(item.record.bytes, locale)}`}</span>{item.record.until !== null && <RelativeTime at={item.record.until} className="text-sm text-text-muted" />}{item.record.blocker !== null && <span className="text-sm text-text-muted">{t(`storage.blockers.${item.record.blocker}`, { defaultValue: item.record.blocker })}</span>}{!shown.has('dependents') && <Dependents row={item.record} />}{typeof item.record.operator_command === 'string' ? <CommandBox command={item.record.operator_command} label={t('storage.cleanup.copyOperatorCommand')} /> : !shown.has('fate') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-text-muted">{t('storage.cleanup.fate')}</span>{fate(item)}</div>}</div> },
         ...(!operatorOnly ? [{ id: 'fate', header: t('storage.cleanup.fate'), from: 'sm' as const, cell: (item: CleanupItem) => typeof item.record.operator_command === 'string' ? null : fate(item) }] : []),
         { id: 'dependents', header: t('storage.keptBy'), from: 'md', cell: (item) => <Dependents row={item.record} /> },
-      ]} />
+      ]} />}</CompleteCollection>
       {plan.items.length === 0 && <StateLine title={t('storage.cleanup.empty')} />}
       {erases && <Input label={t('storage.cleanup.typeName', { name: plan.confirmation_name })} value={typed} onChange={(event) => setTyped(event.target.value)} autoComplete="off" disabled={start.isPending} />}
       {start.error !== null && <ErrorAlert error={start.error} />}
     </> : job === undefined ? progress.isError ? <ErrorState compact error={progress.error} onRetry={() => void progress.refetch()} /> : <SkeletonRows read={progress} rows={4} /> : <>
       <JobProgress job={job} heading={t('storage.cleanup.running')} reconnecting={progress.isError} />
       {ended && <StateLine title={t(`source.job.${job.state}`)} tone={job.state === 'failed' ? 'warning' : 'neutral'} message={job.error?.message} />}
-      {results.length > 0 && <Table label={t('storage.cleanup.results')} boundedIdentity rows={results} rowKey={(row) => row.id} columns={[
-        { id: 'name', header: t('storage.name'), cell: (row) => { const record = records.get(row.id); return record === undefined ? <span className="truncate" title={row.id}>{row.id}</span> : <RecordName row={record} />; } },
+      {results.length > 0 && <CompleteCollection label={t('storage.cleanup.results')} items={results} textOf={(row) => { const record = records.get(row.id); return `${record === undefined ? '' : recordLabel(record, t)} ${row.outcome} ${row.reason ?? ''}`; }}>{(rows) => <Table virtual label={t('storage.cleanup.results')} boundedIdentity rows={rows} rowKey={(row) => row.id} columns={[
+        { id: 'name', header: t('storage.name'), cell: (row) => { const record = records.get(row.id); return record === undefined ? <span className="flex items-center gap-1"><span className="truncate">{t('storage.cleanup.itemUnknown')}</span><CopyId value={row.id} /></span> : <RecordName row={record} />; } },
         { id: 'outcome', header: t('storage.cleanup.outcome'), cell: (row) => <div><span>{t(`storage.cleanup.outcomes.${row.outcome}`,{defaultValue:row.outcome})}</span>{row.reason !== null && <p className="text-sm text-text-muted">{t(`storage.blockers.${row.reason}`, { defaultValue: row.reason })}</p>}</div> },
-      ]} />}
+      ]} />}</CompleteCollection>}
       {stop.error !== null && <ErrorAlert error={stop.error} />}
     </>}
   </Frame>;

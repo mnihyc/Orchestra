@@ -1151,6 +1151,9 @@ async fn following_then_muting_a_chat_changes_focus_without_changing_view() {
             .call(OrgChatList, &[&root])
             .token(&reader.token)
             .query(&OrgChatListQuery {
+                ids: None,
+                include_empty: None,
+                q: None,
                 participating: Some(true),
                 scope: Some(ChatListScope::Nodes),
                 of: None,

@@ -119,6 +119,10 @@ CREATE TABLE api_tokens (
     CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE INDEX api_tokens_name_search_idx ON api_tokens USING gin (name gin_trgm_ops) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_inventory_page_idx ON api_tokens (created_at DESC, id) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_owner_inventory_page_idx ON api_tokens (user_id, created_at DESC, id) WHERE revoked_at IS NULL;
+
 CREATE TABLE email_tokens (
     id uuid NOT NULL,
     user_id uuid NOT NULL,
@@ -184,7 +188,7 @@ CREATE TABLE invitations (
     CONSTRAINT invitations_check3 CHECK (((email IS NULL) OR (max_uses = 1))),
     CONSTRAINT invitations_issuer_origin_check CHECK ((issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object')),
     CONSTRAINT invitations_kind_check CHECK ((kind = ANY (ARRAY['system'::text, 'org'::text, 'node'::text, 'chat'::text]))),
-    CONSTRAINT invitations_max_uses_check CHECK (((max_uses >= 1) AND (max_uses <= 1000))),
+    CONSTRAINT invitations_max_uses_check CHECK ((max_uses >= 1)),
     CONSTRAINT invitations_role_check CHECK ((role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
     CONSTRAINT invitations_pkey PRIMARY KEY (id),
     CONSTRAINT invitations_token_hash_key UNIQUE (token_hash),
@@ -248,6 +252,7 @@ CREATE TABLE sessions (
 );
 
 CREATE INDEX sessions_user_idx ON sessions USING btree (user_id) WHERE (revoked_at IS NULL);
+CREATE INDEX sessions_inventory_page_idx ON sessions (user_id, created_at DESC, id) WHERE revoked_at IS NULL;
 
 CREATE TABLE sign_in_codes (
     user_id uuid NOT NULL,
@@ -294,8 +299,8 @@ CREATE TABLE user_state (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
-    CONSTRAINT user_state_value_check CHECK ((pg_column_size(value) <= 65536)),
+    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'interface'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text, 'picker_recents'::text]))),
+    CONSTRAINT user_state_value_check CHECK ((key = 'picker_recents' OR pg_column_size(value) <= 65536)),
     CONSTRAINT user_state_pkey PRIMARY KEY (user_id, key),
     CONSTRAINT user_state_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );

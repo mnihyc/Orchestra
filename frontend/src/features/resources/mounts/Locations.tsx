@@ -5,15 +5,22 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
  */
 import { Cleanup } from '@/features/storage/Cleanup';
 import { Hint } from '@/features/help/Hint';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { choiceOption } from '@/i18n/choices';
 import { machinesQuery } from '@/api/resources';
-import { machineMountsQuery, mountKey, removeMountLocation, setMountLocation, setMountLocationDataKind } from '@/api/resource-tools';
-import { DetailPages } from '@/features/resources/DetailSections';
+import { machineMountsQuery, mountChildrenQuery, mountKey, removeMountLocation, setMountLocation, setMountLocationDataKind } from '@/api/resource-tools';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { useRetainedRows } from '@/lib/retainedRows';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { ErrorState } from '@/ui/ErrorState';
+import { SkeletonRows } from '@/ui/Skeleton';
 import type { Mount, MountDataKind, MountKeptData, MountLocation } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
@@ -34,21 +41,39 @@ import { MountLocationsEmpty } from './Where';
 const DATA_KINDS: readonly (MountDataKind | 'none')[] = ['own', 'shared', 'synced', 'none'];
 
 /** What a location's data is: a compact choice for the mount's managers, its name for everyone else. */
-export function LocationDataKind({ mount, location }: { mount: Mount; location: MountLocation }) {
+export function LocationDataKind({ mount, location, onActive }: { mount: Mount; location: MountLocation; onActive?: (active: boolean) => void }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const set = useMutation({
-    mutationFn: (kind: MountDataKind | 'none') => setMountLocationDataKind(mount.id, location.machine.id, kind === 'none' ? null : kind),
-    onSuccess: (row) => { cache.setQueryData(mountKey(row.id), row); },
+    mutationFn: ({ kind }: { kind: MountDataKind | 'none'; reader: ReturnType<typeof libraryReader> }) => setMountLocationDataKind(mount.id, location.machine.id, kind === 'none' ? null : kind),
+    onSuccess: (row, asked) => { if (sameLibraryReader(asked.reader)) cache.setQueryData(mountKey(row.id), row); },
   });
+  useEffect(() => { onActive?.(set.isPending || set.isError); }, [onActive, set.isPending, set.isError]);
   if (!holds(mount.access, 'mount.manage')) {
     return location.data_kind === null ? null : <span>{choiceOption(t, `mountDataKind.${location.data_kind}`).name}</span>;
   }
   return <>
     <Select<MountDataKind | 'none'> size="sm" hideLabel label={t('resourceDetails.mount.dataKind')} value={location.data_kind ?? 'none'} disabled={set.isPending}
-      onValueChange={(kind) => set.mutate(kind)} options={DATA_KINDS.map((value) => ({ value, ...choiceOption(t, `mountDataKind.${value}`) }))} />
+      onValueChange={(kind) => set.mutate({ kind, reader: libraryReader() })} options={DATA_KINDS.map((value) => ({ value, ...choiceOption(t, `mountDataKind.${value}`) }))} />
     {set.error !== null && <ErrorAlert error={set.error} />}
   </>;
+}
+
+function useMountChildren<Kind extends 'locations' | 'kept' | 'lost_locations'>(mount: Mount, collection: Kind) {
+  const search = useCollectionSearch('mount-children:' + mount.id + ':' + collection);
+  const source = mount[collection];
+  const version = useMemo(() => {
+    if (collection === 'locations') return JSON.stringify(mount.locations.map((row) => [row.machine.id, row.machine.name, row.host?.name, row.source, row.storage, row.data_kind]));
+    if (collection === 'kept') return JSON.stringify(mount.kept.map((row) => [row.id, row.machine.name, row.host?.name, row.source, row.storage]));
+    return JSON.stringify(mount.lost_locations?.map((row) => [row.id, row.machine_name, row.host_name, row.storage]));
+  }, [mount, collection]);
+  const paged = (source?.length ?? 0) > 50 || search.q !== '';
+  const pages = useInfiniteQuery({ ...mountChildrenQuery(mount.id, collection, search.q, version), enabled: paged });
+  const rows = useMemo(() => paged ? pages.data?.pages.flatMap((page) => page.items) ?? [] : (source ?? []) as NonNullable<Mount[Kind]>[number][], [paged, pages.data, source]);
+  return { search, paged, pages, rows };
+}
+function ChildMore({ list }: { list: { paged: boolean; pages: { hasNextPage: boolean; isFetchingNextPage: boolean; isFetchNextPageError: boolean; error: unknown; fetchNextPage: () => Promise<unknown> } } }) {
+  return <Pagination hasMore={list.paged && list.pages.hasNextPage} loading={list.pages.isFetchingNextPage} error={list.paged && list.pages.isFetchNextPageError ? list.pages.error : null} onMore={() => void list.pages.fetchNextPage()} />;
 }
 
 /** Data a copy displaced, attached nowhere until it is purged: a volume goes with its data once the mount's name is
@@ -57,17 +82,21 @@ function Kept({ mount }: { mount: Mount }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const [purging, setPurging] = useState<MountKeptData | null>(null);
-  if (mount.kept.length === 0 && purging === null) return null;
-  return <>{mount.kept.length > 0 && <div className="flex flex-col gap-2" data-mount-kept>
+  const list = useMountChildren(mount, 'kept');
+  if (mount.kept.length === 0 && purging === null && list.search.text === '') return null;
+  return <><div className="flex flex-col gap-2" data-mount-kept>
     <h4 className="text-sm font-medium text-text">{t('resourceDetails.mount.kept')}</h4>
-    <ul className="flex flex-col divide-y divide-border">{mount.kept.map((data) => <li key={data.id} className="flex flex-wrap items-center gap-2 py-2">
+    <CollectionSearch name={t('resourceDetails.mount.kept')} {...list.search} />
+    {list.paged && list.pages.isPending ? <SkeletonRows read={list.pages} rows={3} /> : list.paged && list.pages.isError && !list.pages.isFetchNextPageError ? <ErrorState compact error={list.pages.error} onRetry={() => void list.pages.refetch()} /> : <ScrollRegion kind="table" label={t('resourceDetails.mount.kept')} className="max-h-96 overflow-y-auto"><ul className="flex flex-col divide-y divide-border">{list.rows.map((data) => <li key={data.id} className="flex flex-wrap items-center gap-2 py-2">
       <span>{data.host?.name ?? data.machine.name}</span>
       <span>{t(data.kind === 'volume' ? 'resourceDetails.mount.volume' : 'resourceDetails.mount.path')}</span>
       <code>{data.source ?? t('resourceDetails.mount.sourceHidden')}</code>
       {data.file_count !== null && data.total_bytes !== null && <span className="text-sm text-text-muted">{t('mountPlan.copy.size', { count: data.file_count, formattedCount: formatNumber(data.file_count, locale), size: formatBytes(data.total_bytes, locale) })}</span>}
       <UserChip user={data.kept_by} />
       {data.can_purge && <Button size="sm" variant="danger-ghost" onClick={() => setPurging(data)}>{t('resourceDetails.mount.purge')}</Button>}
-    </li>)}</ul></div>}
+    </li>)}</ul></ScrollRegion>}
+    <ChildMore list={list} />
+  </div>
     {purging !== null && <Cleanup request={{scope:'me',resource:{kind:'mount',id:mount.id},items:[`mount:${purging.id}`]}} onClose={() => setPurging(null)} />}
   </>;
 }
@@ -106,8 +135,29 @@ function AddLocation({ mount, onClose }: { mount: Mount; onClose: () => void }) 
   </Dialog>;
 }
 
+interface LocationEntry { id: string; location: MountLocation }
+function LocationRow({ entry, mount, visible, keep, onRemove }: { entry: LocationEntry; mount: Mount; visible: boolean; keep: (entry: LocationEntry, active: boolean) => void; onRemove: (location: MountLocation) => void }) {
+  const { t } = useTranslation();
+  const location = entry.location;
+  const active = useCallback((active: boolean) => keep(entry, active), [keep, entry]);
+  return <li hidden={!visible} className="flex flex-col items-start gap-2 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {location.host === null
+            ? <Link to="/resources/machines/$id" params={{ id: location.machine.id }} className="text-link hover:underline">{location.machine.name}</Link>
+            : <Link to="/resources/hosts/$id" params={{ id: location.host.id }} className="text-link hover:underline">{location.host.name}</Link>}
+          <span>{t(location.kind === 'volume' ? 'resourceDetails.mount.volume' : 'resourceDetails.mount.path')}</span>
+          <code>{location.source ?? t('resourceDetails.mount.sourceHidden')}</code>
+          {location.storage !== null && <span>{location.storage}</span>}<LocationDataKind mount={mount} location={location} onActive={active} /><UserChip user={location.created_by} />
+          {location.can_remove && <Button size="sm" variant="danger-ghost" onClick={() => onRemove(location)}>{t('resourceDetails.remove')}</Button>}
+        </div>
+        {!location.machine.online && <p className="text-sm text-text-muted">{t('resourceDetails.mount.locationOfflineHelp')}</p>}
+  </li>;
+}
 export function Locations({ mount }: { mount: Mount }) {
   const { t } = useTranslation();
+  const list = useMountChildren(mount, 'locations');
+  const entries = useMemo(() => list.rows.map((location) => ({ id: location.machine.id, location })), [list.rows]);
+  const held = useRetainedRows(entries);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<MountLocation | null>(null);
   const [confirm, setConfirm] = useState('');
@@ -116,21 +166,13 @@ export function Locations({ mount }: { mount: Mount }) {
     await removeMountLocation(mount.id, removing.machine.id, removing.kind === 'volume' ? confirm : undefined);
   }, onSuccess: () => { setRemoving(null); } });
   return <Section id="mount-locations" title={t('resourceDetails.mount.locations')} action={<><Hint popover id="loss-mounts" />{holds(mount.access, 'mount.use') && <Button onClick={() => setAdding(true)}>{t('resourceDetails.mount.addLocation')}</Button>}</>}>
-    {mount.locations.length === 0 ? <EmptyState compact title={<MountLocationsEmpty hidden={mount.locations_hidden} />} /> : <>
-      <DetailPages items={mount.locations}>{(page) => <ul className="flex flex-col divide-y divide-border">{page.map((location) => <li key={location.machine.id} className="flex flex-col items-start gap-2 py-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {location.host === null
-            ? <Link to="/resources/machines/$id" params={{ id: location.machine.id }} className="text-link hover:underline">{location.machine.name}</Link>
-            : <Link to="/resources/hosts/$id" params={{ id: location.host.id }} className="text-link hover:underline">{location.host.name}</Link>}
-          <span>{t(location.kind === 'volume' ? 'resourceDetails.mount.volume' : 'resourceDetails.mount.path')}</span>
-          <code>{location.source ?? t('resourceDetails.mount.sourceHidden')}</code>
-          {location.storage !== null && <span>{location.storage}</span>}<LocationDataKind mount={mount} location={location} /><UserChip user={location.created_by} />
-          {location.can_remove && <Button size="sm" variant="danger-ghost" onClick={() => { remove.reset(); setConfirm(''); setRemoving(location); }}>{t('resourceDetails.remove')}</Button>}
-        </div>
-        {!location.machine.online && <p className="text-sm text-text-muted">{t('resourceDetails.mount.locationOfflineHelp')}</p>}
-      </li>)}</ul>}</DetailPages>
-      {(mount.locations_hidden ?? 0) > 0 && <p><MountLocationsEmpty hidden={mount.locations_hidden} /></p>}
-    </>}
+    <CollectionSearch name={t('resourceDetails.mount.locations')} {...list.search} />
+    {list.paged && list.pages.isPending ? <SkeletonRows read={list.pages} rows={3} /> : list.paged && list.pages.isError && !list.pages.isFetchNextPageError ? <ErrorState compact error={list.pages.error} onRetry={() => void list.pages.refetch()} /> : list.rows.length === 0 ? <EmptyState compact title={list.search.q === '' ? <MountLocationsEmpty hidden={mount.locations_hidden} /> : t('ui.collection.none')} /> : null}
+    <ScrollRegion kind="table" label={t('resourceDetails.mount.locationRows')} className="max-h-96 overflow-y-auto"><ul className="flex flex-col divide-y divide-border">
+      {held.rows.map((entry) => <LocationRow key={entry.id} entry={entry} mount={mount} visible={held.visible.has(entry.id)} keep={held.keep} onRemove={(location) => { remove.reset(); setConfirm(''); setRemoving(location); }} />)}
+    </ul></ScrollRegion>
+    <ChildMore list={list} />
+    {list.rows.length > 0 && (mount.locations_hidden ?? 0) > 0 && <p><MountLocationsEmpty hidden={mount.locations_hidden} /></p>}
     <LostLocations mount={mount} />
     <Kept mount={mount} />
     {adding && <AddLocation mount={mount} onClose={() => setAdding(false)} />}
@@ -145,6 +187,11 @@ export function Locations({ mount }: { mount: Mount }) {
 function LostLocations({ mount }: { mount: Mount }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
-  if ((mount.lost_locations ?? []).length === 0) return null;
-  return <ul className="flex flex-col divide-y divide-border" aria-label={t('mountLoss.locations')}>{(mount.lost_locations ?? []).map((location) => <li key={location.id} className="flex min-w-0 flex-wrap items-center gap-2 py-2"><Tooltip content={location.host_name ?? location.machine_name}><span tabIndex={0} className="min-w-0 max-w-full truncate">{location.host_name ?? location.machine_name}</span></Tooltip><StatusDot tone="warning" label={t('loss.status')} showLabel /><span className="text-sm text-text-muted">{location.total_bytes === null ? '–' : formatBytes(location.total_bytes, locale)}</span><RelativeTime at={location.lost_at} /></li>)}</ul>;
+  const list = useMountChildren(mount, 'lost_locations');
+  if ((mount.lost_locations ?? []).length === 0 && list.search.text === '') return null;
+  return <div className="flex min-w-0 flex-col gap-2">
+    <CollectionSearch name={t('mountLoss.locations')} {...list.search} />
+    {list.paged && list.pages.isPending ? <SkeletonRows read={list.pages} rows={3} /> : list.paged && list.pages.isError && !list.pages.isFetchNextPageError ? <ErrorState compact error={list.pages.error} onRetry={() => void list.pages.refetch()} /> : <ScrollRegion kind="table" label={t('mountLoss.locations')} className="max-h-96 overflow-y-auto"><ul className="flex flex-col divide-y divide-border" aria-label={t('mountLoss.locations')}>{list.rows.map((location) => <li key={location.id} className="flex min-w-0 flex-wrap items-center gap-2 py-2"><Tooltip content={location.host_name ?? location.machine_name}><span tabIndex={0} className="min-w-0 max-w-full truncate">{location.host_name ?? location.machine_name}</span></Tooltip><StatusDot tone="warning" label={t('loss.status')} showLabel /><span className="text-sm text-text-muted">{location.total_bytes === null ? '–' : formatBytes(location.total_bytes, locale)}</span><RelativeTime at={location.lost_at} /></li>)}</ul></ScrollRegion>}
+    <ChildMore list={list} />
+  </div>;
 }

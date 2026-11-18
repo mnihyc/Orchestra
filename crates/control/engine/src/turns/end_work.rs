@@ -1,7 +1,7 @@
-//! One thread-locked, transactional follow-up for an immutable terminal turn.
+//! Terminal accounting, fanout and aggregation commit without the thread row.
 //!
-//! Core state/pointer cleanup commits before this work. Its original usage/time survive
-//! failures and process restarts; ledger, notifications and removal commit together.
+//! Their durable receipt is then applied under the thread row with the prepared context and queue wake.
+//! Original usage/time survive a failure or restart; a receipt never repeats the committed effects.
 
 use super::*;
 use chrono::{DateTime, Utc};
@@ -18,6 +18,11 @@ struct EndWork {
     org: Id,
     native_completed: bool,
     watching_author: Option<Id>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EndEffects {
+    context: Option<crate::context_fill::TerminalContext>,
 }
 
 pub(super) async fn keep(
@@ -79,8 +84,9 @@ fn failure_class(error: &EngineError) -> (&'static str, Option<String>) {
     match error {
         EngineError::Capability(_) => ("capability", None),
         EngineError::CapabilityPaused(_) => ("capability_paused", None),
-        EngineError::AskContextNoRoom => ("ask_context_no_room", None),
         EngineError::AskContextTooLong(_) => ("ask_context_too_long", None),
+        EngineError::AskTurnTooLong(_) => ("ask_turn_too_long", None),
+        EngineError::AskRefused { .. } => ("ask_refused", None),
         EngineError::BeforeEffect(_) => ("before_effect", None),
         EngineError::BackgroundRunning(_) => ("background_running", None),
         EngineError::Db(DbError::Unique { .. }) => ("db_unique", Some("23505".into())),
@@ -155,8 +161,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Owns at most one pending turn through its thread row lock. All waits are metadata
-    /// reads/writes on this connection; no lease, second connection or native/store wait.
+    /// Prepares one terminal turn without its thread row, then applies the receipt in a short transaction.
     pub(crate) async fn drive_turn_end_work(&self, thread_id: Id) -> Result<(), EngineError> {
         self.end_work_phase(thread_id, "repair_current", "enter", None);
         if let Err(error) = self.repair_terminal_current(thread_id).await {
@@ -214,6 +219,59 @@ impl Engine {
         }
     }
 
+    /// The accounting and recipient locks of a terminal turn never keep its thread row held.
+    async fn prepare_turn_end_effects(&self, thread_id: Id) -> Result<(), EngineError> {
+        let mut tx = self.db().begin().await?;
+        let Some((id, _)) = threads::turn_end_work(&mut tx, thread_id).await? else {
+            return Ok(());
+        };
+        threads::lock_turn_end_effects(&mut tx, id).await?;
+        let Some((current, saved)) = threads::turn_end_work(&mut tx, thread_id).await? else {
+            return Ok(());
+        };
+        if current != id || saved.get("effects").is_some() {
+            return Ok(());
+        }
+        let work: EndWork = serde_json::from_value(saved["snapshot"].clone())?;
+        let Some(mut thread) = threads::thread(&mut tx, thread_id).await? else {
+            return Ok(());
+        };
+        let Some(mut turn) = threads::turn(&mut tx, id).await? else {
+            return Ok(());
+        };
+        let end = terminal_end(&turn)?;
+        turn.usage = work.usage;
+        turn.usage_detail = work.usage_detail;
+        turn.completed_at = Some(work.at);
+        thread.name = work.thread_name;
+        thread.org_id = work.org;
+        let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+        self.close_running_requests(unit.conn, id, end.state, end.error.as_ref())
+            .await?;
+        self.count_harness_usage(&mut unit, &turn).await?;
+        let mut before = turn.clone();
+        before.state = if work.was_starting {
+            turn_state::STARTING
+        } else {
+            turn_state::RUNNING
+        }
+        .to_owned();
+        crate::notifications::turn_ended(&mut unit, &thread, &before, &end, work.watching_author)
+            .await?;
+        let context = if work.native_completed {
+            self.prepare_context_at_end(unit.conn, id).await?
+        } else {
+            None
+        };
+        let effects = serde_json::to_value(EndEffects { context })?;
+        if !threads::keep_turn_end_effects(unit.conn, id, &saved["snapshot"], &effects).await? {
+            return Err(orch_db::DbError::Retry.into());
+        }
+        let finished = unit.finish().await?;
+        self.commit(tx, finished).await?;
+        Ok(())
+    }
+
     async fn apply_turn_end_work(
         &self,
         thread_id: Id,
@@ -225,60 +283,42 @@ impl Engine {
                 self.end_work_phase(thread_id, $name, "enter", None);
             }};
         }
+        entering!("effects");
+        self.prepare_turn_end_effects(thread_id).await?;
         entering!("begin");
         let mut tx = self.db().begin().await?;
         entering!("lock_thread");
-        let Some(mut thread) = threads::lock(&mut tx, thread_id).await? else {
+        let Some(thread) = threads::lock(&mut tx, thread_id).await? else {
             return Ok(());
         };
         entering!("load_work");
         let Some((id, saved)) = threads::turn_end_work(&mut tx, thread_id).await? else {
             return Ok(());
         };
+        if saved.get("effects").is_none() {
+            return Ok(());
+        }
         entering!("decode_work");
         let work: EndWork = serde_json::from_value(saved["snapshot"].clone())?;
         entering!("load_turn");
-        let mut turn = threads::turn(&mut tx, id)
+        let turn = threads::turn(&mut tx, id)
             .await?
             .filter(|turn| turn.thread_id == thread_id)
             .ok_or_else(|| EngineError::unreadable("the terminal follow-up's turn disappeared"))?;
-        let end = terminal_end(&turn)?;
-        turn.usage = work.usage;
-        turn.usage_detail = work.usage_detail;
-        turn.completed_at = Some(work.at);
-        thread.name = work.thread_name;
-        thread.org_id = work.org;
-        // Recipient authority is evaluated now; only the accounting event is dated
-        // to the frozen terminal time. Backdating the unit would revive expired roles.
+        terminal_end(&turn)?;
         let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-        entering!("settle_requests");
-        self.close_running_requests(&mut *unit.conn, turn.id, end.state, end.error.as_ref())
-            .await?;
-        entering!("account_usage");
-        self.count_harness_usage(&mut unit, &turn).await?;
-        // Notification eligibility is based on the turn before terminalization. Its event
-        // identity stays the turn ID; current recipient permissions are checked on replay.
-        let mut before = turn.clone();
-        before.state = if work.was_starting {
-            turn_state::STARTING
-        } else {
-            turn_state::RUNNING
-        }
-        .to_owned();
-        entering!("notifications");
-        crate::notifications::turn_ended(&mut unit, &thread, &before, &end, work.watching_author)
-            .await?;
-        if work.native_completed {
+        let effects: EndEffects = serde_json::from_value(saved["effects"].clone())?;
+        if let Some(context) = effects.context {
             entering!("context");
-            self.estimate_context_at_end(&mut unit, thread_id, turn.id)
+            self.apply_context_at_end(&mut unit, thread_id, turn.id, context)
                 .await?;
-            if orch_db::queries::thread_history::selected_turn(unit.conn, thread_id, turn.id)
+        }
+        if work.native_completed
+            && orch_db::queries::thread_history::selected_turn(unit.conn, thread_id, turn.id)
                 .await?
-            {
-                entering!("summary_due");
-                crate::summaries::due(&mut *unit.conn, thread_id, "turn_completed", work.at)
-                    .await?;
-            }
+        {
+            entering!("summary_due");
+            crate::summaries::due(unit.conn, thread_id, "turn_completed", work.at).await?;
         }
         entering!("retire_work");
         if !threads::finish_turn_end_work(&mut *unit.conn, id, &saved).await? {
@@ -315,6 +355,15 @@ impl Engine {
 #[cfg(test)]
 mod diagnostics_tests {
     use super::*;
+
+    #[test]
+    fn a_refused_question_has_a_diagnostic_category_without_the_persons_words() {
+        let refusal = EngineError::AskRefused {
+            reason: "no_use".into(),
+            message: "Synthetic private question context".into(),
+        };
+        assert_eq!(failure_class(&refusal), ("ask_refused", None));
+    }
 
     #[test]
     fn failure_metadata_excludes_error_values_and_constraint_text() {

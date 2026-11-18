@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -209,6 +210,7 @@ CREATE TABLE environments (
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     manifest_blob bytea,
     manifest_at timestamp with time zone,
+    manifest_source_facts jsonb,
     env_seq bigint DEFAULT 0 NOT NULL,
     unused_since timestamp with time zone,
     remove_at timestamp with time zone,
@@ -256,6 +258,7 @@ CREATE INDEX environments_home_idx ON environments USING btree (home_node_id) WH
 CREATE INDEX environments_kept_idx ON environments USING btree (home_node_id, volumes_purge_at) WHERE (removal_phase = 'kept'::text);
 
 CREATE UNIQUE INDEX environments_owner_name_key ON environments USING btree (org_id, owner_id, lower(name)) WHERE (deleted_at IS NULL);
+CREATE INDEX environments_kept_name_trgm ON environments USING gin (name gin_trgm_ops) WHERE deleted_at IS NOT NULL AND purged_at IS NULL;
 
 CREATE INDEX environments_removal_due_idx ON environments USING btree (remove_at, id) WHERE ((deleted_at IS NULL) AND (remove_at IS NOT NULL));
 
@@ -797,3 +800,18 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- One native source transfer per current environment, independent of browser upload sessions.
+CREATE TABLE environment_file_transfers (
+    environment_id uuid PRIMARY KEY REFERENCES environments(id) ON DELETE CASCADE,
+    machine_id uuid NOT NULL,
+    generation bigint NOT NULL,
+    hash bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('transferring', 'interrupted', 'expired')),
+    observed_at timestamp with time zone NOT NULL,
+    last_piece_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    idle_retention_secs bigint,
+    retention_default boolean
+);
+CREATE INDEX environment_file_transfers_content_idx ON environment_file_transfers(machine_id,hash);

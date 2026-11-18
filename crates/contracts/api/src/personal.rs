@@ -373,6 +373,8 @@ pub enum PersonalStateKey {
     /// How a conversation is shown to them: how much of the agent's work opens on its own, and
     /// whether a difference is drawn in one column or in two.
     Timeline,
+    /// How this person's interface retains views and indicates reading progress.
+    Interface,
     /// Which sidebar sections are folded and whether its tree shows documents, the place last in,
     /// and the order of each org's tree.
     Sidebar,
@@ -382,8 +384,38 @@ pub enum PersonalStateKey {
     Keys,
     /// The last few emoji chosen, newest first.
     Reactions,
+    /// Recently selected picker keys, newest first within each kind.
+    PickerRecents,
     /// How the Inbox groups its rows.
     Inbox,
+}
+
+/// The person's private recent picker choices, with the system's current group length.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MePickerRecents {
+    /// Entries retained and offered per kind; zero disables remembering.
+    pub count: u64,
+    /// Newest-first distinct opaque keys. Names and authority come only from the picker source.
+    pub choices: BTreeMap<String, Vec<String>>,
+}
+
+/// A selection write acknowledges only its effect, without disclosing any stored private history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MePickerRecentReceipt {
+    /// The current system group length.
+    pub count: u64,
+    /// False when remembering is switched off; no earlier choice was erased.
+    pub remembered: bool,
+}
+
+/// One deliberate selection; opening or inspecting a choice does not record it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MePickerRecentChoice {
+    /// Native resource kind, or model. The same kind shares history across screens.
+    pub kind: String,
+    /// Stable choice key. Models use their provider-qualified key.
+    pub key: String,
 }
 
 /// Where to put a favorite.
@@ -551,6 +583,12 @@ crate::endpoints! {
     /// Replaces the whole value of one key of that state.
     MeStateSet: PUT "/me/state/{key}", User, none, json Json, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Reads this person's recent picker choices in one preference read.
+    MePickerRecentsGet: GET "/me/picker-recents", User, none, none, json MePickerRecents, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Promotes one key atomically without replacing another device's choices.
+    MePickerRecentCreate: POST "/me/picker-recents", User, none, json MePickerRecentChoice, json MePickerRecentReceipt, 200,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Keeps the caller's last view of one project, beside those of the others.
     MeProjectViewSet: PUT "/me/state/project_views/{project_id}", Rule("the caller, who may view the project"), none, json ProjectView, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
@@ -665,17 +703,19 @@ mod tests {
     }
 
     #[test]
-    fn the_interface_state_is_kept_under_nine_keys() {
+    fn the_interface_state_keeps_reading_choices_under_their_own_key() {
         assert_eq!(
             serde_json::to_value([
                 PersonalStateKey::Help,
                 PersonalStateKey::Layouts,
                 PersonalStateKey::Viewers,
                 PersonalStateKey::Timeline,
+                serde_json::from_value::<PersonalStateKey>(json!("interface")).unwrap(),
                 PersonalStateKey::Sidebar,
                 PersonalStateKey::ProjectViews,
                 PersonalStateKey::Keys,
                 PersonalStateKey::Reactions,
+                PersonalStateKey::PickerRecents,
                 PersonalStateKey::Inbox
             ])
             .unwrap(),
@@ -684,10 +724,12 @@ mod tests {
                 "layouts",
                 "viewers",
                 "timeline",
+                "interface",
                 "sidebar",
                 "project_views",
                 "keys",
                 "reactions",
+                "picker_recents",
                 "inbox"
             ])
         );
