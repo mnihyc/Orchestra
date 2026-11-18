@@ -645,6 +645,133 @@ async fn a_failed_environment_is_not_offered_as_the_topics_default_even_when_the
     );
 }
 
+/// What starting a thread in `node` is offered, read as Ada reads it before any thread exists.
+async fn start_options_for(s: &Scene, node: Id) -> BindingOptions {
+    s.rig
+        .world
+        .app
+        .call(NodeBindingOptionsGet, &[&node])
+        .token(&s.ada.token)
+        .query(&NodeBindingOptionsGetQuery::default())
+        .send()
+        .await
+        .ok()
+}
+
+#[tokio::test]
+async fn a_default_environment_set_on_the_project_is_the_default_of_its_topics_and_names_where_it_is_set()
+ {
+    let s = Scene::new().await;
+    let spare = another_environment(&s, "Spare", None).await;
+    let project = s.tree.project.base.id;
+    let topic = s.tree.topic.base.id;
+    s.rig
+        .world
+        .set_at(Target::Node(project), "env.default_id", json!(spare))
+        .await;
+
+    let in_topic = start_options_for(&s, topic).await;
+    let row = in_topic
+        .environments
+        .iter()
+        .find(|row| row.environment.id == spare)
+        .unwrap();
+    assert!(
+        row.is_default,
+        "the nearest place that sets the default decides, as for every other setting"
+    );
+    let named = in_topic.default_environment.as_ref().unwrap();
+    assert_eq!(named.environment, spare);
+    assert_eq!(
+        named.from.as_ref().map(|node| node.id),
+        Some(project),
+        "the person is told which place above the topic set it"
+    );
+    assert!(named.reason.is_none());
+
+    let in_project = start_options_for(&s, project).await;
+    assert!(
+        in_project
+            .environments
+            .iter()
+            .find(|row| row.environment.id == spare)
+            .unwrap()
+            .is_default,
+        "the first thread of a topic made in the project starts on the project's default"
+    );
+
+    s.rig
+        .world
+        .set_at(
+            Target::Node(topic),
+            "env.default_id",
+            json!(s.on.environment),
+        )
+        .await;
+    let own = start_options_for(&s, topic).await;
+    let named = own.default_environment.as_ref().unwrap();
+    assert_eq!(
+        named.environment, s.on.environment,
+        "the topic's own setting wins over its project's"
+    );
+    assert!(named.from.is_none(), "the topic's own needs no place named");
+    assert!(
+        own.environments
+            .iter()
+            .find(|row| row.environment.id == s.on.environment)
+            .unwrap()
+            .is_default
+    );
+    assert!(
+        !own.environments
+            .iter()
+            .find(|row| row.environment.id == spare)
+            .unwrap()
+            .is_default
+    );
+}
+
+#[tokio::test]
+async fn a_default_environment_the_caller_cannot_use_is_named_with_why_and_is_not_offered_as_the_default()
+ {
+    let s = Scene::new().await;
+    let project = s.tree.project.base.id;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(project),
+            "env.default_id",
+            json!(s.on.environment),
+        )
+        .await;
+    sqlx::query("UPDATE environments SET status='failed' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let shown = start_options_for(&s, s.tree.topic.base.id).await;
+    let named = shown.default_environment.as_ref().unwrap();
+    assert_eq!(named.environment, s.on.environment);
+    assert_eq!(named.from.as_ref().map(|node| node.id), Some(project));
+    assert_eq!(
+        named.reason.as_deref(),
+        Some("environment_failed"),
+        "the dialog can say why it did not start on the default"
+    );
+    assert!(shown.environments.iter().all(|row| !row.is_default));
+
+    sqlx::query("DELETE FROM settings WHERE node_id=$1 AND key='env.default_id'")
+        .bind(project)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let cleared = start_options_for(&s, s.tree.topic.base.id).await;
+    assert!(
+        cleared.default_environment.is_none(),
+        "no setting, no default named"
+    );
+}
+
 #[tokio::test]
 async fn an_environment_that_has_served_only_other_topics_gives_a_new_directory_named_after_this_one()
  {
@@ -974,5 +1101,200 @@ async fn grouping_uses_the_same_native_arrangements_and_preserves_unavailable_ch
     assert_eq!(
         environment.grouping.availability[0].reason.as_deref(),
         Some("environment_lost")
+    );
+}
+
+#[tokio::test]
+async fn a_thread_created_without_model_or_approval_choices_uses_the_only_model_and_an_offered_mode()
+ {
+    use orch_agent_contract::descriptor::ApprovalMode;
+    use orch_api_contract::binding::EnvironmentChoice;
+    use orch_api_contract::nodes::{CreateThread, CreateThreadBinding, ThreadCreate};
+    let s = Scene::new().await;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "approval.mode",
+            json!("auto"),
+        )
+        .await;
+    let made = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .body(&CreateThread {
+            name: Some("Use the offered defaults".to_owned()),
+            binding: Some(CreateThreadBinding {
+                agent_id: s.on.agent,
+                provider_id: s.on.provider,
+                arrangement: None,
+            }),
+            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            ..CreateThread::default()
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(made.model.as_deref(), Some(MODEL));
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let resolved = orch_engine::resolved::load(&mut conn, made.base.id)
+        .await
+        .unwrap();
+    assert_eq!(resolved.model.as_deref(), Some(MODEL));
+    assert_eq!(resolved.approval_mode, ApprovalMode::Ask);
+    let stored: Option<String> = sqlx::query_scalar("SELECT payload#>>'{data,model}' FROM items WHERE thread_id=$1 AND payload->>'marker'='created'")
+        .bind(made.base.id).fetch_optional(&mut *conn).await.unwrap().flatten();
+    assert_eq!(
+        stored.as_deref(),
+        Some(MODEL),
+        "the accepted creation says which sole model it selected"
+    );
+}
+
+#[tokio::test]
+async fn an_omitted_model_keeps_the_places_choice_and_does_not_replace_an_explicit_or_disallowed_choice()
+ {
+    use orch_api_contract::binding::EnvironmentChoice;
+    use orch_api_contract::nodes::{CreateThread, CreateThreadBinding, ThreadCreate};
+    let s = Scene::new().await;
+    let request = || CreateThread {
+        name: Some("Keep a deliberate model choice".to_owned()),
+        binding: Some(CreateThreadBinding {
+            agent_id: s.on.agent,
+            provider_id: s.on.provider,
+            arrangement: None,
+        }),
+        environment: Some(EnvironmentChoice::Use(s.on.environment)),
+        ..CreateThread::default()
+    };
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "agent.model",
+            json!(MODEL),
+        )
+        .await;
+    let made = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .body(&request())
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(made.model.as_deref(), Some(MODEL));
+    let mut explicit = request();
+    explicit.model = Some("not-offered".to_owned());
+    let refused = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .body(&explicit)
+        .send()
+        .await;
+    assert!(
+        !refused.status.is_success(),
+        "an explicit choice is never replaced by the sole offered model"
+    );
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "models.allowed",
+            json!(["not-offered"]),
+        )
+        .await;
+    let refused = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .body(&request())
+        .send()
+        .await;
+    assert!(
+        !refused.status.is_success(),
+        "choosing a default cannot bypass the place allowlist"
+    );
+}
+
+#[tokio::test]
+async fn placement_choices_show_the_room_on_the_current_machine_or_host() {
+    let s = Scene::new().await;
+    let directory = a_directory_on_a_machine(&s, "Shared workspace").await;
+    let managed = another_environment(&s, "Hosted workspace", None).await;
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let host = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "host",
+        Some(s.ada.id()),
+        Some(s.tree.org.base.id),
+        "Placement host",
+    )
+    .await
+    .unwrap();
+    let at = s.rig.world.now();
+    let sample = json!({"cpu_free_millis":1250,"memory_free_bytes":4096,"observed_at":orch_types::Time::new(at)});
+    sqlx::query("UPDATE machines SET online=true, facts=jsonb_set(facts,'{room}',$2) WHERE id=$1")
+        .bind(s.rig.machine_id)
+        .bind(&sample)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hosts SET capacity=$2,load=$3,load_at=$4 WHERE id=$1")
+        .bind(host)
+        .bind(json!({"cpus":8,"cpu_millis":4500,"memory_mb":8192}))
+        .bind(json!({"cpu_percent":125.0,"memory_used_mb":6144}))
+        .bind(at)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE machines SET online=true,session_started_at=NULL WHERE id=(SELECT machine_id FROM hosts WHERE id=$1)")
+        .bind(host).execute(&mut *conn).await.unwrap();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,unit_name,environment_id,driver,template_id,spec_hash,state)
+                 SELECT $1,'environment',$2,'hosted-placement',id,'test',template_id,$4,'running' FROM environments WHERE id=$3")
+        .bind(orch_types::new_id()).bind(host).bind(managed).bind(vec![0_u8])
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let read = |choices: &BindingOptions, id| {
+        let choice = choices
+            .environments
+            .iter()
+            .find(|row| row.environment.id == id)
+            .unwrap();
+        serde_json::to_value(choice).unwrap()["room"].clone()
+    };
+    let choices = start_options_for(&s, s.tree.topic.base.id).await;
+    assert_eq!(read(&choices, directory), sample);
+    assert_eq!(
+        read(&choices, managed),
+        json!({"cpu_free_millis":3250,"memory_free_bytes":2147483648_i64,"observed_at":orch_types::Time::new(at)})
+    );
+    sqlx::query("UPDATE machines SET facts=facts-'room' WHERE id=$1")
+        .bind(s.rig.machine_id)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE machines SET session_started_at=$2 WHERE id=(SELECT machine_id FROM hosts WHERE id=$1)")
+        .bind(host).bind(at + chrono::Duration::seconds(1)).execute(s.rig.db.pool()).await.unwrap();
+    let later = start_options_for(&s, s.tree.topic.base.id).await;
+    assert_eq!(read(&later, directory), serde_json::Value::Null);
+    assert_eq!(
+        read(&later, managed),
+        serde_json::Value::Null,
+        "a host's earlier session cannot supply its current room"
     );
 }

@@ -40,3 +40,22 @@ for (const reported of [true, false]) it(`updates visible choices when the agent
     expect(read).toHaveBeenCalledTimes(1);
   } finally { stop(); stopOther(); cache.clear(); }
 });
+
+it('repairs a visible starter when a newly available agent was absent from every cached choice set',async()=>{
+  const world=new World(),person=world.people.get('ada')!;
+  const id=RUNS_ON.codex;
+  const choices=()=>world.starts.handle(person,'GET',`/nodes/${ACME.fixLogin}/binding/options`,new URLSearchParams(),{})!.body as BindingOptions;
+  const cache=new QueryClient({defaultOptions:{queries:{staleTime:Infinity,retry:false}}});
+  const key=['start-options',ACME.fixLogin,''];
+  cache.setQueryData(key,{...choices(),providers:[]});
+  const read=vi.fn(()=>Promise.resolve(choices()));
+  const stop=new QueryObserver(cache,{queryKey:key,queryFn:read}).subscribe(()=>undefined);
+  try {
+    world.resources.report(id,true);
+    const row=world.resources.inventoryView(person,'agent',id);
+    if(row===null)throw new Error('The newly offered agent is present');
+    await applyChanges(resourceChanges('agent',id,{row},'news'),cache);
+    expect(read).toHaveBeenCalledOnce();
+    expect(cache.getQueryData(key)).toEqual(choices());
+  }finally{stop();cache.clear();}
+});

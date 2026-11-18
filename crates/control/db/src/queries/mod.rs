@@ -48,6 +48,7 @@ pub mod network;
 pub mod notifications;
 pub mod outsiders;
 pub mod package;
+pub mod placement_room;
 pub mod ports;
 pub mod profiles;
 pub mod provider_credits;

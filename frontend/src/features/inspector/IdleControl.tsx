@@ -53,6 +53,7 @@ export function IdleControl({ environment, door, mayManage }: { environment: Env
   const text =
     environment.status !== 'running'
       ? t('inspector.environment.idle.notRunning')
+      : environment.idle_stop_deferred ? t('inspector.environment.idle.working')
       : typeof environment.idle_stop_at !== 'string'
         ? t('inspector.environment.idle.never')
         : t('inspector.environment.idle.stopsAt', { time: formatDateTime(environment.idle_stop_at, format) });
