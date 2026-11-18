@@ -21,16 +21,16 @@
 .everything-flat-row[data-selecting] .flat-time { grid-column: 3 / span 2; }
 .everything-flat-row [data-desktop-place] { display: none; }
 .everything-flat-row [data-mobile-place] { display: block; }
-@media (min-width: 40rem) {
+.everything-table[data-wide] {
   /* Subgrids align every row while Name takes its content width before Where gets the remainder. */
-  .everything-recent-table { display: grid; grid-template-columns: var(--recent-columns); min-width: var(--recent-min-width); }
-  .everything-recent-table > thead, .everything-recent-table > tbody,
-  .everything-recent-table tr { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
-  .everything-recent-table [colspan] { grid-column: 1 / -1; }
-  .everything-recent-table .everything-flat-row,
-  .everything-recent-table .everything-flat-row[data-selecting] { grid-template-columns: subgrid; gap: 0; }
-  .everything-recent-table .everything-flat-row > td,
-  .everything-recent-table .everything-flat-row[data-selecting] > td { grid-column: auto; grid-row: auto; align-self: stretch; }
+  &.everything-recent-table { display: grid; grid-template-columns: var(--recent-columns);  }
+  &.everything-recent-table > thead, &.everything-recent-table > tbody,
+  &.everything-recent-table tr { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+  &.everything-recent-table [colspan] { grid-column: 1 / -1; }
+  &.everything-recent-table .everything-flat-row,
+  &.everything-recent-table .everything-flat-row[data-selecting] { grid-template-columns: subgrid; gap: 0; }
+  &.everything-recent-table .everything-flat-row > td,
+  &.everything-recent-table .everything-flat-row[data-selecting] > td { grid-column: auto; grid-row: auto; align-self: stretch; }
   .everything-flat-row { display: table-row; padding: 0; border: 0; }
   .everything-flat-row > td { display: grid; align-content: center; min-height: var(--table-row-height); height: auto; padding: 0.25rem 0.5rem; }
   .everything-flat-row .flat-by, .everything-flat-row .flat-extra, .everything-flat-row .flat-secondary,
@@ -41,6 +41,34 @@
   .everything-flat-row [data-mobile-place] { display: none; }
   .everything-flat-row [data-desktop-place] { display: block; }
   .everything-flat-row .flat-by > span, .everything-flat-row .flat-extra > span { max-width: 100%; }
-  .everything-recent-table th { padding-inline: 0.5rem; }
-  .everything-recent-table th:last-child { padding-inline: 0.25rem; }
+  &.everything-recent-table th { padding-inline: 0.5rem; }
+  &.everything-recent-table th:last-child { padding-inline: 0.25rem; }
 }
+
+
+/* The pane can be narrow even on a large screen. Keep actions beside the name and
+   let the selected facts share subsequent lines at their natural widths. */
+.everything-table:not([data-wide]) .everything-tree-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem 0.75rem;
+  padding: 0.375rem 0.5rem;
+}
+.everything-table:not([data-wide]) .everything-tree-row > td {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+}
+.everything-table:not([data-wide]) .everything-tree-row > td[data-inventory-name] { flex: 1 0 calc(100% - 4.5rem); }
+.everything-table:not([data-wide]) .everything-tree-row > td[data-column] { order: 1; }
+.everything-table:not([data-wide]) .everything-tree-row > td[data-column] > span:first-child {
+  display: inline;
+  margin-inline-end: 0.25rem;
+}
+.everything-table[data-wide] :is(td, th) { overflow-wrap: anywhere; white-space: normal; }
+.everything-table[data-wide] th button { max-width: 100%; white-space: normal; }
+
+/* Radix measures scrollable content through a table wrapper. This table already
+   chooses its layout from the viewport, so its wrapper should track that width. */
+.scroll-region-viewport > div:has(> .everything-table) { display: block !important; width: 100%; }

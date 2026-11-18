@@ -25,10 +25,10 @@ vi.mock('@/api/references', () => ({ referencePreviewQuery: ({ id }: { id: strin
     place: null, updated_at: null, updated_by: null, part: null, thread_display: supplied.thread?.display });
 } }) }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }), useNavigate: () => vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
-vi.mock('@/features/navigation/DocMenu', () => ({ DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/chat/open', () => ({ isPlainClick: () => true, useOpenPath: () => vi.fn() }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
+vi.mock('@/features/navigation/DocMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), isPlainClick: () => true, useOpenPath: () => vi.fn() }));
 
 const appearance = useAppearance.getState();
 afterEach(() => { cleanup(); treeWriter.clear(); supplied.read.mockClear(); useAppearance.setState(appearance); });

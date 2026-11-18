@@ -39,6 +39,7 @@ import { InstructionSources } from './InstructionSources';
 import { ThreadViewFrame } from './parts';
 import { environmentStatusWord } from './words';
 import { EnvironmentPrograms, ProgramBuild } from '@/features/resources/agents/ProgramBuild';
+import { SessionSkills } from './SessionSkills';
 
 const TONE: Record<Environment['status'], DotTone> = {
   none: 'off',
@@ -174,6 +175,7 @@ function EnvironmentPanel({ access }: { access: WorkspaceAccess }) {
         </Section>
       )}
       <InstructionSources threadId={access.thread.id} />
+        <SessionSkills thread={access.thread} read={access.read}/>
     </ScrollArea>
   );
 }
