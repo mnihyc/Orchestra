@@ -1123,10 +1123,37 @@ async fn restart_is_one_manager_job_on_the_existing_unit_and_rejects_an_overlap_
         .send()
         .await;
     assert_eq!(malformed.status, 400);
+    let key_id = orch_types::new_id();
+    let key = orch_api_core::middleware::authentication::new_token(
+        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
+    );
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"environment","id":made.base.id,"reach":"self"},
+            "allow":[{"operation":"EnvironmentRestart","actions":["manage"]}]
+        }]}))
+        .unwrap();
+    assert!(policy.validate().is_empty());
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut *world.conn().await,
+        &orch_db::queries::identity::NewApiToken {
+            id: key_id,
+            user_id: t.c.admin.id(),
+            name: "Only this restart",
+            token_hash: &orch_api_core::middleware::authentication::token_hash(&key),
+            scopes: &[],
+            node_id: None,
+            at: world.now(),
+            expires_at: None,
+        },
+        Some(&json!(policy)),
+    )
+    .await
+    .unwrap();
     let reply = world
         .app
         .call(EnvironmentRestart, &[&made.base.id])
-        .token(&t.c.admin.token)
+        .token(&key)
         .body(&EnvironmentRestartBody {
             mode: EnvironmentRestartMode::Wait,
         })
@@ -1142,6 +1169,19 @@ async fn restart_is_one_manager_job_on_the_existing_unit_and_rejects_an_overlap_
     assert_eq!(row.plan["runtime"], json!(runtime));
     assert_eq!(row.plan["restart_mode"], "wait");
     assert_eq!(row.created_by, Some(t.c.admin.id()));
+    assert!(
+        orch_engine::jobs::lifecycle_commands::environment::present(&row),
+        "the deferred restart must retain its own operation instead of a caller-only fallback"
+    );
+    let retained: orch_engine::operation_scope::http_origin::HttpOrigin =
+        serde_json::from_value(row.plan["environment_lifecycle"]["accepted"].clone()).unwrap();
+    assert_eq!(retained.origin().operation(), "EnvironmentRestart");
+    assert_eq!(retained.origin().user(), t.c.admin.id());
+    assert!(
+        matches!(retained.credential(),
+        orch_engine::operation_scope::request_origin::Credential::Token { id, .. } if *id == key_id),
+        "the actual original key must survive into later native phases"
+    );
     let overlap = world
         .app
         .call(EnvironmentRestart, &[&made.base.id])
@@ -1172,6 +1212,48 @@ async fn make(world: &World, team: &Team, by: &Who, name: &str) -> Environment {
         .ok()
         .into_full()
         .expect("ordinary standalone creation remains full")
+}
+
+#[tokio::test]
+async fn a_known_unit_recipe_remains_a_unit_when_its_hosts_driver_report_is_missing() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(t.host),
+        )
+        .await;
+    let made = make(&world, &t, &t.c.admin, "Waiting for driver report").await;
+    sqlx::query("UPDATE hosts SET drivers='{}'::jsonb WHERE id=$1")
+        .bind(t.host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let shown = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        shown.facts["environment_descriptor"]["lifecycle"],
+        json!("unit"),
+        "the template recipe is independent of a cached native driver report"
+    );
+    assert!(
+        shown.facts["environment_descriptor"]["name"].is_null(),
+        "missing native support is not invented"
+    );
+    let mut conn = world.conn().await;
+    assert!(
+        orch_db::queries::environment_facts::has_unit(&mut conn, made.base.id)
+            .await
+            .unwrap(),
+        "Start and Stop do not misclassify the unit as a directory"
+    );
 }
 
 #[tokio::test]

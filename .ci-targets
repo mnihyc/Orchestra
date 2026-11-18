@@ -1,0 +1,12 @@
+fmt
+clippy
+test -p orch-connector-core --lib -- storages::tests::
+test -p orch-api-core --test certificates --features test-support
+test -p orch-api-core --test realtime_diagnostics --features test-support -- enrollment
+test -p orch-api-core --test kmounts_files --features test-support -- deleting_
+test -p orch-connector --test program -- platform_observations::a_connected_machine_completes_a_turn_with_its_own_registered_agent_program
+test -p orch-envhost --lib -- paths::binding_tests::
+test -p orch-api-core --test machines --features test-support -- a_windows_program_approval_follows_the_selected_executable_on_a_linux_controller
+web typecheck
+web lint
+web test -- tests/component/machine-enrollment-arrival.test.tsx tests/component/environment-data.test.tsx tests/unit/enrollment-progress.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts

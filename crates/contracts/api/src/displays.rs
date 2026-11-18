@@ -96,6 +96,31 @@ pub struct EnvironmentDisplayCreateBody {
     /// Its dimensions, or the environment's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<String>,
+    /// An existing server on this machine's loopback interface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<DisplayServer>,
+    /// Share the current local desktop on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
+}
+
+/// A loopback RFB port and the optional password used only by the machine.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayServer {
+    /// The port on 127.0.0.1.
+    pub port: std::num::NonZeroU16,
+    /// The server's VNC password, sealed before persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for DisplayServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DisplayServer")
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Requests watching, or also working with Manage.

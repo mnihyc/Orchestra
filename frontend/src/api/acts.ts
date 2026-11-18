@@ -453,6 +453,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /nodes/{id}/announcements': (p) => [...place(p('id')), ...kinds('announcements')],
   'POST /orgs/{id}/messages': (p) => [{ missing: [only('admin-messages', p('id'))] }],
   // The sent list and the banner's settings are two projections the receipt omits; each is repaired where it is shown.
+  'PUT /admin/public-address': () => [{ missing: [only('admin', 'public-address')] }, { meta: true }],
   'POST /admin/messages': () => [{ missing: [only('admin-messages', 'system')] }, { missing: [only('admin', 'settings')] }, { meta: true }],
   'PATCH /tags/{id}': () => tagged(),
   'DELETE /tags/{id}': () => tagged(),
@@ -511,6 +512,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
   'DELETE /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
   'PUT /gateways': () => [{ key: ['gateway-catalogue'], exact: true }],
+  'PUT /machines/{machine_id}/gateway': (p) => [one(p('machine_id'),'machine-gateway')],
   'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
   'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
 
@@ -797,12 +799,15 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /mcp-servers/{id}/reimport': (p) => mcp(p('id')),
   'DELETE /mcp-servers/{id}': (p) => [gone(p('id'), 'mcp-server'), every('mcp-servers')],
   'POST /mounts': () => kinds('mounts'),
+  'POST /mounts/{id}/delete-plan': () => NOTHING,
+  'POST /mounts/{id}/copy-plan': () => NOTHING,
+  'POST /mounts/{id}/copy': (p) => [only('mount-copy-job', p('id'))],
   'PATCH /mounts/{id}': (p) => mount(p('id')),
   'PUT /mounts/{id}/locations/{machine_id}': (p) => mount(p('id')),
   'PATCH /mounts/{id}/locations/{machine_id}': (p) => mount(p('id')),
   'DELETE /mounts/{id}/locations/{machine_id}': (p) => mount(p('id')),
   'DELETE /mounts/{id}/kept/{kept_id}': (p) => mount(p('id')),
-  'DELETE /mounts/{id}': (p) => [gone(p('id'), 'mount'), gone(p('id'), 'mount-uses'), every('mounts')],
+  'DELETE /mounts/{id}': (p) => [gone(p('id'), 'mount'), gone(p('id'), 'mount-uses'), ...kinds('mounts', 'storage', 'settings', 'environments'), ...inbox()],
 
   // -- skills: the resource, its versions and its draft
   'POST /skills': () => kinds('skills'),
@@ -823,7 +828,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /admin/usage/catalogue': () => usage(),
 
   // -- the system's management
-  'POST /admin/releases/check': () => [only('admin', 'installation-records')],
+  'POST /admin/releases/check': () => [only('admin', 'installation-records'), only('admin', 'server-update')],
+  'POST /admin/bundled-node/enrollment/retry': () => [only('admin', 'bundled-node-enrollment')],
+  'POST /admin/server-update': () => [only('admin', 'server-update')],
   'POST /admin/users': () => kinds('admin', 'trace-users'),
   'PATCH /admin/users/{id}': () => [...kinds('admin', 'trace-users', 'trace-person'), ...people()],
   'DELETE /admin/tokens/{id}': () => [{ adminCredentials: { kind: 'tokens' } }],

@@ -58,6 +58,8 @@ async fn a_real_screen_is_listed_with_its_x_address_and_only_managers_see_the_en
         .call(EnvironmentDisplayCreate, &[&floor.environment])
         .token(&floor.scene.ada.token)
         .body(&EnvironmentDisplayCreateBody {
+            attach: None,
+            desktop: None,
             name: Some("Build preview".to_owned()),
             geometry: Some("800x600".to_owned()),
         })
@@ -229,13 +231,15 @@ async fn forgetting_an_announced_display_leaves_its_original_real_server_running
         .app
         .engine
         .displays()
-        .adopt(
-            floor.environment,
-            thread,
-            original.endpoint.clone(),
-            None,
-            Some("Emulator console".into()),
-        )
+        .adopt(orch_engine::displays::AdoptDisplay {
+            environment: floor.environment,
+            requester: Requester::Agent(thread),
+            thread: Some(thread),
+            target: orch_link_contract::display::DisplayTarget::Endpoint(original.endpoint.clone()),
+            password: None,
+            note: Some("Emulator console".into()),
+            origin: Default::default(),
+        })
         .await
         .unwrap();
     assert_eq!(announced.origin, "announced");
@@ -642,4 +646,160 @@ async fn an_owned_screen_reuses_its_original_endpoint_and_x_display_after_regist
     let mut screen =
         displays_support::Screen::attach(&floor, &floor.scene.ada, display.id, false).await;
     screen.picture_without_clipboard().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_attaches_a_loopback_server_and_a_viewer_watches_without_its_password() {
+    orch_api_core::routes::resources::sealing::install_master_key(
+        orch_db::secrets::MasterKey::new([7; 32]),
+    );
+    let floor = Floor::new()
+        .await
+        .expect("the display proof requires its prepared browser peer");
+    floor.serve().await;
+    displays_support::password_commands(&floor);
+    floor.names(&floor.scene.bea, "vnc.view").await;
+    let thread = floor.scene.thread().await.base.id;
+    let original = floor
+        .app
+        .engine
+        .displays()
+        .open(OpenDisplay {
+            environment: floor.environment,
+            requester: Requester::Agent(thread),
+            thread: Some(thread),
+            name: None,
+            geometry: Some("640x480".into()),
+            note: None,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
+    let password = "vnc-pw7";
+    let protected = floor.peer.rpc(json!({"launch_protected_display":password}))["ok"]["endpoint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (endpoint, secret) in [
+        (original.endpoint.as_str(), None),
+        (protected.as_str(), Some(password)),
+    ] {
+        let port: u16 = endpoint
+            .strip_prefix("127.0.0.1:")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let body: EnvironmentDisplayCreateBody =
+            serde_json::from_value(json!({"attach":{"port":port,"password":secret}})).unwrap();
+        let create = || {
+            floor
+                .scene
+                .rig
+                .world
+                .app
+                .call(EnvironmentDisplayCreate, &[&floor.environment])
+        };
+        assert_eq!(
+            create()
+                .token(&floor.scene.bea.token)
+                .body(&body)
+                .send()
+                .await
+                .status,
+            403
+        );
+        let display = create()
+            .token(&floor.scene.ada.token)
+            .body(&body)
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap();
+        assert_eq!(
+            display.origin,
+            orch_api_contract::browsers::BrowserOrigin::Announced
+        );
+        assert_eq!(display.opened_by.as_ref().unwrap().id, floor.scene.ada.id());
+        assert!(!serde_json::to_string(&display).unwrap().contains(password));
+        let mut screen =
+            displays_support::Screen::attach(&floor, &floor.scene.bea, display.id, false).await;
+        assert_eq!((screen.width, screen.height), (640, 480));
+        screen.picture_without_clipboard().await;
+    }
+    assert!(
+        serde_json::from_value::<EnvironmentDisplayCreateBody>(
+            json!({"attach":{"host":"192.0.2.1","port":5901}})
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_shares_the_existing_x11_desktop_and_a_viewer_receives_its_pixels() {
+    let floor = Floor::desktop()
+        .await
+        .expect("the display proof requires its prepared browser peer");
+    floor.serve().await;
+    let list = floor
+        .scene
+        .rig
+        .world
+        .app
+        .call(EnvironmentDisplayList, &[&floor.environment])
+        .token(&floor.scene.ada.token)
+        .query(&EnvironmentDisplayListQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(list.support.desktop, Some(true));
+    let share = || {
+        floor
+            .scene
+            .rig
+            .world
+            .app
+            .call(EnvironmentDisplayCreate, &[&floor.environment])
+    };
+    let request = EnvironmentDisplayCreateBody {
+        desktop: Some(true),
+        ..Default::default()
+    };
+    floor.names(&floor.scene.bea, "vnc.view").await;
+    assert_eq!(
+        share()
+            .token(&floor.scene.bea.token)
+            .body(&request)
+            .send()
+            .await
+            .status,
+        403
+    );
+    let row = share()
+        .token(&floor.scene.ada.token)
+        .body(&request)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let mut screen =
+        displays_support::Screen::attach(&floor, &floor.scene.bea, row.id, false).await;
+    assert_eq!((screen.width, screen.height), (720, 480));
+    screen.picture_without_clipboard().await;
+    floor
+        .scene
+        .rig
+        .world
+        .app
+        .call(DisplayClose, &[&row.id])
+        .token(&floor.scene.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(screen.closed().await, "quit");
+    assert_eq!(
+        floor.peer.rpc(json!({"fixture_desktop_live":true}))["ok"],
+        true
+    );
 }

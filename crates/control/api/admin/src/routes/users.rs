@@ -739,7 +739,8 @@ async fn invitation_create(
             },
         )
         .await?;
-        let url = mail::link(&ctx.app.config, "invite", &token);
+        let addresses = crate::public_addresses::read(&ctx.app, &mut tx).await?;
+        let url = mail::link(&addresses.addresses.public_url, "invite", &token);
         if let Some(address) = &email
             && let Some(invitee) = identity::user_by_confirmed_email(&mut tx, address).await?
         {

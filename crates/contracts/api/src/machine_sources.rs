@@ -29,6 +29,24 @@ pub enum Source {
 }
 
 pub const SUBJECT: TargetResolver = TargetResolver::Resolved("machine_subject");
+pub const GATEWAY_SUBJECT: TargetResolver = TargetResolver::TypedPath {
+    parameter: "machine_id",
+    kind: KeyTargetKind::Object(ObjectKind::Machine),
+};
+pub const GATEWAY_FACETS: [FacetSpec; 1] = [FacetSpec::required(
+    KeyAction::Manage,
+    &[KeyTargetKind::Object(ObjectKind::Machine)],
+    GATEWAY_SUBJECT,
+)];
+pub const GATEWAY: Declaration<Source> = Declaration {
+    operation: "MachineGatewaySet",
+    bindings: &[Binding {
+        source: Source::Governor,
+        target: GATEWAY_SUBJECT,
+        usage: FacetUsage::Required,
+        cardinality: Cardinality::One,
+    }],
+};
 pub const REGISTERED: &str = "machine_reply_sources";
 /// Actual physical readiness sources, separate from the requested machine.
 pub const READINESS_MACHINES: &str = "machine_readiness_machines";
