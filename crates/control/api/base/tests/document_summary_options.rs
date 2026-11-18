@@ -533,7 +533,7 @@ async fn raw_option_bodies_cannot_choose_a_writer_or_producer_and_invalid_budget
         cases.push(input);
     }
     cases.extend([
-        json!({"options":{"automatic":true,"producer":{"kind":"model","provider_id":new_id()}},"expected_revision":0}),
+        json!({"options":{"automatic":true,"producer":{"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":new_id()}}}},"expected_revision":0}),
         json!({"options":{"automatic":true,"output_chars":0},"expected_revision":0}),
         json!({"options":{"automatic":true,"context_tokens":0},"expected_revision":0}),
         json!({"options":{"automatic":true},"expected_revision":-1}),

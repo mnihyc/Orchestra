@@ -143,6 +143,15 @@ pub static NO_PLACEMENT: Placement = Placement {
 };
 
 impl Placement {
+    /// A verified unit input has its captured size and, for file delivery, a name inside scratch.
+    pub(crate) fn unit_image(&mut self, part: usize, size: i64, path: Option<String>) {
+        let slot = Slot::Image(part);
+        self.sizes.insert(slot, size);
+        if let Some(path) = path {
+            self.written.insert(slot, path);
+        }
+    }
+
     /// Where a file was written, from the thread's directory.
     #[must_use]
     pub fn path_of(&self, slot: Slot) -> Option<&str> {

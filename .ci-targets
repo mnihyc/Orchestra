@@ -1,0 +1,11 @@
+fmt
+clippy
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
+test -p orch-api-core --test resource_summaries -- native::
+test -p orch-engine --test delivery
+test -p orch-engine --test source -- complete_before_and_watcher_end_states_make_one_bounded_actual_change_history
+test -p orch-engine --lib -- summaries::resource::tests::
+test -p orch-api-core --test thread_read_tools
+test -p orch-adapter-codex --test confined_image
+test -p orch-db --test usage_ledger
+web test -- tests/component/capability-helper.test.tsx

@@ -33,6 +33,12 @@ tracing.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+tar.workspace = true
+bollard.workspace = true
+bytes.workspace = true
+orch-blob-contract.workspace = true
+orch-driver-contract.workspace = true
+orch-driver-docker.workspace = true
 sha2.workspace = true      # integrity of the published native protocol schema fixtures
 orch-conformance.workspace = true
 orch-testkit.workspace = true
