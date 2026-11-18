@@ -7,6 +7,8 @@
 #[path = "resource_summaries/batch.rs"]
 mod batch;
 mod desk;
+#[path = "resource_summaries/native.rs"]
+mod native;
 #[path = "resource_summaries/permission_rules.rs"]
 mod permission_rules;
 mod places;
@@ -277,11 +279,11 @@ async fn a_plain_reader_with_model_use_can_refresh_without_configuring_automatio
     assert_eq!(accepted.requested_by, Some(scene.cai.id()));
     assert_eq!(accepted.paying_user, Some(scene.cai.id()));
     assert_eq!(
-        accepted.accepted_source["model"]["provider_id"],
+        accepted.accepted_source["selection"]["backend"]["offering"]["provider"],
         json!(scene.on.provider)
     );
     assert_eq!(
-        accepted.accepted_source["model"]["model"],
+        accepted.accepted_source["selection"]["backend"]["offering"]["offering"],
         json!(rig::MODEL)
     );
     let configured: i64 =
@@ -730,8 +732,14 @@ async fn a_real_document_scoped_refresh_retains_its_original_http_token_and_clos
         .body(&SummaryRefreshBody {
             client_id: new_id(),
             model: Some(SummaryModelChoice {
-                provider_id: scene.on.provider,
-                model: rig::MODEL.into(),
+                backend: orch_provider_contract::capabilities::BackendRef {
+                    route: "summarizer-model.complete".into(),
+                    offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                        provider: scene.on.provider,
+                        offering: rig::MODEL.into(),
+                    }),
+                    ..Default::default()
+                },
                 params: None,
             }),
             range: None,

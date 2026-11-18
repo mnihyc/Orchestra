@@ -565,6 +565,9 @@ mod tests {
             runtime_id: id,
             kind: RuntimeKind::Environment,
             driver: "memory".into(),
+            system: "test".into(),
+            template: Some(serde_json::json!({})),
+            tools: vec![],
             unit: UnitRef {
                 reference: String::new(),
                 name: id.to_string(),

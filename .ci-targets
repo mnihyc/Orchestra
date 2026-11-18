@@ -1,0 +1,7 @@
+test -p orch-api-core --lib
+test -p orch-engine --test resource_summaries --test summary_sources --test summary_targets --test summary_options
+test -p orch-api-core --test summaries --test provider_plan
+test -p orch-engine --test provider_fact_reads
+test -p orch-engine --test provider_runtime -- a_native_background_task_keeps_an_idle_provider_runtime_busy_without_an_open_lease
+test -p orch-provider-contract --lib
+test -p orch-api-core --test provider_services --test thread_read_tools

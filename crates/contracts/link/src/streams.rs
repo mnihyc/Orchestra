@@ -341,6 +341,20 @@ pub enum ResetReason {
     SpoolLost,
     /// Its spool was full, and the oldest events made room.
     SpoolOverflow,
+    /// An event was larger than a message of the session may be, and could not be sent.
+    TooLarge,
+}
+
+impl ResetReason {
+    /// The reason as a word, for a log and a count.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpoolLost => "spool_lost",
+            Self::SpoolOverflow => "spool_overflow",
+            Self::TooLarge => "too_large",
+        }
+    }
 }
 
 /// A machine's word that a stream goes on from a number, and that
@@ -796,10 +810,22 @@ mod tests {
         round_trip::<Ack>(json!({ "s": stream, "q": 43 }));
         round_trip::<Nak>(json!({ "s": stream, "expected": 44 }));
         round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "spool_overflow" }));
+        round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "too_large" }));
         round_trip::<Eph>(json!({
             "s": format!("env:{A}"), "k": "fs.changed", "at": "2026-10-08T17:04:05.000Z",
             "b": { "watch_id": B, "changed": [], "removed": ["tmp/a.txt"] }
         }));
+    }
+
+    #[test]
+    fn a_reason_for_a_reset_is_the_word_a_log_and_a_count_use() {
+        for reason in [
+            ResetReason::SpoolLost,
+            ResetReason::SpoolOverflow,
+            ResetReason::TooLarge,
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
     }
 
     #[test]

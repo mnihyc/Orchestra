@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use orch_link::controller::{ControllerLink, ControllerOutputs, Notice};
 use orch_link::framing::{
-    Connection, Message, MessageSink, MessageSource, PeerInfo, TransportError,
+    Connection, Message, MessageSink, MessageSource, PeerInfo, Refused, TransportError,
 };
 use orch_link::reconnect::{DialError, Dialer};
 use orch_link::session::{GatewayConfig, SessionAuthority, SessionEvent, SessionSender, accept};
@@ -69,11 +69,13 @@ pub enum Action {
 #[derive(Debug, Clone)]
 struct Rule {
     direction: Direction,
-    /// The `t` of a text frame, or `data` for tunnel data; any frame when
-    /// `None`.
+    /// The `t` of a text frame, `part` for a part of a large message, or `data`
+    /// for tunnel data; any frame when `None`.
     frame: Option<String>,
     /// When set, the frame must carry this event of this durable stream.
     event: Option<(String, Seq)>,
+    /// An exact command reply, without depending on unrelated frame ordering.
+    command: Option<Id>,
     /// How many matching frames pass untouched first.
     skip: usize,
     /// How many matching frames suffer the action after that.
@@ -151,6 +153,7 @@ impl Faults {
             direction,
             frame: frame.map(str::to_owned),
             event: None,
+            command: None,
             skip,
             times,
             action,
@@ -160,6 +163,22 @@ impl Faults {
     /// Loses `times` frames of kind `frame` after `skip` have passed.
     pub fn drop_frames(&self, direction: Direction, frame: &str, skip: usize, times: usize) {
         self.add(direction, Some(frame), skip, times, Action::Drop);
+    }
+
+    /// Lose one command's acknowledgement and result after its machine journal accepts it.
+    pub fn drop_command_reply(&self, command: Id) {
+        let mut rules = lock(&self.inner.rules);
+        for frame in ["cmd_ack", "cmd_res"] {
+            rules.push(Rule {
+                direction: Direction::Up,
+                frame: Some(frame.into()),
+                event: None,
+                command: Some(command),
+                skip: 0,
+                times: 1,
+                action: Action::Drop,
+            });
+        }
     }
 
     /// Repeats `times` frames of kind `frame` after `skip` have passed.
@@ -186,6 +205,7 @@ impl Faults {
             direction,
             frame: None,
             event: Some((stream.to_string(), seq)),
+            command: None,
             skip: 0,
             times: 1,
             action: Action::Cut,
@@ -252,6 +272,9 @@ impl Faults {
                     .event
                     .as_ref()
                     .is_some_and(|(stream, seq)| !carries_event(message, stream, *seq))
+                || rule
+                    .command
+                    .is_some_and(|command| !carries_command(message, command))
             {
                 continue;
             }
@@ -267,6 +290,20 @@ impl Faults {
             return Some(rule.action);
         }
         None
+    }
+}
+
+fn carries_command(message: &Message, command: Id) -> bool {
+    let Message::Text(text) = message else {
+        return false;
+    };
+    let Ok(frame) = serde_json::from_str::<Frame>(text) else {
+        return false;
+    };
+    match frame {
+        Frame::CmdAck(reply) => reply.id == command,
+        Frame::CmdRes(reply) => reply.id == command,
+        _ => false,
     }
 }
 
@@ -289,10 +326,15 @@ fn carries_event(message: &Message, stream: &str, seq: Seq) -> bool {
     }
 }
 
-/// The kind of a message, as rules name it: the `t` of a text frame, `data`
-/// for binary.
+/// The kind of a message, as rules name it: the `t` of a text frame, `part`
+/// for a part of a large message, `data` for other binary.
 fn kind_of(message: &Message) -> String {
     match message {
+        Message::Binary(bytes)
+            if bytes.first() == Some(&orch_link_contract::frames::PartFrame::KIND) =>
+        {
+            "part".to_owned()
+        }
         Message::Binary(_) => "data".to_owned(),
         Message::Text(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -945,18 +987,28 @@ impl Dialer for HubDialer {
     }
 }
 
-/// Carries what the system sends a machine to the machine's session.
+/// Carries what the system sends a machine to the machine's session. A command that the session cannot
+/// carry is failed at once with the reason, as a gateway tells the system.
 async fn carry_down(
     hub: Arc<HubInner>,
     machine_id: Id,
     mut down: mpsc::UnboundedReceiver<DownFrame>,
 ) {
     while let Some(frame) = down.recv().await {
-        let sender = lock(&hub.machines)
-            .get(&machine_id)
-            .and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone()));
+        let (sender, controller) = {
+            let machines = lock(&hub.machines);
+            let slot = machines.get(&machine_id);
+            (
+                slot.and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone())),
+                slot.map(|slot| slot.controller.clone()),
+            )
+        };
         if let Some(sender) = sender {
-            let _ = match frame {
+            let command = match &frame {
+                DownFrame::Cmd(cmd) => Some(cmd.id),
+                _ => None,
+            };
+            let sent = match frame {
                 DownFrame::Cmd(cmd) => sender.send(Frame::Cmd(cmd)),
                 DownFrame::CmdCancel(cancel) => sender.send(Frame::CmdCancel(cancel)),
                 DownFrame::Ack(ack) => sender.send(Frame::Ack(ack)),
@@ -976,6 +1028,13 @@ async fn carry_down(
                 }
                 DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
             };
+            if let (Err(Refused::TooLarge { bytes, limit }), Some(id), Some(controller)) =
+                (sent, command, controller)
+            {
+                controller
+                    .commands()
+                    .refuse_unaccepted(id, &orch_link::commands::command_too_large(bytes, limit));
+            }
         }
     }
 }
