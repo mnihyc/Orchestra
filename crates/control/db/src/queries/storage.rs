@@ -45,6 +45,28 @@ fn raw_hashes(hashes: &[Hash]) -> Vec<Vec<u8>> {
     hashes.iter().map(|hash| hash.as_bytes().to_vec()).collect()
 }
 
+/// Counts verified from the immutable UTF-8 bytes, never from attachment metadata.
+pub async fn paste_counts(conn: &mut Conn, hash: &Hash) -> Result<Option<(i64, i64)>, DbError> {
+    Ok(sqlx::query_as("SELECT text_characters,text_ascii_characters FROM blobs WHERE hash=$1 AND text_characters IS NOT NULL AND text_ascii_characters IS NOT NULL")
+        .bind(hash.as_bytes().as_slice()).fetch_optional(conn).await?)
+}
+
+/// Keeps only small text counts with a blob so an oversized paste need not be read again at preflight.
+pub async fn remember_paste_counts(
+    conn: &mut Conn,
+    hash: &Hash,
+    characters: i64,
+    ascii: i64,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE blobs SET text_characters=$2,text_ascii_characters=$3 WHERE hash=$1")
+        .bind(hash.as_bytes().as_slice())
+        .bind(characters)
+        .bind(ascii)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 // ---- blobs ------------------------------------------------------------------------------------
 
 /// What is known of a blob that the store holds.
@@ -164,6 +186,24 @@ pub async fn pin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<u64, DbError>
             .execute(&mut *conn)
             .await?
             .rows_affected();
+    }
+    Ok(pinned)
+}
+
+/// Adds one pin to each of `hashes` that has a row, as [`pin_blobs`] does, and says which they were: a
+/// transfer lets go only of what it pinned, so it must know whether a hash it asked for had a row.
+pub async fn pin_transfer_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<Vec<Hash>, DbError> {
+    let mut pinned = Vec::new();
+    for batch in hashes.chunks(PIN_BATCH) {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = ANY($1) RETURNING hash",
+        )
+        .bind(raw_hashes(batch))
+        .fetch_all(&mut *conn)
+        .await?;
+        for raw in rows {
+            pinned.push(hash_of(&raw)?);
+        }
     }
     Ok(pinned)
 }
@@ -348,6 +388,161 @@ pub async fn unpin_blobs(
     Ok(unpinned)
 }
 
+/// Takes one pin off each of `hashes` that has one, as [`unpin_blobs`] does, and says which of them
+/// that left with none: the content a transfer brought and nothing else holds. Those are the ones the
+/// transfer may then forget ([`forget_released_blobs`]).
+pub async fn release_transfer_blobs(
+    conn: &mut Conn,
+    hashes: &[Hash],
+    at: DateTime<Utc>,
+) -> Result<Vec<Hash>, DbError> {
+    let mut freed = Vec::new();
+    for batch in hashes.chunks(PIN_BATCH) {
+        let rows: Vec<(Vec<u8>, i32)> = sqlx::query_as(
+            "UPDATE blobs
+                SET pin_count = pin_count - 1,
+                    last_access_at = CASE WHEN pin_count = 1 THEN GREATEST(last_access_at, $2) ELSE last_access_at END
+              WHERE hash = ANY($1) AND pin_count > 0
+          RETURNING hash, pin_count",
+        )
+        .bind(raw_hashes(batch))
+        .bind(at)
+        .fetch_all(&mut *conn)
+        .await?;
+        for (raw, left) in rows {
+            if left == 0 {
+                freed.push(hash_of(&raw)?);
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// Takes the rows away of those of `hashes` that nothing wants: no pin, no cached version of a file,
+/// no model input, and nobody has asked for the content since `at`, the moment the transfer let go
+/// of it. The conditions are looked at again in the statement that deletes, so a pin or a use that
+/// came meanwhile keeps the content. Says which rows went; the store's files are then the caller's
+/// to remove.
+pub async fn forget_released_blobs(
+    conn: &mut Conn,
+    hashes: &[Hash],
+    at: DateTime<Utc>,
+) -> Result<Vec<Hash>, DbError> {
+    let mut forgotten = Vec::new();
+    for batch in hashes.chunks(PIN_BATCH) {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "DELETE FROM blobs b
+              WHERE b.hash = ANY($1) AND b.pin_count = 0 AND b.last_access_at <= $2
+                AND NOT EXISTS (SELECT 1 FROM file_cache f WHERE f.hash = b.hash)
+                AND NOT EXISTS (SELECT 1 FROM model_inputs m CROSS JOIN LATERAL jsonb_array_elements(m.blocks) x WHERE x->>'blob'=encode(b.hash,'hex'))
+          RETURNING b.hash",
+        )
+        .bind(raw_hashes(batch))
+        .bind(at)
+        .fetch_all(&mut *conn)
+        .await?;
+        for raw in rows {
+            forgotten.push(hash_of(&raw)?);
+        }
+    }
+    Ok(forgotten)
+}
+
+/// Holds each of `hashes` that has a row for the command `command` of the job `job`, once, until the job ends
+/// ([`release_job_command_pins`]): what the machine of a transfer uploaded, or was told the system holds, is not taken
+/// away by another transfer that lets go of the same content before the job has pinned it for itself. Says how many
+/// pins were added.
+pub async fn pin_for_command(
+    conn: &mut Conn,
+    command: Id,
+    job: Id,
+    hashes: &[Hash],
+    at: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    let mut pinned = 0;
+    for batch in hashes.chunks(PIN_BATCH) {
+        pinned += sqlx::query(
+            "WITH added AS (
+                 INSERT INTO command_blob_pins (command_id, blob, job_id, pinned_at)
+                 SELECT $1, b.hash, $2, $4 FROM blobs b WHERE b.hash = ANY($3)
+                 ON CONFLICT DO NOTHING RETURNING blob)
+             UPDATE blobs b SET pin_count = b.pin_count + 1 FROM added a WHERE b.hash = a.blob",
+        )
+        .bind(command)
+        .bind(job)
+        .bind(raw_hashes(batch))
+        .bind(at)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    }
+    Ok(pinned)
+}
+
+/// Lets go of every pin the commands of `job` hold for it, and says how many there were and which hashes that left with
+/// none: the content the job's transfer brought and nothing else holds.
+pub async fn release_job_command_pins(
+    conn: &mut Conn,
+    job: Id,
+    at: DateTime<Utc>,
+) -> Result<(u64, Vec<Hash>), DbError> {
+    let rows: Vec<(Vec<u8>, i32, i64)> = sqlx::query_as(
+        "WITH gone AS (DELETE FROM command_blob_pins WHERE job_id = $1 RETURNING blob),
+              counts AS (SELECT blob, count(*)::int AS n FROM gone GROUP BY blob)
+         UPDATE blobs b
+            SET pin_count = GREATEST(b.pin_count - c.n, 0),
+                last_access_at = CASE WHEN b.pin_count - c.n <= 0 THEN GREATEST(b.last_access_at, $2) ELSE b.last_access_at END
+           FROM counts c WHERE b.hash = c.blob
+       RETURNING b.hash, b.pin_count, c.n::bigint",
+    )
+    .bind(job)
+    .bind(at)
+    .fetch_all(conn)
+    .await?;
+    let released = rows
+        .iter()
+        .map(|(_, _, n)| u64::try_from(*n).unwrap_or_default())
+        .sum();
+    let mut freed = Vec::new();
+    for (raw, left, _) in rows {
+        if left == 0 {
+            freed.push(hash_of(&raw)?);
+        }
+    }
+    Ok((released, freed))
+}
+
+/// Lets go, as the pins of an ended job are, of the pins that were made before `pinned_before` for a job that is over or
+/// is not there any more: the job's own end did not find them. The content is not removed; it has its grace. Says how
+/// many pins there were.
+pub async fn release_orphaned_command_pins(
+    conn: &mut Conn,
+    pinned_before: DateTime<Utc>,
+    at: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    let rows: Vec<i64> = sqlx::query_scalar(
+        "WITH gone AS (
+             DELETE FROM command_blob_pins p
+              WHERE p.pinned_at < $1
+                AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = p.job_id AND j.state NOT IN ('succeeded','failed','cancelled'))
+          RETURNING blob),
+              counts AS (SELECT blob, count(*)::int AS n FROM gone GROUP BY blob)
+         UPDATE blobs b
+            SET pin_count = GREATEST(b.pin_count - c.n, 0),
+                last_access_at = CASE WHEN b.pin_count - c.n <= 0 THEN GREATEST(b.last_access_at, $2) ELSE b.last_access_at END
+           FROM counts c WHERE b.hash = c.blob
+       RETURNING c.n::bigint",
+    )
+    .bind(pinned_before)
+    .bind(at)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|n| u64::try_from(n).unwrap_or_default())
+        .sum())
+}
+
 /// Locks the native unpin writer's exact existing rows before its caller's first-effect check.
 /// Zero-count rows stay locked too, so another pin cannot appear between this preparation and the update.
 pub async fn prepare_unpin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<bool, DbError> {
@@ -431,6 +626,37 @@ pub struct UploadRow {
     pub started_at: DateTime<Utc>,
     /// When a piece last arrived.
     pub updated_at: DateTime<Utc>,
+    /// The idle allowance accepted when this transfer began, if recorded.
+    pub idle_retention_secs: Option<i64>,
+    /// Whether that allowance came from the shipped default, if recorded.
+    pub retention_default: Option<bool>,
+    /// The last accepted piece plus its captured idle allowance.
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// The accepted idle policy of a new machine transfer.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadRetention {
+    /// Seconds without an accepted piece before cleanup is eligible.
+    pub seconds: i64,
+    /// The registry default supplied this value.
+    pub default_source: bool,
+}
+
+fn upload_expiry(at: DateTime<Utc>, seconds: i64) -> DateTime<Utc> {
+    chrono::Duration::try_seconds(seconds)
+        .and_then(|duration| at.checked_add_signed(duration))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+impl UploadRow {
+    /// Rechecked while holding the writer lock before removing an unfinished transfer.
+    #[must_use]
+    pub fn expired(&self, now: DateTime<Utc>, unreported_seconds: i64) -> bool {
+        self.expires_at
+            .unwrap_or_else(|| upload_expiry(self.updated_at, unreported_seconds))
+            < now
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -442,6 +668,9 @@ struct RawUpload {
     user_id: Option<Id>,
     started_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    idle_retention_secs: Option<i64>,
+    retention_default: Option<bool>,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 impl TryFrom<RawUpload> for UploadRow {
@@ -456,11 +685,14 @@ impl TryFrom<RawUpload> for UploadRow {
             user_id: raw.user_id,
             started_at: raw.started_at,
             updated_at: raw.updated_at,
+            idle_retention_secs: raw.idle_retention_secs,
+            retention_default: raw.retention_default,
+            expires_at: raw.expires_at,
         })
     }
 }
 
-const UPLOAD_COLUMNS: &str = "hash, size, received, machine_id, user_id, started_at, updated_at";
+const UPLOAD_COLUMNS: &str = "hash, size, received, machine_id, user_id, started_at, updated_at, idle_retention_secs, retention_default, expires_at";
 
 /// The upload under way for `hash`, if there is one.
 pub async fn upload(conn: &mut Conn, hash: &Hash) -> Result<Option<UploadRow>, DbError> {
@@ -485,23 +717,27 @@ pub async fn lock_upload(conn: &mut Conn, hash: &Hash) -> Result<Option<UploadRo
     raw.map(UploadRow::try_from).transpose()
 }
 
-/// Begins the upload of `hash`, nothing received yet. Says whether this call began it: two machines
-/// that send the same content at once share one upload.
+/// Begins the upload of `hash`, nothing received yet. An existing transfer keeps its original
+/// sender and accepted idle policy; another sender cannot append to its temporary bytes.
 pub async fn begin_upload(
     conn: &mut Conn,
     hash: &Hash,
     size: i64,
     machine: Option<Id>,
     at: DateTime<Utc>,
+    retention: UploadRetention,
 ) -> Result<bool, DbError> {
     Ok(sqlx::query(
-        "INSERT INTO blob_uploads (hash, size, received, machine_id, started_at, updated_at)
-         VALUES ($1, $2, 0, $3, $4, $4) ON CONFLICT (hash) DO NOTHING",
+        "INSERT INTO blob_uploads (hash, size, received, machine_id, started_at, updated_at, idle_retention_secs, retention_default, expires_at)
+         VALUES ($1, $2, 0, $3, $4, $4, $5, $6, $7) ON CONFLICT (hash) DO NOTHING",
     )
     .bind(hash.as_bytes().as_slice())
     .bind(size)
     .bind(machine)
     .bind(at)
+    .bind(retention.seconds)
+    .bind(retention.default_source)
+    .bind(upload_expiry(at, retention.seconds))
     .execute(conn)
     .await?
     .rows_affected()
@@ -517,13 +753,18 @@ pub async fn advance_upload(
     command: Option<Id>,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
+    let expires_at = upload(conn, hash).await?.and_then(|row| {
+        row.idle_retention_secs
+            .map(|seconds| upload_expiry(at, seconds))
+    });
     sqlx::query(
-        "UPDATE blob_uploads SET received = $2, updated_at = $3, command_id = $4 WHERE hash = $1",
+        "UPDATE blob_uploads SET received = $2, updated_at = $3, command_id = $4, expires_at = $5 WHERE hash = $1",
     )
     .bind(hash.as_bytes().as_slice())
     .bind(received)
     .bind(at)
     .bind(command)
+    .bind(expires_at)
     .execute(conn)
     .await?;
     Ok(())
@@ -578,16 +819,20 @@ pub async fn end_upload(conn: &mut Conn, hash: &Hash) -> Result<(), DbError> {
     Ok(())
 }
 
-/// The uploads of a machine to which no piece has come since `silent_since`.
+/// Machine transfers eligible for cleanup, not a grant to remove them without rechecking the writer lock.
 pub async fn stale_uploads(
     conn: &mut Conn,
-    silent_since: DateTime<Utc>,
+    now: DateTime<Utc>,
+    unreported_seconds: i64,
     limit: i64,
 ) -> Result<Vec<Hash>, DbError> {
+    // Epoch arithmetic keeps even a very long accepted allowance within PostgreSQL's numeric
+    // representation. Unreported rows retain no invented source or expiry receipt.
     let raw: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT hash FROM blob_uploads WHERE updated_at < $1 ORDER BY updated_at LIMIT $2",
+        "SELECT hash FROM blob_uploads WHERE expires_at < $1 OR (expires_at IS NULL AND EXTRACT(EPOCH FROM ($1::timestamptz - updated_at)) > $2::numeric) ORDER BY expires_at, updated_at LIMIT $3",
     )
-    .bind(silent_since)
+    .bind(now)
+    .bind(unreported_seconds)
     .bind(limit)
     .fetch_all(conn)
     .await?;
@@ -635,6 +880,57 @@ pub async fn received_of_machine(
     .await?)
 }
 
+/// Announces the exact source transfer under its current attachment, ignoring late older reports.
+pub async fn record_source_transfer(
+    conn: &mut Conn,
+    environment: Id,
+    machine: Id,
+    generation: i64,
+    hash: &Hash,
+    state: &str,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO environment_file_transfers(environment_id,machine_id,generation,hash,state,observed_at)
+        SELECT id,$2,$3,$4,$5,$6 FROM environments WHERE id=$1 AND machine_id=$2 AND generation=$3 AND deleted_at IS NULL
+        ON CONFLICT(environment_id) DO UPDATE SET machine_id=$2,generation=$3,hash=$4,state=$5,observed_at=$6,
+          last_piece_at=NULL,expires_at=NULL,idle_retention_secs=NULL,retention_default=NULL
+        WHERE environment_file_transfers.observed_at <= $6")
+        .bind(environment).bind(machine).bind(generation).bind(hash.as_bytes().as_slice()).bind(state).bind(at).execute(conn).await?;
+    Ok(())
+}
+
+/// A completed publication clears only its own transfer, never a newer content announcement.
+pub async fn finish_source_transfer(
+    conn: &mut Conn,
+    environment: Id,
+    machine: Id,
+    hash: &Hash,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM environment_file_transfers WHERE environment_id=$1 AND machine_id=$2 AND hash=$3 AND observed_at <= $4")
+        .bind(environment).bind(machine).bind(hash.as_bytes().as_slice()).bind(at).execute(conn).await?;
+    Ok(())
+}
+
+/// Reads only the exact current source; content ownership is a machine/hash join, never a size/time guess.
+pub async fn source_transfer(conn: &mut Conn, environment: Id) -> Result<Option<Json>, DbError> {
+    Ok(sqlx::query_scalar("SELECT jsonb_build_object('transfer_id',encode(t.hash,'hex'),'state',t.state,
+        'last_piece_at',COALESCE(u.updated_at,t.last_piece_at),'expires_at',COALESCE(u.expires_at,t.expires_at),
+        'idle_retention_secs',COALESCE(u.idle_retention_secs,t.idle_retention_secs),'retention_default',COALESCE(u.retention_default,t.retention_default))
+        FROM environment_file_transfers t JOIN environments e ON e.id=t.environment_id AND e.machine_id=t.machine_id AND e.generation=t.generation
+        LEFT JOIN blob_uploads u ON u.hash=t.hash AND u.machine_id=t.machine_id WHERE t.environment_id=$1 AND e.deleted_at IS NULL")
+        .bind(environment).fetch_optional(conn).await?)
+}
+
+/// Keeps the accepted piece/expiry receipt before cleanup removes its temporary bytes and row.
+pub async fn expire_source_transfer(conn: &mut Conn, upload: &UploadRow) -> Result<(), DbError> {
+    sqlx::query("UPDATE environment_file_transfers SET state='expired',last_piece_at=$3,expires_at=$4,idle_retention_secs=$5,retention_default=$6
+        WHERE hash=$1 AND machine_id=$2")
+        .bind(upload.hash.as_bytes().as_slice()).bind(upload.machine_id).bind(upload.updated_at).bind(upload.expires_at)
+        .bind(upload.idle_retention_secs).bind(upload.retention_default).execute(conn).await?;
+    Ok(())
+}
+
 // ---- uploads of people, from a browser --------------------------------------------------------
 
 /// A person's upload in pieces.
@@ -658,10 +954,12 @@ pub struct SessionRow {
     pub updated_at: DateTime<Utc>,
     /// When it ends.
     pub expires_at: DateTime<Utc>,
+    /// Completion receipt; no partial bytes or renewed upload authority remain.
+    pub completion: Option<Json>,
 }
 
 const SESSION_COLUMNS: &str =
-    "id, user_id, name, media_type, size, received, created_at, updated_at, expires_at";
+    "id, user_id, name, media_type, size, received, created_at, updated_at, expires_at, completion";
 
 /// Begins an upload session.
 pub async fn begin_session(conn: &mut Conn, session: &SessionRow) -> Result<(), DbError> {
@@ -748,6 +1046,8 @@ pub async fn expired_sessions(
 /// A version of a file whose content the store holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedFile {
+    /// The native minimum reach captured with these exact bytes, including symlink targets.
+    pub minimum_reach: orch_access_contract::permissions::FileReach,
     /// Its path from the workspace root.
     pub path: String,
     /// Its size in bytes.
@@ -762,6 +1062,7 @@ pub struct CachedFile {
 
 #[derive(sqlx::FromRow)]
 struct RawCached {
+    minimum_reach: String,
     path: String,
     size: i64,
     mtime_ns: i64,
@@ -774,6 +1075,11 @@ impl TryFrom<RawCached> for CachedFile {
 
     fn try_from(raw: RawCached) -> Result<Self, DbError> {
         Ok(Self {
+            minimum_reach: raw.minimum_reach.parse().map_err(
+                |error: orch_access_contract::roles::UnknownName| {
+                    DbError::Other(sqlx::Error::Decode(error.to_string().into()))
+                },
+            )?,
             path: raw.path,
             size: raw.size,
             mtime_ns: raw.mtime_ns,
@@ -790,10 +1096,10 @@ pub async fn record_cached(
     file: &CachedFile,
 ) -> Result<(), DbError> {
     sqlx::query(
-        "INSERT INTO file_cache (environment_id, path, size, mtime_ns, hash, cached_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO file_cache (environment_id, path, size, mtime_ns, hash, cached_at, minimum_reach)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (environment_id, path, size, mtime_ns)
-         DO UPDATE SET hash = EXCLUDED.hash, cached_at = EXCLUDED.cached_at",
+         DO UPDATE SET hash = EXCLUDED.hash, cached_at = EXCLUDED.cached_at, minimum_reach = EXCLUDED.minimum_reach",
     )
     .bind(environment)
     .bind(&file.path)
@@ -801,6 +1107,7 @@ pub async fn record_cached(
     .bind(file.mtime_ns)
     .bind(file.hash.as_bytes().as_slice())
     .bind(file.cached_at)
+    .bind(file.minimum_reach.as_str())
     .execute(conn)
     .await?;
     Ok(())
@@ -814,10 +1121,11 @@ pub async fn cached_version(
     path: &str,
     size: i64,
     mtime_ms: i64,
+    allowed: orch_access_contract::permissions::FileReach,
 ) -> Result<Option<Hash>, DbError> {
     let raw: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT hash FROM file_cache
-          WHERE environment_id = $1 AND path = $2 AND size = $3 AND mtime_ns / $5 = $4
+          WHERE environment_id = $1 AND path = $2 AND size = $3 AND mtime_ns / $5 = $4 AND (minimum_reach='roots' OR $6='machine')
           ORDER BY cached_at DESC LIMIT 1",
     )
     .bind(environment)
@@ -825,6 +1133,7 @@ pub async fn cached_version(
     .bind(size)
     .bind(mtime_ms)
     .bind(NANOS_PER_MILLI)
+    .bind(allowed.as_str())
     .fetch_optional(conn)
     .await?;
     raw.map(|raw| hash_of(&raw)).transpose()
@@ -835,33 +1144,45 @@ pub async fn cached_among(
     conn: &mut Conn,
     environment: Id,
     paths: &[String],
+    allowed: orch_access_contract::permissions::FileReach,
 ) -> Result<Vec<(String, i64, i64)>, DbError> {
     Ok(sqlx::query_as(
         "SELECT path, size, mtime_ns / $3 FROM file_cache
-          WHERE environment_id = $1 AND path = ANY($2)",
+          WHERE environment_id = $1 AND path = ANY($2) AND (minimum_reach='roots' OR $4='machine')",
     )
     .bind(environment)
     .bind(paths)
     .bind(NANOS_PER_MILLI)
+    .bind(allowed.as_str())
     .fetch_all(conn)
     .await?)
 }
 
 /// Whether `hash` is a content that was cached for `path` of the environment, in any version.
-pub async fn hash_belongs(
+pub async fn cached_minimum(
     conn: &mut Conn,
     environment: Id,
     path: &str,
     hash: &Hash,
-) -> Result<bool, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM file_cache WHERE environment_id = $1 AND path = $2 AND hash = $3)",
+) -> Result<Option<orch_access_contract::permissions::FileReach>, DbError> {
+    let reach: Option<String> = sqlx::query_scalar(
+        "SELECT minimum_reach FROM file_cache WHERE environment_id=$1 AND path=$2 AND hash=$3
+         ORDER BY CASE minimum_reach WHEN 'roots' THEN 0 ELSE 1 END LIMIT 1",
     )
     .bind(environment)
     .bind(path)
     .bind(hash.as_bytes().as_slice())
-    .fetch_one(conn)
-    .await?)
+    .fetch_optional(conn)
+    .await?;
+    reach
+        .map(|reach| {
+            reach
+                .parse()
+                .map_err(|error: orch_access_contract::roles::UnknownName| {
+                    DbError::Other(sqlx::Error::Decode(error.to_string().into()))
+                })
+        })
+        .transpose()
 }
 
 /// The newest kept version at this exact path of an environment.
@@ -870,7 +1191,7 @@ pub async fn cached_latest(
     environment: Id,
     path: &str,
 ) -> Result<Option<CachedFile>, DbError> {
-    let raw: Option<RawCached> = sqlx::query_as("SELECT path,size,mtime_ns,hash,cached_at FROM file_cache WHERE environment_id=$1 AND path=$2 ORDER BY cached_at DESC LIMIT 1")
+    let raw: Option<RawCached> = sqlx::query_as("SELECT minimum_reach,path,size,mtime_ns,hash,cached_at FROM file_cache WHERE environment_id=$1 AND path=$2 ORDER BY cached_at DESC LIMIT 1")
         .bind(environment).bind(path).fetch_optional(conn).await?;
     raw.map(CachedFile::try_from).transpose()
 }
@@ -887,7 +1208,7 @@ pub async fn cached_below(
         format!("{directory}/")
     };
     let raw: Vec<RawCached> = sqlx::query_as(
-        "SELECT path, size, mtime_ns, hash, cached_at FROM file_cache
+        "SELECT minimum_reach, path, size, mtime_ns, hash, cached_at FROM file_cache
           WHERE environment_id = $1 AND starts_with(path, $2)
           ORDER BY path, cached_at DESC",
     )
@@ -906,6 +1227,7 @@ pub async fn cached_latest_page(
     directory: &str,
     after: Option<&str>,
     limit: i64,
+    allowed: orch_access_contract::permissions::FileReach,
 ) -> Result<Vec<CachedFile>, DbError> {
     let prefix = if directory.is_empty() {
         String::new()
@@ -914,9 +1236,9 @@ pub async fn cached_latest_page(
     };
     let raw: Vec<RawCached> = sqlx::query_as(
         r#"
-        SELECT path,size,mtime_ns,hash,cached_at FROM (
-            SELECT DISTINCT ON (path COLLATE "C") path,size,mtime_ns,hash,cached_at
-              FROM file_cache WHERE environment_id=$1 AND starts_with(path,$2)
+        SELECT minimum_reach,path,size,mtime_ns,hash,cached_at FROM (
+            SELECT DISTINCT ON (path COLLATE "C") minimum_reach,path,size,mtime_ns,hash,cached_at
+              FROM file_cache WHERE environment_id=$1 AND starts_with(path,$2) AND (minimum_reach='roots' OR $5='machine')
                 AND ($3::text IS NULL OR path COLLATE "C" > $3 COLLATE "C")
               ORDER BY path COLLATE "C",cached_at DESC,mtime_ns DESC,hash
         ) latest ORDER BY path COLLATE "C" LIMIT $4"#,
@@ -925,6 +1247,7 @@ pub async fn cached_latest_page(
     .bind(prefix)
     .bind(after)
     .bind(limit)
+    .bind(allowed.as_str())
     .fetch_all(conn)
     .await?;
     raw.into_iter().map(CachedFile::try_from).collect()
@@ -946,6 +1269,41 @@ pub async fn forget_cached_under(
     .execute(conn)
     .await?
     .rows_affected())
+}
+
+/// The environments that have any cached version of a file.
+pub async fn cached_environments(conn: &mut Conn) -> Result<Vec<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar(
+            "SELECT DISTINCT environment_id FROM file_cache ORDER BY environment_id",
+        )
+        .fetch_all(conn)
+        .await?,
+    )
+}
+
+/// Forgets up to `limit` cached versions of files of `environment` that were cached before
+/// `cached_before`, and says whose content they named: the content is then the caller's to remove if
+/// nothing else wants it.
+pub async fn forget_cached_batch(
+    conn: &mut Conn,
+    environment: Id,
+    cached_before: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<Hash>, DbError> {
+    let raw: Vec<Vec<u8>> = sqlx::query_scalar(
+        "DELETE FROM file_cache
+          WHERE cached_at < $2 AND (environment_id, path, size, mtime_ns) IN
+                (SELECT environment_id, path, size, mtime_ns FROM file_cache
+                  WHERE environment_id = $1 AND cached_at < $2 LIMIT $3)
+      RETURNING hash",
+    )
+    .bind(environment)
+    .bind(cached_before)
+    .bind(limit)
+    .fetch_all(conn)
+    .await?;
+    hashes_of(raw)
 }
 
 /// How many bytes of content each environment that has some cached holds, counting each content
@@ -970,6 +1328,7 @@ pub async fn eviction_candidates(
 ) -> Result<Vec<(CachedFile, i64)>, DbError> {
     #[derive(sqlx::FromRow)]
     struct Row {
+        minimum_reach: String,
         path: String,
         size: i64,
         mtime_ns: i64,
@@ -978,7 +1337,7 @@ pub async fn eviction_candidates(
         blob_size: i64,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT f.path, f.size, f.mtime_ns, f.hash, f.cached_at, b.size AS blob_size
+        "SELECT f.minimum_reach, f.path, f.size, f.mtime_ns, f.hash, f.cached_at, b.size AS blob_size
            FROM file_cache f JOIN blobs b ON b.hash = f.hash
           WHERE f.environment_id = $1 AND b.pin_count = 0
           ORDER BY b.last_access_at, f.cached_at LIMIT $2",
@@ -991,6 +1350,7 @@ pub async fn eviction_candidates(
         .map(|row| {
             Ok((
                 CachedFile::try_from(RawCached {
+                    minimum_reach: row.minimum_reach,
                     path: row.path,
                     size: row.size,
                     mtime_ns: row.mtime_ns,
@@ -1413,4 +1773,137 @@ pub async fn delete_snapshot(conn: &mut Conn, id: Id) -> Result<Option<Option<Ha
             .await?;
     gone.map(|manifest| manifest.as_deref().map(hash_of).transpose())
         .transpose()
+}
+
+// Coverage is normalized by PostgreSQL, under the same parent-row lock as the native writer.
+/// Durable half-open intervals of a browser upload.
+pub async fn session_ranges(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Vec<orch_api_contract::threads::UploadRange>, DbError> {
+    let rows: Vec<(i64,i64)> = sqlx::query_as("SELECT lower(r),upper(r)-lower(r) FROM upload_sessions,unnest(received_ranges) r WHERE id=$1 ORDER BY lower(r)")
+        .bind(id).fetch_all(conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(start, len)| orch_api_contract::threads::UploadRange { start, len })
+        .collect())
+}
+
+/// Adds only durable bytes; overlaps never inflate progress.
+pub async fn cover_session(
+    conn: &mut Conn,
+    id: Id,
+    start: i64,
+    end: i64,
+    at: DateTime<Utc>,
+) -> Result<i64, DbError> {
+    sqlx::query("UPDATE upload_sessions SET received_ranges=received_ranges+int8multirange(int8range($2,$3,'[)')),updated_at=$4 WHERE id=$1")
+        .bind(id).bind(start).bind(end).bind(at).execute(&mut *conn).await?;
+    Ok(sqlx::query_scalar("UPDATE upload_sessions SET received=(SELECT coalesce(sum(upper(r)-lower(r)),0)::bigint FROM unnest(received_ranges) r) WHERE id=$1 RETURNING received")
+        .bind(id).fetch_one(conn).await?)
+}
+
+/// Durable half-open intervals of a machine upload.
+pub async fn upload_ranges(
+    conn: &mut Conn,
+    hash: &Hash,
+) -> Result<Vec<orch_api_contract::threads::UploadRange>, DbError> {
+    let rows: Vec<(i64,i64)> = sqlx::query_as("SELECT lower(r),upper(r)-lower(r) FROM blob_uploads,unnest(received_ranges) r WHERE hash=$1 ORDER BY lower(r)")
+        .bind(hash.as_bytes().as_slice()).fetch_all(conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(start, len)| orch_api_contract::threads::UploadRange { start, len })
+        .collect())
+}
+
+/// Machine coverage is acknowledged only after its file bytes are synced.
+pub async fn cover_upload(
+    conn: &mut Conn,
+    hash: &Hash,
+    start: i64,
+    end: i64,
+) -> Result<i64, DbError> {
+    sqlx::query("UPDATE blob_uploads SET received_ranges=received_ranges+int8multirange(int8range($2,$3,'[)')) WHERE hash=$1")
+        .bind(hash.as_bytes().as_slice()).bind(start).bind(end).execute(&mut *conn).await?;
+    Ok(sqlx::query_scalar("SELECT coalesce(sum(upper(r)-lower(r)),0)::bigint FROM blob_uploads,unnest(received_ranges) r WHERE hash=$1")
+        .bind(hash.as_bytes().as_slice()).fetch_one(conn).await?)
+}
+
+/// Stores browser policy in the same creation transaction as its identity.
+pub async fn set_session_policy(
+    conn: &mut Conn,
+    id: Id,
+    policy: orch_settings_contract::transfers::TransferPolicy,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE upload_sessions SET transfer_policy=$2 WHERE id=$1")
+        .bind(id)
+        .bind(sqlx::types::Json(policy))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+/// Reads accepted browser sizing, independent of mutable progress.
+pub async fn session_policy(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<orch_settings_contract::transfers::TransferPolicy, DbError> {
+    let policy: sqlx::types::Json<orch_settings_contract::transfers::TransferPolicy> =
+        sqlx::query_scalar("SELECT transfer_policy FROM upload_sessions WHERE id=$1")
+            .bind(id)
+            .fetch_one(conn)
+            .await?;
+    Ok(policy.0)
+}
+/// First accepted machine piece captures policy; concurrent pieces keep the winner's facts.
+pub async fn set_upload_policy(
+    conn: &mut Conn,
+    hash: &Hash,
+    policy: orch_settings_contract::transfers::TransferPolicy,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE blob_uploads SET transfer_policy=$2 WHERE hash=$1")
+        .bind(hash.as_bytes().as_slice())
+        .bind(sqlx::types::Json(policy))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+/// Accepted machine sizing.
+pub async fn upload_policy(
+    conn: &mut Conn,
+    hash: &Hash,
+) -> Result<orch_settings_contract::transfers::TransferPolicy, DbError> {
+    let policy: sqlx::types::Json<orch_settings_contract::transfers::TransferPolicy> =
+        sqlx::query_scalar("SELECT transfer_policy FROM blob_uploads WHERE hash=$1")
+            .bind(hash.as_bytes().as_slice())
+            .fetch_one(conn)
+            .await?;
+    Ok(policy.0)
+}
+
+/// Atomic optional policy read before a machine body arrives; completion may remove the row meanwhile.
+pub async fn optional_upload_policy(
+    conn: &mut Conn,
+    hash: &Hash,
+) -> Result<Option<orch_settings_contract::transfers::TransferPolicy>, DbError> {
+    let found: Option<sqlx::types::Json<orch_settings_contract::transfers::TransferPolicy>> =
+        sqlx::query_scalar("SELECT transfer_policy FROM blob_uploads WHERE hash=$1")
+            .bind(hash.as_bytes().as_slice())
+            .fetch_optional(conn)
+            .await?;
+    Ok(found.map(|policy| policy.0))
+}
+
+/// Status and repeated completion may read the retained receipt; piece writers use active sessions only.
+pub async fn session_with_receipt(
+    conn: &mut Conn,
+    id: Id,
+    lock: bool,
+) -> Result<Option<SessionRow>, DbError> {
+    let suffix = if lock { " FOR UPDATE" } else { "" };
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SESSION_COLUMNS} FROM upload_sessions WHERE id=$1 AND cancelled_at IS NULL{suffix}"
+    )))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
 }

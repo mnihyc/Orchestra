@@ -258,6 +258,20 @@ pub async fn queue(
         Mode::Start => &[status::STOPPED, status::PROVISIONING],
         Mode::Copy => &[status::NONE, status::PROVISIONING],
     };
+    crate::environment_preparation::accepted_job(
+        conn,
+        environment.id,
+        environment.generation,
+        if mode == Mode::Start {
+            orch_api_contract::threads::EnvironmentPreparationKind::Start
+        } else {
+            orch_api_contract::threads::EnvironmentPreparationKind::Create
+        },
+        job.id,
+        now,
+    )
+    .await
+    .map_err(MakeError::Internal)?;
     env_rows::set_status(conn, environment.id, from, status::PROVISIONING, None, now).await?;
     Ok(job)
 }
@@ -1842,7 +1856,8 @@ impl Provision {
             )
             .await?;
         }
-        crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
+        let copy_released =
+            crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
         if self.mode == Mode::Make {
             crate::resource_facts::library::created(
                 &mut tx,
@@ -1887,6 +1902,9 @@ impl Provision {
             checked.check(self.engine.inner.clock.as_ref())?;
         }
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(released) = copy_released {
+            released.settle(&self.engine).await;
+        }
         Ok(Done::Finished)
     }
 
@@ -1914,11 +1932,12 @@ impl Provision {
 
     async fn undo_make(&self, job: &Job, why: &Stop) -> Undone {
         if let Ok(mut tx) = self.engine.db().begin().await
-            && crate::initial_files::release(&mut tx, job.id(), Time::new(job.now()))
-                .await
-                .is_ok()
+            && let Ok(released) =
+                crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await
+            && tx.commit().await.is_ok()
+            && let Some(released) = released
         {
-            let _ = tx.commit().await;
+            released.settle(&self.engine).await;
         }
         let Ok(plan) = job.plan().await else {
             return Undone::Partly("the job's plan could not be read".to_owned());

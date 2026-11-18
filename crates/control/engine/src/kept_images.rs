@@ -77,7 +77,7 @@ impl Engine {
                     orch_db::queries::jobs::merge_plan(
                         &mut tx,
                         job.id(),
-                        &json!({"kept_image_archive":archive,"kept_image_pins":[archive.hash]}),
+                        &json!({"kept_image_archive":archive,"kept_image_pins":[archive.hash],"move_pins_marked":true}),
                         job.now(),
                     )
                     .await?;
@@ -175,7 +175,7 @@ impl Engine {
         let plan = job.plan().await?;
         if let Some(image) = runtime.kept_image.as_ref() {
             let recorded:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE kind='environment_remove' AND environment_id=$1 AND plan->'removal_revision'=$2 AND plan->'kept_image'=$3)")
-                .bind(runtime.environment_id).bind(plan.get("removal_revision").cloned().unwrap_or(Json::Null)).bind(image).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+                .bind(runtime.environment_id).bind(plan.get("removal_revision").cloned().unwrap_or(Json::Null)).bind(orch_types::storable::encode_exact(image)).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
             if recorded {
                 drop(conn);
                 job.remember(&json!({"kept_image":image})).await?;
@@ -454,6 +454,7 @@ impl Engine {
         let plans:Vec<(Id,Json)>=sqlx::query_as("SELECT j.id,j.plan FROM jobs j WHERE j.environment_id IS NOT NULL AND j.state IN ('queued','running') AND (j.plan->>'host'=$1::text OR EXISTS(SELECT 1 FROM runtimes r WHERE r.id::text=j.plan->>'old' AND r.host_id=$1) OR EXISTS(SELECT 1 FROM runtimes r WHERE r.environment_id=j.environment_id AND r.host_id=$1 AND r.state NOT IN ('removed','retired')))")
             .bind(host).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         for (job, plan) in plans {
+            let plan = orch_types::storable::decode_exact(plan).map_err(orch_db::DbError::from)?;
             if let Some(image) = plan
                 .get("kept_image")
                 .cloned()

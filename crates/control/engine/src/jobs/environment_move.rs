@@ -499,6 +499,7 @@ impl Engine {
                 machine,
                 SerialKey::Environment(environment),
                 &FsManifest {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: environment,
                     selection: Selection {
                         include: selection.include.clone(),
@@ -680,6 +681,14 @@ impl Engine {
             }
         }
         let files = FilesPlan {
+            source_policy: live.then(crate::fork_source::workspace_copy_policy),
+            home_policy: home
+                .as_ref()
+                .filter(|home| home.measured)
+                .map(|_| crate::fork_source::owned_copy_policy()),
+            file_states_policy: file_states
+                .complete
+                .then(crate::fork_source::owned_copy_policy),
             file_states: Some(file_states),
             kept_image_bytes: kept_image.as_ref().map(|image| image.bytes),
             source: if live {
@@ -1001,6 +1010,7 @@ impl Moving {
                         machine,
                         SerialKey::Environment(self.environment()),
                         &FsSnapshot {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             work: None,
                             environment_id: self.environment(),
                             job_id: job.id(),
@@ -1056,7 +1066,7 @@ impl Moving {
             jobs::merge_plan(
                 &mut tx,
                 job.id(),
-                &json!({"move_pins":pins,"move_snapshot":snapshot}),
+                &json!({"move_pins":pins,"move_snapshot":snapshot,"move_pins_marked":true}),
                 job.now(),
             )
             .await?;
@@ -1086,6 +1096,7 @@ impl Moving {
                     machine,
                     SerialKey::Environment(self.environment()),
                     &FsMaterialize {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: self.environment(),
                         job_id: Some(job.id()),
@@ -1160,6 +1171,7 @@ impl Moving {
                         machine,
                         SerialKey::Environment(self.environment()),
                         &orch_link_contract::source::FsRecordVerify {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             environment_id: self.environment(),
                         },
                     )
@@ -1720,17 +1732,18 @@ impl Engine {
         if let Err(error) = self.cleanup_moved_image(row).await {
             tracing::warn!(job=%row.id,%error,"move image cleanup waits for the node sweep");
         }
-        if let Ok(pins) = serde_json::from_value::<Vec<Hash>>(row.plan["kept_image_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-        {
-            let _ = storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now()).await;
-        }
-        if let Ok(pins) = serde_json::from_value::<Vec<Hash>>(row.plan["move_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-            && let Err(error) = storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now()).await
-        {
-            tracing::warn!(%error,"the move's transient pins could not be released");
+        if let Err(error) = self.release_move_held(row.id).await {
+            tracing::warn!(job=%row.id,%error,"the move's transient pins could not be released");
         }
         self.after_recreate(row).await;
+    }
+
+    /// Lets go, once, of the files and the kept-image archive the move held in the store, and removes
+    /// from the server what nothing else holds. The plan's `move_pins_marked` says the move was one whose
+    /// release is recorded, so that the startup sweep ([`Engine::keep_file_states`]) can finish a release
+    /// that a stopped process left; a move from an earlier version has no record to find it by.
+    pub(crate) async fn release_move_held(&self, job: Id) -> Result<(), EngineError> {
+        self.release_held(job, &["kept_image_pins", "move_pins"], "move_pins_released")
+            .await
     }
 }

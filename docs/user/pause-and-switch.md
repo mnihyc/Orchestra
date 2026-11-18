@@ -8,11 +8,13 @@ summary: Understand disabling, enabling, switching and deleting resources and th
 
 # Pause, switch and remove
 
+This page shows how to pause a provider, a profile or an environment, what happens to the messages waiting for it, and how switching and removing differ.
+
 ## Disable
 
 Disable pauses a provider, agent profile, model or environment. Running turns stop through the usual interrupt. Each thread records the resource and the person who switched it off. Usage already spent stays recorded.
 
-Waiting messages keep their order and their authors. They stay bound to the resource. Disabling does not hold them as a person's Stop does. The provider or environment units stop after their turns, keeping their volumes and sign-in.
+Waiting messages keep their order and their authors. They stay bound to the resource. Disabling does not hold them as a person's Stop does. The containers of a provider or environment stop after their turns, keeping their volumes and sign-in.
 
 Accepted summary and embedding requests stop too. A stopped request cannot start later just because its resource was enabled again.
 

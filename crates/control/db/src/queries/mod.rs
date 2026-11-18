@@ -26,6 +26,7 @@ pub mod feeds;
 pub mod first_steps;
 pub mod goals;
 pub mod hierarchy;
+pub mod human_check;
 pub mod identity;
 pub mod imports;
 pub mod imports_chats;

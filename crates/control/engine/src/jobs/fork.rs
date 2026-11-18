@@ -160,7 +160,17 @@ pub fn phases_of(plan: &ForkPlan) -> Vec<Phase> {
     if moves_harness || opens_session {
         phases.push(PROVISION);
     }
-    if plan.files.is_some() || plan.worktree.is_some() || plan.files_at.is_some() {
+    if plan.files.is_some()
+        || plan.worktree.is_some()
+        || plan.files_at.is_some()
+        || plan
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.proposal.as_ref())
+            .is_some_and(|proposal| {
+                proposal.proposed_fate == orch_api_contract::forks::MemoryProposedFate::CopyIfAbsent
+            })
+    {
         phases.push(COPY);
     }
     if opens_session {
@@ -293,6 +303,9 @@ mod made {
 /// A session the job opened.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Opened {
+    /// The offer frozen with the actual successful native attempt.
+    #[serde(default)]
+    pub orch_tools_offer: Option<crate::tools::catalogue::AcceptedOrchTools>,
     /// The machine of the harness.
     pub machine: Id,
     /// The thread the session is for.
@@ -932,6 +945,7 @@ impl Forking {
                         .unwrap_or_else(crate::binding::BirthAgentAccess::nothing),
                     first_input: None,
                     prepare_source: Some(false),
+                    workspace_edits: Vec::new(),
                     worktree: None,
                     titled_by_automation: request.name.is_none(),
                     settings,
@@ -1449,14 +1463,25 @@ impl Forking {
 
     async fn copy(&self, job: &Job) -> Result<Done, Stop> {
         if self.recipe.forkplan.worktree.is_some() || self.recipe.forkplan.files_at.is_some() {
-            return crate::fork_source::copy(job, &self.recipe).await;
+            let done = crate::fork_source::copy(job, &self.recipe).await?;
+            self.remember_exact_memory(job).await?;
+            return Ok(done);
         }
         let selection = match &self.recipe.request.environment {
             Some(ForkEnvironment::New { new }) => new.files.as_ref(),
             Some(ForkEnvironment::Existing { files, .. }) => files.as_ref(),
             _ => None,
         };
-        if matches!(selection, Some(FileSelection::Nothing)) {
+        let proposed = self
+            .recipe
+            .forkplan
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.proposal.as_ref())
+            .map(|proposal| proposal.proposed_fate);
+        let carries_notes =
+            proposed == Some(orch_api_contract::forks::MemoryProposedFate::CopyIfAbsent);
+        if matches!(selection, Some(FileSelection::Nothing)) && !carries_notes {
             // Whole home/private volumes were imported by the new environment's provisioning job.
             return Ok(Done::Skipped(
                 "no workspace files were selected; owned volumes were carried before startup"
@@ -1510,20 +1535,29 @@ impl Forking {
         };
         crate::fork_source::authorize_copy(job, &self.recipe, &source, &target, &source_directory)
             .await?;
-        let carries_notes = plan.memory.as_ref().map(|memory| memory.carried);
+        let protects_notes =
+            proposed.is_some_and(|fate| fate != orch_api_contract::forks::MemoryProposedFate::Off);
         let selection = snapshot_selection(
             &source_directory,
             self.recipe_files().as_ref(),
-            carries_notes,
+            protects_notes.then_some(carries_notes),
         );
         if selection.include.is_empty() {
             return Ok(Done::Skipped("no file was chosen".to_owned()));
         }
+        let resolved_source_root = crate::sessions::absolute_directory(
+            crate::sessions::workspace_root(
+                &source.workspace_root,
+                &source.facts,
+                source.generation,
+            ),
+            &source_directory,
+        );
         let source_directory_root = plan
             .files
             .as_ref()
             .map(|files| files.path_map.from.as_str())
-            .ok_or_else(|| failed(INTERNAL, "the copy's planned source directory is missing"))?;
+            .unwrap_or(&resolved_source_root);
         let target_directory = crate::sessions::absolute_directory(
             crate::sessions::workspace_root(
                 &target.workspace_root,
@@ -1548,6 +1582,18 @@ impl Forking {
         // Once for everything, then once more for what changed on the source meanwhile; what is there
         // already with the right hash is skipped by the machine.
         for pass in 0u32..2 {
+            if pass > 0 && matches!(self.recipe_files(), Some(FileSelection::Nothing)) {
+                break;
+            }
+            let pass_selection = if pass == 0 {
+                selection.clone()
+            } else {
+                snapshot_selection(
+                    &source_directory,
+                    self.recipe_files().as_ref(),
+                    protects_notes.then_some(false),
+                )
+            };
             crate::fork_source::authorize_copy(
                 job,
                 &self.recipe,
@@ -1571,7 +1617,7 @@ impl Forking {
                         environment_id: source.id,
                         job_id: job.id(),
                         directory: source_directory.clone(),
-                        selection: selection.clone(),
+                        selection: pass_selection.clone(),
                     },
                 )
                 .map_err(EngineError::from)?
@@ -1581,10 +1627,11 @@ impl Forking {
                     from_machine,
                     SerialKey::Environment(source.id),
                     &FsSnapshot {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: source.id,
                         job_id: job.id(),
-                        selection: selection.clone(),
+                        selection: pass_selection.clone(),
                     },
                 )
                 .map_err(EngineError::from)?
@@ -1605,16 +1652,48 @@ impl Forking {
             } else {
                 serde_json::from_value(answer).map_err(EngineError::from)?
             };
-            {
+            let notes_manifest = {
                 let mut conn = engine.db().acquire().await.map_err(EngineError::from)?;
-                taken.manifest_blob = crate::selection::rebase_manifest(
-                    engine,
-                    &mut conn,
-                    &taken.manifest_blob,
-                    source_directory_root,
+                if protects_notes {
+                    let (regular, notes) = crate::memory::partition(
+                        engine,
+                        &mut conn,
+                        &taken.manifest_blob,
+                        source_directory_root,
+                    )
+                    .await?;
+                    taken.manifest_blob = regular;
+                    notes
+                } else {
+                    taken.manifest_blob = crate::selection::rebase_manifest(
+                        engine,
+                        &mut conn,
+                        &taken.manifest_blob,
+                        source_directory_root,
+                    )
+                    .await?;
+                    None
+                }
+            };
+            if pass == 0 && carries_notes {
+                self.copy_notes(
+                    job,
+                    &source,
+                    &target,
+                    &source_directory,
+                    &target_directory,
+                    notes_manifest,
                 )
                 .await?;
             }
+            if matches!(self.recipe_files(), Some(FileSelection::Nothing)) {
+                continue;
+            }
+            // What the source uploaded belongs to this fork until it ends: held for the target to
+            // fetch, let go of, and removed from the server, with the job.
+            engine
+                .hold_for_transfer(job.id(), "fork_live_pins", taken.manifest_blob)
+                .await?;
             job.progress(
                 f64::from(pass) / 2.0 + 0.25,
                 Some("the files are read from the source"),
@@ -1638,6 +1717,7 @@ impl Forking {
                     to_machine,
                     SerialKey::Environment(target.id),
                     &FsMaterialize {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: target.id,
                         job_id: Some(job.id()),
@@ -1673,6 +1753,125 @@ impl Forking {
             .await?;
         }
         Ok(Done::Finished)
+    }
+
+    fn passive_memory_outcome(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Option<orch_api_contract::forks::MemoryOutcome> {
+        use orch_api_contract::forks::{MemoryFate, MemoryOutcome, MemoryProposedFate};
+        let proposal = self.recipe.forkplan.memory.as_ref()?.proposal.as_ref()?;
+        let fate = match proposal.proposed_fate {
+            MemoryProposedFate::Shared => MemoryFate::Shared,
+            MemoryProposedFate::NotCarried => MemoryFate::NotCarried,
+            MemoryProposedFate::Off => MemoryFate::Off,
+            MemoryProposedFate::CopyIfAbsent => return None,
+        };
+        Some(MemoryOutcome {
+            fate,
+            at: Time::new(now),
+            cleanup_pending: false,
+        })
+    }
+
+    async fn copy_notes(
+        &self,
+        job: &Job,
+        source: &environment_rows::EnvironmentRow,
+        target: &environment_rows::EnvironmentRow,
+        source_directory: &str,
+        target_directory: &str,
+        manifest: Option<orch_types::Hash>,
+    ) -> Result<(), Stop> {
+        use orch_api_contract::forks::{MemoryFate, MemoryOutcome};
+        use orch_link_contract::commands::{
+            DirectoryCopyOutcome, FsDirectoryCopyResult, FsMaterializeIfAbsent,
+        };
+        if job
+            .plan()
+            .await?
+            .get("memory_outcome")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Ok(());
+        }
+        let Some(manifest) = manifest else {
+            job.remember(&json!({"memory_outcome":MemoryOutcome { fate: MemoryFate::NotCarried, at: Time::new(job.now()), cleanup_pending:false }})).await?;
+            return Ok(());
+        };
+        crate::fork_source::authorize_copy(job, &self.recipe, source, target, source_directory)
+            .await?;
+        let machine = target
+            .machine_id
+            .ok_or_else(|| failed("environment_unavailable", "the notes target has no machine"))?;
+        crate::fork_source::pin_export(job, manifest).await?;
+        let result: FsDirectoryCopyResult = serde_json::from_value(
+            job.command(
+                Outgoing::new(
+                    ids::derived("fork.notes", &[job.id().as_bytes()]),
+                    machine,
+                    SerialKey::Environment(target.id),
+                    &FsMaterializeIfAbsent {
+                        work: None,
+                        environment_id: target.id,
+                        job_id: job.id(),
+                        manifest_blob: manifest,
+                        target_root: format!(
+                            "{}/{}",
+                            target_directory.trim_end_matches('/'),
+                            crate::memory::DIRECTORY
+                        ),
+                    },
+                )
+                .map_err(EngineError::from)?,
+            )
+            .await?,
+        )
+        .map_err(EngineError::from)?;
+        let fate = match result.outcome {
+            DirectoryCopyOutcome::Copied => MemoryFate::Copied,
+            DirectoryCopyOutcome::TargetKept => MemoryFate::TargetKept,
+        };
+        job.remember(&json!({"memory_outcome":MemoryOutcome { fate, at: result.at, cleanup_pending:result.cleanup_pending },
+            made::COPIED: Copied { environment:target.id, directory:target_directory.to_owned(), made_by_job:false }})).await?;
+        crate::fork_source::release_pins(job.engine(), job.id(), job.now()).await?;
+        Ok(())
+    }
+
+    async fn remember_exact_memory(&self, job: &Job) -> Result<(), Stop> {
+        use orch_api_contract::forks::{MemoryFate, MemoryOutcome, MemoryProposedFate};
+        let saved = job.plan().await?;
+        if saved
+            .get("memory_outcome")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Ok(());
+        }
+        let Some(memory) = &self.recipe.forkplan.memory else {
+            return Ok(());
+        };
+        if memory
+            .proposal
+            .as_ref()
+            .is_none_or(|proposal| proposal.proposed_fate != MemoryProposedFate::CopyIfAbsent)
+        {
+            return Ok(());
+        }
+        let Some(original) = member::<FsMaterialize>(&saved, "fork_exact_original") else {
+            return Ok(());
+        };
+        let manifest = job.engine().read_manifest(&original.manifest_blob).await?;
+        let fate = if manifest
+            .entries()
+            .iter()
+            .any(|entry| crate::memory::is_note(&entry.path))
+        {
+            MemoryFate::Copied
+        } else {
+            MemoryFate::NotCarried
+        };
+        job.remember(&json!({"memory_outcome":MemoryOutcome { fate, at:Time::new(job.now()), cleanup_pending:false }})).await?;
+        Ok(())
     }
 
     /// The selection of files the request made.
@@ -1721,11 +1920,39 @@ impl Forking {
 /// The command that opens the session of the result, and what it was opened as.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Attempt {
+    #[serde(default)]
+    orch_tools_offer: Option<crate::tools::catalogue::AcceptedOrchTools>,
     method: HistoryMethod,
     mode: SessionMode,
     body: SessionOpen,
     model_inputs: Vec<Id>,
     instruction_sources: Json,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history_coverage: Option<orch_api_contract::forks::HistoryCoverage>,
+}
+
+struct HistoryOpened {
+    opened: Opened,
+    coverage: Option<orch_api_contract::forks::HistoryCoverage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffContext {
+    notice: String,
+    coverage: orch_api_contract::forks::HistoryCoverage,
+}
+
+/// Completed change reads use only the retained transport receipt, never today's carry policy.
+#[must_use]
+pub fn history_coverage(row: &JobRow) -> Option<orch_api_contract::forks::HistoryCoverage> {
+    if row.kind != KIND || row.state != orch_db::queries::jobs::state::SUCCEEDED {
+        return None;
+    }
+    row.plan
+        .get("history_coverage")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 impl Forking {
@@ -1854,16 +2081,29 @@ impl Forking {
                     source_ref.as_deref(),
                     old_machine,
                     tried,
+                    (captured.last_turn >= captured.first_turn.max(1)).then(|| {
+                        orch_api_contract::forks::HistoryTurnRange {
+                            from: i64::from(captured.first_turn.max(1)),
+                            through: i64::from(captured.last_turn),
+                        }
+                    }),
                 )
                 .await?;
             match outcome {
-                Ok(mut opened) => {
+                Ok(HistoryOpened {
+                    mut opened,
+                    mut coverage,
+                }) => {
                     let mut report = opened.report.take().unwrap_or_else(|| {
                         fork_history::report_counts(opened.method, &counts, None)
                     });
                     report.warnings.extend(notes);
                     opened.report = Some(report);
-                    job.remember(&json!({ made::SESSION: opened })).await?;
+                    if let Some(coverage) = &mut coverage {
+                        coverage.at = Time::new(job.now());
+                    }
+                    job.remember(&json!({ made::SESSION: opened, "history_coverage":coverage }))
+                        .await?;
                     return Ok(Done::Finished);
                 }
                 Err(why) => {
@@ -1911,143 +2151,203 @@ impl Forking {
         source_ref: Option<&str>,
         old_machine: Option<Id>,
         attempt: u32,
-    ) -> Result<Result<Opened, String>, Stop> {
+        selected_range: Option<orch_api_contract::forks::HistoryTurnRange>,
+    ) -> Result<Result<HistoryOpened, String>, Stop> {
         use crate::sessions::{SessionImport, session_open_body_importing};
+        use orch_api_contract::forks::{
+            HistoryAllowanceSource, HistoryContextAllowance, HistoryContextForm, HistoryCoverage,
+            HistoryTranscriptCoverage,
+        };
         let engine = job.engine();
         let machine = snapshot.key.machine;
         let result_thread = self.result_thread();
+        let saved = job.plan().await?;
+        let retained = saved
+            .get("history_attempts")
+            .and_then(|attempts| attempts.get(format!("open_{attempt}")))
+            .map(|old| serde_json::from_value::<Attempt>(old.clone()).map_err(EngineError::from))
+            .transpose()?;
+        if retained.as_ref().is_some_and(|old| old.method != method) {
+            return Err(failed(
+                "history_command_changed",
+                "The retained history stage has another method.",
+            ));
+        }
+        let mut coverage = HistoryCoverage {
+            method,
+            actual_ranges: selected_range.clone().into_iter().collect(),
+            selected_range,
+            partial_turn: None,
+            omitted_prefix: None,
+            context_form: if method == HistoryMethod::Nothing {
+                HistoryContextForm::Nothing
+            } else {
+                HistoryContextForm::Native
+            },
+            transcript_coverage: HistoryTranscriptCoverage::NotApplicable,
+            context_allowance: fork_history::allowance_for_method(
+                HistoryContextAllowance {
+                    share: None,
+                    tokens: None,
+                    source: HistoryAllowanceSource::UnknownModelWindow,
+                    setting_scope: None,
+                },
+                method,
+            ),
+            at: Time::new(job.now()),
+        };
         let mut import = SessionImport::default();
-        let mode = match method {
-            HistoryMethod::SameSession => {
-                let complete = {
-                    let mut conn = engine.db().acquire().await?;
-                    let cut = orch_db::queries::thread_history_cuts::cut(&mut conn, job.id())
-                        .await?
-                        .ok_or_else(|| {
-                            failed(
-                                "history_source_unconfirmed",
-                                "The confirmed source cut is absent.",
-                            )
-                        })?;
-                    self.replace()
-                        && i64::from(cut.last_turn)
-                            == orch_db::queries::thread_history::last_turn(
-                                &mut conn,
-                                cut.thread_id,
-                                cut.continuation_id,
-                            )
+        let mode = if let Some(old) = &retained {
+            old.mode
+        } else {
+            match method {
+                HistoryMethod::SameSession => {
+                    let complete = {
+                        let mut conn = engine.db().acquire().await?;
+                        let cut = orch_db::queries::thread_history_cuts::cut(&mut conn, job.id())
                             .await?
-                };
-                if !complete {
-                    return Ok(Err(
-                        "a whole-session resume cannot trim the confirmed source boundary".into(),
-                    ));
-                }
-                import.native_session_ref = source_ref.map(str::to_owned);
-                SessionMode::Resume
-            }
-            HistoryMethod::NativeFork => {
-                if through.is_none() || source_ref.is_none() {
-                    return Ok(Err(
-                        "the captured source has no exact recorded native turn boundary".into(),
-                    ));
-                }
-                import.native_session_ref = source_ref.map(str::to_owned);
-                import.upto_turn_ordinal = through;
-                SessionMode::Fork
-            }
-            HistoryMethod::NativeTransplant => {
-                if !self.replace() {
-                    return Ok(Err("the native exporter cannot address a captured inactive source while its thread keeps working".into()));
-                }
-                if through.is_none() {
-                    return Ok(Err(
-                        "the captured source has no exact recorded native turn boundary".into(),
-                    ));
-                }
-                let Some(from) = old_machine else {
-                    return Ok(Err("the source's harness is not known".to_owned()));
-                };
-                let export = Outgoing::new(
-                    ids::derived(
-                        "fork.export",
-                        &[
-                            job.id().as_bytes().as_slice(),
-                            attempt.to_le_bytes().as_slice(),
-                        ],
-                    ),
-                    from,
-                    SerialKey::Thread(self.recipe.source_thread),
-                    &SessionExport {
-                        thread_id: self.recipe.source_thread,
-                        kind: orch_link_contract::commands::ExportKind::Native,
-                        upto_turn_ordinal: through,
-                    },
-                )
-                .map_err(EngineError::from)?;
-                let export = source::save(
-                    job,
-                    &self.recipe,
-                    &format!("export_{attempt}"),
-                    export,
-                    None,
-                )
-                .await?;
-                let exported = match source::run(job, export).await {
-                    Ok(value) => value,
-                    Err(Stop::Failed(refused)) if refused.code == "unsupported" => {
-                        return Ok(Err(refused.message));
+                            .ok_or_else(|| {
+                                failed(
+                                    "history_source_unconfirmed",
+                                    "The confirmed source cut is absent.",
+                                )
+                            })?;
+                        self.replace()
+                            && i64::from(cut.last_turn)
+                                == orch_db::queries::thread_history::last_turn(
+                                    &mut conn,
+                                    cut.thread_id,
+                                    cut.continuation_id,
+                                )
+                                .await?
+                    };
+                    if !complete {
+                        return Ok(Err(
+                            "a whole-session resume cannot trim the confirmed source boundary"
+                                .into(),
+                        ));
                     }
-                    Err(other) => return Err(other),
-                };
-                let exported: SessionExportResult =
-                    serde_json::from_value(exported).map_err(EngineError::from)?;
-                source::exported(job, &format!("native_export_{attempt}"), &exported).await?;
-                import.archive = Some(SessionOpenArchive {
-                    format: exported.format,
-                    blob: exported.blob,
-                    size: exported.size,
-                });
-                import.upto_turn_ordinal = through;
-                SessionMode::ImportNative
-            }
-            HistoryMethod::NeutralImport => {
-                // What the new agent is told is the newest turns that fit the share of its model's window, read from the
-                // end of the captured history a page at a time. The plan chose this method because all of it fits; if
-                // it no longer does, the next way carries what does not.
-                let cut = self.source_cut(job).await?;
-                let budget = carry_budget(engine, snapshot)
-                    .await?
-                    .unwrap_or(fork_history::UNKNOWN_WINDOW_NEUTRAL_BYTES);
-                let newest = {
-                    let mut conn = engine.db().acquire().await?;
-                    fork_history::newest(
-                        &mut conn,
-                        crate::history_pages::Source::Cut(&cut),
-                        (i64::from(cut.first_turn.max(1)), i64::from(cut.last_turn)),
-                        i64::from(cut.last_turn),
-                        budget,
-                    )
-                    .await?
-                };
-                if !newest.complete {
-                    return Ok(Err(
-                        "the conversation no longer fits the share of the new model's window"
-                            .into(),
-                    ));
+                    import.native_session_ref = source_ref.map(str::to_owned);
+                    SessionMode::Resume
                 }
-                let text = fork_history::neutral_lines(&newest.selected);
-                let (blob, size) =
-                    fork_history::cut::keep_bytes(engine, job.id(), "neutral", text.into_bytes())
-                        .await?;
-                import.history = Some(SessionOpenHistory { blob, size });
-                SessionMode::ImportNeutral
+                HistoryMethod::NativeFork => {
+                    if through.is_none() || source_ref.is_none() {
+                        return Ok(Err(
+                            "the captured source has no exact recorded native turn boundary".into(),
+                        ));
+                    }
+                    import.native_session_ref = source_ref.map(str::to_owned);
+                    import.upto_turn_ordinal = through;
+                    SessionMode::Fork
+                }
+                HistoryMethod::NativeTransplant => {
+                    if !self.replace() {
+                        return Ok(Err("the native exporter cannot address a captured inactive source while its thread keeps working".into()));
+                    }
+                    if through.is_none() {
+                        return Ok(Err(
+                            "the captured source has no exact recorded native turn boundary".into(),
+                        ));
+                    }
+                    let Some(from) = old_machine else {
+                        return Ok(Err("the source's harness is not known".to_owned()));
+                    };
+                    let export = Outgoing::new(
+                        ids::derived(
+                            "fork.export",
+                            &[
+                                job.id().as_bytes().as_slice(),
+                                attempt.to_le_bytes().as_slice(),
+                            ],
+                        ),
+                        from,
+                        SerialKey::Thread(self.recipe.source_thread),
+                        &SessionExport {
+                            thread_id: self.recipe.source_thread,
+                            kind: orch_link_contract::commands::ExportKind::Native,
+                            upto_turn_ordinal: through,
+                        },
+                    )
+                    .map_err(EngineError::from)?;
+                    let export = source::save(
+                        job,
+                        &self.recipe,
+                        &format!("export_{attempt}"),
+                        export,
+                        None,
+                    )
+                    .await?;
+                    let exported = match source::run(job, export).await {
+                        Ok(value) => value,
+                        Err(Stop::Failed(refused)) if refused.code == "unsupported" => {
+                            return Ok(Err(refused.message));
+                        }
+                        Err(other) => return Err(other),
+                    };
+                    let exported: SessionExportResult =
+                        serde_json::from_value(exported).map_err(EngineError::from)?;
+                    source::exported(job, &format!("native_export_{attempt}"), &exported).await?;
+                    import.archive = Some(SessionOpenArchive {
+                        format: exported.format,
+                        blob: exported.blob,
+                        size: exported.size,
+                    });
+                    import.upto_turn_ordinal = through;
+                    SessionMode::ImportNative
+                }
+                HistoryMethod::NeutralImport => {
+                    // What the new agent is told is the newest turns that fit the share of its model's window, read from the
+                    // end of the captured history a page at a time. The plan chose this method because all of it fits; if
+                    // it no longer does, the next way carries what does not.
+                    let cut = self.source_cut(job).await?;
+                    let allowance = carry_allowance(engine, snapshot).await?;
+                    let budget = allowance
+                        .bytes
+                        .unwrap_or(fork_history::UNKNOWN_WINDOW_NEUTRAL_BYTES);
+                    let newest = {
+                        let mut conn = engine.db().acquire().await?;
+                        fork_history::newest(
+                            &mut conn,
+                            crate::history_pages::Source::Cut(&cut),
+                            (i64::from(cut.first_turn.max(1)), i64::from(cut.last_turn)),
+                            i64::from(cut.last_turn),
+                            budget,
+                        )
+                        .await?
+                    };
+                    if !newest.complete {
+                        return Ok(Err(
+                            "the conversation no longer fits the share of the new model's window"
+                                .into(),
+                        ));
+                    }
+                    let text = fork_history::neutral_lines(&newest.selected);
+                    coverage.actual_ranges = fork_history::turn_ranges(
+                        newest
+                            .selected
+                            .turns
+                            .iter()
+                            .map(|(_, ordinal)| i64::from(*ordinal))
+                            .collect(),
+                    );
+                    coverage.context_form = HistoryContextForm::Verbatim;
+                    coverage.context_allowance = allowance.fact;
+                    let (blob, size) = fork_history::cut::keep_bytes(
+                        engine,
+                        job.id(),
+                        "neutral",
+                        text.into_bytes(),
+                    )
+                    .await?;
+                    import.history = Some(SessionOpenHistory { blob, size });
+                    SessionMode::ImportNeutral
+                }
+                HistoryMethod::SummaryHandoff | HistoryMethod::FileHandoff => {
+                    coverage = self.write_handoff(job, snapshot).await?;
+                    SessionMode::New
+                }
+                HistoryMethod::Nothing => SessionMode::New,
             }
-            HistoryMethod::SummaryHandoff | HistoryMethod::FileHandoff => {
-                self.write_handoff(job, snapshot).await?;
-                SessionMode::New
-            }
-            HistoryMethod::Nothing => SessionMode::New,
         };
         // The old session is closed first when the old harness and the new one are on one machine: a
         // machine keeps one session for a thread. It is resumed by the next turn if this does not go through.
@@ -2088,24 +2388,25 @@ impl Forking {
             }
             engine.forget_open_sessions(result_thread);
         }
-        let mut body = session_open_body_importing(snapshot, mode, &import).map_err(Stop::from)?;
-        body.mcp = engine
-            .mcp_for_session(snapshot.environment.id, result_thread)
+        let mut body = if let Some(old) = &retained {
+            old.body.clone()
+        } else {
+            session_open_body_importing(snapshot, mode, &import).map_err(Stop::from)?
+        };
+        if retained.is_none() {
+            body.mcp = engine
+                .mcp_for_session(snapshot.environment.id, result_thread)
+                .await
+                .map_err(Stop::from)?;
+            body.raw_after = orch_db::queries::raw_events::last_number(
+                &mut *engine.inner.db.acquire().await.map_err(EngineError::from)?,
+                snapshot.segment.id,
+            )
             .await
-            .map_err(Stop::from)?;
-        body.raw_after = orch_db::queries::raw_events::last_number(
-            &mut *engine.inner.db.acquire().await.map_err(EngineError::from)?,
-            snapshot.segment.id,
-        )
-        .await
-        .map_err(EngineError::from)?;
+            .map_err(EngineError::from)?;
+        }
         let opening = ids::session_open(self.recipe.new_segment, attempt);
-        let saved = job.plan().await?;
-        let attempt_record = if let Some(old) = saved
-            .get("history_attempts")
-            .and_then(|attempts| attempts.get(format!("open_{attempt}")))
-        {
-            let old: Attempt = serde_json::from_value(old.clone()).map_err(EngineError::from)?;
+        let attempt_record = if let Some(old) = retained {
             if old.method != method || old.mode != mode {
                 return Err(failed(
                     "history_command_changed",
@@ -2131,6 +2432,8 @@ impl Forking {
                 )
                 .await?;
             Attempt {
+                orch_tools_offer: Some(snapshot.orch_tools_offer.clone()),
+                history_coverage: Some(coverage),
                 method,
                 mode,
                 body,
@@ -2307,26 +2610,36 @@ impl Forking {
             .as_ref()
             .and_then(|report| serde_json::to_value(report).ok())
             .and_then(|value| serde_json::from_value::<HistoryReport>(value).ok());
-        Ok(Ok(Opened {
-            machine,
-            thread: result_thread,
-            native_session_ref: opened.native_session_ref,
-            mode: attempt_record.mode,
-            method: attempt_record.method,
-            report,
-            model_inputs: attempt_record.model_inputs,
-            instruction_sources: crate::instruction_sources::merge(
-                &attempt_record.instruction_sources,
-                &snapshot
-                    .instruction_sources(&opened.instruction_sources)
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|source| source["evidence"] == "reported")
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            ),
-            approval_reviewer: opened.approval_reviewer,
+        let coverage = attempt_record.history_coverage;
+        Ok(Ok(HistoryOpened {
+            opened: Opened {
+                orch_tools_offer: attempt_record.orch_tools_offer.map(|mut receipt| {
+                    receipt.summary.accepted_at = engine.inner.clock.time();
+                    receipt
+                }),
+                machine,
+                thread: result_thread,
+                native_session_ref: opened.native_session_ref,
+                mode: attempt_record.mode,
+                method: coverage
+                    .as_ref()
+                    .map_or(attempt_record.method, |coverage| coverage.method),
+                report,
+                model_inputs: attempt_record.model_inputs,
+                instruction_sources: crate::instruction_sources::merge(
+                    &attempt_record.instruction_sources,
+                    &snapshot
+                        .instruction_sources(&opened.instruction_sources)
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|source| source["evidence"] == "reported")
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                approval_reviewer: opened.approval_reviewer,
+            },
+            coverage,
         }))
     }
 
@@ -2336,7 +2649,7 @@ impl Forking {
         &self,
         job: &Job,
         snapshot: &crate::sessions::StartSnapshot,
-    ) -> Result<(), Stop> {
+    ) -> Result<orch_api_contract::forks::HistoryCoverage, Stop> {
         use crate::manifest::{Entry, EntryKind, Header, MANIFEST_VERSION, build};
         let engine = job.engine();
         let mut cut = self.source_cut(job).await?;
@@ -2433,14 +2746,20 @@ impl Forking {
                 let previous =
                     fork_history::cut::summary_input(engine, &cut, &summary_budget).await?;
                 let mut previous_recovery = None;
+                let mut handoff_receipt = None;
                 let summary = loop {
                     job.check()?;
                     let made = crate::summaries::handoff_captured(
                         engine,
                         cut.thread_id,
-                        &previous,
+                        &previous.text,
                         job.id(),
                         &choice,
+                        Some(crate::summaries::HandoffCapture {
+                            cut: cut.id,
+                            input: &previous,
+                            receipt: &mut handoff_receipt,
+                        }),
                     )
                     .await;
                     if made.is_ok() {
@@ -2480,7 +2799,7 @@ impl Forking {
                             job,
                             &self.recipe,
                             "summary_result",
-                            &json!({"text":summary,"at":Time::new(job.now())}),
+                            &json!({"text":summary,"at":Time::new(job.now()),"handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
                             true,
                         )
                         .await?;
@@ -2491,7 +2810,7 @@ impl Forking {
                             job,
                             &self.recipe,
                             "summary_skipped",
-                            &json!({"reason": "failed"}),
+                            &json!({"reason": "failed","handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
                             true,
                         )
                         .await?;
@@ -2518,48 +2837,129 @@ impl Forking {
         // the new agent imports nothing, the most recent turns word for word, as many as fill the place's share of
         // the new model's window; for a Summary without one, or a model whose window is not known, the last turns
         // briefly.
-        let budget = if summary.is_some() || wants_summary {
-            None
+        let context = if let Some(saved) = cut.artifacts.get("handoff_context") {
+            serde_json::from_value::<HandoffContext>(saved.clone()).map_err(EngineError::from)?
         } else {
-            carry_budget(engine, snapshot).await?
-        };
-        let carried = if summary.is_some() {
-            None
-        } else {
-            let mut conn = engine.db().acquire().await?;
-            match budget {
-                Some(budget) => {
-                    fork_history::cut::recent(
-                        &mut conn,
-                        &cut,
-                        crate::written::Detail::Normal,
-                        Some(budget),
-                        None,
-                    )
-                    .await?
+            use orch_api_contract::forks::{
+                HistoryAllowanceSource, HistoryContextAllowance, HistoryContextForm,
+                HistoryCoverage, HistoryTranscriptCoverage, HistoryTurnRange,
+            };
+            let allowance = if summary.is_some() || wants_summary {
+                fork_history::CarryAllowance {
+                    bytes: None,
+                    fact: HistoryContextAllowance {
+                        share: None,
+                        tokens: None,
+                        setting_scope: None,
+                        source: if summary.is_some() {
+                            HistoryAllowanceSource::Summary
+                        } else {
+                            HistoryAllowanceSource::SummaryFallback
+                        },
+                    },
                 }
-                None => {
-                    fork_history::cut::recent(
-                        &mut conn,
-                        &cut,
-                        crate::written::Detail::Brief,
-                        None,
-                        Some(SUMMARY_STAND_IN_TURNS),
-                    )
-                    .await?
+            } else {
+                carry_allowance(engine, snapshot).await?
+            };
+            let carried = if summary.is_some() {
+                None
+            } else {
+                let mut conn = engine.db().acquire().await?;
+                match allowance.bytes {
+                    Some(budget) => {
+                        fork_history::cut::recent_with_coverage(
+                            &mut conn,
+                            &cut,
+                            crate::written::Detail::Normal,
+                            Some(budget),
+                            None,
+                        )
+                        .await?
+                    }
+                    None => {
+                        fork_history::cut::recent_with_coverage(
+                            &mut conn,
+                            &cut,
+                            crate::written::Detail::Brief,
+                            None,
+                            Some(SUMMARY_STAND_IN_TURNS),
+                        )
+                        .await?
+                    }
                 }
-            }
+            };
+            let notice = crate::summaries::handoff_notice(
+                cut.thread_id,
+                transcript_turns,
+                usize::try_from(transcript_bytes).unwrap_or(usize::MAX),
+                summary,
+                carried
+                    .as_ref()
+                    .map(|result| (&result.carried, Time::new(cut.captured_at))),
+            );
+            let selected_range =
+                (cut.last_turn >= cut.first_turn.max(1)).then(|| HistoryTurnRange {
+                    from: i64::from(cut.first_turn.max(1)),
+                    through: i64::from(cut.last_turn),
+                });
+            let actual_ranges = carried
+                .as_ref()
+                .map_or_else(Vec::new, |result| result.actual_ranges.clone());
+            let first = actual_ranges.first().map(|range| range.from).or_else(|| {
+                selected_range
+                    .as_ref()
+                    .and_then(|range| range.through.checked_add(1))
+            });
+            let omitted_prefix = first.filter(|first| {
+                selected_range
+                    .as_ref()
+                    .is_some_and(|range| *first > range.from)
+            });
+            let coverage = HistoryCoverage {
+                method: if summary.is_some() {
+                    HistoryMethod::SummaryHandoff
+                } else {
+                    HistoryMethod::FileHandoff
+                },
+                selected_range,
+                actual_ranges,
+                partial_turn: carried.as_ref().and_then(|result| result.partial_turn),
+                omitted_prefix: if summary.is_some() {
+                    None
+                } else {
+                    omitted_prefix
+                },
+                context_form: if summary.is_some() {
+                    HistoryContextForm::Summary
+                } else if carried.as_ref().is_some_and(|result| result.carried.brief) {
+                    HistoryContextForm::Brief
+                } else {
+                    HistoryContextForm::Verbatim
+                },
+                transcript_coverage: HistoryTranscriptCoverage::Unreported,
+                context_allowance: allowance.fact,
+                at: Time::new(job.now()),
+            };
+            let context = HandoffContext { notice, coverage };
+            source::artifact(
+                job,
+                &self.recipe,
+                "handoff_context",
+                &serde_json::to_value(&context).map_err(EngineError::from)?,
+                false,
+            )
+            .await?;
+            context
         };
-        let carried_at = Time::new(cut.captured_at);
-        let notice = crate::summaries::handoff_notice(
-            cut.thread_id,
-            transcript_turns,
-            usize::try_from(transcript_bytes).unwrap_or(usize::MAX),
-            summary,
-            carried.as_ref().map(|carried| (carried, carried_at)),
-        );
-        source::artifact(job, &self.recipe, "handoff_notice", &json!(notice), false).await?;
-        job.remember(&json!({"handoff_text":notice})).await?;
+        job.remember(&json!({
+            "handoff_text": context.notice,
+            "handoff_result": cut
+                .artifacts
+                .get("summary_result")
+                .or_else(|| cut.artifacts.get("summary_skipped"))
+                .and_then(|result| result.get("handoff")),
+        }))
+        .await?;
         let transcript_blob =
             serde_json::from_value(transcript_meta["blob"].clone()).map_err(EngineError::from)?;
         let transcript_size = transcript_bytes;
@@ -2604,6 +3004,7 @@ impl Forking {
             machine,
             SerialKey::Environment(snapshot.environment.id),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: snapshot.environment.id,
                 job_id: None,
@@ -2614,8 +3015,18 @@ impl Forking {
         )
         .map_err(EngineError::from)?;
         let command = source::save(job, &self.recipe, "handoff", command, None).await?;
-        source::run(job, command).await?;
-        Ok(())
+        let delivered: orch_link_contract::commands::FsMaterializeResult =
+            serde_json::from_value(source::run(job, command).await?).map_err(EngineError::from)?;
+        if delivered.files.checked_add(delivered.skipped) != Some(1) {
+            return Err(failed(
+                "history_not_carried",
+                "The separate transcript was not confirmed written; the original conversation is kept.",
+            ));
+        }
+        let mut coverage = context.coverage;
+        coverage.transcript_coverage =
+            orch_api_contract::forks::HistoryTranscriptCoverage::Complete;
+        Ok(coverage)
     }
 }
 
@@ -2692,14 +3103,11 @@ impl Engine {
         let descriptor = harnesses::descriptor_at(conn, agent, provider.id, Some(machine_id))
             .await?
             .unwrap_or(descriptor);
-        let descriptor: orch_agent_contract::descriptor::AgentDescriptor = serde_json::from_value(
-            crate::hosting::with_build_limits(conn, serde_json::to_value(descriptor)?).await?,
-        )?;
         if let Some(mode) = &plan.to.approval_mode {
             let mode = serde_json::from_value(Json::String(mode.clone()))?;
             if !descriptor.approval_modes.contains(&mode) {
                 return Err(EngineError::unreadable(
-                    crate::sessions::APPROVAL_UNSUPPORTED,
+                    crate::sessions::unavailable_approval_detail(mode, &descriptor),
                 ));
             }
             if !settings.allowed_modes.contains(&mode) {
@@ -2798,7 +3206,7 @@ impl Engine {
         };
         crate::approval_review::reviewer_allowed_for(
             approval,
-            crate::harnesses::descriptor_of(agent)?.as_ref(),
+            Some(&descriptor),
             &available_models,
             path,
             &plan.to.model,
@@ -2818,8 +3226,8 @@ impl Engine {
             threads::other_topic_threads_in_environment(conn, thread.topic_id, environment.id)
                 .await?
                 > 0;
-        let tools = self
-            .offered_tools_for_session(
+        let (tools, orch_tools_offer) = self
+            .offered_tools_with_facts(
                 conn,
                 &thread,
                 descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
@@ -2846,6 +3254,9 @@ impl Engine {
             _ => None,
         };
         let segment = threads::SegmentRow {
+            session_outcome: None,
+            native_history: None,
+            sandbox_resolution: None,
             id: target_segment,
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2872,6 +3283,9 @@ impl Engine {
         // that carry the model and the effort; the lease is one for a ticket that is never used, the first
         // turn opens the session again with its own.
         let turn = threads::TurnRow {
+            offline_episode: None,
+            start_wait: None,
+            sandbox_resolution: None,
             id: Id::nil(),
             thread_id,
             segment_id: target_segment,
@@ -2879,7 +3293,11 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            files_changed_complete: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +3315,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2905,6 +3324,9 @@ impl Engine {
             plan: false,
         };
         let input = threads::InputRow {
+            delivery_resolution: None,
+            native_image_delivery: None,
+            text_replacements: 0,
             id: Id::nil(),
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2915,6 +3337,7 @@ impl Engine {
             delivery: "queue".to_owned(),
             state: threads::input_state::PENDING.to_owned(),
             state_detail: None,
+            cancellation: None,
             limit_bypass: None,
             position: "0".to_owned(),
             turn_id: None,
@@ -2922,6 +3345,7 @@ impl Engine {
             created_at: now,
             delivered_at: None,
             cancelled_by: None,
+            seq_created: 0,
             seq_updated: 0,
             attachment_issues: json!([]),
             run_as: None,
@@ -2982,8 +3406,10 @@ impl Engine {
             author_name: None,
             authors: 0,
             tools,
+            orch_tools_offer,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3429,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,
@@ -3305,7 +3732,8 @@ impl Forking {
             orch_db::queries::jobs::merge_plan(
                 &mut *unit.conn,
                 job.id(),
-                &json!({ "commit_done": true }),
+                &json!({ "commit_done": true,
+                    "memory_outcome": crate::memory::outcome(&owned).or_else(|| self.passive_memory_outcome(now)) }),
                 now,
             )
             .await
@@ -3407,7 +3835,20 @@ impl Forking {
         )
         .await
         .map_err(EngineError::from)?;
-        let report = self.final_report(opened);
+        sqlx::query("UPDATE segments SET orch_tools_offer=$2 WHERE id=$1")
+            .bind(self.recipe.new_segment)
+            .bind(
+                opened
+                    .and_then(|opened| opened.orch_tools_offer.as_ref())
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(EngineError::from)?,
+            )
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)
+            .map_err(EngineError::from)?;
+        let report = self.final_report(opened, remembered)?;
         if let Some(opened) = opened {
             orch_db::queries::machine_streams::bind_segment(
                 &mut *unit.conn,
@@ -3687,7 +4128,20 @@ impl Forking {
             .await
             .map_err(EngineError::from)?;
         }
-        let mut report = self.final_report(opened);
+        sqlx::query("UPDATE segments SET orch_tools_offer=$2 WHERE id=$1")
+            .bind(segment)
+            .bind(
+                opened
+                    .and_then(|opened| opened.orch_tools_offer.as_ref())
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(EngineError::from)?,
+            )
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)
+            .map_err(EngineError::from)?;
+        let mut report = self.final_report(opened, remembered)?;
         let keep_side = if source.side_of.is_some() {
             let queued:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state IN ('pending','delivering'))")
                 .bind(source_id).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
@@ -3871,14 +4325,26 @@ impl Forking {
 
     /// The report that says how the history travelled: the harness's own where it gave one, else what the
     /// plan worked out for the method that was used.
-    fn final_report(&self, opened: Option<&Opened>) -> HistoryReport {
-        match opened {
+    fn final_report(
+        &self,
+        opened: Option<&Opened>,
+        remembered: &Json,
+    ) -> Result<HistoryReport, Stop> {
+        let mut report = match opened {
             Some(opened) => opened
                 .report
                 .clone()
                 .unwrap_or_else(|| fork_history::report(opened.method, &Selected::default(), None)),
             None => self.recipe.forkplan.history.report.clone(),
-        }
+        };
+        report.handoff = remembered
+            .get("handoff_result")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(EngineError::from)?;
+        Ok(report)
     }
 
     /// The verified handoff accompanies the next real input, including one released from a held queue.
@@ -3944,12 +4410,22 @@ impl Forking {
                 .await
                 .map_err(EngineError::from)?
                 .ok_or_else(|| failed("agent_unavailable", "the agent profile is gone"))?;
-            let descriptor = harnesses::descriptor_of(&agent)?
-                .ok_or_else(|| failed("agent_unavailable", "the profile never reported"))?;
+            let provider = resource_rows::provider(&mut *unit.conn, plan.to.provider.id)
+                .await
+                .map_err(EngineError::from)?
+                .ok_or_else(|| failed("provider_unavailable", "the provider is gone"))?;
+            let row = threads::thread(&mut *unit.conn, thread)
+                .await
+                .map_err(EngineError::from)?
+                .ok_or_else(|| failed("source_gone", "the thread is gone"))?;
+            let descriptor =
+                harnesses::descriptor_for_thread(&mut *unit.conn, &agent, &provider, &row)
+                    .await?
+                    .ok_or_else(|| failed("agent_unavailable", "the profile never reported"))?;
             if !descriptor.approval_modes.contains(&mode) {
                 return Err(failed(
                     "approval_mode_unsupported",
-                    crate::sessions::APPROVAL_UNSUPPORTED,
+                    crate::sessions::unavailable_approval_detail(mode, &descriptor),
                 ));
             }
             if !resolved.allowed_modes.contains(&mode) {
@@ -4281,6 +4757,12 @@ impl Forking {
             false
         };
         let mut left: Vec<String> = Vec::new();
+        if !self.makes_environment()
+            && member::<orch_api_contract::forks::MemoryOutcome>(&plan_json, "memory_outcome")
+                .is_some_and(|outcome| outcome.fate == orch_api_contract::forks::MemoryFate::Copied)
+        {
+            left.push("the copied notes are kept on the target; later work is preserved".into());
+        }
         if let Some(copied) = member::<Copied>(&plan_json, made::COPIED)
             && !keep_target
             && copied.made_by_job
@@ -4312,6 +4794,7 @@ impl Forking {
                     machine,
                     SerialKey::Environment(copied.environment),
                     &FsRemove {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         environment_id: copied.environment,
                         path: copied.directory.clone(),
                         recursive: true,
@@ -4466,14 +4949,14 @@ impl Engine {
 const SUMMARY_STAND_IN_TURNS: usize = 3;
 
 /// How many bytes of recent turns a switch carries into the new agent's context, from the new model's entry.
-async fn carry_budget(
+async fn carry_allowance(
     engine: &crate::engine::Engine,
     snapshot: &crate::sessions::StartSnapshot,
-) -> Result<Option<usize>, Stop> {
+) -> Result<fork_history::CarryAllowance, Stop> {
     let window = snapshot
         .model
         .as_ref()
         .and_then(|model| fork_history::model_window(&model.parameters));
     let mut conn = engine.db().acquire().await?;
-    Ok(fork_history::carry_budget(&mut conn, snapshot.thread.node_id, window).await?)
+    Ok(fork_history::carry_allowance(&mut conn, snapshot.thread.node_id, window).await?)
 }

@@ -71,7 +71,7 @@ describe('one provider usage card', () => {
     expect(screen.queryByText(/5-hour/)).not.toBeInTheDocument();
     provider.access.permissions = ['provider.use'];
     rerender(<ProviderUsageCard compact provider={provider} />);
-    expect(screen.getByText('Room not visible')).toBeInTheDocument();
+    expect(screen.getByText('Remaining usage not visible')).toBeInTheDocument();
     expect(screen.queryByText(/81%/)).not.toBeInTheDocument();
   });
   it('keeps known spending when the balance read has told nothing yet', () => {
@@ -135,10 +135,10 @@ describe('one provider usage card', () => {
   });
   it('marks a gone model with when it was seen without switching it off', () => {
     const provider = planProvider();
-    provider.facts.models = [];
+    provider.facts.models_count = 0;
     provider.facts_state.models = 'empty';
     provider.facts.field_times.models = OBSERVED;
-    const { container } = show(<ModelAvailability provider={provider} name="old-model" />);
+    const { container } = show(<ModelAvailability provider={provider} name="old-model" listing={[]} />);
     expect(screen.getByText(/No longer offered/)).toBeInTheDocument();
     expect(container.querySelector('time')).toHaveAttribute('datetime', OBSERVED);
   });

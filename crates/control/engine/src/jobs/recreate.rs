@@ -1695,12 +1695,9 @@ impl Engine {
             tracing::warn!(job=%row.id,%error,"kept-image cleanup waits for a later sweep");
         }
         // A provider's carried files were kept in the blob store only for the move.
-        if let Ok(pins) =
-            serde_json::from_value::<Vec<orch_types::Hash>>(row.plan["carry_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-            && let Err(error) =
-                orch_db::queries::storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now())
-                    .await
+        if let Err(error) = self
+            .release_held(row.id, &["carry_pins"], "carry_pins_released")
+            .await
         {
             tracing::warn!(%error, "a move's carried files could not be let go");
         }

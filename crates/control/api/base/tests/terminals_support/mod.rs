@@ -689,6 +689,7 @@ impl Floor {
         let mut tuning = Tuning::from_config(&old.config);
         tune(&mut tuning);
         let app: App = Arc::new(AppState {
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             builtin_sources: old.builtin_sources.clone(),
             db: old.db.clone(),

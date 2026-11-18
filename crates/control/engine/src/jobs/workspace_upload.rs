@@ -9,6 +9,7 @@ use orch_api_contract::workspace::FileStat;
 use orch_db::audit::{self, Actor, Entry, Origin};
 use orch_db::queries::{environments, jobs, link, storage};
 use orch_link_contract::commands::{FsWrite, SerialKey};
+use orch_settings::Place;
 use orch_types::{Id, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -74,6 +75,9 @@ pub async fn retain_native_result(
 /// The immutable admission facts of one workspace write, kept in its ordinary delivery job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Admission {
+    /// The original raw HTTP identity and actual immutable native write source.
+    pub raw: crate::operation_scope::http_origin::HttpOrigin,
+    pub source: crate::operation_scope::file_commands::FileCommand,
     /// The authenticated machine selected at admission.
     pub machine: Id,
     /// The environment generation selected at admission.
@@ -114,7 +118,16 @@ impl Upload {
         Ok(Self(admission))
     }
 
-    async fn finish(&self, job: &Job, written: Option<FileStat>) -> Result<(), EngineError> {
+    /// Settles the write once: the file's receipt, its cached version in a place that caches, and the
+    /// content the upload held. `awaiting_choice` is a write that failed on a clash with the file at the
+    /// path: the person may still choose Replace or Keep both from the same upload, so its content is
+    /// let go of but not removed at once, and has the grace of ordinary content.
+    async fn finish(
+        &self,
+        job: &Job,
+        written: Option<FileStat>,
+        awaiting_choice: bool,
+    ) -> Result<(), EngineError> {
         let mut tx = job.engine().db().begin().await?;
         let row = job
             .lock_owned(&mut tx)
@@ -124,24 +137,56 @@ impl Upload {
             return Ok(());
         }
         let admitted = &self.0;
+        let place = Place::Environment(admitted.write.environment_id);
+        // A place that relays keeps no copy of what it wrote: the file is on the machine, and the
+        // upload's copy in the store goes with the write (a connector that cannot relay is served through it).
+        let relayed = crate::transfers::relay_on(&mut tx, place).await;
         if let Some(stat) = &written {
-            storage::record_cached(
-                &mut tx,
-                admitted.write.environment_id,
-                &storage::CachedFile {
-                    path: admitted.write.path.clone(),
-                    size: stat.entry.size,
-                    mtime_ns: stat
-                        .entry
-                        .mtime
-                        .get()
-                        .timestamp_millis()
-                        .saturating_mul(storage::NANOS_PER_MILLI),
-                    hash: stat.hash.unwrap_or(admitted.write.blob),
-                    cached_at: job.now(),
-                },
-            )
-            .await?;
+            if !relayed {
+                storage::record_cached(
+                    &mut tx,
+                    admitted.write.environment_id,
+                    &storage::CachedFile {
+                        minimum_reach: stat.facts.as_ref().map_or_else(
+                            || {
+                                admitted
+                                    .write
+                                    .access
+                                    .manage
+                                    .unwrap_or(orch_access_contract::permissions::FileReach::Roots)
+                            },
+                            |facts| {
+                                if facts.policy.kind
+                                    == orch_api_contract::workspace::FileSourceKind::Machine
+                                {
+                                    orch_access_contract::permissions::FileReach::Machine
+                                } else {
+                                    orch_access_contract::permissions::FileReach::Roots
+                                }
+                            },
+                        ),
+                        path: if admitted.write.path.starts_with('/')
+                            || (admitted.write.path.len() >= 3
+                                && admitted.write.path.as_bytes()[1] == b':'
+                                && admitted.write.path.as_bytes()[2] == b'/')
+                        {
+                            format!("/native/{}", admitted.write.path)
+                        } else {
+                            admitted.write.path.clone()
+                        },
+                        size: stat.entry.size,
+                        mtime_ns: stat
+                            .entry
+                            .mtime
+                            .get()
+                            .timestamp_millis()
+                            .saturating_mul(storage::NANOS_PER_MILLI),
+                        hash: stat.hash.unwrap_or(admitted.write.blob),
+                        cached_at: job.now(),
+                    },
+                )
+                .await?;
+            }
             let action = orch_db::audit::action!(AuditAction::WorkspaceFileWritten);
             let mut entry = Entry::new(
                 Actor::User(admitted.by),
@@ -165,7 +210,20 @@ impl Upload {
             )
             .await?;
         }
-        storage::unpin_blobs(&mut tx, &[admitted.write.blob], job.now()).await?;
+        let released = if awaiting_choice {
+            storage::unpin_blobs(&mut tx, &[admitted.write.blob], job.now()).await?;
+            None
+        } else {
+            Some(
+                crate::transfers::release_transfer(
+                    &mut tx,
+                    place,
+                    &[admitted.write.blob],
+                    job.now(),
+                )
+                .await?,
+            )
+        };
         jobs::merge_plan(
             &mut tx,
             job.id(),
@@ -174,6 +232,9 @@ impl Upload {
         )
         .await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
+        if let Some(released) = released {
+            released.settle(job.engine()).await;
+        }
         Ok(())
     }
 }
@@ -212,11 +273,11 @@ impl Phased for Upload {
         .map_err(|error| Stop::Failed(Failure::new(INTERNAL, error.to_string())))?;
         let written = job.command(command).await?;
         let stat: FileStat = serde_json::from_value(written).map_err(EngineError::from)?;
-        self.finish(job, Some(stat)).await?;
+        self.finish(job, Some(stat), false).await?;
         Ok(Done::Finished)
     }
 
-    async fn undo(&self, job: &Job, _why: &Stop) -> Undone {
+    async fn undo(&self, job: &Job, why: &Stop) -> Undone {
         // A command that won before cancellation keeps its real completed file and audit.
         // A cancelled command's acknowledgement alone does not invent a completed file receipt.
         let plan = match job.plan().await {
@@ -243,7 +304,8 @@ impl Phased for Upload {
             },
             _ => None,
         };
-        match self.finish(job, written).await {
+        let clash = matches!(why, Stop::Failed(failure) if failure.code.starts_with("conflict"));
+        match self.finish(job, written, clash).await {
             Ok(()) => Undone::Partly("files already written stay in the workspace".into()),
             Err(error) => Undone::Deferred(error.to_string()),
         }
@@ -255,4 +317,33 @@ impl Phased for Upload {
             .ok()
             .and_then(|plan| plan.get("written").cloned())
     }
+}
+
+/// Reuse the existing raw HTTP command family after the job has fixed its progress/deadline recipe.
+pub(crate) async fn decorate(job: &Job, command: &mut Outgoing) -> Result<(), Stop> {
+    let row = job.row().await?;
+    if row.kind != jobs::kind::DELIVERY
+        || row.plan.get("workspace_upload").is_none()
+        || command.kind != orch_link_contract::commands::CommandKind::FsWrite
+    {
+        return Ok(());
+    }
+    let admitted: Admission =
+        serde_json::from_value(row.plan["workspace_upload"].clone()).map_err(EngineError::from)?;
+    if command.machine != admitted.machine
+        || command.body.get("environment_id") != Some(&json!(admitted.write.environment_id))
+    {
+        return Err(Stop::Failed(Failure::new(
+            "files.reach_denied",
+            "the original upload file source changed",
+        )));
+    }
+    let authority = admitted.raw.command_source(
+        command,
+        crate::operation_scope::http_command_source::CommandEvidence::FilePath(Box::new(
+            admitted.source,
+        )),
+    )?;
+    command.authority = Some(authority);
+    Ok(())
 }
