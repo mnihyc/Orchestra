@@ -57,3 +57,33 @@ it('does not offer Auto in the policy set while preserving the stored policy unt
   expect(screen.queryByRole('checkbox',{name:'Auto'})).not.toBeInTheDocument();
   expect(putSetting).not.toHaveBeenCalled();
 });
+
+
+it.each(['en', 'zh-CN'] as const)('keeps an existing Auto setting visible with its served build-check reason before any write in %s', async (language) => {
+  await setLocale(language);
+  try {
+    for (const [reason, english, chinese] of [
+      ['auto_not_proven', 'Not proven on this machine yet.', '尚未在此机器上验证。'],
+      ['auto_check_failed', 'Failed its check on this machine.', '未通过此机器上的检查。'],
+    ] as const) {
+      const def: KeyDef = { key: 'approval.mode', title: 'Approval', description: 'Native mode', group: 'confinement', class: 'parameter', scopes: ['project', 'thread'], merge: 'replace', default: 'on_request', example: 'on_request', schema: { type: 'string', enum: ['ask', 'on_request', 'auto', 'bypass'] }, text_key: null, keywords: [] };
+      const row: ResolvedSetting = { key: def.key, value: 'auto', own: { value: 'auto', revision: 3, locked: false }, source, locked_by: null, writable: true, parts: [], available_values: ['on_request'], approval_choices: [
+        { mode: 'on_request', available: true, reason: null, requirement: null },
+        { mode: 'auto', available: false, reason, requirement: 'auto_check' },
+      ] };
+      vi.mocked(putSetting).mockReset();
+      const view = show(<ul><SettingRow def={def} setting={row} target={target} place={place} /></ul>);
+      try {
+        const field = screen.getByRole('combobox', { name: def.title });
+        expect(field).toHaveValue(i18n.t('choiceCatalog.approvalMode.auto.name'));
+        await userEvent.click(field);
+        const automatic = screen.getByRole('option', { name: i18n.t('choiceCatalog.approvalMode.auto.name') });
+        expect(automatic).toHaveAttribute('aria-disabled', 'true');
+        expect(screen.getByText(language === 'en' ? english : chinese)).toBeVisible();
+        await userEvent.click(automatic);
+        expect(putSetting).not.toHaveBeenCalled();
+        expect(row.value).toBe('auto');
+      } finally { view.unmount(); }
+    }
+  } finally { await setLocale('en'); }
+});

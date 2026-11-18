@@ -3580,6 +3580,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -3937,6 +3938,7 @@ dependencies = [
  "orch-driver-contract",
  "orch-plugin-contract",
  "orch-provider-contract",
+ "orch-settings-contract",
  "orch-types",
  "schemars",
  "serde",
@@ -4620,6 +4622,7 @@ dependencies = [
  "orch-testkit",
  "orch-types",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sqlx",
@@ -4727,6 +4730,7 @@ dependencies = [
  "orch-plugin",
  "orch-plugin-contract",
  "orch-protocol-anthropic-messages",
+ "orch-protocol-google-interactions",
  "orch-protocol-openai-responses",
  "orch-provider-builtins",
  "orch-provider-contract",
@@ -4780,6 +4784,7 @@ dependencies = [
  "orch-plugin",
  "orch-plugin-contract",
  "orch-protocol-anthropic-messages",
+ "orch-protocol-google-interactions",
  "orch-protocol-openai-responses",
  "orch-provider-contract",
  "orch-realtime-contract",
@@ -5001,6 +5006,7 @@ dependencies = [
  "orch-operation-scope",
  "orch-person-notices",
  "orch-plugin-contract",
+ "orch-private-file",
  "orch-provider-contract",
  "orch-settings",
  "orch-settings-contract",
@@ -5011,6 +5017,7 @@ dependencies = [
  "rand 0.10.3",
  "regex",
  "reqwest",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -5053,6 +5060,7 @@ dependencies = [
  "orch-api-contract",
  "orch-driver-contract",
  "orch-executor-contract",
+ "orch-link",
  "orch-link-contract",
  "orch-plugin-contract",
  "orch-realtime-contract",
@@ -5212,6 +5220,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
+ "tower",
  "tracing",
  "url",
 ]
@@ -5464,6 +5473,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -5647,6 +5657,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "orch-protocol-google-interactions"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "orch-agent-contract",
+ "orch-model-contract",
+ "orch-provider-contract",
+ "orch-types",
+ "serde_json",
  "url",
 ]
 
@@ -5895,6 +5919,7 @@ dependencies = [
  "http",
  "orch-agent-contract",
  "orch-agent-programs",
+ "orch-api-contract",
  "orch-driver-contract",
  "orch-link",
  "orch-link-contract",
@@ -8775,9 +8800,9 @@ dependencies = [
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -9717,16 +9742,18 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.1"
+version = "9.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e49ade69c4434c55dd651d36fe05f38e0578db948b773cbc01c48c4b5e560692"
+checksum = "3f5b58784007ff6e5f280ec82c8596686a3b9b5dd5836c63288d4479f84728b9"
 dependencies = [
  "crc32fast",
  "flate2",
+ "getrandom 0.4.3",
  "indexmap",
  "memchr",
  "nix 0.31.3",
  "typed-path",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

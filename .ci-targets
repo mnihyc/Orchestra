@@ -1,0 +1,1 @@
+test -p orch-engine --test turns -- a_first_provider_route_compiles_on_an_ordinary_worker_stack
