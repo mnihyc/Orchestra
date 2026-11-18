@@ -335,6 +335,43 @@ impl Read {
     }
 }
 
+/// Read only the frozen material and its paid-call source items, without issuing filesystem work.
+pub(in crate::tools) async fn retained_images(
+    conn: &mut Conn,
+    call: &CallContext,
+    count: usize,
+) -> Result<Option<Vec<GenerationPart>>, EngineError> {
+    source::check_call(conn, call).await?;
+    let saved: Option<Json> =
+        sqlx::query_scalar("SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1")
+            .bind(crate::ids::tool_result(call.thread, &call.call_ref))
+            .bind(SLOT)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+    let Some(saved) = saved else {
+        return Ok(None);
+    };
+    let frozen: Frozen = serde_json::from_value(saved)?;
+    if frozen.source != source::Source::captured()?
+        || frozen.images.len() != count
+        || frozen.items.len() != count
+    {
+        return Err(EngineError::ToolCallIdentity);
+    }
+    for (index, (part, item)) in frozen.images.iter().zip(&frozen.items).enumerate() {
+        let GenerationPart::ImageRef { blob, size, .. } = part else {
+            return Err(EngineError::ToolCallIdentity);
+        };
+        let held:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items i JOIN blobs b ON b.hash=$4 WHERE i.id=$1 AND i.thread_id=$2 AND i.native_ref=$3 AND i.payload->'tool'->>'kind'='image' AND i.payload->'tool'->>'blob'=$5 AND b.size=$6)")
+                    .bind(item).bind(call.thread).bind(format!("orch.image_input:{}:{index}",crate::ids::tool_result(call.thread,&call.call_ref))).bind(blob.as_bytes().as_slice()).bind(blob.to_string()).bind(size).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        if !held {
+            return Err(EngineError::StaleToolSource);
+        }
+    }
+    Ok(Some(frozen.images))
+}
+
 impl Engine {
     pub(super) async fn image_inputs(
         &self,
@@ -356,15 +393,7 @@ impl Engine {
         }
         let mut conn = self.db().acquire().await?;
         source::check_call(&mut conn, call).await?;
-        let saved: Option<Json> =
-            sqlx::query_scalar("SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1")
-                .bind(crate::ids::tool_result(call.thread, &call.call_ref))
-                .bind(SLOT)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
-        if let Some(saved) = saved {
-            let frozen: Frozen = serde_json::from_value(saved)?;
+        if let Some(images) = retained_images(&mut conn, call, paths.len()).await? {
             source::original_callers(
                 &mut conn,
                 call,
@@ -372,23 +401,7 @@ impl Engine {
                 self.inner.access.as_ref(),
             )
             .await?;
-            if frozen.source != source::Source::captured()?
-                || frozen.images.len() != paths.len()
-                || frozen.items.len() != paths.len()
-            {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            for (index, (part, item)) in frozen.images.iter().zip(&frozen.items).enumerate() {
-                let GenerationPart::ImageRef { blob, size, .. } = part else {
-                    return Err(EngineError::ToolCallIdentity);
-                };
-                let held:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items i JOIN blobs b ON b.hash=$4 WHERE i.id=$1 AND i.thread_id=$2 AND i.native_ref=$3 AND i.payload->'tool'->>'kind'='image' AND i.payload->'tool'->>'blob'=$5 AND b.size=$6)")
-                    .bind(item).bind(call.thread).bind(format!("orch.image_input:{}:{index}",crate::ids::tool_result(call.thread,&call.call_ref))).bind(blob.as_bytes().as_slice()).bind(blob.to_string()).bind(size).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
-                if !held {
-                    return Err(EngineError::StaleToolSource);
-                }
-            }
-            return Ok(frozen.images);
+            return Ok(images);
         }
         let thread = threads::thread(&mut conn, call.thread)
             .await?

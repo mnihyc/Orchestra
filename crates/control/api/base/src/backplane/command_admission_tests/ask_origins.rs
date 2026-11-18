@@ -285,7 +285,7 @@ impl Scene {
             transport.clock.time(),
         )
         .await?;
-        let choices = json!([{"provider_id":provider,"model":MODEL}]);
+        let choices = json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]);
         let written = orch_db::queries::settings::put(
             &mut conn,
             Some(root),
@@ -351,8 +351,8 @@ async fn a_queued_ask_request_keeps_the_original_access_token_deadline_after_a_n
             }],
             context: None,
             model: Some(Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
+                backend: orch_api_contract::ask::AskModelIdentity::api(provider, MODEL.into())
+                    .backend,
                 params: None,
             })),
         };
@@ -541,8 +541,8 @@ async fn a_queued_ask_command_rechecks_its_controller_model_endpoint_and_retaine
             }],
             context: None,
             model: Some(Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
+                backend: orch_api_contract::ask::AskModelIdentity::api(provider, MODEL.into())
+                    .backend,
                 params: None,
             })),
         };
@@ -1022,8 +1022,7 @@ async fn submitting_an_ask_needs_its_own_history_read_beside_message_write() -> 
         }],
         context: None,
         model: Some(Some(AskModel {
-            provider_id: provider,
-            model: MODEL.into(),
+            backend: orch_api_contract::ask::AskModelIdentity::api(provider, MODEL.into()).backend,
             params: None,
         })),
     };

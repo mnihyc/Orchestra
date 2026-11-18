@@ -36,7 +36,12 @@ pub(crate) async fn execution(
             .model
             .map(serde_json::from_value::<orch_api_contract::ask::AskModel>)
             .transpose()?
-            .map(|model| (model.provider_id, model.model)),
+            .and_then(|model| {
+                model
+                    .backend
+                    .offering
+                    .map(|offering| (offering.provider, offering.offering))
+            }),
     };
     let (provider, model) = selected.ok_or_else(|| {
         PlanError::invalid(
