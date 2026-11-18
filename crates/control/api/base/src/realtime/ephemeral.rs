@@ -417,7 +417,16 @@ impl Feeds {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_background_seed(&self, feed: Feed, capture: Json) {
         assert!(matches!(feed, Feed::ThreadBackground(_)));
+        if let Feed::ThreadBackground(thread) = &feed {
+            super::background_read_tests::retain_manual_capture(*thread, capture.clone());
+        }
         lock(&self.lists).insert(feed, capture);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn test_background_evict(&self, feed: &Feed) {
+        assert!(matches!(feed, Feed::ThreadBackground(_)));
+        lock(&self.lists).remove(feed);
     }
 
     /// Local tree/authority/reconnect wake; bounded-mailbox overflow requests one consolidated repair.
@@ -608,6 +617,11 @@ impl Feeds {
                 .then(|| serde_json::json!({}))
             })
         };
+        #[cfg(any(test, feature = "test-support"))]
+        let data = data.or_else(|| match sub.feed() {
+            Feed::ThreadBackground(thread) => super::background_read_tests::manual_capture(*thread),
+            _ => None,
+        });
         if let Some(data) = data {
             // Availability reads can await the database too; the seed is authorized for
             // this reader at the same serialization boundary as a newly published list.

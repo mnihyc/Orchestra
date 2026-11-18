@@ -1,4 +1,5 @@
 /** One sent-list section beside the same composer in organization and system administration. */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Megaphone } from 'lucide-react';
 import { useState } from 'react';
@@ -34,7 +35,7 @@ export function MessagesSection({ scope }: { scope: MessageScope }) {
     { id: 'title', header: t('adminMessages.title'), cell: (row, shown) => {
       const senderShown = shown.has('sender'), timeShown = shown.has('time');
       return <div className="flex min-w-0 flex-col gap-1">
-      <a className={`${linkClasses} min-w-0 truncate`} title={row.title} href={`/messages/${encodeURIComponent(row.id)}`}>{row.title}</a>
+      <PathLink className={`${linkClasses} min-w-0 truncate`} title={row.title} href={`/messages/${encodeURIComponent(row.id)}`}>{row.title}</PathLink>
       {!senderShown && <UserChip user={row.sender} />}
       {!timeShown && <RelativeTime at={row.created_at} className="text-sm text-text-muted" />}
     </div>; } },

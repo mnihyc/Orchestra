@@ -35,7 +35,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['org', 'proje
   const name = kind === 'org' ? data.org.name : kind === 'project' ? data.project.name : data.topic.name;
   const nav = screen.getByRole('navigation', { name: t('settings.org.sections', { name }) });
   expect(nav.querySelectorAll('[aria-current="page"]')).toHaveLength(0);
-  expect(within(nav).getByRole('combobox')).toHaveValue('');
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
   const link = within(nav).getByRole('link', { name: t('day100.names.defaults') });
   expect(link).toHaveAttribute('href', kind === 'org' ? '/org/acme/settings/defaults' : kind === 'project' ? `/project/${ACME.web}/settings?section=defaults` : `/topic/${ACME.fixLogin}?tab=settings&section=defaults`);
 });

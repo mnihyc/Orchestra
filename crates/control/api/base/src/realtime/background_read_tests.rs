@@ -51,8 +51,6 @@ use serde_json::json;
 
 use std::collections::HashMap;
 
-use std::collections::HashSet;
-
 use std::sync::atomic::AtomicUsize;
 
 use std::sync::atomic::Ordering;
@@ -89,13 +87,34 @@ type Boundaries = HashMap<(Id, Cut), Arc<Boundary>>;
 
 static BOUNDARIES: LazyLock<Mutex<Boundaries>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static MANUAL_WATCHES: LazyLock<Mutex<HashSet<Id>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+type ManualCaptures = HashMap<Id, Option<serde_json::Value>>;
+// The canonical observation belongs to its fixture until that fixture drops its watch.
+static MANUAL_WATCHES: LazyLock<Mutex<ManualCaptures>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn manual_watch(thread: Id) -> bool {
     MANUAL_WATCHES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .contains(&thread)
+        .contains_key(&thread)
+}
+
+pub(crate) fn retain_manual_capture(thread: Id, capture: serde_json::Value) {
+    if let Some(owned) = MANUAL_WATCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_mut(&thread)
+    {
+        *owned = Some(capture);
+    }
+}
+
+pub(crate) fn manual_capture(thread: Id) -> Option<serde_json::Value> {
+    MANUAL_WATCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&thread)
+        .and_then(Clone::clone)
 }
 
 struct ManualWatch(Id);
@@ -106,7 +125,8 @@ impl ManualWatch {
             MANUAL_WATCHES
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(thread)
+                .insert(thread, None)
+                .is_none()
         );
         Self(thread)
     }
@@ -720,6 +740,14 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
         .inner
         .ephemeral
         .test_background_seed(feed.clone(), data.clone());
+    // Inactive transient cache entries may leave before the first subscription arrives.
+    rig.server
+        .app
+        .realtime
+        .inner
+        .ephemeral
+        .test_background_evict(&feed);
+
     let mut pause = if seed {
         Some(Pause::arm(thread, Cut::SocketProjected))
     } else {

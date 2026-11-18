@@ -31,7 +31,7 @@ import { EditEnvironment } from '@/features/resources/environments/Edit';
 import type { EnvironmentTab } from '@/features/resources/environments/Environment';
 import { RemoveEnvironmentDialog } from '@/features/resources/environments/Remove';
 import { RestartEnvironmentDialog } from '@/features/resources/environments/Restart';
-import { isBusy } from '@/features/resources/environments/words';
+import { environmentDisplayStatus, environmentLifecycle, isBusy } from '@/features/resources/environments/words';
 import type { Environment } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -97,15 +97,24 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     },
   });
 
-  const startApplicable = (environment: Environment) => environment.machine === null && !(environment.network.required_mode === 'restricted' && environment.network.mode === 'open') && (environment.status === 'stopped' || environment.status === 'none');
+  const isUnit = (environment: Environment) => environmentLifecycle(environment) === 'unit';
+  const startApplicable = (environment: Environment) => {
+    const status = environmentDisplayStatus(environment);
+    return isUnit(environment) && !(environment.network.required_mode === 'restricted' && environment.network.mode === 'open') && (status === 'stopped' || status === 'none');
+  };
   const canStart = (environment: Environment) => holds(environment.access, 'environment.manage') && startApplicable(environment);
-  const stopApplicable = (environment: Environment) => environment.machine === null && environment.status === 'running';
+  const stopApplicable = (environment: Environment) => {
+    const status = environmentDisplayStatus(environment);
+    const ownProvision = environment.job?.kind === 'environment_provision'
+      && (environment.job.state === 'queued' || environment.job.state === 'running');
+    return isUnit(environment) && (status === 'running' || status === 'offline' || status === 'provisioning' && ownProvision);
+  };
   const canStop = (environment: Environment) => holds(environment.access, 'environment.manage') && stopApplicable(environment);
 
   const actsOf = (environment: Environment, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
     const manage = holds(environment.access, 'environment.manage');
     const guarded = (act: Act | null) => managedAct(act, manage, t('resources.act.manageRequired'));
-    const working = busy(environment.id) || isBusy(environment.status);
+    const working = busy(environment.id) || (isBusy(environmentDisplayStatus(environment)) && !stopApplicable(environment));
     const open: Act | null =
       where === 'row' ? { id: 'open', label: t('resources.act.open'), icon: <ArrowRight aria-hidden />, run: () => void navigate({ to: '/resources/environments/$id', params: { id: environment.id } }) } : null;
     const startAct: Act | null = guarded(startApplicable(environment) ? {
@@ -144,7 +153,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'environment', id: environment.id }) };
     const del: Act | null = guarded({ id: 'delete', label: t('trace.removeEntry'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', environment }) });
     // What changes where and on what it runs, each a plan read before anything is done: for one that Orch made.
-    const changed = environment.machine === null && environment.status !== 'lost';
+    const changed = isUnit(environment) && environment.status !== 'lost';
     const target = { kind: 'environment' as const, id: environment.id, name: environment.name };
     const updateAct: Act | null = guarded(changed ? { id: 'update', label: t('change.env.menu.update'), icon: <RefreshCw aria-hidden />, run: () => openChange(target, { kind: 'update' }) } : null);
     const recreateAct: Act | null = guarded(changed ? { id: 'recreate', label: t('change.env.menu.recreate'), icon: <RotateCcw aria-hidden />, run: () => openChange(target, { kind: 'recreate' }) } : null);
@@ -246,7 +255,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     ask: (what, environment) => setAsked({ what, environment }),
     enable: askEnable,
     keepAwake: (environment) =>
-      holds(environment.access, 'environment.manage') && environment.machine === null && environment.status === 'running'
+      holds(environment.access, 'environment.manage') && isUnit(environment) && environment.status === 'running'
         ? {
             id: 'keep',
             label: t('environments.act.keepButton'),

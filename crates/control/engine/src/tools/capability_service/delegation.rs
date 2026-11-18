@@ -935,6 +935,7 @@ impl SessionAuthority {
         self.current_issue_callers(
             conn,
             &link::NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -991,6 +992,7 @@ pub(crate) async fn seal_session(
         .current_issue_callers(
             &mut conn,
             &link::NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
