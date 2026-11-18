@@ -616,6 +616,7 @@ pub(crate) async fn saved(
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            native_target: None,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -762,6 +763,7 @@ pub(crate) async fn save_first_turn(
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            native_target: None,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -994,6 +996,7 @@ async fn verify_child(
         link::insert_command(
             &mut tx,
             &link::NewCommand {
+                native_target: None,
                 id: read.id,
                 machine_id: read.machine,
                 kind: read.kind.as_str(),
@@ -1275,6 +1278,7 @@ pub(crate) async fn reap_closed(engine: &Engine) -> Result<(), EngineError> {
             link::insert_command(
                 &mut tx,
                 &link::NewCommand {
+                    native_target: None,
                     id: fence,
                     machine_id: command.machine,
                     kind: CommandKind::MachineProbe.as_str(),

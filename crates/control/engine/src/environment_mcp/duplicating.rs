@@ -829,6 +829,7 @@ impl Command {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                native_target: None,
                 id: row.id,
                 machine_id: row.machine_id,
                 kind: &row.kind,
@@ -971,6 +972,7 @@ impl Command {
             link::insert_command_with_authority(
                 conn,
                 &NewCommand {
+                    native_target: None,
                     id,
                     machine_id: cleanup.machine,
                     kind: cleanup.kind.as_str(),

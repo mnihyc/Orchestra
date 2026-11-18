@@ -702,6 +702,14 @@ fn peer(
                 return Err("the proof gateway received another machine's command".into());
             }
             match frame {
+                DownFrame::ToolSessionControl(control) => {
+                    if control.refreshing {
+                        server.on_tool_session_refresh();
+                    } else {
+                        server.on_tool_session_control(control.available);
+                    }
+                }
+                DownFrame::ToolSessionUpdate(update) => server.on_tool_session_update(update).await,
                 DownFrame::Cmd(command) => {
                     let id = command.id;
                     let await_ack_snapshot = GATES
@@ -922,6 +930,7 @@ impl Fixture {
             rows::insert_command(
                 &mut conn,
                 &rows::NewCommand {
+                    native_target: None,
                     id,
                     machine_id: self.machine,
                     kind: CommandKind::FsWrite.as_str(),
@@ -934,6 +943,7 @@ impl Fixture {
             .await?
         );
         Ok(StoredCommand {
+            native_target: None,
             authority: None,
             id: Some(id),
             machine: self.machine,
@@ -1050,6 +1060,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
         plan: false,
     })?;
     let original = StoredCommand {
+        native_target: None,
         authority: None,
         id: Some(id),
         machine: fixture.machine,
@@ -1063,6 +1074,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
         rows::insert_command(
             &mut conn,
             &rows::NewCommand {
+                native_target: None,
                 id,
                 machine_id: original.machine,
                 kind: &original.kind,

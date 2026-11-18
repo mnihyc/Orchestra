@@ -84,25 +84,35 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The runtimes a command is being carried out for. The reconciliation leaves these alone: the command
-/// tells the system what became of them when it ends.
+/// In-flight changes suppress transient observations; a stop still permits a terminal observation.
 #[derive(Debug, Default)]
 pub struct Busy {
-    running: Mutex<BTreeMap<Id, usize>>,
+    running: Mutex<BTreeMap<Id, InFlight>>,
+}
+
+#[derive(Debug, Default)]
+struct InFlight {
+    changing: usize,
+    stopping: usize,
 }
 
 /// A runtime counts as busy until this is dropped.
 pub struct BusyGuard {
     busy: Arc<Busy>,
     runtime_id: Id,
+    stopping: bool,
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         let mut running = lock(&self.busy.running);
         if let Some(count) = running.get_mut(&self.runtime_id) {
-            *count -= 1;
-            if *count == 0 {
+            if self.stopping {
+                count.stopping -= 1;
+            } else {
+                count.changing -= 1;
+            }
+            if count.stopping == 0 && count.changing == 0 {
                 running.remove(&self.runtime_id);
             }
         }
@@ -119,11 +129,32 @@ impl Busy {
     /// Counts the runtime as busy until the guard is dropped.
     #[must_use]
     pub fn enter(self: &Arc<Self>, runtime_id: Id) -> BusyGuard {
-        *lock(&self.running).entry(runtime_id).or_default() += 1;
+        self.enter_kind(runtime_id, false)
+    }
+
+    fn enter_stopping(self: &Arc<Self>, runtime_id: Id) -> BusyGuard {
+        self.enter_kind(runtime_id, true)
+    }
+
+    fn enter_kind(self: &Arc<Self>, runtime_id: Id, stopping: bool) -> BusyGuard {
+        let mut running = lock(&self.running);
+        let count = running.entry(runtime_id).or_default();
+        if stopping {
+            count.stopping += 1;
+        } else {
+            count.changing += 1;
+        }
         BusyGuard {
             busy: Arc::clone(self),
             runtime_id,
+            stopping,
         }
+    }
+
+    pub(crate) fn blocks_observation(&self, runtime: Id, terminal: bool) -> bool {
+        lock(&self.running)
+            .get(&runtime)
+            .is_some_and(|count| count.changing > 0 || !terminal)
     }
 
     /// The runtimes that are busy now.
@@ -183,6 +214,36 @@ impl Drop for Claim {
 #[derive(Clone)]
 pub struct Runtimes {
     inner: Arc<Inner>,
+}
+
+/// An original command's factual order, checked after native waits without granting authority.
+#[derive(Clone, Copy)]
+struct OriginalControl<'a> {
+    target: Option<(
+        &'a orch_link_contract::native_target::LifecycleTarget,
+        &'a orch_link::native_fences::NativeFences,
+    )>,
+    context: Option<&'a orch_link::commands::CommandContext>,
+}
+impl OriginalControl<'_> {
+    fn check(self) -> Result<(), CommandError> {
+        if let Some(context) = self.context {
+            context.check_authority()?;
+        }
+        let Some((target, fences)) = self.target else {
+            return Ok(());
+        };
+        let current = fences
+            .lifecycle_target(&target.subject)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        if current.as_ref() != Some(target) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "a newer native control superseded the original command during preparation",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Runtimes {
@@ -679,6 +740,7 @@ impl Runtimes {
                 host,
                 Record {
                     runtime_id,
+                    incarnation: crate::ledger::Incarnation::Untracked,
                     kind: unit.kind,
                     driver,
                     unit,
@@ -695,9 +757,71 @@ impl Runtimes {
         }))
     }
 
+    /// Successful complete observations prove an empty slot. A missing ledger entry,
+    /// unavailable driver or untracked existing unit is never such proof.
+    async fn native_slot_absent(
+        &self,
+        runtime: Id,
+        name: Option<&str>,
+        selected: Option<(&str, Arc<HostDriver>)>,
+        original: OriginalControl<'_>,
+        extra_system: Option<&str>,
+    ) -> Result<bool, CommandError> {
+        original.check()?;
+        let drivers = match selected {
+            Some((name, driver)) => vec![(name.to_owned(), driver)],
+            None => {
+                let drivers = self.inner.drivers.all();
+                if drivers.is_empty() || !self.inner.drivers.failures().is_empty() {
+                    return Err(CommandError {
+                        code: "unavailable".into(),
+                        detail: "the original unit's absence cannot be confirmed while a configured driver is unavailable".into(),
+                        retryable: true,
+                        details: None,
+                    });
+                }
+                drivers
+            }
+        };
+        let mut systems = self.inner.ledger.systems();
+        for system in std::iter::once(self.inner.settings.system_name.as_str()).chain(extra_system)
+        {
+            if !systems.iter().any(|known| known == system) {
+                systems.push(system.to_owned());
+            }
+        }
+        for (_, driver) in drivers {
+            for system in &systems {
+                let units = driver
+                    .contract()
+                    .list(system)
+                    .await
+                    .map_err(|error| failure(&error))?;
+                original.check()?;
+                if units
+                    .iter()
+                    .any(|unit| unit.runtime_id == runtime || name == Some(unit.name.as_str()))
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Tells the system the state the driver finds a runtime's unit in now, if it is not what it was last
     /// told.
     async fn tell(&self, runtime_id: Id, host: &HostDriver, unit: &UnitRef) {
+        let original = self.inner.ledger.get(runtime_id);
+        if original.as_ref().is_some_and(|record| &record.unit != unit) {
+            return;
+        }
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: original.as_ref().and_then(|record| record.incarnation.id()),
+        };
+        let original_identity = original
+            .as_ref()
+            .map(|record| (record.unit.clone(), record.incarnation));
         let state = match host.contract().inspect(unit).await {
             Ok(state) => state,
             Err(error) => {
@@ -705,10 +829,20 @@ impl Runtimes {
                 return;
             }
         };
+        if self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .map(|record| (record.unit, record.incarnation))
+            != original_identity
+        {
+            return;
+        }
         self.inner
             .reports
             .runtime_if_changed(
                 runtime_id,
+                source,
                 state_name(state.state),
                 self.inner
                     .ledger
@@ -725,9 +859,99 @@ impl Runtimes {
         command: Id,
         body: Json,
         cancel: &CancellationToken,
+        context: Option<&orch_link::commands::CommandContext>,
+    ) -> Result<NodeRuntimeCreateResult, CommandError> {
+        self.create_guarded(
+            command,
+            body,
+            cancel,
+            context.map(|context| OriginalControl {
+                target: None,
+                context: Some(context),
+            }),
+        )
+        .await
+    }
+
+    /// A fresh original birth is ordered before its first effect. An existing unknown
+    /// unit cannot be relabeled; an exact recorded retry returns its own reference.
+    pub async fn create_original(
+        &self,
+        command: Id,
+        body: Json,
+        cancel: &CancellationToken,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+        context: Option<&orch_link::commands::CommandContext>,
+    ) -> Result<Option<NodeRuntimeCreateResult>, CommandError> {
+        use orch_link_contract::native_target::LifecycleAction;
+        if !target.coherent_for(LifecycleAction::Create) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime birth is invalid",
+            ));
+        }
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Create)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(None);
+        }
+        self.create_guarded(
+            command,
+            body,
+            cancel,
+            Some(OriginalControl {
+                target: Some((target, fences)),
+                context,
+            }),
+        )
+        .await
+        .map(Some)
+    }
+
+    async fn create_guarded(
+        &self,
+        command: Id,
+        body: Json,
+        cancel: &CancellationToken,
+        original: Option<OriginalControl<'_>>,
     ) -> Result<NodeRuntimeCreateResult, CommandError> {
         let _resources = self.inner.resource_changes.read().await;
+        if let Some(original) = original {
+            original.check()?;
+        }
         let mut spec = managed::unseal(&self.inner.keys, command, body)?;
+        let birth =
+            original.and_then(|original| original.target.and_then(|(target, _)| target.opening));
+        if let Some((target, _)) = original.and_then(|original| original.target) {
+            if target.subject
+                != (orch_link_contract::native_target::LifecycleSubject::Runtime {
+                    runtime_id: spec.runtime_id,
+                })
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the original birth names another runtime",
+                ));
+            }
+            spec.labels.insert(
+                orch_driver_contract::runtime::LABEL_BIRTH.into(),
+                birth
+                    .ok_or_else(|| {
+                        CommandError::new(ErrorCode::Conflict, "the original birth has no opening")
+                    })?
+                    .to_string(),
+            );
+        } else if spec
+            .labels
+            .contains_key(orch_driver_contract::runtime::LABEL_BIRTH)
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "a fresh allocation marker needs its original birth target",
+            ));
+        }
         let requested_driver = self.driver(&spec.driver)?;
         if let Some(link) = lock(&self.inner.link).as_ref() {
             let endpoint = if self.inner.settings.managed_endpoint.is_empty() {
@@ -797,7 +1021,62 @@ impl Runtimes {
         let _busy = self.inner.busy.enter(spec.runtime_id);
         let serial = self.lock_of(spec.runtime_id);
         let _one_at_a_time = serial.lock().await;
+        if let Some(original) = original {
+            original.check()?;
+        }
         let host = self.driver(&spec.driver)?;
+        if let Some(birth) = birth {
+            if let Some(before) = self.inner.ledger.get(spec.runtime_id) {
+                if before.incarnation.id() != Some(birth)
+                    || before.driver != spec.driver
+                    || before.kind != spec.kind
+                    || before.unit.name != spec.name
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the birth cannot adopt or replace an existing native unit",
+                    ));
+                }
+                let state = host
+                    .contract()
+                    .inspect(&before.unit)
+                    .await
+                    .map_err(|error| failure(&error))?;
+                if let Some(original) = original {
+                    original.check()?;
+                }
+                if state.state == UnitStateKind::Absent {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the original birth is absent; no replacement was adopted",
+                    ));
+                }
+                return Ok(NodeRuntimeCreateResult {
+                    unit: before.unit,
+                    source: orch_link_contract::native_target::RuntimeSource {
+                        incarnation: Some(birth),
+                    },
+                });
+            }
+            let control = original.ok_or_else(|| {
+                CommandError::new(ErrorCode::Conflict, "the birth has no original control")
+            })?;
+            if !self
+                .native_slot_absent(
+                    spec.runtime_id,
+                    Some(&spec.name),
+                    Some((&spec.driver, Arc::clone(&host))),
+                    control,
+                    spec.labels.get(LABEL_SYSTEM).map(String::as_str),
+                )
+                .await?
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the birth's native slot already holds an untracked unit; it was left unchanged",
+                ));
+            }
+        }
         if self
             .inner
             .ledger
@@ -857,6 +1136,9 @@ impl Runtimes {
                 .validate(spec.kind, &spec.spec)
                 .await
                 .map_err(|error| failure(&error))?;
+            if let Some(original) = original {
+                original.check()?;
+            }
         }
         let checked = managed::check(&spec, &self.inner.tools)?;
         if spec
@@ -865,6 +1147,9 @@ impl Runtimes {
             .is_some_and(|value| value == "true")
         {
             self.verify_kept(&spec).await?;
+            if let Some(original) = original {
+                original.check()?;
+            }
         }
         for volume in spec
             .volumes
@@ -888,11 +1173,17 @@ impl Runtimes {
             tracing::warn!(%error, "the system a unit belongs to could not be noted");
         }
         // The image first: pulled, built or loaded, so that the unit is made from what is there.
+        if let Some(original) = original {
+            original.check()?;
+        }
         if spec.kept_image.is_none() {
             self.inner
                 .images
                 .ensure(command, &spec.driver, &spec.spec, None, cancel)
                 .await?;
+        }
+        if let Some(original) = original {
+            original.check()?;
         }
         spec.capabilities.check().map_err(|error| failure(&error))?;
         let unit = host
@@ -900,6 +1191,17 @@ impl Runtimes {
             .create(&spec)
             .await
             .map_err(|error| self.failed_for_room(&error))?;
+        if birth.is_some()
+            && (unit.runtime_id != spec.runtime_id
+                || unit.kind != spec.kind
+                || unit.name != spec.name
+                || unit.reference.is_empty())
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the driver did not identify the original birth; no returned unit was adopted",
+            ));
+        }
         if let Some(image) = &spec.kept_image {
             self.inner
                 .ledger
@@ -939,6 +1241,17 @@ impl Runtimes {
         let first_record = before.is_none();
         let record = Record {
             runtime_id: spec.runtime_id,
+            incarnation: birth
+                .map(crate::ledger::Incarnation::Tracked)
+                .unwrap_or_else(|| {
+                    before
+                        .as_ref()
+                        .filter(|before| before.unit == unit)
+                        .map_or_else(
+                            || crate::ledger::Incarnation::Tracked(orch_types::new_id()),
+                            |before| before.incarnation,
+                        )
+                }),
             kind: spec.kind,
             driver: spec.driver.clone(),
             unit: unit.clone(),
@@ -967,8 +1280,18 @@ impl Runtimes {
                 .runtime_class(spec.spec.get("runtime").and_then(Json::as_str))
                 .and_then(|class| class.enrol_timeout_secs),
         };
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: record.incarnation.id(),
+        };
         if let Err(error) = self.inner.ledger.insert(record) {
-            // A unit the node could not record is a unit nobody could find again: it is not kept.
+            if birth.is_some() {
+                return Err(CommandError::new(
+                    ErrorCode::Internal,
+                    format!(
+                        "the unit could not be recorded: {error}; its admitted birth and data remain unconfirmed"
+                    ),
+                ));
+            }
             let _ = host.contract().remove(&unit).await;
             return Err(CommandError::new(ErrorCode::Internal, error.to_string()));
         }
@@ -1009,7 +1332,7 @@ impl Runtimes {
                 .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         }
         self.tell(spec.runtime_id, &host, &unit).await;
-        Ok(NodeRuntimeCreateResult { unit })
+        Ok(NodeRuntimeCreateResult { unit, source })
     }
 
     /// Claims the enrollment token for the runtime, or says who has it. A token is single-use: it is given to
@@ -1065,12 +1388,105 @@ impl Runtimes {
     // ------------------------------------------------------------------------------------ start, stop, remove
 
     /// Carries out `node.runtime.start`.
-    pub async fn start(&self, runtime_id: Id) -> Result<(), CommandError> {
+    pub async fn start(
+        &self,
+        runtime_id: Id,
+        context: Option<&orch_link::commands::CommandContext>,
+    ) -> Result<orch_link_contract::commands::NodeRuntimeStartResult, CommandError> {
         let _resources = self.inner.resource_changes.read().await;
         let _busy = self.inner.busy.enter(runtime_id);
         let serial = self.lock_of(runtime_id);
         let _one_at_a_time = serial.lock().await;
         let (host, record) = self.require(runtime_id).await?;
+        self.start_locked(
+            runtime_id,
+            &host,
+            &record,
+            None,
+            context.map(|context| OriginalControl {
+                target: None,
+                context: Some(context),
+            }),
+        )
+        .await
+    }
+
+    /// Starts only the accepted original after its queue; a genuine reuse keeps its old
+    /// physical identity and a new start installs the admitted candidate before native IO.
+    pub async fn start_original(
+        &self,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+        context: Option<&orch_link::commands::CommandContext>,
+    ) -> Result<Option<orch_link_contract::commands::NodeRuntimeStartResult>, CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject};
+        if !target.coherent_for(LifecycleAction::Start) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime start target is invalid",
+            ));
+        }
+        let LifecycleSubject::Runtime { runtime_id } = &target.subject else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original start target is not a runtime",
+            ));
+        };
+        let runtime_id = *runtime_id;
+        let _resources = self.inner.resource_changes.read().await;
+        let serial = self.lock_of(runtime_id);
+        let _one = serial.lock().await;
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Start)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(None);
+        }
+        if target.observed.is_none() && target.pending.is_empty() {
+            return Ok(None);
+        }
+        let actual = self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .and_then(|record| record.incarnation.id())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::Conflict,
+                    "the host cannot confirm the original native runtime identity",
+                )
+            })?;
+        if !target.matches_source(Some(actual)) {
+            return Ok(None);
+        }
+        let (host, record) = self.require(runtime_id).await?;
+        if !target.matches_source(record.incarnation.id()) {
+            return Ok(None);
+        }
+        let _busy = self.inner.busy.enter(runtime_id);
+        let result = self
+            .start_locked(
+                runtime_id,
+                &host,
+                &record,
+                target.opening,
+                Some(OriginalControl {
+                    target: Some((target, fences)),
+                    context,
+                }),
+            )
+            .await?;
+        Ok(Some(result))
+    }
+
+    async fn start_locked(
+        &self,
+        runtime_id: Id,
+        host: &HostDriver,
+        record: &Record,
+        opening: Option<Id>,
+        original: Option<OriginalControl<'_>>,
+    ) -> Result<orch_link_contract::commands::NodeRuntimeStartResult, CommandError> {
         crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1100,21 +1516,27 @@ impl Runtimes {
                 ));
             }
         }
-        self.recover_interrupted_mounts(runtime_id, &host, &record)
+        self.recover_interrupted_mounts(runtime_id, host, record)
             .await?;
-        let _volume_holds = self.hold_start_volumes(&record).await;
-        self.keep_off_shared_volumes(&record).await?;
+        let _volume_holds = self.hold_start_volumes(record).await;
+        self.keep_off_shared_volumes(record).await?;
+        if let Some(original) = original {
+            original.check()?;
+        }
         let policy = self.inner.ledger.network(runtime_id).unwrap_or_default();
         let network = self
-            .install_network(runtime_id, &host, &record.unit, &policy)
+            .install_network(runtime_id, host, &record.unit, &policy)
             .await;
+        if let Some(original) = original {
+            original.check()?;
+        }
         if !network.is_ready_for(&policy) {
             self.unwatch(runtime_id);
             let _ = host
                 .contract()
                 .stop(&record.unit, self.inner.settings.stop_grace)
                 .await;
-            self.tell(runtime_id, &host, &record.unit).await;
+            self.tell(runtime_id, host, &record.unit).await;
             return Err(CommandError {
                 code: "network.restricted_unavailable".to_owned(),
                 detail: network
@@ -1126,21 +1548,23 @@ impl Runtimes {
         }
         // The operator's up hooks run around a start that brings the unit up, never around one that finds it
         // running; they fail closed.
-        let hooked = self.inner.hooks.any() && !self.runs(&host, &record).await;
+        let hooked = self.inner.hooks.any() && !self.runs(host, record).await;
         let reason = UnitAbout::up_reason(
             self.inner.ledger.about(runtime_id).as_ref(),
             record.started_at.is_none(),
         );
         if hooked
             && let Some(run) = self
-                .hook(HookEvent::PreUp, reason, false, &host, &record)
+                .hook(HookEvent::PreUp, reason, false, host, record)
                 .await
             && run.failed
         {
-            self.tell(runtime_id, &host, &record.unit).await;
+            self.tell(runtime_id, host, &record.unit).await;
             return Err(hook_failure(&run));
         }
-        self.start_capabilities(&host, &record).await?;
+        let result = self
+            .start_capabilities(host, record, opening, original)
+            .await?;
         crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1149,31 +1573,48 @@ impl Runtimes {
             self.inner.clock.time(),
         )
         .await?;
-        self.restore_live_mounts(runtime_id, &host, &record).await;
+        if let Some(original) = original {
+            original.check()?;
+        }
+        self.restore_live_mounts(runtime_id, host, record).await;
         if hooked {
             if let Some(run) = self
-                .hook(HookEvent::PostUp, reason, false, &host, &record)
+                .hook(HookEvent::PostUp, reason, false, host, record)
                 .await
                 && run.failed
             {
-                self.close_after_failed_up(&host, &record).await;
-                self.tell(runtime_id, &host, &record.unit).await;
+                self.close_after_failed_up_checked(host, record, original)
+                    .await?;
+                self.tell(runtime_id, host, &record.unit).await;
                 return Err(hook_failure(&run));
             }
             self.note_phase(runtime_id, HookPhase::Up);
+        }
+        if let Some(original) = original {
+            original.check()?;
         }
         let now = self.inner.clock.time();
         let _ = self
             .inner
             .ledger
             .update(runtime_id, |record| record.started_at = Some(now));
-        self.report_addresses(runtime_id, &host, &record, &policy)
+        self.report_addresses(runtime_id, host, record, &policy)
             .await;
-        self.tell(runtime_id, &host, &record.unit).await;
+        self.tell(runtime_id, host, &record.unit).await;
         if !record.enrolled {
-            self.watch(runtime_id, self.enroll_time(&record));
+            self.watch(runtime_id, self.enroll_time(record));
         }
-        Ok(())
+        let current = self.inner.ledger.get(runtime_id);
+        if current.as_ref().is_some_and(|current| {
+            current.unit != record.unit || current.incarnation.id() != result.source.incarnation
+        }) || (current.is_none() && result.source.incarnation.is_some())
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original native start changed before its reply; no replacement source was substituted",
+            ));
+        }
+        Ok(result)
     }
 
     /// Carries out `node.runtime.stop`: the unit is given `[node] stop_grace_secs` to end by itself. The operator's
@@ -1183,12 +1624,131 @@ impl Runtimes {
         &self,
         runtime_id: Id,
         reason: Option<UnitReason>,
-    ) -> Result<(), CommandError> {
+        context: Option<&orch_link::commands::CommandContext>,
+    ) -> Result<orch_link_contract::commands::NodeRuntimeStopResult, CommandError> {
         let _resources = self.inner.resource_changes.read().await;
-        let _busy = self.inner.busy.enter(runtime_id);
+        let _busy = self.inner.busy.enter_stopping(runtime_id);
         let serial = self.lock_of(runtime_id);
         let _one_at_a_time = serial.lock().await;
         let (host, record) = self.require(runtime_id).await?;
+        self.stop_locked(
+            runtime_id,
+            reason,
+            &host,
+            &record,
+            context.map(|context| OriginalControl {
+                target: None,
+                context: Some(context),
+            }),
+        )
+        .await
+    }
+
+    /// Stops only the accepted original after the native runtime lock. The caller retains
+    /// its actual original operation/authority; the target and ordering marker grant nothing.
+    /// None means a superseded or foreign original caused no native stop; proved absence
+    /// has its own factual result and never selects a later unit.
+    pub async fn stop_original(
+        &self,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+        reason: Option<UnitReason>,
+        context: Option<&orch_link::commands::CommandContext>,
+    ) -> Result<Option<orch_link_contract::commands::NodeRuntimeStopResult>, CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject};
+        if !target.coherent_for(LifecycleAction::Stop) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime stop target is invalid",
+            ));
+        }
+        let LifecycleSubject::Runtime { runtime_id } = &target.subject else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original stop target is not a runtime",
+            ));
+        };
+        let runtime_id = *runtime_id;
+        let _resources = self.inner.resource_changes.read().await;
+        let serial = self.lock_of(runtime_id);
+        let _one = serial.lock().await;
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Stop)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(None);
+        }
+        let original = OriginalControl {
+            target: Some((target, fences)),
+            context,
+        };
+        original.check()?;
+        let actual = self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .and_then(|record| record.incarnation.id());
+        let Some(actual) = actual else {
+            if self
+                .native_slot_absent(runtime_id, None, None, original, None)
+                .await?
+            {
+                let mut originals: Vec<_> = target
+                    .observed
+                    .into_iter()
+                    .chain(target.pending.iter().copied())
+                    .collect();
+                originals.sort_unstable();
+                originals.dedup();
+                return Ok(Some(
+                    orch_link_contract::commands::NodeRuntimeStopResult::Absent { originals },
+                ));
+            }
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the host cannot confirm the existing native runtime identity; it was left unchanged",
+            ));
+        };
+        if !target.matches_source(Some(actual)) {
+            return Ok(None);
+        }
+        let (host, record) = self.require(runtime_id).await?;
+        if !target.matches_source(record.incarnation.id()) {
+            return Ok(None);
+        }
+        let _busy = self.inner.busy.enter_stopping(runtime_id);
+        let result = self
+            .stop_locked(
+                runtime_id,
+                reason,
+                &host,
+                &record,
+                Some(OriginalControl {
+                    target: Some((target, fences)),
+                    context,
+                }),
+            )
+            .await?;
+        Ok(Some(result))
+    }
+
+    async fn stop_locked(
+        &self,
+        runtime_id: Id,
+        reason: Option<UnitReason>,
+        host: &HostDriver,
+        record: &Record,
+        original: Option<OriginalControl<'_>>,
+    ) -> Result<orch_link_contract::commands::NodeRuntimeStopResult, CommandError> {
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: record.incarnation.id(),
+        };
+        if source.incarnation.is_none() {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the host cannot confirm the original native runtime source",
+            ));
+        }
         let occupied = crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1199,23 +1759,40 @@ impl Runtimes {
         .await?;
         self.unwatch(runtime_id);
         let reason = reason.unwrap_or(UnitReason::Stop);
-        let running = self.inner.hooks.any() && self.runs(&host, &record).await;
+        let running = self.inner.hooks.any() && self.runs(host, record).await;
         let came_up = running || self.came_up(runtime_id);
         if running {
             let _ = self
-                .hook(HookEvent::PreDown, reason, false, &host, &record)
+                .hook(HookEvent::PreDown, reason, false, host, record)
                 .await;
         }
-        host.contract()
-            .stop(&record.unit, self.inner.settings.stop_grace)
+        let before = host
+            .contract()
+            .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
+        if let Some(original) = original {
+            original.check()?;
+        }
+        let attempt = if before.state == UnitStateKind::Running {
+            host.contract()
+                .stop(&record.unit, self.inner.settings.stop_grace)
+                .await
+        } else {
+            Ok(())
+        };
         let actual = host
             .contract()
             .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
-        if actual.state != UnitStateKind::Stopped {
+        if let Some(original) = original {
+            original.check()?;
+        }
+        if actual.state == UnitStateKind::Running {
+            if let Err(error) = attempt {
+                return Err(failure(&error));
+            }
             return Err(CommandError::new(
                 ErrorCode::Conflict,
                 "the host did not confirm that the unit stopped",
@@ -1227,12 +1804,31 @@ impl Runtimes {
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         if came_up {
             let _ = self
-                .hook(HookEvent::PostDown, reason, false, &host, &record)
+                .hook(HookEvent::PostDown, reason, false, host, record)
                 .await;
             self.note_phase(runtime_id, HookPhase::Down);
         }
-        self.tell(runtime_id, &host, &record.unit).await;
-        Ok(())
+        if let Some(original) = original {
+            original.check()?;
+        }
+        self.tell(runtime_id, host, &record.unit).await;
+        if actual.state == UnitStateKind::Absent {
+            let mut originals: Vec<_> = original
+                .and_then(|control| control.target)
+                .map(|(target, _)| {
+                    target
+                        .observed
+                        .into_iter()
+                        .chain(target.pending.iter().copied())
+                        .collect()
+                })
+                .unwrap_or_else(|| source.incarnation.into_iter().collect());
+            originals.sort_unstable();
+            originals.dedup();
+            Ok(orch_link_contract::commands::NodeRuntimeStopResult::Absent { originals })
+        } else {
+            Ok(orch_link_contract::commands::NodeRuntimeStopResult::Stopped { source })
+        }
     }
 
     /// Carries out `node.runtime.remove`: the unit goes and its volumes stay. A runtime the node has no unit
@@ -1248,6 +1844,72 @@ impl Runtimes {
             self.forget(runtime_id).await;
             return Ok(());
         };
+        self.remove_locked(runtime_id, &host, &record).await
+    }
+
+    /// Removes only the accepted original after its native queue, retaining volumes and
+    /// leaving a later physical instance or an unconfirmed original untouched.
+    pub async fn remove_original(
+        &self,
+        target: &orch_link_contract::native_target::LifecycleTarget,
+        fences: &orch_link::native_fences::NativeFences,
+    ) -> Result<bool, CommandError> {
+        use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject};
+        if !target.coherent_for(LifecycleAction::Remove) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original runtime removal target is invalid",
+            ));
+        }
+        let LifecycleSubject::Runtime { runtime_id } = &target.subject else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original removal target is not a runtime",
+            ));
+        };
+        let runtime_id = *runtime_id;
+        let _resources = self.inner.resource_changes.read().await;
+        let serial = self.lock_of(runtime_id);
+        let _one = serial.lock().await;
+        if !fences
+            .observe_lifecycle(target, LifecycleAction::Remove)
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        {
+            return Ok(false);
+        }
+        let Some(expected) = target.observed else {
+            return Ok(false);
+        };
+        let actual = self
+            .inner
+            .ledger
+            .get(runtime_id)
+            .and_then(|record| record.incarnation.id())
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::Conflict,
+                    "the host cannot confirm the original native runtime identity",
+                )
+            })?;
+        if actual != expected {
+            return Ok(false);
+        }
+        let (host, record) = self.require(runtime_id).await?;
+        if record.incarnation.id() != Some(expected) {
+            return Ok(false);
+        }
+        let _busy = self.inner.busy.enter(runtime_id);
+        self.unwatch(runtime_id);
+        self.remove_locked(runtime_id, &host, &record).await?;
+        Ok(true)
+    }
+
+    async fn remove_locked(
+        &self,
+        runtime_id: Id,
+        host: &HostDriver,
+        record: &Record,
+    ) -> Result<(), CommandError> {
         let occupied = crate::resources::runtime_occupancy(
             &self.inner.drivers,
             &self.inner.tools,
@@ -1256,30 +1918,18 @@ impl Runtimes {
             self.inner.clock.time(),
         )
         .await?;
-        let running = self.inner.hooks.any() && self.runs(&host, &record).await;
+        let running = self.inner.hooks.any() && self.runs(host, record).await;
         let came_up = running || self.came_up(runtime_id);
         if running {
             let _ = self
-                .hook(
-                    HookEvent::PreDown,
-                    UnitReason::Delete,
-                    false,
-                    &host,
-                    &record,
-                )
+                .hook(HookEvent::PreDown, UnitReason::Delete, false, host, record)
                 .await;
         }
         // Built before the unit and its networks go, so that the hook is told what it is to undo.
         let after = if came_up && self.inner.hooks.wants(HookEvent::PostDown) {
             Some(
-                self.hook_document(
-                    HookEvent::PostDown,
-                    UnitReason::Delete,
-                    false,
-                    &host,
-                    &record,
-                )
-                .await,
+                self.hook_document(HookEvent::PostDown, UnitReason::Delete, false, host, record)
+                    .await,
             )
         } else {
             None
@@ -1509,9 +2159,24 @@ impl Runtimes {
     /// A unit whose up hook failed does not stay up: its down hooks run around its stop, as for any stop, and the
     /// start that brought it up fails whatever they do.
     async fn close_after_failed_up(&self, host: &HostDriver, record: &Record) {
+        let _ = self.close_after_failed_up_checked(host, record, None).await;
+    }
+
+    async fn close_after_failed_up_checked(
+        &self,
+        host: &HostDriver,
+        record: &Record,
+        original: Option<OriginalControl<'_>>,
+    ) -> Result<(), CommandError> {
+        if let Some(original) = original {
+            original.check()?;
+        }
         let _ = self
             .hook(HookEvent::PreDown, UnitReason::Stop, false, host, record)
             .await;
+        if let Some(original) = original {
+            original.check()?;
+        }
         if let Err(error) = host
             .contract()
             .stop(&record.unit, self.inner.settings.stop_grace)
@@ -1519,10 +2184,14 @@ impl Runtimes {
         {
             tracing::warn!(runtime = %record.runtime_id, %error, "a unit whose up hook failed could not be stopped");
         }
+        if let Some(original) = original {
+            original.check()?;
+        }
         let _ = self
             .hook(HookEvent::PostDown, UnitReason::Stop, false, host, record)
             .await;
         self.note_phase(record.runtime_id, HookPhase::Down);
+        Ok(())
     }
 
     /// Tells the system an open unit's networks once it runs, with its address there; a restricted unit's are told
@@ -1573,6 +2242,9 @@ impl Runtimes {
                         .reports
                         .runtime(
                             record.runtime_id,
+                            orch_link_contract::native_target::RuntimeSource {
+                                incarnation: record.incarnation.id(),
+                            },
                             state_name(UnitStateKind::Stopped),
                             Some(run.why()),
                         )
@@ -1617,13 +2289,20 @@ impl Runtimes {
 
     /// Takes a runtime out of the node's memory and tells the system its unit is gone.
     async fn forget(&self, runtime_id: Id) {
+        let source = orch_link_contract::native_target::RuntimeSource {
+            incarnation: self
+                .inner
+                .ledger
+                .get(runtime_id)
+                .and_then(|record| record.incarnation.id()),
+        };
         if let Err(error) = self.inner.ledger.remove(runtime_id) {
             tracing::warn!(%runtime_id, %error, "a removed runtime could not be taken out of the ledger");
         }
         lock(&self.inner.locks).remove(&runtime_id);
         self.inner
             .reports
-            .runtime_if_changed(runtime_id, state_name(UnitStateKind::Absent), None)
+            .runtime_if_changed(runtime_id, source, state_name(UnitStateKind::Absent), None)
             .await;
     }
 
@@ -1899,6 +2578,9 @@ impl Runtimes {
             .reports
             .runtime_if_changed(
                 runtime_id,
+                orch_link_contract::native_target::RuntimeSource {
+                    incarnation: record.incarnation.id(),
+                },
                 state_name(UnitStateKind::Failed),
                 Some(why.to_owned()),
             )

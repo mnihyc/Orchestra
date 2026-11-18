@@ -136,7 +136,7 @@ pub async fn of_many(
                 CASE WHEN r.id IS NOT NULL THEN jsonb_build_object('lifecycle','unit') || COALESCE(h.drivers -> r.driver,'{}'::jsonb)
                      WHEN e.template_id IS NULL THEN m.facts -> 'environment_descriptor'
                      ELSE jsonb_build_object('lifecycle','unit') ||
-                         CASE WHEN h.id IS NOT NULL THEN h.drivers -> t.driver ELSE offered.descriptor END END AS descriptor,
+                         COALESCE(CASE WHEN h.id IS NOT NULL THEN h.drivers -> t.driver ELSE offered.descriptor END,'{}'::jsonb) END AS descriptor,
                 m.facts -> 'policy' AS policy,
                 COALESCE((SELECT c.body #>> '{spec,runtime}' FROM commands c WHERE r.id IS NOT NULL AND c.kind = 'node.runtime.create'
                            AND c.body ->> 'runtime_id' = r.id::text AND c.state IN ('queued','sent','accepted','succeeded')
