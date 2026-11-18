@@ -39,9 +39,11 @@ export interface EditDialogProps {
   children: ReactNode;
   /** What cannot be changed here: `Fixed` and `ChangedOn` rows. */
   rest?: ReactNode;
+  /** An act's shared notice choice, before Cancel and Save. */
+  footerStart?: ReactNode;
 }
 
-export function EditDialog({ admin, title, submitLabel, description, changed, valid = true, pending, error, onSave, onClose, children, rest }: EditDialogProps) {
+export function EditDialog({ admin, title, submitLabel, description, changed, valid = true, pending, error, onSave, onClose, children, rest, footerStart }: EditDialogProps) {
   const { t } = useTranslation();
   const stale = error instanceof ApiError && error.is('conflict.stale_revision');
   return (
@@ -53,6 +55,7 @@ export function EditDialog({ admin, title, submitLabel, description, changed, va
       dismissible={!pending}
       footer={
         <>
+          {footerStart}
           <Button disabled={pending} onClick={onClose}>
             {t('common.cancel')}
           </Button>

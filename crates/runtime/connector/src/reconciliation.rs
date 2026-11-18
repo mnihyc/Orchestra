@@ -36,9 +36,18 @@ pub const TURN_LOST: &str = "the connector stopped while a turn was running";
 /// What a session that its harness no longer has is told.
 pub const SESSION_GONE: &str = "the harness no longer has the session";
 
-async fn lost(hosting: &Hosting, thread: ThreadId, segment: Id, reason: &str) {
+async fn lost(
+    hosting: &Hosting,
+    thread: ThreadId,
+    segment: Id,
+    opening_id: Id,
+    expected: bool,
+    reason: &str,
+) {
     let event = orch_agent_contract::events::SessionEvent::SessionLost(
         orch_agent_contract::events::SessionLost {
+            expected,
+            opening_id,
             reason: reason.to_owned(),
         },
     );
@@ -62,7 +71,7 @@ async fn lost(hosting: &Hosting, thread: ThreadId, segment: Id, reason: &str) {
             tracing::warn!(%error, "a lost session could not be reported");
         }
     }
-    hosting.ledger().session_closed(thread);
+    hosting.ledger().session_closed_if(thread, opening_id);
 }
 
 fn why(session: &HostedSession, held: Option<&[String]>) -> Option<&'static str> {
@@ -86,16 +95,40 @@ pub async fn reconcile(hosting: &Arc<Hosting>) {
                 for session in &hosted.sessions {
                     match why(session, held.as_deref()) {
                         Some(reason) => {
-                            lost(hosting, session.thread_id, session.segment_id, reason).await;
+                            lost(
+                                hosting,
+                                session.thread_id,
+                                session.segment_id,
+                                session.opening_id,
+                                false,
+                                reason,
+                            )
+                            .await;
                         }
-                        None => hosting.ledger().session_closed(session.thread_id),
+                        None => lost(
+                            hosting,
+                            session.thread_id,
+                            session.segment_id,
+                            session.opening_id,
+                            true,
+                            "the connector restarted; the next turn opens this conversation again",
+                        )
+                        .await,
                     }
                 }
             }
             Err(error) => {
                 let detail = format!("the harness process could not be started again: {error}");
                 for session in &hosted.sessions {
-                    lost(hosting, session.thread_id, session.segment_id, &detail).await;
+                    lost(
+                        hosting,
+                        session.thread_id,
+                        session.segment_id,
+                        session.opening_id,
+                        false,
+                        &detail,
+                    )
+                    .await;
                 }
                 hosting.ledger().harness_stopped(provider, agent);
                 let report = orch_agent_contract::facts::HarnessStatus {
@@ -130,6 +163,7 @@ mod tests {
 
     fn session(turn: Option<Id>) -> HostedSession {
         HostedSession {
+            opening_id: orch_types::new_id(),
             thread_id: new_id(),
             segment_id: new_id(),
             native_session_ref: "fake_1".into(),
@@ -145,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_session_is_lost_only_when_the_harness_says_it_has_gone() {
+    fn an_idle_conversation_is_unexpectedly_lost_only_when_the_harness_says_it_has_gone() {
         let held = vec!["fake_1".to_owned()];
         assert_eq!(why(&session(None), Some(&held)), None);
         assert_eq!(why(&session(None), Some(&[])), Some(SESSION_GONE));

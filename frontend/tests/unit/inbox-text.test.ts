@@ -16,6 +16,30 @@ function notice(kind: Notification['kind'], parameters: Record<string, unknown> 
 }
 
 describe('notification action text', () => {
+  it.each(['en', 'zh-CN'] as const)('names the same Copy operation as it runs, finishes or leaves cleanup incomplete (%s)', async (locale) => {
+    await setLocale(locale);
+    try {
+      const states = locale === 'en'
+        ? [['running', 'Copying Shared data'], ['done', 'Shared data copied'], ['failed', 'Copy incomplete · Shared data']]
+        : [['running', '正在复制 Shared data'], ['done', 'Shared data 已复制'], ['failed', '复制未完成 · Shared data']];
+      for (const [state, title] of states) {
+        const row = notice('environment.attention', { operation_kind: 'mount_copy', name: 'Shared data', state, resource_ids: [['mount', 'mount']] });
+        expect(notificationText(row, i18n.t, locale).title).toBe(title);
+      }
+    } finally { await setLocale('en'); }
+  });
+
+  it.each(['en', 'zh-CN'] as const)('names the saved mount availability in the reader’s language (%s)', async (locale) => {
+    await setLocale(locale);
+    try {
+      for (const enabled of [false, true]) {
+        const row = notice('environment.attention', { operation_kind: enabled ? 'mount_enable' : 'mount_disable', name: 'Shared data', state: 'done', resource_ids: [['mount', 'mount']] });
+        const title = locale === 'en' ? `Mount Shared data ${enabled ? 'enabled' : 'disabled'}` : `挂载 Shared data 已${enabled ? '启用' : '停用'}`;
+        expect(notificationText(row, i18n.t, locale).title).toBe(title);
+      }
+    } finally { await setLocale('en'); }
+  });
+
   it.each(['en', 'zh-CN'] as const)('localizes an explicit person notice and preserves its authored note (%s)', async (locale) => {
     await setLocale(locale);
     try {

@@ -193,6 +193,7 @@ async fn cancelled_upload(controller_failed: bool) {
                 environment_id: site.environment,
             },
             &[orch_link::streams::DeliveredEvent {
+                native_opening_id: None,
                 seq: 1,
                 at: orch_types::Time::new(site.world.now()),
                 kind: "job.progress".into(),

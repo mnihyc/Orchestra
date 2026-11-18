@@ -59,7 +59,7 @@ beforeEach(() => {
   } };
   calls.kinds.mockResolvedValue(registry); calls.machine.mockImplementation(() => Promise.resolve(machine));
   calls.create.mockResolvedValue(detailAgent); calls.register.mockResolvedValue(detailAgent);
-  calls.program.mockResolvedValue({ entries: [custom], can_manage: true, config_file: null, capabilities: [] });
+  calls.program.mockResolvedValue({ approvals: [], entries: [custom], can_manage: true, config_file: null, capabilities: [] });
 });
 afterEach(async () => { document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark']) describe(`${locale}/${theme}`, () => {

@@ -27,6 +27,8 @@ import { useReadWhenOpened } from '@/features/inbox/Counters';
 import { NoAccess } from '@/features/access/NoAccess';
 import { readableNavigationRoot } from '@/features/navigation/currentOrg';
 import { Composer } from '@/features/composer/Composer';
+import { ThreadRunsLine } from '@/features/composer/Controls';
+import { WhereChip } from '@/features/thread/WhereChip';
 import { composerWriter, type SendingInput, useSending } from '@/features/composer/Draft';
 import { QueueTray } from '@/features/composer/QueueTray';
 import { PlaceReadme } from '@/features/documents/Readme';
@@ -58,8 +60,9 @@ import { TimelineSelectionBar } from '@/features/timeline/SelectionBar';
 import { Timeline, type TimelineHandle } from '@/features/timeline/Timeline';
 import { useTimelineWindowKey } from '@/features/timeline/windowKey';
 import { holds } from '@/lib/permissions';
-import { reloadThread, useThreadFeed } from '@/realtime/live';
-import { threadReadState, useThreadView } from '@/realtime/stores/thread';
+import { refreshThread, reloadThread, useSocketStatus, useThreadFeed } from '@/realtime/live';
+import { useReadAgain } from '@/lib/useReadAgain';
+import { threadReadState, threadViewOf, useThreadView } from '@/realtime/stores/thread';
 import { selectOrg } from '@/shell/org';
 import { useScreenHeading } from '@/shell/screen';
 import { Button } from '@/ui/Button';
@@ -107,6 +110,9 @@ export interface ThreadProps {
   focusPrompt?: PromptFocus | null | undefined;
 }
 
+/** While the page shows a turn as under way, the thread is read again this often (while the live connection is up; every three seconds while it is not): a frame that never came would otherwise leave "Generating" on the screen until the page was loaded again. Small: one read of what changed since the last row held. */
+const RUNNING_READ_AGAIN_MS = 5_000;
+
 export function ThreadScreen({ threadId, item, items = null, turn, continuation = null, onVersionSelect, prompt, focusPrompt }: ThreadProps) {
   const { t } = useTranslation();
   const userId = useStore(client.session, (state) => state.userId);
@@ -133,6 +139,13 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
   // Only the actually displayed conversation marks its notifications read; frame metadata does not.
   useReadWhenOpened(!reading.readOnly && view.closed === null && view.loaded !== 'none' ? threadId : null);
   const thread = isThreadForScreen(view.thread, threadId) ? view.thread : null;
+  // A read that begins again (a live frame was lost, the connection came back) leaves the box where it stands and usable, so what is being typed keeps its place and its focus: removing it made the row of controls vanish and the page jump.
+  const [boxWas, setBoxWas] = useState(false);
+  const holdBox = boxWas && thread !== null && !thread.archived && reading.readiness === 'loading' && reading.selection === null
+    && (reading.projection === null || reading.projection.viewed_continuation_id === reading.projection.active_continuation_id);
+  const boxNow = holdBox || thread !== null && !reading.readOnly && !thread.archived;
+  // Remembered from one render to the next; adjusted while rendering, as React asks for a value that follows others.
+  if (boxWas !== boxNow) setBoxWas(boxNow);
   const navigationOrg = readableNavigationRoot(thread?.path);
   // The items being picked, to forward, quote or discuss: held here, where the conversation and the bar that stands in place of the box meet.
   const picking = useSelection<string>(view.order);
@@ -161,6 +174,22 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
   useEffect(() => {
     if (focusedContent && navigationOrg !== null) selectOrg(userId, navigationOrg);
   }, [navigationOrg, userId, focusedContent]);
+
+  // The status stays true without the live connection's help: while a turn is shown as under way the thread is read again, once more when the page is looked at again, and once when the connection comes back. A thread that is being opened again is left to that opening.
+  const turnShown = thread !== null && (thread.state === 'running' || thread.state === 'starting' || thread.state === 'waiting_approval');
+  const readNow = useCallback(() => { if (document.visibilityState === 'visible' && threadReadState(threadViewOf(read)).readiness === 'ready') refreshThread(read); }, [read]);
+  useReadAgain(turnShown && shown, readNow, RUNNING_READ_AGAIN_MS);
+  useEffect(() => {
+    if (!turnShown || !shown) return;
+    document.addEventListener('visibilitychange', readNow);
+    return () => document.removeEventListener('visibilitychange', readNow);
+  }, [turnShown, shown, readNow]);
+  const connected = useSocketStatus().phase === 'ready';
+  const wasConnected = useRef(connected);
+  useEffect(() => {
+    if (connected && !wasConnected.current && shown) readNow();
+    wasConnected.current = connected;
+  }, [connected, shown, readNow]);
 
   const sending = useSending(threadId);
   const unarchive = useMutation({
@@ -200,8 +229,9 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
       <AudienceBanner thread={thread} />
       <Frame><ThreadSummaryInspector threadId={threadId} enabled={shown} /></Frame>
       <NowLine threadId={threadId} />
-      {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="min-w-0 shrink-0 px-4 pt-1">
-        <ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line />
+      {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 px-4 pt-1">
+        <WhereChip thread={thread} />
+        <div className="min-w-0 flex-1"><ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line /></div>
       </div>}
       {linkedTurn.isError && <ErrorAlert error={linkedTurn.error} />}
       <FindInConversation threadId={threadId} timeline={timeline} root={root} />
@@ -250,7 +280,8 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
         <QueueTray threadId={threadId} queued={queuedInputs(view)} sending={sendingTray(view, sending)} readOnly={reading.readOnly} />
         {picking.active && !reading.readOnly ? (
           <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={drivingShown} onCancel={picking.clear} />
-        ) : reading.readOnly ? null : thread.archived ? (
+        ) : reading.readOnly && !holdBox ? <ThreadRunsLine thread={thread} /> : thread.archived ? (
+          <>
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-text">
             <Archive className="text-text-muted" aria-hidden />
             <span className="flex-1">{thread.archived_by === null ? t('thread.archived.lineAnonymous') : t('thread.archived.line', { name: thread.archived_by.display_name })}</span>
@@ -263,7 +294,9 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
             )}
             {unarchive.error !== null && <ErrorAlert error={unarchive.error} className="w-full" />}
           </div>
-        ) : composerShown ? (
+          <ThreadRunsLine thread={thread} />
+          </>
+        ) : composerShown || holdBox ? (
           <Composer thread={thread} onSent={() => timeline.current?.scrollToEnd()} />
         ) : null}
       </Frame>

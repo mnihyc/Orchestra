@@ -204,7 +204,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
   it('registers a source inline through the machine registry and selects its returned declaration without another setup read',async()=>{
     const program:MachineProgram={kind:'provider_source',name:'gpu',command:['python','/opt/source.py'],origin:'orch',ready:true,version:'1',
       descriptor:{...SOURCE_DESCRIPTOR,name:'gpu',title:'GPU source'},models:null,detail:null};
-    vi.mocked(changeMachinePrograms).mockResolvedValue({entries:[program],can_manage:true,capabilities:[],config_file:null});
+    vi.mocked(changeMachinePrograms).mockResolvedValue({approvals:[],entries:[program],can_manage:true,capabilities:[],config_file:null});
     const user=await address();await pick(t('providerCreation.machine'),'GPU machine',user);
     await user.click(button(t('providerCreation.registerSource')));
     const dialog=await screen.findByRole('dialog',{name:t('machinePrograms.addTitle')});
