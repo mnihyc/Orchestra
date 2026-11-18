@@ -123,6 +123,7 @@ pub struct CommandSource {
     person: Id,
     payer: Id,
     provider: Id,
+    backend: orch_provider_contract::capabilities::BackendRef,
     machine: Id,
     body: Hash,
     endpoint: Vec<u8>,
@@ -254,7 +255,14 @@ impl NativeSource for Source {
             }
             let request: ProviderGenerate =
                 serde_json::from_value(selected.call.request.clone()).map_err(EngineError::from)?;
-            if request.provider_id != input.provider {
+            let binding = rows::segment_binding(conn, input.thread, input.segment)
+                .await?
+                .ok_or(Error::Refused)?;
+            if request.provider_id != input.provider
+                || binding.provider_id != request.provider_id
+                || binding.model != request.model_name
+                || !matches!(&binding.transport, rows::DialogueTransport::Api{protocol, backend} if protocol==&request.protocol && backend==&input.backend)
+            {
                 return Err(Error::Refused);
             }
             let selected = match Box::pin(model::select(
@@ -262,8 +270,7 @@ impl NativeSource for Source {
                 &principal,
                 input.root,
                 AskModel {
-                    provider_id: request.provider_id,
-                    model: request.model_name.clone(),
+                    backend: input.backend.clone(),
                     params: request.params.clone(),
                 },
                 principal.now(),
@@ -363,6 +370,12 @@ impl CommandSource {
             .await?
             .ok_or_else(closed)?;
         let request: ProviderGenerate = serde_json::from_value(call.request.clone())?;
+        let binding = rows::segment_binding(conn, call.thread_id, call.segment_id)
+            .await?
+            .ok_or_else(closed)?;
+        let rows::DialogueTransport::Api { protocol, backend } = binding.transport else {
+            return Err(closed());
+        };
         if call.thread_id != controller.thread
             || call.turn_id != controller.turn
             || call.person_id != caller.user()
@@ -377,10 +390,14 @@ impl CommandSource {
             || authored.turn_id != Some(controller.turn)
             || authored.run_as.is_some()
             || request.provider_id != call.provider_id
+            || binding.provider_id != request.provider_id
+            || binding.model != request.model_name
+            || protocol != request.protocol
         {
             return Err(closed());
         }
         Ok(Self {
+            backend,
             origin: CapturedOperation::capture(caller).map_err(EngineError::unreadable)?,
             call: call.id,
             thread: call.thread_id,

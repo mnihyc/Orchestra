@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib -- merge::tests::ask_model_policy
+test -p orch-api-core --test ask -- backend_reserve::
+test -p orch-api-core --test ask -- ask_model
+test -p orch-api-core --lib
+test -p orch-engine --lib -- ask::
+web typecheck
+web lint
+web test -- tests/component/ask-models-setting.test.tsx tests/component/ask-models-editor.test.tsx tests/component/ask-models.test.tsx tests/component/ask-model-params.test.tsx tests/component/ask-allocation-history.test.tsx tests/unit/ask-model-policy-value.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue.test.ts

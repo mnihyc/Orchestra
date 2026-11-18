@@ -37,6 +37,16 @@ async fn settings(
 }
 
 impl Engine {
+    /// Check the input's current model use and record what this turn's program can see.
+    pub(crate) async fn preview_turn_model(
+        &self,
+        conn: &mut Conn,
+        snapshot: &mut StartSnapshot,
+    ) -> Result<Option<Box<NativeModelContext>>, EngineError> {
+        let allowed = Box::pin(self.native_model_use_preview(conn, snapshot)).await?;
+        Box::pin(self.capture_native_model(conn, snapshot, allowed)).await
+    }
+
     async fn native_backend_principals(
         &self,
         conn: &mut Conn,
@@ -85,9 +95,51 @@ impl Engine {
     pub(crate) async fn capture_native_model(
         &self,
         conn: &mut Conn,
-        snapshot: &StartSnapshot,
+        snapshot: &mut StartSnapshot,
         allowed: bool,
     ) -> Result<Option<Box<NativeModelContext>>, EngineError> {
+        let sources = self
+            .inner
+            .capability_services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
+        let authority =
+            crate::inputs::saved_authority(snapshot.input.submission_authority.as_ref())?;
+        let overrides = if let Some(parent) = authority
+            .as_ref()
+            .and_then(|authority| authority.capability_parent())
+        {
+            parent
+                .native_settings(
+                    conn,
+                    &snapshot.input,
+                    snapshot.thread.node_id,
+                    &snapshot.descriptor,
+                    sources.capabilities().declarations(),
+                )
+                .await?
+        } else {
+            BTreeMap::new()
+        };
+        // The concrete image flag and the canonical capability carrier describe the same native request.
+        if let Some(mode) = overrides
+            .get(registry::keys::AGENTS_IMAGE_GENERATION)
+            .and_then(Json::as_str)
+        {
+            snapshot.settings.image_generation = Some(mode == "on");
+        }
+        let program_output = if let Some(parent) = authority
+            .as_ref()
+            .and_then(|authority| authority.capability_parent())
+        {
+            parent
+                .program_output(conn, &snapshot.input, &snapshot.turn, &snapshot.descriptor)
+                .await?
+        } else {
+            None
+        };
         let Some(model) = &snapshot.model else {
             return Ok(None);
         };
@@ -133,14 +185,8 @@ impl Engine {
         }
         let access = serde_json::to_value(snapshot.path)?;
         let arrangement = serde_json::to_value(snapshot.arrangement.kind)?;
-        let sources = self
-            .inner
-            .capability_services
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default();
         let mut values = Box::pin(settings(conn, snapshot.thread.node_id, &sources)).await?;
+        values.extend(overrides);
         // The session and its first turn both use the exact choices already frozen on that turn.
         values.insert("agent.params".into(), snapshot.adapter_params()?);
         let mut projection = capability_routes::project_with_account(
@@ -212,6 +258,11 @@ impl Engine {
             &projection.resolve(),
         )
         .map_err(EngineError::unreadable)?;
+        if let Some(output) = program_output {
+            context
+                .set_program_output(output)
+                .map_err(EngineError::unreadable)?;
+        }
         if let Some(path) = projection
             .registry
             .declarations()

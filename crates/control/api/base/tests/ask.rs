@@ -4,11 +4,15 @@
     clippy::expect_used,
     reason = "a deciding case fails by panicking"
 )]
+#[path = "ask/admin_mode.rs"]
+mod admin_mode;
 #[path = "ask/backend_reserve.rs"]
 mod backend_reserve;
 #[path = "ask/context.rs"]
 mod context;
 mod places;
+#[path = "ask/refusals.rs"]
+mod refusals;
 mod rig;
 mod support;
 
@@ -142,10 +146,7 @@ async fn configured_provider(s: &Scene) -> Id {
     .await
     .unwrap()
     .unwrap_or_default();
-    models.push(AskModelIdentity {
-        provider_id: id,
-        model: MODEL.into(),
-    });
+    models.push(AskModelIdentity::api(id, MODEL.into()));
     setting(s, "ask.models", json!(models)).await;
     id
 }
@@ -1451,12 +1452,12 @@ async fn root_model_choices_do_not_require_thread_creation_authority() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,enabled,source,created_by) VALUES ($1,$2,'switched-off','Off',false,'manual',$3)")
         .bind(new_id()).bind(provider).bind(s.ada.id()).execute(s.rig.db.pool()).await.unwrap();
-    setting(&s,"ask.models",json!([{ "provider_id":provider,"model":MODEL },{ "provider_id":provider,"model":"switched-off" }])).await;
+    setting(&s,"ask.models",json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":"switched-off"}}}])).await;
     let reply = s
         .rig
         .world
@@ -1472,14 +1473,19 @@ async fn root_model_choices_do_not_require_thread_creation_authority() {
     let allowed = reply
         .models
         .iter()
-        .find(|choice| choice.selection.provider_id == provider && choice.selection.model == MODEL)
+        .find(|choice| {
+            choice.selection.backend.offering.as_ref().unwrap().provider == provider
+                && choice.selection.backend.offering.as_ref().unwrap().offering == MODEL
+        })
         .unwrap();
     assert!(allowed.allowed);
     assert!(allowed.is_default);
     let disabled = reply
         .models
         .iter()
-        .find(|choice| choice.selection.model == "switched-off")
+        .find(|choice| {
+            choice.selection.backend.offering.as_ref().unwrap().offering == "switched-off"
+        })
         .unwrap();
     assert!(!disabled.allowed);
     assert!(disabled.unavailable_reason.is_some());
@@ -1501,7 +1507,7 @@ async fn model_choices_keep_the_original_keys_root_read_admission() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     for operation in ["AskGet", "AskModelsGet"] {
@@ -1526,15 +1532,12 @@ async fn model_choices_keep_the_original_keys_root_read_admission() {
             .await;
         if operation == "AskModelsGet" {
             let reply = reply.ok();
-            assert!(
-                reply
-                    .models
-                    .iter()
-                    .any(|choice| choice.selection.provider_id == provider
-                        && choice.selection.model == MODEL
-                        && choice.allowed
-                        && choice.is_default)
-            );
+            assert!(reply.models.iter().any(|choice| {
+                choice.selection.backend.offering.as_ref().unwrap().provider == provider
+                    && choice.selection.backend.offering.as_ref().unwrap().offering == MODEL
+                    && choice.allowed
+                    && choice.is_default
+            }));
         } else {
             assert_eq!(reply.status.as_u16(), 403);
         }
@@ -1606,14 +1609,17 @@ async fn ask_model_options_include_native_constraints_without_provider_read_oper
     let option = reply
         .models
         .iter()
-        .find(|option| option.selection.provider_id == provider)
+        .find(|option| option.selection.backend.offering.as_ref().unwrap().provider == provider)
         .unwrap();
     assert!(option.allowed, "{:?}", option.unavailable_reason);
     let schema = option.request_option_schema.as_ref().unwrap();
-    assert_eq!(
-        schema,
-        &option.model.as_ref().unwrap().option_constraints["openai-responses"]
-    );
+    // Ask declares its own read tools, so hosted web search is the one option it does not offer.
+    let mut offered = option.model.as_ref().unwrap().option_constraints["openai-responses"].clone();
+    offered["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("web_search");
+    assert_eq!(schema, &offered);
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.3})).is_ok());
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.8})).is_err());
     assert_eq!(schema["properties"]["temperature"]["maximum"], 0.5);
@@ -1656,12 +1662,41 @@ async fn ask_model_discovery_batches_queries_without_changing_order_or_exclusion
         .await;
         let reply = reply.ok();
         assert_eq!(reply.models.len(), total);
-        assert_eq!(reply.models[0].selection.provider_id, disabled);
+        assert_eq!(
+            reply.models[0]
+                .selection
+                .backend
+                .offering
+                .as_ref()
+                .unwrap()
+                .provider,
+            disabled
+        );
         assert!(!reply.models[0].allowed);
         assert!(reply.models[0].unavailable_reason.is_some());
-        assert_eq!(reply.models[1].selection.provider_id, default);
+        assert_eq!(
+            reply.models[1]
+                .selection
+                .backend
+                .offering
+                .as_ref()
+                .unwrap()
+                .provider,
+            default
+        );
         assert!(reply.models[1].allowed && reply.models[1].is_default);
-        assert_eq!(reply.default_model.as_ref().unwrap().provider_id, default);
+        assert_eq!(
+            reply
+                .default_model
+                .as_ref()
+                .unwrap()
+                .backend
+                .offering
+                .as_ref()
+                .unwrap()
+                .provider,
+            default
+        );
         assert!(reply.blocked_reason.is_none());
         let first = reply.models[..2].to_vec();
         match &stable {
@@ -1736,8 +1771,7 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
             context: None,
             retention_days: None,
             model: Some(AskModel {
-                provider_id: outside,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(outside, MODEL.into()).backend,
                 params: None,
             }),
         })
@@ -1771,8 +1805,7 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
         .body(&question(
             "outside",
             Some(Some(AskModel {
-                provider_id: outside,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(outside, MODEL.into()).backend,
                 params: None,
             })),
         ))
@@ -1832,7 +1865,7 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
     setting(
         &s,
         "ask.models",
-        json!([{ "provider_id":listed,"model":MODEL }]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":listed,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
@@ -1904,7 +1937,7 @@ async fn ask_models_unset_blocks_then_the_first_usable_entry_answers_without_a_p
     setting(
         &s,
         "ask.models",
-        json!([{ "provider_id":first,"model":MODEL },{ "provider_id":second,"model":MODEL }]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":second,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
@@ -1927,7 +1960,18 @@ async fn ask_models_unset_blocks_then_the_first_usable_entry_answers_without_a_p
     assert_eq!(choices.models.len(), 2);
     assert!(!choices.models[0].allowed);
     assert!(choices.models[1].allowed);
-    assert_eq!(choices.default_model.as_ref().unwrap().provider_id, second);
+    assert_eq!(
+        choices
+            .default_model
+            .as_ref()
+            .unwrap()
+            .backend
+            .offering
+            .as_ref()
+            .unwrap()
+            .provider,
+        second
+    );
     assert!(choices.blocked_reason.is_none());
     assert!(choices.writable);
     s.rig
@@ -1956,7 +2000,7 @@ async fn a_saved_excluded_model_uses_todays_allowed_default_with_a_notice() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = s
@@ -1977,7 +2021,7 @@ async fn a_saved_excluded_model_uses_todays_allowed_default_with_a_notice() {
     // A formerly saved entry is removed from the current configuration.
     sqlx::query("UPDATE threads SET ask_model=$2 WHERE node_id=$1")
         .bind(made.conversation_id)
-        .bind(json!({"provider_id":provider,"model":"removed-model"}))
+        .bind(json!({"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":"removed-model"}}}))
         .execute(s.rig.db.pool())
         .await
         .unwrap();
@@ -2055,8 +2099,7 @@ async fn a_saved_excluded_model_uses_todays_allowed_default_with_a_notice() {
                 }],
                 context: None,
                 model: Some(Some(AskModel {
-                    provider_id: provider,
-                    model: "removed-model".into(),
+                    backend: AskModelIdentity::api(provider, "removed-model".into()).backend,
                     params: None
                 }))
             })
@@ -2081,7 +2124,7 @@ async fn default_model_preference_follows_current_settings_and_can_replace_an_ex
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":first,"model":MODEL},{"provider_id":other,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}}]),
     )
     .await;
     let providers = Arc::new(Mutex::new(Vec::new()));
@@ -2102,14 +2145,13 @@ async fn default_model_preference_follows_current_settings_and_can_replace_an_ex
             setting(
                 &s,
                 "ask.models",
-                json!([{"provider_id":other,"model":MODEL},{"provider_id":first,"model":MODEL}]),
+                json!([{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}}]),
             )
             .await;
         }
         let selection = match index {
             2 => Some(Some(AskModel {
-                provider_id: first,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(first, MODEL.into()).backend,
                 params: None,
             })),
             4 => Some(None),
@@ -2144,7 +2186,10 @@ async fn default_model_preference_follows_current_settings_and_can_replace_an_ex
             .conversation
             .model;
         if matches!(index, 2 | 3) {
-            assert_eq!(preference.unwrap().provider_id, first);
+            assert_eq!(
+                preference.unwrap().backend.offering.unwrap().provider,
+                first
+            );
         } else {
             assert!(
                 preference.is_none(),
@@ -2195,7 +2240,7 @@ async fn changing_the_model_origin_keeps_text_without_replaying_another_interfac
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":first,"model":MODEL},{"provider_id":other,"model":MODEL},{"provider_id":other,"model":"other-model"}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":"other-model"}}}]),
     )
     .await;
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2246,12 +2291,15 @@ async fn changing_the_model_origin_keeps_text_without_replaying_another_interfac
                 context: None,
                 model: (index >= 3)
                     .then(|| AskModel {
-                        provider_id: other,
-                        model: if index == 4 {
-                            "other-model".into()
-                        } else {
-                            MODEL.into()
-                        },
+                        backend: AskModelIdentity::api(
+                            other,
+                            if index == 4 {
+                                "other-model".into()
+                            } else {
+                                MODEL.into()
+                            },
+                        )
+                        .backend,
                         params: None,
                     })
                     .map(Some),
@@ -2307,7 +2355,7 @@ async fn sourced_opaque_state_stays_inside_its_current_tool_round_trip() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2405,7 +2453,7 @@ async fn repeated_provider_tool_ids_keep_distinct_journal_witnesses_through_keep
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2575,7 +2623,7 @@ async fn another_builtin_sender_gets_visible_history_without_the_previous_person
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2764,7 +2812,7 @@ async fn named_read_tools_use_the_catalogue_and_refuse_a_different_actual_varian
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let tools = [
@@ -3039,7 +3087,7 @@ async fn resuming_replaces_a_revoked_preview_before_the_model_sees_it() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -3161,7 +3209,7 @@ async fn personal_storage_does_not_mix_another_ask_knowledge_root_into_a_turn() 
         .call(NodeSettingSet, &[&personal, &"ask.models"])
         .token(&s.cai.token)
         .body(&NodeSettingSetBody {
-            value: json!([{ "provider_id":provider,"model":MODEL }]),
+            value: json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
             locked: None,
             expected_revision: None,
         })
@@ -3179,8 +3227,7 @@ async fn personal_storage_does_not_mix_another_ask_knowledge_root_into_a_turn() 
             context: None,
             retention_days: None,
             model: Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(provider, MODEL.into()).backend,
                 params: None,
             }),
         })
@@ -3249,7 +3296,7 @@ async fn provider_use_revoked_during_startup_prevents_a_paid_ask_request() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let entry: Id = sqlx::query_scalar("SELECT id FROM permission_entries WHERE object_kind='provider' AND object_id=$1 AND page='live' AND permission='provider.use' AND holder_kind='user' AND holder_id=$2 AND removed_at IS NULL")
@@ -3331,7 +3378,7 @@ async fn losing_the_keys_history_read_during_startup_prevents_paid_generation() 
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = create(&s, &s.ada, None).await;
@@ -3415,7 +3462,7 @@ async fn owning_an_ask_does_not_bypass_a_permission_keys_native_ceiling() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = create(&s, &s.ada, None).await;
@@ -3556,7 +3603,7 @@ async fn builtin_input_needs_the_original_keys_read_of_retained_history() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let made = create(&s, &s.ada, None).await;
@@ -3854,7 +3901,7 @@ async fn native_builtin_birth_commits_its_first_question_before_generation_and_r
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -3995,7 +4042,7 @@ async fn ask_message_pages_skip_nonmessages_without_losing_the_boundary_message(
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     s.rig
@@ -4130,7 +4177,7 @@ async fn ask_snapshot_model_and_export_use_the_native_selected_history() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -4312,7 +4359,7 @@ async fn permanent_builtin_forks_use_native_source_and_destination_rights_and_th
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -4518,7 +4565,7 @@ async fn builtin_fork_from_here_copies_only_visible_selected_history_and_its_fil
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -4720,7 +4767,7 @@ async fn a_kept_thread_exposes_and_applies_its_own_program_model_choice() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":first,"model":MODEL},{"provider_id":other,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":first,"offering":MODEL}}},{"backend":{"route":"provider.generate","offering":{"provider":other,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -4764,8 +4811,7 @@ async fn a_kept_thread_exposes_and_applies_its_own_program_model_choice() {
                 }],
                 context: None,
                 model: Some((index == 0).then(|| AskModel {
-                    provider_id: other,
-                    model: MODEL.into(),
+                    backend: AskModelIdentity::api(other, MODEL.into()).backend,
                     params: None,
                 })),
             })
@@ -4795,7 +4841,18 @@ async fn a_kept_thread_exposes_and_applies_its_own_program_model_choice() {
         );
         assert_eq!(thread.base.owner.id, s.ada.id());
         if index == 0 {
-            assert_eq!(thread.program_model.as_ref().unwrap().provider_id, other);
+            assert_eq!(
+                thread
+                    .program_model
+                    .as_ref()
+                    .unwrap()
+                    .backend
+                    .offering
+                    .as_ref()
+                    .unwrap()
+                    .provider,
+                other
+            );
         } else {
             assert!(thread.program_model.is_none());
         }
@@ -4836,8 +4893,7 @@ async fn kept_segment_program_survives_the_end_of_its_current_binding() {
             context: None,
             retention_days: None,
             model: Some(AskModel {
-                provider_id: provider,
-                model: MODEL.into(),
+                backend: AskModelIdentity::api(provider, MODEL.into()).backend,
                 params: None,
             }),
         })
@@ -4959,7 +5015,7 @@ async fn a_native_attachment_reaches_ask_and_its_kept_history_without_an_environ
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("UPDATE provider_models SET parameters=$2 WHERE provider_id=$1")
@@ -5114,7 +5170,7 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -5362,7 +5418,7 @@ async fn ordinary_retry_rechecks_and_runs_a_builtin_question_as_the_actual_sende
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -5539,7 +5595,7 @@ async fn an_expired_controller_lease_recovers_without_borrowing_a_new_principal(
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     s.rig
@@ -5663,7 +5719,7 @@ async fn a_late_provider_reply_is_counted_only_from_its_original_recipient_and_o
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let response = ProviderGenerateResult {
@@ -5766,7 +5822,7 @@ async fn ask_purpose_and_offering_filters_share_the_owned_model_cap_port() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     for purpose in ["turn", "summary"] {
@@ -5887,7 +5943,7 @@ async fn ask_concurrency_keeps_the_current_turns_reservation_and_its_actual_purp
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let calls = Arc::new(Mutex::new(0));
@@ -5907,8 +5963,7 @@ async fn ask_concurrency_keeps_the_current_turns_reservation_and_its_actual_purp
         }],
         context: None,
         model: Some(Some(AskModel {
-            provider_id: provider,
-            model: MODEL.into(),
+            backend: AskModelIdentity::api(provider, MODEL.into()).backend,
             params: Some(json!({"service_tier":"priority"})),
         })),
     };
@@ -6038,7 +6093,7 @@ async fn lowering_an_ask_stop_cap_ends_only_its_persons_actual_builtin_turn() {
         setting(
             &s,
             "ask.models",
-            json!([{"provider_id":provider,"model":MODEL}]),
+            json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
         )
         .await;
         let calls = Arc::new(Mutex::new(0));
@@ -6186,7 +6241,7 @@ async fn a_personal_ask_cap_allows_finish_turn_and_blocks_the_next_question() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,at_limit,uncounted,created_by) VALUES ($1,$2,'user',$3,'shared','tokens','day',100,'finish_turn','allow',$4)")
@@ -6296,7 +6351,7 @@ async fn a_stop_cap_prevents_the_next_tool_batch_and_model_step() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,at_limit,uncounted,created_by) VALUES ($1,$2,'user',$3,'shared','tokens','day',100,'stop','allow',$4)")
@@ -6378,7 +6433,7 @@ async fn ask_runs_a_tool_loop_and_attributes_every_step_to_the_person() {
     setting(
         &s,
         "ask.models",
-        json!([{"provider_id":provider,"model":MODEL}]),
+        json!([{"backend":{"route":"provider.generate","offering":{"provider":provider,"offering":MODEL}}}]),
     )
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));

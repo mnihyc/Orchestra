@@ -129,7 +129,6 @@ async fn forbidden(
 }
 
 fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
-    let id = selection.provider_id;
     let mut choice = AskModelOption {
         selection,
         provider: None,
@@ -139,6 +138,14 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
         is_default: false,
         unavailable_reason: Some("provider_unavailable".into()),
     };
+    let Some(offering) = choice.selection.backend.offering.as_ref() else {
+        return choice;
+    };
+    let id = offering.provider;
+    if choice.selection.backend.route != orch_api_contract::ask::API_ROUTE {
+        choice.unavailable_reason = Some("generation_unsupported".into());
+        return choice;
+    }
     let Some(provider) = inputs
         .providers
         .get(&id)
@@ -154,7 +161,7 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
     choice.model = inputs
         .models
         .get(&id)
-        .and_then(|models| models.get(&choice.selection.model))
+        .and_then(|models| models.get(&offering.offering))
         .cloned();
     let protocol = provider
         .protocols
@@ -168,6 +175,15 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
             .get(protocol)
             .cloned()
     });
+    // Ask declares its own read tools and never selects hosted web search, so it is not offered.
+    if let Some(schema) = choice.request_option_schema.as_mut() {
+        if let Some(properties) = schema.get_mut("properties").and_then(Json::as_object_mut) {
+            properties.remove("web_search");
+        }
+        if let Some(required) = schema.get_mut("required").and_then(Json::as_array_mut) {
+            required.retain(|name| name.as_str() != Some("web_search"));
+        }
+    }
     let reason = if provider.status == "disabled" {
         Some("disabled")
     } else if matches!(
@@ -209,7 +225,7 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
                         orch_authz::options::entry_allows(
                             entry,
                             &orch_authz::options::Wanted {
-                                model: Some((&choice.selection.model, &model.groups)),
+                                model: Some((&offering.offering, &model.groups)),
                                 effort: Some(effort),
                                 ..orch_authz::options::Wanted::default()
                             },
@@ -248,7 +264,13 @@ pub(super) async fn read(
         .map_err(ApiError::internal)?;
     let ids = configured
         .iter()
-        .map(|model| model.provider_id)
+        .filter_map(|model| {
+            model
+                .backend
+                .offering
+                .as_ref()
+                .map(|offering| offering.provider)
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();

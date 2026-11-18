@@ -12,7 +12,7 @@ WITH open_requests AS (
       LEFT JOIN commands c ON c.id=accepted.id
       LEFT JOIN threads t ON t.node_id=accepted.thread_id
       LEFT JOIN segments s ON s.id=t.current_segment_id
-    WHERE accepted.cancel_reason IS NULL AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
+    WHERE accepted.cancel_reason IS NULL AND accepted.delegated_result IS NULL AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
 )
 SELECT DISTINCT id FROM open_requests
 WHERE (($1='provider' AND provider_id=$2) OR ($1='agent' AND agent_id=$2) OR ($1='environment' AND environment_id=$2))

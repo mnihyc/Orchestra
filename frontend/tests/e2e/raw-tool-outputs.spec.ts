@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import type { FilePreview } from '../../src/features/files/source';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { AT, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
+import { AT, rawOf, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
 import { ADA } from '../doubles/thread-scenes';
 import { ACME, configureThread, emit, scenario, signIn } from './support';
 
@@ -20,7 +20,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const call = toolCall('retained-call', { kind: 'mcp', server: 'gallery', tool: 'render', arguments: {}, result: 'An image was returned', error: null },
       { title: 'gallery: render', turn: 'raw-turn', at: AT });
     if (call.kind !== 'tool_call') throw new Error('The fixture is a tool call');
-    const item = { ...call, payload: { ...call.payload, raw: { ...call.payload.raw,
+    const item = { ...call, payload: { ...call.payload, raw: { ...rawOf(call),
       output: { inline: '', total_len: Buffer.byteLength(WHOLE), truncated: true, blob: HASH } } } };
     await emit(ACME.mainThread, { thread: { state: 'idle', current_turn_id: null },
       items: [userMessage('raw-input', 'Keep the original result', { author: ADA, turn: 'raw-turn', inputId: 'raw-input', at: AT }), item],

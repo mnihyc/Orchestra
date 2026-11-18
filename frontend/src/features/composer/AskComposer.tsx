@@ -1,4 +1,5 @@
 /** The shared composer adapts to a private, read-only conversation without an environment. */
+import { backendIdentity } from '@/features/settings/capabilityBackendValue';
 import { AtSign, Send, Square } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -136,7 +137,7 @@ export function AskComposer({ scope, root, draftKey: givenKey, conversationId, a
   }, [dirty]);
   const imageFacts = useQuery({ ...askModelsQuery(root), enabled: shown && root !== '' && parts.some((part) => part.type === 'image') });
   const effectiveModel = model ?? imageFacts.data?.default_model;
-  const imageModel = imageFacts.data?.models.find((option) => option.selection.provider_id === effectiveModel?.provider_id && option.selection.model === effectiveModel.model);
+  const imageModel = imageFacts.data?.models.find((option) => effectiveModel != null && backendIdentity(option.selection.backend) === backendIdentity(effectiveModel.backend));
   const sendNow = async () => {
     if (disabled || pending || active || uploads.blocked || drops.blocked || text.trim() === '' && parts.length === 0) return;
     const content: ContentPart[] = [...(text === '' ? [] : [{ type: 'text' as const, text }]), ...parts];

@@ -13,7 +13,7 @@ import { editableValue } from '@/features/settings/settingParts';
 import { shapeOf, withGroup } from '@/features/settings/settingsModel';
 import type { Provider, ProviderModel, ResolvedSetting, SettingDef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { askModels } from '../unit/ask-fixtures';
+import { apiAskModel, askModels } from '../unit/ask-fixtures';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ providers: vi.fn<(scope: string, root: string | null) => Promise<Provider[]>>(), models: vi.fn<(id: string) => Promise<ProviderModel[]>>(), detail: vi.fn<(id: string) => Promise<Provider>>(),
@@ -26,9 +26,9 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(),
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof Settings>(), putSetting: calls.put }));
 const provider = planProvider({ id: 'api-provider', name: 'Team API', kind: 'api', protocols: ['openai-responses'] });
 const subscription = planProvider({ id: 'subscription-provider' });
-const identity = { provider_id: provider.id, model: 'enabled' };
-const policySchema = { type: 'array', uniqueItems: true, items: { type: 'object', required: ['provider_id', 'model'],
-  additionalProperties: false, properties: { provider_id: { type: 'string' }, model: { type: 'string' } } } };
+const identity = apiAskModel(provider.id, 'enabled');
+const policySchema = { type: 'array', uniqueItems: true, items: { type: 'object', required: ['backend'],
+  additionalProperties: false, properties: { backend: { type: 'object' } } } };
 const policyShape = shapeOf(policySchema);
 function model(): ProviderModel {
   const configured = askModels().models[0]?.model;
@@ -84,7 +84,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
   it(`does not load an unrestricted catalogue or add/reorder at an org (${locale})`, async () => {
     await setLocale(locale); const change = vi.fn();
-    show(<SettingValue def={{ key: 'ask.models', merge: 'intersect' }} setting={setting} target={{ kind: 'node', id: 'org' }} shape={policyShape} label="Ask models" value={[identity, { provider_id: 'outside', model: 'outside' }]} onChange={change} />);
+    show(<SettingValue def={{ key: 'ask.models', merge: 'intersect' }} setting={setting} target={{ kind: 'node', id: 'org' }} shape={policyShape} label="Ask models" value={[identity, apiAskModel('outside', 'outside')]} onChange={change} />);
     expect(screen.getByText(i18n.t('ask.modelsFromAbove'))).toBeVisible(); expect(calls.providers).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: i18n.t('modelList.add') })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: i18n.t('modelList.remove', { model: i18n.t('modelList.entry', { number: '1' }) }) }));
@@ -99,11 +99,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
   for (const system of [true, false]) it(`opens and saves identities through the actual ${system ? 'system' : 'org'} setting row and its revision guard (${locale})`, async () => {
     await setLocale(locale); const t = i18n.getFixedT(locale), title = locale === 'en' ? 'Ask models' : '问一问模型列表';
-    const second = { provider_id: provider.id, model: 'second' }, initial = [identity, second];
+    const second = apiAskModel(provider.id, 'second'), initial = [identity, second];
     const target: SettingsTarget = system ? { kind: 'system' } : { kind: 'node', id: 'org' };
     const current: ResolvedSetting = { ...setting, value: initial, own: system ? { value: initial, revision: 3, locked: false } : null,
       parts: setting.parts.map((part) => ({ ...part, value: initial })) };
-    calls.models.mockResolvedValue([model(), { ...model(), id: 'second-row', model_name: second.model, display_name: 'Second API model' }]);
+    calls.models.mockResolvedValue([model(), { ...model(), id: 'second-row', model_name: second.backend.offering.offering, display_name: 'Second API model' }]);
     calls.put.mockImplementation((_target, _key, write) => Promise.resolve({ ...current, value: write.value, own: { value: write.value, revision: 4, locked: false } }));
     const def: SettingDef = { key: 'ask.models', title, description: title, class: 'policy', group: 'automation', scopes: ['system', 'org'], merge: 'intersect',
       default: null, example: null, text_key: null, keywords: [], schema: policySchema };

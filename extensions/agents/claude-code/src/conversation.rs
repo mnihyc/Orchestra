@@ -1224,7 +1224,8 @@ impl Conversation {
                 &self.params.spec.settings.model,
             )
             .unwrap_or(true);
-        let changed = spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
+        let changed = spec.settings.side_reading != self.params.spec.settings.side_reading
+            || spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
             || page_reader_changed
             || spec.settings.background_wake != self.params.spec.settings.background_wake
             || spec.mcp != self.params.spec.mcp
@@ -1270,6 +1271,10 @@ impl Conversation {
 
     fn turn_settings(turn: &TurnStart) -> TurnSettings {
         TurnSettings {
+            program_output: crate::sessions::native_program_output(
+                turn.native_model.as_deref(),
+                &turn.model,
+            ),
             cache_lifetimes: crate::sessions::native_cache_lifetimes(
                 turn.native_model.as_deref(),
                 &turn.model,
@@ -1624,6 +1629,7 @@ impl Conversation {
         let must_restart = self.needs_restart
             || live.model != wanted.model
             || live.effort != wanted.effort
+            || live.program_output != wanted.program_output
             || live.sandbox_mode != wanted.sandbox_mode
             || page_reader_changed
             || (live.approval_mode == ApprovalMode::Bypass)
@@ -1759,7 +1765,7 @@ impl Conversation {
             turn: settings,
             oauth_token: token.as_deref(),
         })?;
-        if through_executor(&self.params.spec)
+        if (through_executor(&self.params.spec) || crate::confinement::no_tools(&self.params.spec))
             && let Err(error) = tokio::fs::create_dir_all(&spec.cwd).await
         {
             return Err(AdapterError::HarnessError(format!(
@@ -2432,6 +2438,15 @@ impl Conversation {
                 .await;
             return;
         };
+        if crate::confinement::no_tools(&self.params.spec) {
+            let _ = self
+                .write(&control_success(
+                    &ask.control_id,
+                    ask.refusal("This conversation has no callable tools."),
+                ))
+                .await;
+            return;
+        }
         let turn_id = self
             .turn
             .as_ref()
