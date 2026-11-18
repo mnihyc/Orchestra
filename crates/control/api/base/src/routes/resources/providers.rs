@@ -112,6 +112,27 @@ pub struct PreparedListProjection {
     pub projection: PreparedProviderViews,
 }
 
+orch_api_base::api_family_callback! {
+    bind __api_bind_provider_thread, __api_install_provider_thread, __api_callback_provider_thread;
+    slot __ApiCallbackProviderThread, __API_CALLBACK_PROVIDER_THREAD, __api_set_provider_thread;
+    base orch_api_base::routes::resources::providers;
+    async fn show_thread_prepared<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: &'__api orch_api_base::routes::resources::providers::PreparedProjection) -> orch_api_base::middleware::requests::ApiResult<orch_api_contract::settings::ThreadProvider>;
+}
+
+orch_api_base::api_family_callback! {
+    bind __api_bind_provider_list_rows, __api_install_provider_list_rows, __api_callback_provider_list_rows;
+    slot __ApiCallbackProviderListRows, __API_CALLBACK_PROVIDER_LIST_ROWS, __api_set_provider_list_rows;
+    base orch_api_base::routes::resources::providers;
+    async fn show_list_rows_prepared<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: &'__api orch_api_base::routes::resources::providers::PreparedListProjection) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::resource_rows::ProviderListRow>>;
+}
+
+orch_api_base::api_family_callback! {
+    bind __api_bind_provider_inventory_rows, __api_install_provider_inventory_rows, __api_callback_provider_inventory_rows;
+    slot __ApiCallbackProviderInventoryRows, __API_CALLBACK_PROVIDER_INVENTORY_ROWS, __api_set_provider_inventory_rows;
+    base orch_api_base::routes::resources::providers;
+    async fn inventory_rows<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: &'__api [orch_authz::resources::Seen]) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::resource_rows::ProviderListRow>>;
+}
+
 impl PreparedListProjection {
     pub fn name_sources(&self) -> &crate::routes::access::page::NameSources {
         &self.projection.sources

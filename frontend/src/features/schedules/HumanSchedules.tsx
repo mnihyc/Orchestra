@@ -14,14 +14,15 @@ import { formatDateTime } from '@/lib/time';
 import { useFormatContext } from '@/lib/appearance';
 import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
-import { useErrorText } from '@/ui/errorText';
+import { Input } from '@/ui/Input';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Table } from '@/ui/Table';
 import { UserChip } from '@/ui/UserChip';
 import { Section } from '@/shell/Page';
-import { ScheduleEditor } from './Editor';
+import { ScheduleEditor, ScheduleModes } from './Editor';
 import { ScheduleCancel } from './Schedules';
+import { ScheduleRunOutcome, scheduleRunWords } from './RunOutcome';
 
 export function HumanScheduleActions({ row, topic, controller, thread }: { row: InputSchedule; topic: string; controller: boolean; thread?: Thread }) {
   const { t } = useTranslation();
@@ -59,14 +60,20 @@ export function HumanScheduleActions({ row, topic, controller, thread }: { row: 
 }
 export function ScheduleHistory({ row }: { row: InputSchedule }) {
   const { t } = useTranslation();
-  const describe = useErrorText();
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const format = useFormatContext();
   const query = useInfiniteQuery({ ...inputScheduleRunsQuery(row.id), enabled: open });
+  const needle = search.trim().toLocaleLowerCase(format.locale);
+  const runs = query.data?.pages.flatMap((page) => page.items).filter((run) => needle === '' || [
+    scheduleRunWords(run, t, format.locale), run.thread?.name ?? '', run.outcome?.zone ?? '',
+    formatDateTime(run.scheduled_for ?? run.created_at, { ...format, timeZone: run.outcome?.zone ?? format.timeZone }),
+  ].join(' ').toLocaleLowerCase(format.locale).includes(needle)) ?? [];
   return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary className="cursor-pointer text-sm text-text-muted">{t('sendLater.history')}</summary>
+    {open && <Input type="search" label={t('sendLater.searchLoadedRuns')} hideLabel placeholder={t('sendLater.searchLoadedRuns')} value={search} onChange={(event) => setSearch(event.target.value)} />}
     {open && (query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows rows={2} /> : <ol className="flex max-h-[50dvh] flex-col gap-2 overflow-auto py-2 text-sm">
-      {query.data.pages.flatMap((page) => page.items).map((run) => <li key={run.id} className="flex flex-wrap items-baseline gap-2"><span>{t(`agentSchedules.outcomes.${run.state}`)}</span><time dateTime={run.scheduled_for ?? run.created_at}>{formatDateTime(run.scheduled_for ?? run.created_at, { ...format, timeZone: row.timing.zone })}</time>
-        {run.thread !== null && <Link to="/thread/$threadId" params={{ threadId: run.thread.id }} hash={run.input_id === null ? undefined : `input-${run.input_id}`}>{run.thread.name ?? t('access.place.hidden')}</Link>}{run.reason !== null && <span>{describe(run.reason).message}</span>}
+      {runs.map((run) => <li key={run.id} className="flex flex-wrap items-baseline gap-2"><ScheduleRunOutcome run={run} /><time dateTime={run.scheduled_for ?? run.created_at}>{formatDateTime(run.scheduled_for ?? run.created_at, { ...format, timeZone: run.outcome?.zone ?? format.timeZone })}</time>
+        {run.thread !== null && <Link to="/thread/$threadId" params={{ threadId: run.thread.id }} hash={run.input_id === null ? undefined : `input-${run.input_id}`}>{run.thread.name ?? t('access.place.hidden')}</Link>}
       </li>)}
     </ol>)}
     {open && query.hasNextPage && <Button size="sm" pending={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{t('operation.more')}</Button>}
@@ -82,7 +89,7 @@ export function TopicSchedules({ topic }: { topic: Topic }) {
     {query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows rows={3} /> : query.data.length === 0 ? <p className="text-sm text-text-muted">{t('sendLater.empty')}</p> : <Table label={t('sendLater.list')} rows={query.data} rowKey={(row) => row.id} columns={[
       { id: 'name', header: t('agentSchedules.name'), grow: true, cell: (row) => <div className="flex min-w-0 flex-col gap-1"><span className="wrap-anywhere">{row.name}</span><UserChip user={row.author} /><span className="text-sm text-text-muted">{row.destination.new_thread ? t('sendLater.newThread') : row.destination.thread?.name ?? t('access.place.hidden')}</span><ScheduleHistory row={row} /></div> },
       { id: 'next', header: t('agentSchedules.next'), from: 'sm', cell: (row) => row.next_run_at === null ? '–' : formatDateTime(row.next_run_at, { ...format, timeZone: row.timing.zone }) },
-      { id: 'state', header: t('agentSchedules.state'), from: 'sm', cell: (row) => t(`agentSchedules.states.${row.state}`) },
+      { id: 'state', header: t('agentSchedules.state'), from: 'sm', cell: (row) => <div className="flex flex-col gap-1"><span>{t(`agentSchedules.states.${row.state}`)}</span><ScheduleModes plan={row.plan} delivery={row.delivery} /></div> },
       { id: 'actions', header: t('sendLater.actions'), hideHeader: true, cell: (row) => <HumanScheduleActions row={row} topic={topic.id} controller={controller} /> },
     ]} />}
   </Section>;

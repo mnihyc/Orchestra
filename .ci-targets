@@ -1,0 +1,8 @@
+# Place the remaining engine failures on the models merge, after the default-stack Stop repair and before scale or frame.
+test -p orch-engine --test turns -- a_second_queued_input_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-engine --lib -- source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-engine --test preflight
+test -p orch-engine --test provider_rejection -- provider_attention_reaches_its_managers_once_per_rejection_and_no_other_person
+test -p orch-engine --lib -- a_malformed_frozen_parent_rolls_back_every_copied_row
+test -p orch-api-core --test node_chat_opening_scopes -- summary_provider_scope_declines_only_its_metadata_and_never_the_admitted_chat
+test -p orch-db --lib -- a_personal_cut_sees_only_committed_changes_and_keeps_unrelated_people_current

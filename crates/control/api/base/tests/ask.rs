@@ -4,12 +4,18 @@
     clippy::expect_used,
     reason = "a deciding case fails by panicking"
 )]
+#[path = "ask/admin_mode.rs"]
+mod admin_mode;
 #[path = "ask/backend_reserve.rs"]
 mod backend_reserve;
 #[path = "ask/context.rs"]
 mod context;
 mod places;
+#[path = "ask/refusals.rs"]
+mod refusals;
 mod rig;
+#[path = "ask/sources.rs"]
+mod sources;
 mod support;
 
 use orch_api_contract::{
@@ -36,6 +42,7 @@ async fn setting(s: &Scene, key: &str, value: Json) {
         .call(NodeSettingSet, &[&s.tree.org.base.id, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -150,6 +157,59 @@ async fn configured_provider(s: &Scene) -> Id {
     id
 }
 
+#[tokio::test]
+async fn an_embedding_entry_never_becomes_the_default_ask_model_because_its_provider_also_serves_chat()
+ {
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{offered}', '{\"purposes\":[\"embedding\"]}') WHERE provider_id=$1")
+        .bind(provider).execute(s.rig.db.pool()).await.unwrap();
+    let blocked = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let entry = blocked
+        .models
+        .iter()
+        .find(|entry| entry.selection.provider_id == provider)
+        .unwrap();
+    assert!(!entry.allowed);
+    assert_eq!(
+        entry.unavailable_reason.as_deref(),
+        Some("generation_unsupported")
+    );
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{purposes}', '[\"generation\"]') WHERE provider_id=$1")
+        .bind(provider).execute(s.rig.db.pool()).await.unwrap();
+    let available = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        available
+            .models
+            .iter()
+            .find(|entry| entry.selection.provider_id == provider)
+            .unwrap()
+            .allowed
+    );
+}
+
 async fn kept_native_source(s: &Scene) -> (Id, Id) {
     let provider = configured_provider(s).await;
     s.rig
@@ -201,6 +261,36 @@ async fn kept_native_source(s: &Scene) -> (Id, Id) {
     sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,import_neutral}','true') WHERE id=$1")
         .bind(s.on.agent).execute(s.rig.db.pool()).await.unwrap();
     (kept.thread_id, provider)
+}
+
+#[tokio::test]
+async fn a_native_ask_default_use_is_recent_for_its_person_without_opening_a_model_picker() {
+    use orch_api_contract::personal::MeModelRecentList;
+    let s = Scene::new().await;
+    let (_, provider) = kept_native_source(&s).await;
+    let recent = s
+        .rig
+        .world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(recent.recent[0].provider_id, provider);
+    assert_eq!(recent.recent[0].model_name, MODEL);
+    assert!(
+        s.rig
+            .world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&s.cai.token)
+            .send()
+            .await
+            .ok()
+            .recent
+            .is_empty()
+    );
 }
 
 async fn native_program_plan(
@@ -650,6 +740,68 @@ fn simple_answer() -> CommandResult {
         timing: Default::default(),
         request_ref: None,
     })
+}
+
+#[tokio::test]
+async fn an_ask_only_use_entry_runs_the_ordinary_model_and_a_question_larger_than_one_link_frame() {
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query("UPDATE permission_entries SET options=$3 WHERE object_kind='provider' AND object_id=$1 AND permission='provider.use' AND holder_kind='user' AND holder_id=$2 AND removed_at IS NULL")
+        .bind(provider).bind(s.cai.id()).bind(json!({"models":[MODEL],"purposes":["ask"]})).execute(s.rig.db.pool()).await.unwrap();
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&s.cai.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        choices
+            .models
+            .iter()
+            .any(|choice| choice.selection.provider_id == provider
+                && choice.selection.model == MODEL
+                && choice.allowed)
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, move |command| {
+            let Command::ProviderGenerate(request) = command else {
+                panic!("a real generation command");
+            };
+            seen.lock().unwrap().push(request.model_name.clone());
+            Ok(simple_answer())
+        });
+    let made = create_unseeded(&s, &s.cai).await;
+    s.rig
+        .world
+        .app
+        .call(AskMessageCreate, &[&made.conversation_id])
+        .token(&s.cai.token)
+        .body(&AskMessageBody {
+            client_id: "large-question".into(),
+            content: vec![ContentPart::Text {
+                text: "上下文".repeat(30_000),
+            }],
+            context: None,
+            model: None,
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the allowed question reaches its model", || async {
+        !calls.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(calls.lock().unwrap().as_slice(), [MODEL]);
 }
 
 #[tokio::test]
@@ -1610,10 +1762,13 @@ async fn ask_model_options_include_native_constraints_without_provider_read_oper
         .unwrap();
     assert!(option.allowed, "{:?}", option.unavailable_reason);
     let schema = option.request_option_schema.as_ref().unwrap();
-    assert_eq!(
-        schema,
-        &option.model.as_ref().unwrap().option_constraints["openai-responses"]
-    );
+    // Ask declares its own read tools, so hosted web search is the one option it does not offer.
+    let mut offered = option.model.as_ref().unwrap().option_constraints["openai-responses"].clone();
+    offered["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("web_search");
+    assert_eq!(schema, &offered);
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.3})).is_ok());
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.8})).is_err());
     assert_eq!(schema["properties"]["temperature"]["maximum"], 0.5);
@@ -3161,6 +3316,7 @@ async fn personal_storage_does_not_mix_another_ask_knowledge_root_into_a_turn() 
         .call(NodeSettingSet, &[&personal, &"ask.models"])
         .token(&s.cai.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!([{ "provider_id":provider,"model":MODEL }]),
             locked: None,
             expected_revision: None,
@@ -5300,7 +5456,9 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
         .app
         .call(ThreadInterrupt, &[&kept.thread_id])
         .token(&s.cai.token)
-        .body(&ThreadInterruptBody { turn_id: new_id() })
+        .body(&ThreadInterruptBody {
+            turn_id: Some(new_id()),
+        })
         .send()
         .await;
     assert!(stale.status.is_client_error());
@@ -5316,10 +5474,14 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
         .app
         .call(ThreadInterrupt, &[&kept.thread_id])
         .token(&s.cai.token)
-        .body(&ThreadInterruptBody { turn_id: turn })
+        .body(&ThreadInterruptBody {
+            turn_id: Some(turn),
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .turn
+        .expect("the answer is the turn it names");
     assert_eq!(stopped.id, turn);
     assert_eq!(
         stopped.state,
