@@ -20,7 +20,7 @@ const rows: ApiTokenInfo[] = [
 ];
 const calls = vi.hoisted(() => ({ preview: vi.fn<() => Promise<ReferencePreview>>() }));
 const preview: ReferencePreview = { id: 'web', kind: 'node', node_kind: 'project', title: 'Web', place: null, description: '', updated_at: null, updated_by: null, part: null };
-vi.mock('@/api/users', async (load) => ({ ...await load<typeof UsersApi>(), tokensQuery: { queryKey: ['token-list-facts'], queryFn: () => Promise.resolve(rows) } }));
+vi.mock('@/api/users', async (load) => ({ ...await load<typeof UsersApi>(), tokensQuery: { queryKey: ['token-list-facts'], queryFn: () => Promise.resolve(rows) }, tokensPageQuery: (q: string) => ({ queryKey: ['token-list-pages', q], initialPageParam: null, queryFn: () => Promise.resolve({ items: rows.filter((row) => row.name.includes(q)), next_cursor: null }), getNextPageParam: () => null }) }));
 vi.mock('@/api/references', async (load) => {
   const actual = await load<typeof ReferencesApi>();
   return { ...actual, referencePreviewQuery: (reference: Parameters<typeof actual.referencePreviewQuery>[0]) => ({ ...actual.referencePreviewQuery(reference), queryFn: calls.preview }) };

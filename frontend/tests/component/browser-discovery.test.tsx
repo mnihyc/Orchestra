@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import type * as ClientApi from '@/api/client';
 import type * as EnvironmentApi from '@/api/environments';
+import { OpenDialog } from '@/features/browser/OpenDialog';
 import { browserKeys } from '@/api/browsers';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { i18n, setLocale } from '@/i18n';
@@ -26,22 +27,22 @@ vi.mock('@/api/environments', async (load) => {
   const actual = await load<typeof EnvironmentApi>();
   return { ...actual, environmentQuery: (id: string) => ({ queryKey: actual.environmentKey(id), queryFn: () => Promise.resolve(environment), staleTime: Infinity }) };
 });
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn(),
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn(),
   Link: ({ children, className }: { children: ReactNode; className?: string }) => <a href="#environment" className={className}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), keepAwake: () => null, dialogs: null }) }));
 vi.mock('@/features/resources/environments/McpServers', () => ({ McpServers: () => <p>Tools ready</p> }));
 vi.mock('@/features/resources/environments/Doors', () => ({ EnvironmentDoor: () => <p>Terminal ready</p> }));
 vi.mock('@/features/ports/Ports', () => ({ PortsPanel: () => <p>Ports ready</p> }));
-vi.mock('@/features/vnc/View', () => ({ DisplaysTab: () => <p>Display ready</p> }));
+vi.mock('@/features/vnc/View', async (loadOriginal) => ({ ...await loadOriginal<object>(), DisplaysTab: () => <p>Display ready</p> }));
 // A deliberately failing picture proves the real panel boundary independently of malformed API data.
 vi.mock('@/features/browser/Front', () => ({ Front: () => {
   if (wire.state.broken) throw new Error('The browser picture failed to render');
   return <p>Browser picture</p>;
 } }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 
 const caches = new Set<QueryClient>();
@@ -163,3 +164,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(wire.read).toHaveBeenCalledTimes(1);
   });
 }
+
+
+it('names a new browser profile before choosing how it starts', () => {
+  show(<OpenDialog environmentId={environment.id} environmentName={environment.name} list={{ ...browserSnapshot(), profiles: [] }} watchers={null} threadId={null} onOpened={vi.fn()} onClose={vi.fn()} />);
+  const name = screen.getByRole('textbox', { name: i18n.t('browser.open.name') });
+  const profiles = screen.getByRole('radiogroup', { name: i18n.t('browser.open.profile') });
+  expect(name.compareDocumentPosition(profiles) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+});
