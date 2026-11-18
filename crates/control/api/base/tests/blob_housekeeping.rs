@@ -55,6 +55,7 @@ async fn cached(site: &Site, path: &str, bytes: &[u8], mtime_ns: i64) -> Hash {
         &mut conn,
         site.environment,
         &CachedFile {
+            minimum_reach: orch_access_contract::permissions::FileReach::Roots,
             path: path.to_owned(),
             size: meta.size,
             mtime_ns,
@@ -321,5 +322,104 @@ async fn a_browser_upload_that_ran_out_goes_with_its_pieces() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_unfinished_transfer_is_not_forgotten_when_its_temporary_bytes_cannot_be_removed() {
+    let depot = Depot::new().await;
+    let app = depot.app();
+    let command = depot.uploading().await;
+    let bytes = vec![7_u8; 3000];
+    let hash = Hash::of(&bytes);
+    depot
+        .content
+        .put(depot.machine, command, &hash, 0, 3000, &bytes[..1000])
+        .await;
+    let part = app.blobs.part_of(&hash);
+    let held = part.with_extension("held");
+    tokio::fs::rename(&part, &held).await.unwrap();
+    tokio::fs::create_dir(&part).await.unwrap();
+    depot.world.advance(Duration::hours(25));
+    assert_eq!(
+        collect(app).await.uploads,
+        0,
+        "a failed unlink is still owed"
+    );
+    assert!(
+        storage::upload(&mut *depot.world.conn().await, &hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tokio::fs::remove_dir(&part).await.unwrap();
+    tokio::fs::rename(&held, &part).await.unwrap();
+    assert_eq!(
+        collect(app).await.uploads,
+        1,
+        "the next collection pays the retained debt"
+    );
+    assert!(!tokio::fs::try_exists(&part).await.unwrap());
+}
+
+#[tokio::test]
+async fn cache_cleanup_keeps_the_native_reach_of_each_retained_version() {
+    use orch_access_contract::permissions::FileReach;
+    let site = Site::new().await;
+    let root_hash = cached(&site, "root.txt", b"root", 1).await;
+    let app = &site.app().app;
+    let blob = app
+        .blobs
+        .put_bytes(bytes::Bytes::from_static(b"machine"))
+        .await
+        .unwrap();
+    let mut conn = app.db.acquire().await.unwrap();
+    app.blobs
+        .register(&mut conn, blob, app.clock.now())
+        .await
+        .unwrap();
+    storage::record_cached(
+        &mut conn,
+        site.environment,
+        &CachedFile {
+            minimum_reach: FileReach::Machine,
+            path: "/native//outside.txt".to_owned(),
+            size: blob.size,
+            mtime_ns: 2,
+            hash: blob.hash,
+            cached_at: app.clock.now(),
+        },
+    )
+    .await
+    .unwrap();
+    let candidates = storage::eviction_candidates(&mut conn, site.environment, 2)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|(file, _)| file.hash == root_hash)
+            .unwrap()
+            .0
+            .minimum_reach,
+        FileReach::Roots
+    );
+    let machine = &candidates
+        .iter()
+        .find(|(file, _)| file.hash == blob.hash)
+        .unwrap()
+        .0;
+    assert_eq!(machine.minimum_reach, FileReach::Machine);
+    assert!(
+        storage::evict_cached(&mut conn, site.environment, machine, app.clock.now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        storage::cached_minimum(&mut conn, site.environment, "root.txt", &root_hash)
+            .await
+            .unwrap(),
+        Some(FileReach::Roots)
     );
 }
