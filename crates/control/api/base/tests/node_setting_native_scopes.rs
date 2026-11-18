@@ -100,6 +100,7 @@ impl Scene {
             .call(NodeSettingSet, &[&self.node, &keys::AGENT_INSTRUCTIONS])
             .token(token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value: json!(value),
                 locked: None,
                 expected_revision: revision,
@@ -298,6 +299,7 @@ async fn setting_full_readback_uses_its_own_read_and_bounds_inherited_provenance
                     .call(NodeSettingSet, &[&scene.org, &keys::AGENT_INSTRUCTIONS])
                     .token(&scene.owner.token)
                     .body(&NodeSettingSetBody {
+                        model_choice: None,
                         value: json!("Private inherited instructions"),
                         locked: None,
                         expected_revision: None,
@@ -402,6 +404,7 @@ async fn setting_write_and_clear_refresh_lifetime_after_the_actual_snapshot_row_
                         .call(NodeSettingSet, &[&node, &keys::AGENT_INSTRUCTIONS])
                         .token(&token)
                         .body(&NodeSettingSetBody {
+                            model_choice: None,
                             value: json!("Private replacement instructions"),
                             locked: None,
                             expected_revision: None,
@@ -476,6 +479,7 @@ async fn setting_committed_value_or_clear_keeps_its_receipt_after_publication_re
                         .call(NodeSettingSet, &[&node, &keys::AGENT_INSTRUCTIONS])
                         .token(&token)
                         .body(&NodeSettingSetBody {
+                            model_choice: None,
                             value: json!("Private committed instructions"),
                             locked: None,
                             expected_revision: None,
@@ -531,6 +535,7 @@ async fn setting_a_bound_threads_directory_scopes_its_actual_environment_governo
     )
     .await;
     let request = NodeSettingSetBody {
+        model_choice: None,
         value: json!("src"),
         locked: None,
         expected_revision: None,
@@ -602,6 +607,7 @@ async fn setting_refusals_never_disclose_current_values_or_ancestor_names_withou
                 .call(NodeSettingSet, &[&scene.org, &keys::AGENT_INSTRUCTIONS])
                 .token(&scene.owner.token)
                 .body(&NodeSettingSetBody {
+                    model_choice: None,
                     value: json!("Private locked parent contents"),
                     locked: Some(true),
                     expected_revision: None,
