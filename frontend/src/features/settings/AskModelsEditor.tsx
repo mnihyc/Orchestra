@@ -20,7 +20,9 @@ export interface AskModelsEditorProps {
 export function AskModelsEditor({ label, value, entries, disabled = false, mode = 'system', onChange }: AskModelsEditorProps) {
   const { t, i18n } = useTranslation();
   const [adding, setAdding] = useState(false);
-  const rows = value.map(({ provider_id, model }) => ({ provider_id, model }));
+  const identity = ({ provider_id, model, backend }: ModelIdentity): ModelIdentity =>
+    ({ provider_id, model, ...(backend === undefined ? {} : { backend }) });
+  const rows = value.map(identity);
   const move = (index: number, direction: number) => {
     const target = index + direction;
     if (disabled || mode === 'narrow' || target < 0 || target >= rows.length) return;
@@ -35,7 +37,7 @@ export function AskModelsEditor({ label, value, entries, disabled = false, mode 
         return <li key={index} className="flex min-w-0 flex-wrap items-center gap-1">
           <span className="text-xs text-text-muted">{formatNumber(index + 1, i18n.language)}.</span>
           <ModelEffort choice={{ value: entry, entries, label: name, disabled: disabled || mode === 'narrow' || entries.length === 0, showEffort: false, onChange: (next) => {
-            if (!disabled && mode === 'system' && next !== null) onChange(rows.map((held, at) => at === index ? { provider_id: next.provider_id, model: next.model } : held));
+            if (!disabled && mode === 'system' && next !== null) onChange(rows.map((held, at) => at === index ? identity(next) : held));
           } }} />
           <span className="ml-auto flex items-center gap-1">
             {mode === 'system' && <><IconButton size="sm" label={t('modelList.moveUp', { model: name })} icon={<ArrowUp aria-hidden />} disabled={disabled || index === 0} onClick={() => move(index, -1)} />
@@ -47,7 +49,7 @@ export function AskModelsEditor({ label, value, entries, disabled = false, mode 
     </ol>
     {mode === 'narrow' ? <p className="text-xs text-text-muted">{t('ask.modelsFromAbove')}</p> : <>
       {adding && <ModelEffort open onOpenChange={(open) => { if (!open) setAdding(false); }} choice={{ value: null, entries, label: t('modelList.add'), disabled, showEffort: false,
-        onChange: (next) => { if (!disabled && next !== null) { onChange([...rows, { provider_id: next.provider_id, model: next.model }]); setAdding(false); } } }} />}
+        onChange: (next) => { if (!disabled && next !== null) { onChange([...rows, identity(next)]); setAdding(false); } } }} />}
       <Button size="sm" variant="ghost" disabled={disabled || adding || entries.length === 0} onClick={() => setAdding(true)}>{t('modelList.add')}</Button>
     </>}
   </div>;

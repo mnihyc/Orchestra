@@ -84,6 +84,33 @@ pub struct SummaryRequest {
     pub config: Json,
 }
 
+/// An explicit background budget can defer unstarted work until the next provider observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetReason {
+    Measurement,
+    Reserve,
+}
+impl BudgetReason {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Measurement => "usage_measurement",
+            Self::Reserve => "plan_reserve",
+        }
+    }
+}
+
+/// The same accepted work can be checked again without buying a model request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("The background plan budget waits until {next}.")]
+pub struct BudgetWait {
+    pub reason: BudgetReason,
+    pub next: orch_types::Time,
+}
+
+/// The model ran into its output allowance before completing the summary.
+pub const OUTPUT_CUT: &str = "the model used its output allowance before finishing";
+
 /// Why a summary was not made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SummarizeError {
@@ -97,6 +124,9 @@ pub enum SummarizeError {
     /// shown on the setting's row, and is no failure.
     #[error("skipped: {0}")]
     Skipped(String),
+    /// The owning scheduler retains the unstarted work and its next eligibility time.
+    #[error(transparent)]
+    Waiting(#[from] BudgetWait),
     /// What the summarizer called failed.
     #[error("the call failed: {message}")]
     Failed {
@@ -115,7 +145,7 @@ impl SummarizeError {
     /// attempt backs off. A skip is not one.
     #[must_use]
     pub const fn is_failure(&self) -> bool {
-        !matches!(self, Self::Skipped(_))
+        !matches!(self, Self::Skipped(_) | Self::Waiting(_))
     }
 
     /// The code, for metrics and for the setting's row.
@@ -125,6 +155,7 @@ impl SummarizeError {
             Self::Unsupported(_) => "unsupported",
             Self::Config(_) => "config",
             Self::Skipped(_) => "skipped",
+            Self::Waiting(_) => "waiting",
             Self::Failed { .. } => "failed",
             Self::Internal(_) => "internal",
         }

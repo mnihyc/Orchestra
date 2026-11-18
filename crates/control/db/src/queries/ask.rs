@@ -2,6 +2,7 @@
 
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
+use orch_provider_contract::capabilities::{BackendRef, ProgramPlacement};
 use orch_types::{Id, Json, Seq};
 
 /// Metadata of a hidden or kept built-in conversation.
@@ -40,10 +41,11 @@ pub struct Governance {
     pub retention_days: i32,
     pub last_message_at: DateTime<Utc>,
     pub root_live: bool,
+    pub inspectable: bool,
 }
 
 pub async fn governance(conn: &mut Conn, threads: &[Id]) -> Result<Vec<Governance>, DbError> {
-    Ok(sqlx::query_as("SELECT t.node_id thread_id,t.ask_root_org_id root_org_id,n.owner_id person_id,t.ask_retention_days retention_days,t.ask_last_message_at last_message_at,(r.deleted_at IS NULL AND r.kind='org') root_live FROM threads t JOIN nodes n ON n.id=t.node_id JOIN nodes r ON r.id=t.ask_root_org_id WHERE t.node_id=ANY($1) AND t.ask_root_org_id IS NOT NULL")
+    Ok(sqlx::query_as("SELECT thread_id,root_org_id,person_id,retention_days,last_message_at,root_live,inspectable FROM ask_governance WHERE thread_id=ANY($1)")
         .bind(threads).fetch_all(conn).await?)
 }
 
@@ -64,9 +66,27 @@ pub async fn program_binding(
     conn: &mut Conn,
     thread: Id,
 ) -> Result<Option<ProgramBinding>, DbError> {
-    Ok(sqlx::query_as("SELECT COALESCE(t.ask_root_org_id,t.program_root_org_id) root_org_id,t.ask_model model FROM threads t WHERE t.node_id=$1 AND t.program='orch'
-        AND NOT EXISTS(SELECT 1 FROM segments s WHERE s.id=t.current_segment_id AND s.program_backend IS NOT NULL)")
-        .bind(thread).fetch_optional(conn).await?)
+    #[derive(sqlx::FromRow)]
+    struct Current {
+        root_org_id: Id,
+        preference: Option<Json>,
+        has_dialogue: bool,
+        #[sqlx(flatten)]
+        segment: StoredSegmentBinding,
+    }
+    let current:Option<Current> = sqlx::query_as("SELECT COALESCE(t.ask_root_org_id,t.program_root_org_id) AS root_org_id,t.ask_model AS preference,
+        s.program IS NOT NULL AS has_dialogue,s.provider_id,s.program_protocol AS protocol,s.program_model AS model,s.program_backend AS backend
+        FROM threads t LEFT JOIN segments s ON s.id=t.current_segment_id AND s.thread_id=t.node_id
+        WHERE t.node_id=$1 AND t.program='orch'").bind(thread).fetch_optional(conn).await?;
+    Ok(current.and_then(|current| {
+        if current.has_dialogue && current.segment.decode().is_none() {
+            return None;
+        }
+        Some(ProgramBinding {
+            root_org_id: current.root_org_id,
+            model: current.preference,
+        })
+    }))
 }
 
 /// Historical placement of an actual built-in segment, never inferred from missing native bindings.
@@ -78,11 +98,52 @@ pub async fn segment_root(conn: &mut Conn, segment: Id) -> Result<Option<Id>, Db
 }
 
 /// Actual dialogue placement recorded by one built-in history segment.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentBinding {
     pub provider_id: Id,
-    pub protocol: String,
+    pub transport: DialogueTransport,
     pub model: String,
+}
+
+/// The conversation owns its history. Only an API transport names a provider wire protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogueTransport {
+    Api {
+        protocol: String,
+        backend: BackendRef,
+    },
+    Program(BackendRef),
+}
+
+impl DialogueTransport {
+    pub fn backend(&self) -> &BackendRef {
+        match self {
+            Self::Api { backend, .. } | Self::Program(backend) => backend,
+        }
+    }
+}
+
+impl SegmentBinding {
+    fn valid(&self) -> bool {
+        if self.provider_id.is_nil() || self.model.trim().is_empty() {
+            return false;
+        }
+        let backend = self.transport.backend();
+        backend.validate().is_ok()
+            && backend.offering.as_ref().is_some_and(|entry| {
+                entry.provider == self.provider_id && entry.offering == self.model
+            })
+            && match &self.transport {
+                DialogueTransport::Api { protocol, .. } => {
+                    !protocol.trim().is_empty()
+                        && backend.route == orch_api_contract::ask::API_ROUTE
+                }
+                DialogueTransport::Program(_) => {
+                    backend.route == orch_api_contract::ask::PROGRAM_ROUTE
+                        && ProgramPlacement::read(&backend.config).is_ok()
+                }
+            }
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -91,6 +152,23 @@ struct StoredSegmentBinding {
     protocol: Option<String>,
     model: Option<String>,
     backend: Option<Json>,
+}
+
+impl StoredSegmentBinding {
+    fn decode(self) -> Option<SegmentBinding> {
+        let binding = SegmentBinding {
+            provider_id: self.provider_id?,
+            model: self.model?,
+            transport: match self.protocol {
+                Some(protocol) => DialogueTransport::Api {
+                    protocol,
+                    backend: serde_json::from_value(self.backend?).ok()?,
+                },
+                None => DialogueTransport::Program(serde_json::from_value(self.backend?).ok()?),
+            },
+        };
+        binding.valid().then_some(binding)
+    }
 }
 
 /// Historical provider and interface, independent of the thread's current choice.
@@ -106,17 +184,7 @@ pub async fn segment_binding(
     .bind(thread)
     .fetch_optional(conn)
     .await?;
-    Ok(binding.and_then(|binding| {
-        // A retained backend is not an implemented API binding, even if a protocol remains.
-        if binding.backend.is_some() {
-            return None;
-        }
-        Some(SegmentBinding {
-            provider_id: binding.provider_id?,
-            protocol: binding.protocol?,
-            model: binding.model?,
-        })
-    }))
+    Ok(binding.and_then(StoredSegmentBinding::decode))
 }
 
 /// Knowledge domains of actual source nodes, independent of their storage homes.
@@ -217,9 +285,19 @@ pub async fn segment(
     at: DateTime<Utc>,
     seq: Seq,
 ) -> Result<(), DbError> {
+    if !binding.valid() {
+        return Err(DbError::Rule {
+            constraint: "ask_segment_binding".into(),
+        });
+    }
+    let backend = sqlx::types::Json(binding.transport.backend());
+    let (protocol, path) = match &binding.transport {
+        DialogueTransport::Api { protocol, .. } => (Some(protocol.as_str()), "forwarded"),
+        DialogueTransport::Program(_) => (None, "native"),
+    };
     sqlx::query("UPDATE segments SET ended_at=$2,end_reason='switched' WHERE thread_id=$1 AND program='orch' AND ended_at IS NULL").bind(thread).bind(at).execute(&mut *conn).await?;
-    sqlx::query("INSERT INTO segments (id,thread_id,ordinal,program,provider_id,program_protocol,program_model,env_generation,arrangement,credential_path,started_by,started_at,seq_updated,continuation_id) SELECT $1,t.node_id,(SELECT COALESCE(max(ordinal),0)+1 FROM segments WHERE thread_id=t.node_id),'orch',$3,$7,$8,0,'control_plane','forwarded',$4,$5,$6,t.active_continuation_id FROM threads t WHERE t.node_id=$2")
-        .bind(id).bind(thread).bind(binding.provider_id).bind(person).bind(at).bind(seq).bind(&binding.protocol).bind(&binding.model).execute(&mut *conn).await?;
+    sqlx::query("INSERT INTO segments (id,thread_id,ordinal,program,provider_id,program_protocol,program_model,program_backend,env_generation,arrangement,credential_path,started_by,started_at,seq_updated,continuation_id) SELECT $1,t.node_id,(SELECT COALESCE(max(ordinal),0)+1 FROM segments WHERE thread_id=t.node_id),'orch',$3,$7,$8,$9,0,'control_plane',$10,$4,$5,$6,t.active_continuation_id FROM threads t WHERE t.node_id=$2")
+        .bind(id).bind(thread).bind(binding.provider_id).bind(person).bind(at).bind(seq).bind(protocol).bind(&binding.model).bind(backend).bind(path).execute(&mut *conn).await?;
     sqlx::query("UPDATE threads SET provider_id=$3,current_segment_id=$2 WHERE node_id=$1")
         .bind(thread)
         .bind(id)
@@ -332,7 +410,7 @@ pub async fn retain_call(
     root: Id,
     person: Id,
     provider: Id,
-    machine: Id,
+    machine: Option<Id>,
     request: &Json,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
@@ -370,7 +448,7 @@ pub async fn delta(
     text: &str,
 ) -> Result<Option<(Id, Id)>, DbError> {
     let len = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
-    let found:Option<(Id,Id)>=sqlx::query_as("UPDATE ask_calls c SET text_offset=text_offset+$4 FROM threads t WHERE c.id=$2 AND c.provider_id=$1 AND c.text_offset=$3 AND NOT c.settled AND t.node_id=c.thread_id AND t.current_turn_id=c.turn_id AND t.ask_state='running' RETURNING c.thread_id,c.item_id")
+    let found:Option<(Id,Id)>=sqlx::query_as("UPDATE ask_calls c SET text_offset=text_offset+$4 FROM threads t WHERE c.id=$2 AND c.provider_id=$1 AND c.machine_id IS NOT NULL AND c.text_offset=$3 AND NOT c.settled AND t.node_id=c.thread_id AND t.current_turn_id=c.turn_id AND t.ask_state='running' RETURNING c.thread_id,c.item_id")
         .bind(provider).bind(command).bind(offset).bind(len).fetch_optional(&mut *conn).await?;
     if let Some((_, item)) = found {
         sqlx::query("UPDATE items SET payload=jsonb_set(jsonb_set(payload,'{text}',to_jsonb(COALESCE(payload->>'text','')||$2::text)),'{text_len}',to_jsonb($3::bigint+$4::bigint)) WHERE id=$1")

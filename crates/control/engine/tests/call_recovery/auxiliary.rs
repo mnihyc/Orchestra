@@ -155,7 +155,7 @@ async fn a_switched_off_summary_target_pauses_without_another_request_or_failure
                 .set(
                     world.topic,
                     "auto.summarizer",
-                    json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
+                    json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":common::MODEL}}}),
                 )
                 .await;
             world.set(world.topic, "calls.rules", json!([{"id":"retry","when":{},"steps":[{"type":"retry","delay_secs":0,"times":10,"backoff":1}]}])).await;
@@ -330,7 +330,7 @@ async fn an_automatic_failed_summary_uses_its_configured_candidate_without_attri
         .set(
             world.topic,
             "auto.summarizer",
-            json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":common::MODEL}}}),
         )
         .await;
     world.set(world.topic,"calls.rules",json!([{"id":"summary-fallback","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","params":{}}},{"type":"wait","until":"person"}]}])).await;
@@ -654,7 +654,7 @@ async fn a_model_failure_without_a_matching_rule_does_not_use_the_old_summary_re
         .set(
             world.topic,
             "auto.summarizer",
-            json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":common::MODEL}}}),
         )
         .await;
     world.set(world.topic, "calls.rules", json!([])).await;
@@ -896,7 +896,7 @@ async fn an_unusable_model_answer_uses_call_policy_instead_of_summary_backoff() 
         .set(
             world.topic,
             "auto.summarizer",
-            json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":common::MODEL}}}),
         )
         .await;
     sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
@@ -1278,7 +1278,7 @@ async fn an_auxiliary_candidate_cannot_send_an_effort_the_target_model_does_not_
         .set(
             world.topic,
             "auto.summarizer",
-            json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":common::MODEL}}}),
         )
         .await;
     world.set(world.topic, "calls.rules", json!([{"id":"effort","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"limited-effort","params":{"effort":"high"}}},{"type":"wait","until":"person"}]}])).await;

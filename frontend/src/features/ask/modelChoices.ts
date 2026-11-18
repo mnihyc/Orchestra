@@ -1,12 +1,22 @@
 /** Runtime rows are the native configured entries, never a second model/Use/policy evaluator. */
 import type { TFunction } from 'i18next';
-import type { AskModelsReply } from '@/generated/api-types';
+import type { AskModel, AskModelsReply, BackendRef } from '@/generated/api-types';
 import type { ModelEffortEntry } from '@/features/composer/ModelEffort';
+import type { ModelSelection } from '@/features/composer/modelSelection';
+
+/** The model chip displays the offering while keeping the whole route for its writer. */
+export function askSelection(value: AskModel | null | undefined): (ModelSelection & { backend: BackendRef }) | null {
+  const offering = value?.backend.offering;
+  return value === undefined || value === null || offering === null || offering === undefined ? null :
+    { provider_id: offering.provider, model: offering.offering, backend: value.backend, params: value.params };
+}
 
 export function configuredAskEntries(reply: AskModelsReply | undefined): ModelEffortEntry[] {
-  return (reply?.models ?? []).flatMap((entry, index) => entry.allowed && entry.provider !== null && entry.model !== null ? [{
-    id: String(index), value: entry.selection, option: entry.model, providerName: entry.provider.name,
-  }] : []);
+  return (reply?.models ?? []).flatMap((entry, index) => {
+    const value = askSelection(entry.selection);
+    return entry.allowed && entry.provider !== null && entry.model !== null && value !== null
+      ? [{ id: String(index), value, option: entry.model, providerName: entry.provider.name }] : [];
+  });
 }
 
 export function askModelExclusionText(reason: string, t: TFunction): string {

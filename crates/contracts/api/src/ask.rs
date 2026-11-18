@@ -9,36 +9,54 @@ use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver 
 use crate::routes::Access::Rule;
 use orch_access_contract::key_scope::{KeyAction, KeyIdentityKind, KeyTargetKind};
 use orch_access_contract::permissions::ObjectKind;
+use orch_provider_contract::capabilities::{BackendRef, OfferingRef};
 use orch_types::{Id, Json, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A selected API model; subscription-only providers cannot serve Ask.
+/// The existing credential-keeper dialogue command.
+pub const API_ROUTE: &str = "provider.generate";
+/// A tool-free program returning the same dialogue answers and read requests.
+pub const PROGRAM_ROUTE: &str = "ask.delegation";
+
+/// An exact Ask policy entry. Route, offering and placement participate in its identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskModelIdentity {
-    pub provider_id: Id,
-    pub model: String,
+    pub backend: BackendRef,
 }
 
 /// A conversation's model identity and its optional current parameter choices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AskModel {
-    /// The provider whose runtime keeps its credential.
-    pub provider_id: Id,
-    /// The enabled routing name.
-    pub model: String,
+    /// Exact backend accepted by the organization, including its offering and placement.
+    pub backend: BackendRef,
     /// Choices within the provider's effective constraints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Json>,
 }
 
+impl AskModelIdentity {
+    /// A model served by the credential keeper's dialogue interface.
+    pub fn api(provider: Id, model: String) -> Self {
+        Self {
+            backend: BackendRef {
+                route: API_ROUTE.into(),
+                offering: Some(OfferingRef {
+                    provider,
+                    offering: model,
+                }),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 impl From<AskModelIdentity> for AskModel {
     fn from(identity: AskModelIdentity) -> Self {
         Self {
-            provider_id: identity.provider_id,
-            model: identity.model,
+            backend: identity.backend,
             params: None,
         }
     }

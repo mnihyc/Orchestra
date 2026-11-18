@@ -74,11 +74,12 @@ const TAKES: &[CommandKind] = &[
     CommandKind::ProviderEmbed,
 ];
 
-/// Keeps the longest canonical prefix of factual groups that fits the existing command frame.
-/// The journal retains every group; aggregate tokens remain exact, and the host can recognize any
-/// omitted usage as uncovered. Sorting is O(groups log groups), then each group is serialized once:
-/// an empty-array CmdRes frame supplies the exact fixed overhead, and commas cost one byte each.
-/// A role handler cannot read a lower negotiated session limit, so this uses the shipped frame budget.
+/// Keeps the longest canonical prefix of factual groups that fits one message of the link, whose size the
+/// session states; groups are carried in parts when they do not fit a frame, so this cuts only what could
+/// not be sent at all. The journal retains every group; aggregate tokens remain exact, and the host can
+/// recognize any omitted usage as uncovered. Sorting is O(groups log groups), then each group is
+/// serialized once: an empty-array CmdRes frame supplies the exact fixed overhead, and commas cost one
+/// byte each.
 fn fitting_close_groups(
     command: Id,
     mut answer: LeaseCloseResult,
@@ -1011,7 +1012,7 @@ impl RoleHandler for ProviderRole {
                             usage: totals.reported(),
                             usage_groups: totals.usage_groups,
                         },
-                        orch_link_contract::version::MAX_FRAME_BYTES as usize,
+                        self.services.link.message_bytes(),
                     )
                     .map_err(|error| internal(error.to_string()))?,
                 )
@@ -1324,7 +1325,7 @@ mod close_group_tests {
     }
 
     #[test]
-    fn close_groups_fit_the_shipped_frame_limit_without_an_arbitrary_group_cap() {
+    fn close_groups_fit_the_message_limit_without_an_arbitrary_group_cap() {
         let command = new_id();
         let full = answer(
             (0..400)
@@ -1337,7 +1338,7 @@ mod close_group_tests {
                 })
                 .collect(),
         );
-        let max = orch_link_contract::version::MAX_FRAME_BYTES as usize;
+        let max = 256 * 1024;
         assert!(frame(command, &full).len() > max);
         let fitted = fitting_close_groups(command, full.clone(), max).unwrap();
         let count = fitted.usage_groups.as_ref().unwrap().len();
@@ -1351,7 +1352,7 @@ mod close_group_tests {
     #[test]
     fn oversized_first_group_leaves_an_aware_empty_reply_with_exact_aggregate_usage() {
         let command = new_id();
-        let max = orch_link_contract::version::MAX_FRAME_BYTES as usize;
+        let max = 256 * 1024;
         let full = answer(vec![group("a".to_owned(), "x".repeat(max))]);
         let fitted = fitting_close_groups(command, full.clone(), max).unwrap();
         assert_eq!(fitted.usage_groups, Some(Vec::new()));
