@@ -18,10 +18,9 @@ import { threadGatewayQuery } from '@/api/gateways';
 import { seedPendingAgentSchedules } from '@/api/inputSchedules';
 import { applyThread, isCompleteThread } from '@/api/cache';
 import { queryClient } from '@/api/query';
-import { settingsKey } from '@/api/settings';
 import { assertThreadRead, captureThreadExecution, captureThreadRead, isCurrentThreadRead, readInThread,
-  receiveThreadRead, stampThreadRows, threadAct, threadQueryRead, threadReadQueryKey, threadReadSelector, type ThreadReadCapture } from '@/api/threadRead';
-import { isDefaultThreadRead, sameThreadRead, threadReadTarget, type ThreadReadTarget, planThreadOpening, scopedThreadKey, stampThreadReceipt, threadReadChanged } from '@/realtime/threadScope';
+  receiveThreadRead, stampThreadRows, threadAct, threadStopAct, threadQueryRead, threadReadQueryKey, threadReadSelector, type ThreadReadCapture } from '@/api/threadRead';
+import { isDefaultThreadRead, sameThreadRead, threadReadTarget, type ThreadReadTarget, planThreadOpening, stampThreadReceipt, threadReadChanged } from '@/realtime/threadScope';
 export { captureThreadRead, isCurrentThreadRead, selectThreadContinuation, threadReadQueryKey, threadReadSelector } from '@/api/threadRead';
 import type {
   Catchup,
@@ -33,7 +32,10 @@ import type {
   Item,
   LimitBypassRequest,
   NodeSettingSetBody,
+  RawCall,
+  Turn,
   ThreadOutlinePage,
+  OutlineSelection,
   ThreadSegmentPage,
   ThreadTurnPage,
   ResolvedSetting,
@@ -46,10 +48,11 @@ import type {
   ThreadItemListReply,
   ThreadLimits,
   ThreadOpening,
+  ThreadScreenFacts,
   ThreadParameters,
   ThreadQueue,
+  ThreadStop,
   ThreadSync,
-  Turn,
 } from '@/generated/api-types';
 import { THREAD_INPUT_PAGE_SIZE, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 
@@ -61,21 +64,34 @@ export const threadKeys = {
   outline: (target: ThreadReadTarget) => threadReadQueryKey(target, ['thread-outline', threadReadTarget(target).threadId]),
 };
 
-/** How many items the first answer holds: a screenful and then some, so that the first scroll up needs no request. */
+/** The incremental read budget; the opening chooses its configured first screen on the server. */
 export const TAIL_ITEMS = 200;
 /** How many older items a scroll to the top reads. */
 export const OLDER_ITEMS = 100;
 
+/** Activity and answer policy are independent of model metadata and of an unopened settings panel. */
+export const threadScreenFactsQuery = (id: string) => queryOptions({
+  queryKey: ['thread-screen-facts', id] as const,
+  queryFn: ({ signal }): Promise<ThreadScreenFacts> => ok(api.GET('/threads/{id}/screen-facts', { params: { path: { id } }, signal })),
+  staleTime: Infinity,
+});
+
 /** Install the screen's native projections before its thread is published to mounted controls. */
-export function hydrateThreadOpening(cache: QueryClient, opening: ThreadOpening, captured?: ThreadReadCapture, outlineKey?: readonly unknown[]): void {
+export function hydrateThreadOpening(cache: QueryClient, opening: ThreadOpening, captured?: ThreadReadCapture): void {
   if (!isCompleteThread(opening.sync.thread)) throw new Error('The opening did not carry a complete thread view');
   const id = opening.sync.thread.id;
   if (captured !== undefined) {
     assertThreadRead(captured);
     if (captured.threadId !== id) throw threadReadChanged();
+  }
+  if (opening.screen.status === 'ready') cache.setQueryData(threadScreenFactsQuery(id).queryKey, opening.screen.data);
+  else if (opening.screen.status === 'failed') cache.getQueryCache().build(cache, { queryKey: threadScreenFactsQuery(id).queryKey }).setState({
+    data: undefined, status: 'error', fetchStatus: 'idle',
+    error: new ApiError(opening.screen.problem, opening.screen.retry_after === null ? null : new Date(Date.now() + opening.screen.retry_after * 1000)),
+  });
+  if (captured !== undefined) {
     if (!isDefaultThreadRead(captured.ref) && (captured.ref.controls !== true || captured.scope.selection !== null)) {
       // Read-only previews publish history only; full content tabs share the normal controls.
-      cache.setQueryData(outlineKey ?? threadKeys.outline(captured.ref), { pages: [opening.outline], pageParams: [null] });
       return;
     }
   }
@@ -86,8 +102,6 @@ export function hydrateThreadOpening(cache: QueryClient, opening: ThreadOpening,
   else cache.removeQueries({ queryKey: threadKeys.parameters(id), exact: true });
   if (opening.limits !== null) cache.setQueryData([...threadKeys.limits(id), null], opening.limits);
   else cache.removeQueries({ queryKey: [...threadKeys.limits(id), null], exact: true });
-  cache.setQueryData(settingsKey(id), opening.settings);
-  cache.setQueryData(outlineKey ?? threadKeys.outline(id), { pages: [opening.outline], pageParams: [null] });
   const gateway = opening.gateway;
   if (gateway?.status === 'ready') {
     cache.setQueryData(threadGatewayQuery(id, opening.sync.thread.execution_revision).queryKey, gateway.data);
@@ -111,7 +125,7 @@ export async function fetchThreadSync(target: ThreadReadTarget, since: number | 
   if (since === null) {
     const captured = threadWriter.beginRead(ref, client.session.getState().readerVersion);
     const opening = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/opening', {
-      params: { path: { id }, query: { limit: TAIL_ITEMS, ...threadReadSelector(captured, false) } },
+      params: { path: { id }, query: { ...threadReadSelector(captured, false) } },
       signal: readSignal,
     })), signal, true);
     if (opening.sync.thread.id !== id) throw new Error('The opening belongs to a different thread');
@@ -119,7 +133,7 @@ export async function fetchThreadSync(target: ThreadReadTarget, since: number | 
     if (!opening.sync.complete) throw new Error('The full thread opening was incomplete');
     const planned = planThreadOpening(captured.scope, opening.sync.projection ?? null);
     if (planned === null) throw threadReadChanged();
-    hydrateThreadOpening(queryClient, opening, captured, scopedThreadKey(planned, ['thread-outline', id]));
+    hydrateThreadOpening(queryClient, opening, captured);
     const accepted = threadWriter.reset(ref, opening.sync, opening.sync.has_older, captured, planned);
     if (accepted === null) throw threadReadChanged();
     return stampThreadRows(opening.sync, accepted);
@@ -173,13 +187,25 @@ export async function fetchItem(target: ThreadReadTarget, itemId: string, signal
 
 /** A stretch of a command's whole output, as text, under the same captured history. */
 export function fetchOutput(target: ThreadReadTarget, itemId: string, offset: number, limit: number, signal?: AbortSignal,
-  captured = captureThreadRead(target)): Promise<string> {
+  captured = captureThreadRead(target), expectedBlob?: string): Promise<string> {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
   if (!sameThreadRead(captured.ref,ref)) return Promise.reject(threadReadChanged());
   return readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/items/{item_id}/output', {
-    params: { path: { id, item_id: itemId }, query: { offset, limit, ...threadReadSelector(captured) } },
+    params: { path: { id, item_id: itemId }, query: { offset, limit, ...(expectedBlob === undefined ? {} : { expected_blob: expectedBlob }), ...threadReadSelector(captured) } },
     parseAs: 'text', signal: readSignal,
+  })), signal);
+}
+
+/** A tool call exactly as its harness made it, which a thread's items leave out: read when a person opens it, under the same captured history. */
+export function fetchRaw(target: ThreadReadTarget, itemId: string, signal?: AbortSignal,
+  captured = captureThreadRead(target)): Promise<RawCall> {
+  const ref = threadReadTarget(target);
+  const id = ref.threadId;
+  if (!sameThreadRead(captured.ref,ref)) return Promise.reject(threadReadChanged());
+  return readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/items/{item_id}/raw', {
+    params: { path: { id, item_id: itemId }, query: threadReadSelector(captured) },
+    signal: readSignal,
   })), signal);
 }
 
@@ -203,10 +229,17 @@ export const catchupQuery = (target: ThreadReadTarget, since: number) => {
   });
 };
 
-export const outlineQuery = (target: ThreadReadTarget) => {
+export interface OutlineOptions {
+  selection?: OutlineSelection;
+  q?: string;
+}
+
+export const outlineQuery = (target: ThreadReadTarget, options: OutlineOptions = {}) => {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
-  const reading = threadQueryRead(ref, ['thread-outline', id]);
+  const selected = options.selection ?? 'conversation';
+  const q = options.q?.trim() ?? '';
+  const reading = threadQueryRead(ref, ['thread-outline', id, ...(selected === 'conversation' && q === '' ? [] : [selected, q])]);
   return infiniteQueryOptions({
     queryKey: reading.key,
     enabled: reading.enabled,
@@ -215,6 +248,7 @@ export const outlineQuery = (target: ThreadReadTarget) => {
       const captured = await reading.capture(signal, pageParam !== null);
       const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/outline', {
         params: { path: { id }, query: { limit: TAIL_ITEMS, ...threadReadSelector(captured),
+          ...(selected === 'conversation' ? {} : { selection: selected }), ...(q === '' ? {} : { q }),
           ...(pageParam === null ? {} : { before: pageParam }) } }, signal: readSignal,
       })), signal);
       const accepted = receiveThreadRead(captured, page.projection, signal);
@@ -224,6 +258,16 @@ export const outlineQuery = (target: ThreadReadTarget) => {
     staleTime: Infinity,
   });
 };
+
+/** The anchor and its immediate human neighbors; three positions express the neighborhood, not a history limit. */
+export async function fetchMessageNeighbors(target: ThreadReadTarget, around: string, signal?: AbortSignal): Promise<ThreadOutlinePage> {
+  const captured = captureThreadRead(target);
+  const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/outline', {
+    params: { path: { id: captured.threadId }, query: { selection: 'messages', around, limit: 3, include_changes: false, ...threadReadSelector(captured) } }, signal: readSignal,
+  })), signal);
+  const accepted = receiveThreadRead(captured, page.projection, signal);
+  return stampThreadReceipt(page, accepted);
+}
 
 /** Historical references remain explicitly pageable, even for turns with no timeline items. */
 export const segmentsQuery = (target: ThreadReadTarget) => {
@@ -271,6 +315,33 @@ export const turnsQuery = (target: ThreadReadTarget) => {
     },
     getNextPageParam: (page) => page.next_before ?? undefined,
     staleTime: Infinity,
+  });
+};
+
+export type TurnChoice = Pick<Turn, 'id' | 'ordinal'>;
+export interface TurnChoicePage { turns: TurnChoice[]; next_before: number | null }
+
+/** History choices retain only native positions, including empty turns, without publishing old turn bodies. */
+export const turnChoicesQuery = (target: ThreadReadTarget) => {
+  const ref = threadReadTarget(target);
+  const id = ref.threadId;
+  const reading = threadQueryRead(ref, ['thread-turn-choices', id]);
+  return infiniteQueryOptions({
+    queryKey: reading.key,
+    enabled: reading.enabled,
+    initialPageParam: null as number | null,
+    queryFn: async ({ signal, pageParam }): Promise<TurnChoicePage> => {
+      const captured = await reading.capture(signal, pageParam !== null);
+      const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/turns', {
+        params: { path: { id }, query: { limit: OLDER_ITEMS, ...threadReadSelector(captured),
+          ...(pageParam === null ? {} : { before: pageParam }) } }, signal: readSignal,
+      })), signal);
+      const accepted = receiveThreadRead(captured, page.projection, signal);
+      return stampThreadReceipt({ turns: page.turns.map(({ id, ordinal }) => ({ id, ordinal })), next_before: page.next_before }, accepted);
+    },
+    getNextPageParam: (page) => page.next_before ?? undefined,
+    staleTime: Infinity,
+    retry: false,
   });
 };
 
@@ -378,11 +449,12 @@ export async function cancelInput(target: ThreadReadTarget, inputId: string): Pr
   return stampThreadReceipt(reply, captured);
 }
 
-/** Stops a turn. */
-export function interruptTurn(target: ThreadReadTarget, turnId: string): Promise<Turn> {
+/** Stops a turn, or, with none to name, the start of the thread's next turn (the files being recorded or written before it
+ * exists). The answer comes at once and says that the thread is stopping until the program has stopped. */
+export function interruptTurn(target: ThreadReadTarget, turnId: string | null): Promise<ThreadStop> {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
-  return threadAct(ref, () => ok(api.POST('/threads/{id}/interrupt', { params: { path: { id } }, body: { turn_id: turnId } })));
+  return threadStopAct(ref, () => ok(api.POST('/threads/{id}/interrupt', { params: { path: { id } }, body: turnId === null ? {} : { turn_id: turnId } })), (reply) => reply.turn === null || reply.turn === undefined ? [] : [reply.turn]);
 }
 
 /** Tries again, for its author, the files that hold an input: the same input, held again if they still cannot go. */
@@ -496,11 +568,11 @@ export async function markRead(target: ThreadReadTarget, seq: number): Promise<n
 // ---------------------------------------------------------------- the model, the effort and the settings
 
 /** What can be set on the agent of a thread, and what it is now. */
-export const parametersQuery = (id: string) =>
+export const parametersQuery = (id: string, choices = false) =>
   queryOptions({
     queryKey: threadKeys.parameters(id),
     queryFn: ({ signal }): Promise<ThreadParameters> => ok(api.GET('/threads/{id}/parameters', { params: { path: { id } }, signal })),
-    staleTime: Infinity,
+    staleTime: (query) => choices && query.state.data?.model.options_partial === true ? 0 : Infinity,
   });
 
 /** Writes one setting of the thread itself: the model and the effort are two of them, and apply from the next turn. */

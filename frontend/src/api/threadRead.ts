@@ -2,7 +2,7 @@
 import { ApiError, client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import type { ThreadContinuationProjection } from '@/generated/api-types';
-import { holdThreadRead, threadViewOf, threadWriter, useThreadStore, type ThreadRows } from '@/realtime/stores/thread';
+import { holdThreadRead, threadStopReadOnly, threadViewOf, threadWriter, useThreadStore, type ThreadRows } from '@/realtime/stores/thread';
 import { matchesThreadCapture, matchesThreadProjection, projectionFitsSelection, sameThreadProjection,
   coldThreadKey, scopedThreadKey, threadReadTarget, stampPromptReceipt, stampThreadReceipt, threadReadChanged, threadReceipt, threadReadSelector,
   type ThreadReadCapture, type ThreadReadTarget } from '@/realtime/threadScope';
@@ -106,6 +106,20 @@ export async function threadAct<Value extends object>(threadId: ThreadReadTarget
   const reply = await readInThread(captured, act);
   for (const row of rows(reply)) stampThreadReceipt(row, captured);
   return stampThreadReceipt(reply, captured);
+}
+
+/** Stop is of an exact live target, independent of a history revision or a reload's cancellation signal. */
+export async function threadStopAct<Value extends object>(threadId: ThreadReadTarget, act: () => Promise<Value>,
+  rows: (value: Value) => readonly object[] = () => []): Promise<Value> {
+  const captured = captureThreadRead(threadId);
+  if (threadStopReadOnly(threadViewOf(threadId))) throw threadReadChanged();
+  const release = holdThreadRead(captured.ref);
+  try {
+    const reply = await act();
+    if (captured.scope.reader !== client.session.getState().readerVersion) throw threadReadChanged();
+    for (const row of rows(reply)) stampThreadReceipt(row, captured);
+    return stampThreadReceipt(reply, captured);
+  } finally { release(); }
 }
 
 /** Query option factories are pure. Registration/cancellation happens only when their read starts. */
