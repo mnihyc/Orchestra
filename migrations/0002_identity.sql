@@ -80,6 +80,42 @@ CREATE TABLE users (
     CONSTRAINT users_org_invited_by_fkey FOREIGN KEY (org_invited_by) REFERENCES users(id)
 );
 
+CREATE TABLE personal_feed_state (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    seq bigint DEFAULT 0 NOT NULL
+);
+
+-- Profile sources are part of the first shell even when no live notice is emitted.
+-- Keep their committed order apart from credential locks and connection bookkeeping.
+CREATE FUNCTION stamp_personal_profile() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    before_person uuid;
+    after_person uuid;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        IF TG_TABLE_NAME = 'users' THEN before_person := OLD.id;
+        ELSE before_person := OLD.user_id;
+        END IF;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        IF TG_TABLE_NAME = 'users' THEN after_person := NEW.id;
+        ELSE after_person := NEW.user_id;
+        END IF;
+    END IF;
+    INSERT INTO personal_feed_state (user_id, seq)
+        SELECT id, 1 FROM users WHERE id = ANY(ARRAY[before_person, after_person]) ORDER BY id
+        ON CONFLICT (user_id) DO UPDATE SET seq = personal_feed_state.seq + 1;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER personal_profile_changed AFTER UPDATE ON users FOR EACH ROW
+    WHEN (ROW(OLD.username, OLD.display_name, OLD.avatar_color, OLD.kind, OLD.email, OLD.email_verified_at, OLD.password_hash, OLD.totp_enabled_at, OLD.email_code_at, OLD.is_system_admin, OLD.locale, OLD.timezone, OLD.timezone_mode, OLD.theme, OLD.density, OLD.personal_org_id, OLD.status, OLD.created_at)
+          IS DISTINCT FROM ROW(NEW.username, NEW.display_name, NEW.avatar_color, NEW.kind, NEW.email, NEW.email_verified_at, NEW.password_hash, NEW.totp_enabled_at, NEW.email_code_at, NEW.is_system_admin, NEW.locale, NEW.timezone, NEW.timezone_mode, NEW.theme, NEW.density, NEW.personal_org_id, NEW.status, NEW.created_at))
+    EXECUTE FUNCTION stamp_personal_profile();
+
 CREATE UNIQUE INDEX users_email_key ON users USING btree (lower(email)) WHERE (email IS NOT NULL);
 
 CREATE INDEX users_people_name_idx ON users USING gin ((((lower(username) || ' '::text) || lower(display_name))) gin_trgm_ops) WHERE ((kind = 'human'::text) AND (status = 'active'::text));
@@ -135,6 +171,16 @@ CREATE TABLE email_tokens (
     CONSTRAINT email_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TRIGGER personal_email_pending_created AFTER INSERT ON email_tokens FOR EACH ROW
+    WHEN (NEW.purpose = 'verify_email') EXECUTE FUNCTION stamp_personal_profile();
+CREATE TRIGGER personal_email_pending_removed AFTER DELETE ON email_tokens FOR EACH ROW
+    WHEN (OLD.purpose = 'verify_email') EXECUTE FUNCTION stamp_personal_profile();
+CREATE TRIGGER personal_email_pending_changed AFTER UPDATE ON email_tokens FOR EACH ROW
+    WHEN ((OLD.purpose = 'verify_email' OR NEW.purpose = 'verify_email') AND
+          ROW(OLD.user_id, OLD.purpose, OLD.email, OLD.expires_at, OLD.used_at)
+          IS DISTINCT FROM ROW(NEW.user_id, NEW.purpose, NEW.email, NEW.expires_at, NEW.used_at))
+    EXECUTE FUNCTION stamp_personal_profile();
+
 CREATE TABLE enrollment_tokens (
     token_hash bytea NOT NULL,
     created_by uuid NOT NULL,
@@ -184,7 +230,7 @@ CREATE TABLE invitations (
     CONSTRAINT invitations_check3 CHECK (((email IS NULL) OR (max_uses = 1))),
     CONSTRAINT invitations_issuer_origin_check CHECK ((issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object')),
     CONSTRAINT invitations_kind_check CHECK ((kind = ANY (ARRAY['system'::text, 'org'::text, 'node'::text, 'chat'::text]))),
-    CONSTRAINT invitations_max_uses_check CHECK (((max_uses >= 1) AND (max_uses <= 1000))),
+    CONSTRAINT invitations_max_uses_check CHECK ((max_uses >= 1)),
     CONSTRAINT invitations_role_check CHECK ((role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
     CONSTRAINT invitations_pkey PRIMARY KEY (id),
     CONSTRAINT invitations_token_hash_key UNIQUE (token_hash),
@@ -273,6 +319,13 @@ CREATE TABLE user_identities (
 
 CREATE INDEX user_identities_user_idx ON user_identities USING btree (user_id);
 
+CREATE TRIGGER personal_identity_linked AFTER INSERT OR DELETE ON user_identities FOR EACH ROW
+    EXECUTE FUNCTION stamp_personal_profile();
+CREATE TRIGGER personal_identity_changed AFTER UPDATE ON user_identities FOR EACH ROW
+    WHEN (ROW(OLD.identity_provider_id, OLD.subject, OLD.user_id, OLD.email, OLD.linked_at)
+          IS DISTINCT FROM ROW(NEW.identity_provider_id, NEW.subject, NEW.user_id, NEW.email, NEW.linked_at))
+    EXECUTE FUNCTION stamp_personal_profile();
+
 CREATE TABLE user_profiles (
     user_id uuid NOT NULL,
     bio text DEFAULT ''::text NOT NULL,
@@ -294,7 +347,7 @@ CREATE TABLE user_state (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
+    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'interface'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
     CONSTRAINT user_state_value_check CHECK ((pg_column_size(value) <= 65536)),
     CONSTRAINT user_state_pkey PRIMARY KEY (user_id, key),
     CONSTRAINT user_state_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

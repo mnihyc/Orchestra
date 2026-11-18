@@ -158,6 +158,22 @@ pub enum OrgCreation {
     Invited,
 }
 
+/// Installation defaults for a person's reading experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InterfaceDefaults {
+    /// Effective installation threshold for automatic catch-up; absent when it was not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up_above_items: Option<i64>,
+    /// Extra recently closed views to retain; open views always retain their state.
+    pub kept_closed_tabs: i64,
+    /// Milliseconds before a read shows a loading indication.
+    pub progress_delay_ms: i64,
+    /// Freshness in milliseconds for directory, lookup, report and status reads.
+    pub read_freshness_ms: std::collections::BTreeMap<String, i64>,
+    /// Recent/usual sample windows and relative/noise thresholds for measured link degradation.
+    pub connection_quality: std::collections::BTreeMap<String, i64>,
+}
+
 /// What a client may know before anybody has signed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Meta {
@@ -202,6 +218,8 @@ pub struct Meta {
     pub link_endpoints: Vec<MetaLinkEndpoint>,
     /// The sizes the system accepts.
     pub limits: MetaLimits,
+    /// Installation defaults for choices each person may override in Interface.
+    pub interface_defaults: InterfaceDefaults,
 }
 
 /// What a sign-in, a registration or a refresh answers with.
@@ -228,6 +246,8 @@ pub struct AdminMode {
 /// projection and access rules as its individual read, without loading any organization's tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MeBootstrapReply {
+    /// The committed change cut captured before selecting this shell, compared with personal-feed admission.
+    pub personal_revision: PersonalRevision,
     /// The shell's public facts, with organization creation checked for this reader.
     pub meta: Meta,
     /// The signed-in person and their preferences.
@@ -259,6 +279,19 @@ pub struct MeBootstrapReply {
     /// This same authenticated account's native notification preferences, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_preferences: Option<crate::notifications::NotificationPrefs>,
+}
+
+/// Native change order for a person's shell, independent of a process or the browser's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PersonalRevision {
+    /// Changes announced only to this person's live readers.
+    pub personal: i64,
+    /// Their committed Inbox row sequence.
+    pub inbox: i64,
+    /// Committed public metadata changes.
+    pub meta: i64,
+    /// Committed authority changes that may alter the shell projection.
+    pub authority: i64,
 }
 
 /// Fresh authority after personal-feed admission, without reloading preferences or Inbox state.
