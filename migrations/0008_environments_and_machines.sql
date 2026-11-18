@@ -102,10 +102,12 @@ CREATE TABLE commands (
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
     deadline_at timestamp with time zone NOT NULL,
+    authority_until timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    tool_session jsonb,
     login_authority jsonb,
     authority_required boolean DEFAULT false NOT NULL,
     mcp_import_completion jsonb,
@@ -292,6 +294,7 @@ ALTER TABLE snapshots ADD CONSTRAINT snapshots_environment_id_fkey FOREIGN KEY (
 CREATE TABLE hosts (
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
+    bundled_with_server boolean DEFAULT false NOT NULL,
     owner_id uuid,
     org_id uuid,
     home_id uuid,
@@ -306,6 +309,7 @@ CREATE TABLE hosts (
     load jsonb DEFAULT '{}'::jsonb NOT NULL,
     load_at timestamp with time zone,
     storages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    mount_sizes jsonb DEFAULT '[]'::jsonb NOT NULL,
     schedulable boolean DEFAULT true NOT NULL,
     disabled boolean DEFAULT false NOT NULL,
     when_full text,
@@ -546,6 +550,7 @@ CREATE TABLE mount_kept_data (
 CREATE INDEX mount_kept_data_mount_idx ON mount_kept_data USING btree (mount_id, machine_id);
 
 CREATE TABLE mount_locations (
+    membership_id uuid DEFAULT gen_random_uuid() NOT NULL UNIQUE,
     mount_id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
@@ -563,6 +568,9 @@ CREATE TABLE mount_locations (
     CONSTRAINT mount_locations_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
     CONSTRAINT mount_locations_mount_id_fkey FOREIGN KEY (mount_id) REFERENCES mounts(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER mount_location_membership BEFORE UPDATE ON mount_locations
+    FOR EACH ROW EXECUTE FUNCTION orch_mount_location_membership();
 
 CREATE TABLE mount_lost_locations (
     id uuid NOT NULL,
@@ -710,12 +718,20 @@ CREATE TABLE runtimes (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     lost_at timestamp with time zone,
     loss_missing boolean DEFAULT false NOT NULL,
+    native_incarnation uuid,
+    native_stop jsonb,
+    native_control_revision bigint DEFAULT 0 NOT NULL,
+    native_control_intent uuid,
     resources_used jsonb,
     CONSTRAINT runtimes_check CHECK (((kind = 'provider'::text) = (provider_id IS NOT NULL))),
     CONSTRAINT runtimes_check1 CHECK (((kind = 'environment'::text) = (environment_id IS NOT NULL))),
     CONSTRAINT runtimes_kind_check CHECK ((kind = ANY (ARRAY['provider'::text, 'environment'::text]))),
     CONSTRAINT runtimes_network_required_check CHECK ((network_required = ANY (ARRAY['open'::text, 'restricted'::text]))),
     CONSTRAINT runtimes_state_check CHECK ((state = ANY (ARRAY['creating'::text, 'running'::text, 'stopping'::text, 'stopped'::text, 'failed'::text, 'retired'::text, 'removed'::text]))),
+    CONSTRAINT runtimes_native_stop_state_check CHECK (
+        native_stop IS NULL OR state = 'stopping' OR (native_stop->'ready' = 'false'::jsonb) IS TRUE
+    ),
+    CONSTRAINT runtimes_native_control_revision_check CHECK (native_control_revision >= 0),
     CONSTRAINT runtimes_pkey PRIMARY KEY (id),
     CONSTRAINT runtimes_unit_name_key UNIQUE (unit_name),
     CONSTRAINT runtimes_environment_id_fkey FOREIGN KEY (environment_id) REFERENCES environments(id),
@@ -725,6 +741,77 @@ CREATE TABLE runtimes (
     CONSTRAINT runtimes_successor_of_fkey FOREIGN KEY (successor_of) REFERENCES runtimes(id),
     CONSTRAINT runtimes_template_id_fkey FOREIGN KEY (template_id) REFERENCES env_templates(id)
 );
+
+-- Preparation retains its original without inventing a physical Stop. A completed
+-- or failed Stop cannot become the pending Stop of a later start.
+CREATE FUNCTION public.orch_runtime_stop_pending() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.state <> 'stopping' AND NOT COALESCE(
+      NEW.native_stop->'ready' = 'false'::jsonb AND (
+        NEW.state IN ('creating', 'running') OR
+        (NEW.state IN ('stopped', 'failed') AND NEW.state = OLD.state)
+      ), false
+  ) THEN
+    NEW.native_stop := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER runtimes_pending_stop BEFORE UPDATE OF state ON runtimes
+    FOR EACH ROW EXECUTE FUNCTION public.orch_runtime_stop_pending();
+
+-- Native source identities are factual and never confer control of a runtime.
+CREATE TABLE runtime_incarnations (
+    id uuid PRIMARY KEY,
+    runtime_id uuid NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
+    host_id uuid NOT NULL REFERENCES hosts(id),
+    closed boolean DEFAULT false NOT NULL,
+    CONSTRAINT runtime_incarnations_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
+);
+
+CREATE INDEX runtime_incarnations_runtime_idx ON runtime_incarnations(runtime_id);
+
+ALTER TABLE runtimes ADD CONSTRAINT runtimes_native_incarnation_fkey
+    FOREIGN KEY (native_incarnation) REFERENCES runtime_incarnations(id) ON DELETE SET NULL;
+
+-- Original operation ownership and native ordering facts confer no permission.
+CREATE TABLE runtime_control_intents (
+    id uuid PRIMARY KEY,
+    runtime_id uuid NOT NULL REFERENCES runtimes(id) ON DELETE CASCADE,
+    host_id uuid NOT NULL CHECK (host_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    machine_id uuid NOT NULL CHECK (machine_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    owner_job_id uuid CHECK (owner_job_id IS NULL OR owner_job_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    previous_intent uuid REFERENCES runtime_control_intents(id),
+    pending_incarnations uuid[] NOT NULL DEFAULT '{}'::uuid[]
+        CHECK (array_position(pending_incarnations, NULL) IS NULL
+            AND array_position(pending_incarnations, '00000000-0000-0000-0000-000000000000'::uuid) IS NULL),
+    source_incarnation uuid REFERENCES runtime_incarnations(id),
+    accepted_revision bigint NOT NULL CHECK (accepted_revision > 0),
+    CONSTRAINT runtime_control_intents_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    UNIQUE (runtime_id, accepted_revision)
+);
+
+CREATE INDEX runtime_control_intents_runtime_idx ON runtime_control_intents(runtime_id);
+CREATE UNIQUE INDEX runtime_control_intents_job_runtime_idx ON runtime_control_intents(owner_job_id,runtime_id)
+    WHERE owner_job_id IS NOT NULL;
+
+ALTER TABLE runtimes ADD CONSTRAINT runtimes_native_control_intent_fkey
+    FOREIGN KEY (native_control_intent) REFERENCES runtime_control_intents(id) ON DELETE SET NULL;
+
+CREATE TABLE runtime_control_phases (
+    id uuid PRIMARY KEY,
+    intent_id uuid NOT NULL REFERENCES runtime_control_intents(id) ON DELETE CASCADE,
+    revision bigint NOT NULL CHECK (revision > 0),
+    operands jsonb NOT NULL CHECK (jsonb_typeof(operands) = 'object'),
+    outcome jsonb CHECK (outcome IS NULL OR jsonb_typeof(outcome) = 'object'),
+    CONSTRAINT runtime_control_phases_id_check CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    UNIQUE (intent_id, revision)
+);
+
+CREATE INDEX runtime_control_phases_opening_idx ON runtime_control_phases((operands->>'opening'))
+    WHERE operands->>'kind' IN ('node.runtime.start','node.runtime.create');
 
 CREATE INDEX runtimes_custody_waiting_idx ON runtimes USING btree (host_id) INCLUDE (state, remove_at) WHERE ((lost_at IS NULL) AND (state <> 'removed'::text));
 
@@ -797,3 +884,16 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+-- Native openings are ordered independently from wall clocks and logical segment numbers.
+CREATE SEQUENCE native_session_openings AS bigint;
+
+-- One accepted writer owns a mount destination until publication or joined compensation.
+CREATE TABLE mount_copy_claims (
+    mount_id uuid NOT NULL REFERENCES mounts(id),
+    machine_id uuid NOT NULL REFERENCES machines(id),
+    job_id uuid NOT NULL REFERENCES jobs(id),
+    decision jsonb NOT NULL,
+    PRIMARY KEY(mount_id,machine_id)
+);
+CREATE INDEX mount_copy_claims_job ON mount_copy_claims(job_id,mount_id,machine_id);

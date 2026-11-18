@@ -111,6 +111,15 @@ orch_api_base::__api_bind_b46eced664!();
 /// Checks the name a harness and a machine use for a server.
 pub(crate) fn name(value: &str) -> ApiResult<String> {
     let value = value.trim();
+    if matches!(
+        value,
+        orch_agent_contract::loopback::ORCH_SERVER | orch_agent_contract::loopback::EXEC_SERVER
+    ) {
+        return Err(invalid(
+            "name",
+            "this name belongs to a builtin tool server",
+        ));
+    }
     if (NAME_MIN..=NAME_MAX).contains(&value.len())
         && value.starts_with(|c: char| c.is_ascii_lowercase())
         && value

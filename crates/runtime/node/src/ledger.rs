@@ -70,6 +70,8 @@ pub struct Record {
     pub driver: String,
     /// The unit, as the driver named it.
     pub unit: UnitRef,
+    /// The native unit/start this record actually owns; unrecorded inventory invents no identity.
+    pub incarnation: Incarnation,
     /// The names of the volumes its unit stands on. Two units on one volume never run at once.
     pub volumes: Vec<String>,
     /// The hash of the enrollment token its unit was given. The token itself is never kept.
@@ -87,6 +89,28 @@ pub struct Record {
     /// How long its connector has to enroll, in seconds, where its runtime needs another time than the node's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enroll_timeout_secs: Option<u64>,
+}
+
+/// Persistent native identity, separate from runtime UUID, process numbers and times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum Incarnation {
+    Tracked(Id),
+    Untracked,
+}
+impl Incarnation {
+    #[must_use]
+    pub const fn id(self) -> Option<Id> {
+        match self {
+            Self::Tracked(id) => Some(id),
+            Self::Untracked => None,
+        }
+    }
 }
 
 /// What the node noted when it last made an image available.
@@ -175,11 +199,43 @@ pub struct CapabilityConfiguration {
     pub applied_started_at: Option<Time>,
 }
 
+/// One driver's actual created object and its credential-free replay metadata.
+/// It is installed as one runtime, never a snapshot of other native subjects.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Creation {
+    pub(crate) record: Record,
+    pub(crate) directories: BTreeMap<String, orch_driver_contract::runtime::DirectoryBinding>,
+    pub(crate) network: NetworkPolicy,
+    pub(crate) capabilities: CapabilityConfiguration,
+    pub(crate) mounts: MountConfiguration,
+    pub(crate) about: crate::hooks::UnitAbout,
+    #[serde(deserialize_with = "explicit_kept")]
+    pub(crate) kept: Option<orch_driver_contract::kept::KeptImage>,
+}
+
+fn explicit_kept<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<orch_driver_contract::kept::KeptImage>, D::Error> {
+    Option::deserialize(deserializer)
+}
+
 /// The ledger of one node.
 #[derive(Debug)]
 pub struct Ledger {
     path: PathBuf,
     state: Mutex<File>,
+}
+
+fn restore_entry<T>(entries: &mut BTreeMap<Id, T>, runtime: Id, previous: Option<T>) {
+    match previous {
+        Some(previous) => {
+            entries.insert(runtime, previous);
+        }
+        None => {
+            entries.remove(&runtime);
+        }
+    }
 }
 
 impl Ledger {
@@ -531,11 +587,60 @@ impl Ledger {
         Ok(())
     }
 
+    /// Installs one actual fresh creation atomically, and never replaces a later native record.
+    pub(crate) fn install_creation(&self, creation: &Creation) -> Result<bool, LedgerError> {
+        let mut state = self.lock();
+        let runtime = creation.record.runtime_id;
+        if state.runtimes.contains_key(&runtime) {
+            return Ok(false);
+        }
+        let old_record = state.runtimes.insert(runtime, creation.record.clone());
+        let old_directories = state
+            .directories
+            .insert(runtime, creation.directories.clone());
+        let old_network = state.networks.get(&runtime).cloned();
+        state
+            .networks
+            .entry(runtime)
+            .or_insert_with(|| creation.network.clone());
+        let old_capabilities = state.capabilities.get(&runtime).cloned();
+        state
+            .capabilities
+            .entry(runtime)
+            .or_insert_with(|| creation.capabilities.clone());
+        let old_mounts = state.mounts.get(&runtime).cloned();
+        state
+            .mounts
+            .entry(runtime)
+            .or_insert_with(|| creation.mounts.clone());
+        let old_about = state.about.insert(runtime, creation.about.clone());
+        let old_kept = match &creation.kept {
+            Some(kept) => state.kept_runtime.insert(runtime, kept.clone()),
+            None => state.kept_runtime.remove(&runtime),
+        };
+        if let Err(error) = self.save(&state) {
+            restore_entry(&mut state.runtimes, runtime, old_record);
+            restore_entry(&mut state.directories, runtime, old_directories);
+            restore_entry(&mut state.networks, runtime, old_network);
+            restore_entry(&mut state.capabilities, runtime, old_capabilities);
+            restore_entry(&mut state.mounts, runtime, old_mounts);
+            restore_entry(&mut state.about, runtime, old_about);
+            restore_entry(&mut state.kept_runtime, runtime, old_kept);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     /// Puts a record in the ledger, in place of the one the runtime had.
     pub fn insert(&self, record: Record) -> Result<(), LedgerError> {
         let mut state = self.lock();
-        state.runtimes.insert(record.runtime_id, record);
-        self.save(&state)
+        let runtime = record.runtime_id;
+        let previous = state.runtimes.insert(runtime, record);
+        if let Err(error) = self.save(&state) {
+            restore_entry(&mut state.runtimes, runtime, previous);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Changes a record. Answers whether there was one.
@@ -548,25 +653,38 @@ impl Ledger {
         let Some(record) = state.runtimes.get_mut(&runtime_id) else {
             return Ok(false);
         };
+        let previous = record.clone();
         change(record);
-        self.save(&state)?;
+        if let Err(error) = self.save(&state) {
+            state.runtimes.insert(runtime_id, previous);
+            return Err(error);
+        }
         Ok(true)
     }
 
     /// Takes a record out of the ledger.
     pub fn remove(&self, runtime_id: Id) -> Result<Option<Record>, LedgerError> {
         let mut state = self.lock();
-        let removed = state.runtimes.remove(&runtime_id);
-        if removed.is_some() {
-            state.mounts.remove(&runtime_id);
-            state.directories.remove(&runtime_id);
-            state.capabilities.remove(&runtime_id);
-            state.kept_runtime.remove(&runtime_id);
-            state.about.remove(&runtime_id);
-            state.hooks.remove(&runtime_id);
-            self.save(&state)?;
+        let Some(removed) = state.runtimes.remove(&runtime_id) else {
+            return Ok(None);
+        };
+        let mounts = state.mounts.remove(&runtime_id);
+        let directories = state.directories.remove(&runtime_id);
+        let capabilities = state.capabilities.remove(&runtime_id);
+        let kept = state.kept_runtime.remove(&runtime_id);
+        let about = state.about.remove(&runtime_id);
+        let hooks = state.hooks.remove(&runtime_id);
+        if let Err(error) = self.save(&state) {
+            state.runtimes.insert(runtime_id, removed);
+            restore_entry(&mut state.mounts, runtime_id, mounts);
+            restore_entry(&mut state.directories, runtime_id, directories);
+            restore_entry(&mut state.capabilities, runtime_id, capabilities);
+            restore_entry(&mut state.kept_runtime, runtime_id, kept);
+            restore_entry(&mut state.about, runtime_id, about);
+            restore_entry(&mut state.hooks, runtime_id, hooks);
+            return Err(error);
         }
-        Ok(removed)
+        Ok(Some(removed))
     }
 
     /// What the request of a runtime's unit said it serves, for the operator's hooks.
@@ -712,6 +830,7 @@ mod tests {
         let id = new_id();
         Record {
             runtime_id: id,
+            incarnation: Incarnation::Tracked(new_id()),
             kind: RuntimeKind::Environment,
             driver: "memory".to_owned(),
             unit: UnitRef {
@@ -729,6 +848,202 @@ mod tests {
             started_at: None,
             enroll_timeout_secs: None,
         }
+    }
+
+    #[test]
+    fn a_failed_native_record_write_keeps_the_committed_source_and_replay_metadata_in_memory() {
+        for operation in ["insert", "update", "remove"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut ledger = Ledger::open(dir.path()).unwrap();
+            let original = record(&["kept-state"]);
+            ledger.insert(original.clone()).unwrap();
+            let capabilities = CapabilityConfiguration {
+                desired: Default::default(),
+                applied: Default::default(),
+                changing: false,
+                applied_started_at: None,
+            };
+            ledger
+                .set_capabilities(original.runtime_id, capabilities.clone())
+                .unwrap();
+            let mounts = MountConfiguration {
+                base: Vec::new(),
+                wanted: Vec::new(),
+                reserved: vec!["original-root".into()],
+                applied: Vec::new(),
+                applied_started_at: None,
+                pending_reason: None,
+                retry_pending: false,
+            };
+            ledger
+                .set_mounts(original.runtime_id, mounts.clone())
+                .unwrap();
+            let committed_path = ledger.path.clone();
+            // This existing directory cannot be replaced by a journal file. The real ledger stays readable.
+            ledger.path = dir.path().to_path_buf();
+            let failed = match operation {
+                "insert" => {
+                    let mut replacement = original.clone();
+                    replacement.incarnation = Incarnation::Tracked(new_id());
+                    ledger.insert(replacement)
+                }
+                "update" => ledger
+                    .update(original.runtime_id, |row| {
+                        row.incarnation = Incarnation::Tracked(new_id())
+                    })
+                    .map(|_| ()),
+                "remove" => ledger.remove(original.runtime_id).map(|_| ()),
+                _ => unreachable!(),
+            };
+            assert!(
+                failed.is_err(),
+                "the real journal write must fail for {operation}"
+            );
+            assert_eq!(
+                ledger.get(original.runtime_id),
+                Some(original.clone()),
+                "no uncommitted source is visible after {operation}"
+            );
+            assert_eq!(
+                ledger.capabilities(original.runtime_id),
+                Some(capabilities.clone())
+            );
+            assert_eq!(ledger.mounts(original.runtime_id), Some(mounts.clone()));
+            ledger.path = committed_path;
+            let again = Ledger::open(dir.path()).unwrap();
+            let runtime = original.runtime_id;
+            assert_eq!(again.get(runtime), Some(original));
+            assert_eq!(again.capabilities(runtime), Some(capabilities));
+            assert_eq!(again.mounts(runtime), Some(mounts));
+        }
+    }
+
+    #[test]
+    fn a_native_creation_installs_its_record_and_replay_metadata_once_or_keeps_all_of_them_uncommitted()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(dir.path()).unwrap();
+        let original = record(&["kept-state"]);
+        let runtime = original.runtime_id;
+        let creation = Creation {
+            record: original.clone(),
+            directories: BTreeMap::new(),
+            network: NetworkPolicy::default(),
+            capabilities: CapabilityConfiguration {
+                desired: Default::default(),
+                applied: Default::default(),
+                changing: false,
+                applied_started_at: None,
+            },
+            mounts: MountConfiguration {
+                base: Vec::new(),
+                wanted: Vec::new(),
+                reserved: vec!["original-root".into()],
+                applied: Vec::new(),
+                applied_started_at: None,
+                pending_reason: None,
+                retry_pending: false,
+            },
+            about: crate::hooks::UnitAbout {
+                subject: None,
+                network_mode: Some("bridge".into()),
+                environment_id: Some(new_id()),
+            },
+            kept: None,
+        };
+        let committed_path = ledger.path.clone();
+        ledger.path = dir.path().to_path_buf();
+        assert!(ledger.install_creation(&creation).is_err());
+        assert!(ledger.get(runtime).is_none());
+        assert!(ledger.capabilities(runtime).is_none());
+        assert!(ledger.mounts(runtime).is_none());
+        assert!(ledger.network(runtime).is_none());
+        assert!(ledger.about(runtime).is_none());
+        ledger.path = committed_path;
+        assert!(ledger.install_creation(&creation).unwrap());
+        let again = Ledger::open(dir.path()).unwrap();
+        assert_eq!(again.get(runtime), Some(original.clone()));
+        assert_eq!(
+            again.capabilities(runtime),
+            Some(creation.capabilities.clone())
+        );
+        assert_eq!(again.mounts(runtime), Some(creation.mounts.clone()));
+        assert_eq!(again.network(runtime), Some(creation.network.clone()));
+        assert_eq!(again.about(runtime), Some(creation.about.clone()));
+        let mut replacement = original;
+        replacement.incarnation = Incarnation::Tracked(new_id());
+        ledger.insert(replacement.clone()).unwrap();
+        assert!(
+            !ledger.install_creation(&creation).unwrap(),
+            "recovery cannot overwrite a current native source"
+        );
+        assert_eq!(ledger.get(runtime), Some(replacement));
+    }
+
+    #[test]
+    fn restoring_a_created_object_never_restores_an_older_policy_or_erases_an_interrupted_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(dir.path()).unwrap();
+        let original = record(&["kept-state"]);
+        let runtime = original.runtime_id;
+        let capabilities = CapabilityConfiguration {
+            desired: Default::default(),
+            applied: Default::default(),
+            changing: false,
+            applied_started_at: None,
+        };
+        let mounts = MountConfiguration {
+            base: Vec::new(),
+            wanted: Vec::new(),
+            reserved: vec!["original-root".into()],
+            applied: Vec::new(),
+            applied_started_at: None,
+            pending_reason: None,
+            retry_pending: false,
+        };
+        let creation = Creation {
+            record: original,
+            directories: BTreeMap::new(),
+            network: NetworkPolicy::default(),
+            capabilities: capabilities.clone(),
+            mounts: mounts.clone(),
+            about: crate::hooks::UnitAbout {
+                subject: None,
+                network_mode: Some("bridge".into()),
+                environment_id: None,
+            },
+            kept: None,
+        };
+        let policy = NetworkPolicy {
+            mode: orch_driver_contract::network::EgressMode::Restricted,
+            revision: "current-policy".into(),
+            ..Default::default()
+        };
+        ledger.set_network(runtime, policy.clone()).unwrap();
+        let mut current_capabilities = capabilities;
+        current_capabilities.changing = true;
+        ledger
+            .set_capabilities(runtime, current_capabilities.clone())
+            .unwrap();
+        let mut current_mounts = mounts;
+        current_mounts.pending_reason = Some("the current accepted mounts await replay".into());
+        ledger.set_mounts(runtime, current_mounts.clone()).unwrap();
+        assert!(ledger.install_creation(&creation).unwrap());
+        assert_eq!(ledger.network(runtime), Some(policy));
+        assert_eq!(ledger.capabilities(runtime), Some(current_capabilities));
+        assert_eq!(ledger.mounts(runtime), Some(current_mounts));
+    }
+
+    #[test]
+    fn a_failed_first_native_record_never_becomes_a_tracked_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(dir.path()).unwrap();
+        ledger.path = dir.path().to_path_buf();
+        let pending = record(&["kept-state"]);
+        assert!(ledger.insert(pending.clone()).is_err());
+        assert!(ledger.get(pending.runtime_id).is_none());
+        assert!(ledger.all().is_empty());
+        assert!(Ledger::open(dir.path()).unwrap().all().is_empty());
     }
 
     #[test]
