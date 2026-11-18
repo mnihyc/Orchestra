@@ -43,8 +43,8 @@ const LOOKS = {
 };
 
 /** An explicit state/value description stays complete after the tooltip's Slot merges its own id. */
-function IconButtonFace({ ownerDescription, children, ref, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { ownerDescription?: string | undefined; ref?: Ref<HTMLButtonElement> }) {
-  return <button {...props} ref={ref} aria-describedby={ownerDescription ?? props['aria-describedby']}>{children}</button>;
+function IconButtonFace({ ownerDescription, children, ref, type = 'button', ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { ownerDescription?: string | undefined; ref?: Ref<HTMLButtonElement> }) {
+  return <button {...props} type={type} ref={ref} aria-describedby={ownerDescription ?? props['aria-describedby']}>{children}</button>;
 }
 
 export function IconButton({

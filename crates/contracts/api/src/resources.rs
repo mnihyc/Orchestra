@@ -73,6 +73,9 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.
@@ -1273,6 +1276,8 @@ pub struct HostRunning {
 /// whoever its page names, wherever they work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
+    /// Enrolled through the protected token installed with the server; immutable across rename or home changes.
+    pub bundled_with_server: bool,
     /// Protected origin and native contextual availability, beside home and owner.
     #[serde(default, flatten)]
     pub provenance: crate::resource_groups::ResourceProvenance,
@@ -1838,6 +1843,26 @@ pub struct ProviderUpdateReceipt {
     pub provider_id: Id,
     /// Its revision at the accepted mutation checkpoint.
     pub revision: Revision,
+}
+
+/// An accepted Provider Stop without existing provider content or a physical absence claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderStopReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The provider selected by this operation.
+    pub provider_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// Current Provider content under this operation's Read, or its Stop request alone.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderStopResponse {
+        /// Existing content admitted by the same operation's optional Read.
+        Full(Provider),
+        /// The selected provider identity without existing content.
+        Receipt(ProviderStopReceipt),
+    }
 }
 
 crate::common::full_or_receipt! {
@@ -2596,9 +2621,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3369,6 +3395,28 @@ pub struct HostRuntimeStopBody {
     pub interrupt: bool,
 }
 
+/// The accepted Stop request without existing unit, tenant or machine content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostRuntimeStopReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The Host selected by this request.
+    pub host_id: Id,
+    /// The exact unit selected by this request; this does not confirm physical absence.
+    pub runtime_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The selected unit under same-operation Read, or its accepted Stop request alone.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum HostRuntimeStopResponse {
+        /// Existing runtime content admitted separately from the completed Stop.
+        Full(Runtime),
+        /// Request identities without existing runtime content.
+        Receipt(HostRuntimeStopReceipt),
+    }
+}
+
 /// Which runtime to remove from a host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -3827,9 +3875,9 @@ crate::endpoints! {
             },
         ]));
     /// Deletes a provider that no thread is bound to, signing its harness out first and retiring its runtime.
-    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), none, none, none, 204;
+    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), query crate::resource_facts::ResourceDeleteQuery, none, none, 204;
     /// Switches a provider off.
-    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Provider, 200,
+    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ProviderPauseQuery, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Switches a provider on again.
     ProviderEnable: POST "/providers/{id}/enable", Permission("provider.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Provider, 200,
@@ -3838,8 +3886,8 @@ crate::endpoints! {
     ProviderStart: POST "/providers/{id}/start", Permission("provider.manage"), none, json ProviderStartStopBody, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Stops a managed provider's runtime by hand; refused while a turn runs on it unless told to interrupt.
-    ProviderStop: POST "/providers/{id}/stop", Permission("provider.manage"), none, json ProviderStartStopBody, json Provider, 200,
-        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
+    ProviderStop: POST "/providers/{id}/stop", Permission("provider.manage"), none, json ProviderStartStopBody, json ProviderStopResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
     /// Plans an update of a provider's runtime, or a plain recreation, before anything is done.
     ProviderRuntimeUpdatePreflight: POST "/providers/{id}/runtime/updates/preflight", Permission("provider.manage"), none, json UpdatePreflightBody, json ProviderUpdatePlan, 200;
     /// Carries out a plan of an update as a job; the runtime and every thread bound to the provider are locked at once.
@@ -3920,10 +3968,10 @@ crate::endpoints! {
     ProviderModelCreate: POST "/providers/{id}/models", Permission("provider.manage"), none, json ProviderModelCreateBody, json ProviderModelWriteResponse, 200,
         operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
     /// Changes a model of a provider: its display name, what it can be run with, its groups, whether it may be chosen; the same refusals as when it is added.
-    ProviderModelUpdate: PATCH "/providers/{id}/models/{model_id}", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, json ProviderModelUpdateBody, json ProviderModelWriteResponse, 200,
+    ProviderModelUpdate: PATCH "/providers/{id}/models/{model_id}", Permission("provider.manage"), query crate::resource_facts::ProviderModelPauseQuery, json ProviderModelUpdateBody, json ProviderModelWriteResponse, 200,
         operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
     /// Removes a model from a provider.
-    ProviderModelDelete: DELETE "/providers/{id}/models/{model_id}", Permission("provider.manage"), none, none, none, 204;
+    ProviderModelDelete: DELETE "/providers/{id}/models/{model_id}", Permission("provider.manage"), query crate::resource_facts::ResourceDeleteQuery, none, none, 204;
     /// Lists the models that discovery suggests for a provider.
     ProviderModelSuggestionList: GET "/providers/{id}/models/suggestions", Permission("provider.manage"), none, none, json Vec<ModelSuggestion>, 200;
     /// Adds the suggested models that were chosen; the speeds, the access programs and the larger context they list are put under `offered`, and none of them is enabled.
@@ -4052,7 +4100,7 @@ crate::endpoints! {
     McpServerUpdate: PATCH "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, json McpServerUpdateBody, json McpServerUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mcp_sources::UPDATE_FACETS));
     /// Deletes an MCP server; one imported from a machine has that machine's connector forget its copy.
-    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, none, none, 204,
+    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), query crate::resource_facts::ResourceDeleteQuery, none, none, 204,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::McpServer)], Target::Resolved("server_subject")),
             Facet::required(Manage, &[Object(K::Machine)], Target::ResolvedCollection("forgotten_copies")),
@@ -4148,8 +4196,8 @@ crate::endpoints! {
     /// Reads a host's load over time: CPU, memory used, disk used and free.
     HostMetricsList: GET "/hosts/{id}/metrics", Permission("host.manage"), query HostMetricsListQuery, none, json Vec<MetricSeries>, 200;
     /// Stops a runtime of a host.
-    HostRuntimeStop: POST "/hosts/{id}/runtimes/{runtime_id}/stop", Permission("host.manage"), none, json HostRuntimeStopBody, json Runtime, 200,
-        operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
+    HostRuntimeStop: POST "/hosts/{id}/runtimes/{runtime_id}/stop", Permission("host.manage"), none, json HostRuntimeStopBody, json HostRuntimeStopResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject));
     /// Schedules removal of the exact environment or provider unit, with its owned volumes if asked.
     /// A provider survives; its next turn creates a new unit. Running work prevents acceptance.
     HostRuntimeDelete: DELETE "/hosts/{id}/runtimes/{runtime_id}", Permission("host.manage"), query HostRuntimeDeleteQuery, none, none, 204;

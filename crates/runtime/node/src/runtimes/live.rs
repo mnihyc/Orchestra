@@ -18,6 +18,33 @@ fn invalid(detail: &str) -> CommandError {
 }
 
 impl Runtimes {
+    /// Called under the runtime's existing lock immediately before a new native start.
+    fn note_starting(
+        &self,
+        expected: &Record,
+        opening: Option<Id>,
+    ) -> Result<Option<Id>, CommandError> {
+        let next = opening.unwrap_or_else(orch_types::new_id);
+        let mut matched = false;
+        let recorded = self
+            .inner
+            .ledger
+            .update(expected.runtime_id, |record| {
+                if record.unit == expected.unit && record.incarnation == expected.incarnation {
+                    record.incarnation = crate::ledger::Incarnation::Tracked(next);
+                    matched = true;
+                }
+            })
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        if (recorded && !matched) || (!recorded && expected.incarnation.id().is_some()) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the original native unit changed before its start was recorded",
+            ));
+        }
+        Ok(matched.then_some(next))
+    }
+
     pub async fn inspect_resources(
         &self,
         request: &orch_link_contract::commands::NodeResourcesInspect,
@@ -201,7 +228,23 @@ impl Runtimes {
         &self,
         host: &HostDriver,
         record: &Record,
-    ) -> Result<(), CommandError> {
+        opening: Option<Id>,
+        original: Option<super::OriginalControl<'_>>,
+    ) -> Result<orch_link_contract::commands::NodeRuntimeStartResult, CommandError> {
+        let before = host
+            .contract()
+            .inspect(&record.unit)
+            .await
+            .map_err(|error| failure(&error))?;
+        if let Some(original) = original {
+            original.check()?;
+        }
+        let reused = before.state == UnitStateKind::Running;
+        let incarnation = if reused {
+            record.incarnation.id()
+        } else {
+            self.note_starting(record, opening)?
+        };
         let state = self
             .inner
             .ledger
@@ -213,7 +256,8 @@ impl Runtimes {
             .start_with_capabilities(&record.unit, &state)
             .await
         {
-            self.close_after_failed_up(host, record).await;
+            self.close_after_failed_up_checked(host, record, original)
+                .await?;
             return Err(self.failed_for_room(&error));
         }
         let actual = host
@@ -221,6 +265,9 @@ impl Runtimes {
             .inspect(&record.unit)
             .await
             .map_err(|error| failure(&error))?;
+        if let Some(original) = original {
+            original.check()?;
+        }
         self.inner
             .ledger
             .set_capabilities(
@@ -233,7 +280,10 @@ impl Runtimes {
                 },
             )
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
-        Ok(())
+        Ok(orch_link_contract::commands::NodeRuntimeStartResult {
+            source: orch_link_contract::native_target::RuntimeSource { incarnation },
+            reused,
+        })
     }
 
     async fn restart_capabilities(
@@ -264,6 +314,7 @@ impl Runtimes {
         {
             return Err(hook_failure(&run));
         }
+        let _ = self.note_starting(record, None)?;
         if let Err(error) = host
             .contract()
             .start_with_capabilities(&record.unit, state)
@@ -317,7 +368,10 @@ impl Runtimes {
                 // must not start it again over a successor that has taken its volumes.
                 let _volume_holds = self.hold_start_volumes(&record).await;
                 match self.keep_off_shared_volumes(&record).await {
-                    Ok(()) => self.start_capabilities(&host, &record).await,
+                    Ok(()) => self
+                        .start_capabilities(&host, &record, None, None)
+                        .await
+                        .map(|_| ()),
                     Err(error) => Err(error),
                 }
             };

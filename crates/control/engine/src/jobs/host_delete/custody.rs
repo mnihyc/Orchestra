@@ -236,15 +236,18 @@ impl Deleting {
                 .collect::<Vec<_>>();
             let mut conn = job.engine().db().acquire().await?;
             for copy in &mut copies.copies {
-                let current = mounts::locations(&mut conn, &[copy.mount_id])
+                let reviewed = mount_copies::reviewed_locations(&mut conn, &[copy.mount_id])
                     .await?
                     .into_iter()
-                    .find(|row| row.machine_id == copy.target_machine);
+                    .find(|location| location.row.machine_id == copy.target_machine);
+                let membership = reviewed.as_ref().map(|location| location.membership_id);
+                let current = reviewed.as_ref().map(|location| &location.row);
                 let expected = copy.kept.as_ref().map(|kept| &kept.previous);
                 if current
                     .as_ref()
                     .map(|row| (&row.kind, &row.source, &row.storage))
                     != expected.map(|data| (&data.kind, &data.source, &data.storage))
+                    || membership != copy.target_membership_id
                 {
                     let carried = current.as_ref().filter(|current| {
                         child_copies.iter().any(|child| {
@@ -259,6 +262,8 @@ impl Deleting {
                         })
                     });
                     let current=carried.ok_or_else(||Failure::new("data_changed","A destination changed outside the accepted cascades; the source stays intact"))?;
+                    // Only a completed accepted child can supply this new destination.
+                    copy.target_membership_id = membership;
                     copy.kept = Some(mount_copies::KeptDecision {
                         previous: mount_copies::DataRef {
                             kind: current.kind.clone(),
