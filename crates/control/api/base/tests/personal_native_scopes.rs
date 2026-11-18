@@ -502,7 +502,8 @@ async fn document_notice_jobs_bind_the_stored_document_and_native_creator_filter
             .app
             .call(DocumentNoticeJobList, &[&document])
             .token(&reader)
-            .query(&PageQuery {
+            .query(&orch_api_contract::common::CollectionQuery {
+                q: None,
                 limit: Some(1),
                 cursor: None,
             })
@@ -965,4 +966,31 @@ async fn notification_context_resource_kinds_come_from_the_native_stored_subject
             .await,
         StatusCode::FORBIDDEN,
     );
+}
+
+#[tokio::test]
+async fn active_notice_search_selects_the_older_matching_state_with_the_same_native_creator_gate() {
+    let s = Scene::new().await;
+    let document = s.document("Notice search").await;
+    let wanted = s.notice_job(document, s.owner.id(), false).await;
+    sqlx::query("UPDATE jobs SET state='running' WHERE id=$1")
+        .bind(wanted)
+        .execute(&s.world.db.pool)
+        .await
+        .unwrap();
+    for _ in 0..13 {
+        s.notice_job(document, s.owner.id(), false).await;
+    }
+    let response = checked(
+        s.world
+            .app
+            .call(DocumentNoticeJobList, &[&document])
+            .token(&s.owner.token)
+            .raw_query("q=running&limit=1")
+            .send_bytes()
+            .await,
+        StatusCode::OK,
+    );
+    assert_eq!(response["items"].as_array().unwrap().len(), 1);
+    assert_eq!(response["items"][0]["id"], json!(wanted));
 }

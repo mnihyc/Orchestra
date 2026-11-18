@@ -45,6 +45,13 @@ fn value(reply: orch_api_core::testing::RawReply) -> Json {
     assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.raw));
     serde_json::from_slice(&reply.raw).unwrap()
 }
+fn environment_page(reply: orch_api_core::testing::RawReply) -> Json {
+    let value = value(reply);
+    let page: orch_api_contract::common::Page<orch_api_contract::environment::Environment> =
+        serde_json::from_value(value).unwrap();
+    assert!(page.next_cursor.is_none());
+    serde_json::to_value(page.items).unwrap()
+}
 async fn topic(world: &World, c: &resources::Company) -> Id {
     orch_api_core::routes::install_master_key(&orch_db::secrets::MasterKey::new([7; 32]));
     let project = places::make_project(world, &c.boss, c.acme, "Topic source")
@@ -127,7 +134,7 @@ async fn topic_environment_whole_style_keeps_its_real_template_and_native_defaul
     let topic = topic(&world, &c).await;
     let (first, template) = environment(&world, &c, topic, "Whole environment").await;
     let (other, _) = environment(&world, &c, topic, "Other environment").await;
-    let ordinary = value(
+    let ordinary = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -152,7 +159,7 @@ async fn topic_environment_whole_style_keeps_its_real_template_and_native_defaul
     )
     .await;
     assert_eq!(
-        value(
+        environment_page(
             world
                 .app
                 .call(TopicEnvironmentList, &[&topic])
@@ -172,7 +179,7 @@ async fn topic_environment_whole_style_keeps_its_real_template_and_native_defaul
         ],
     )
     .await;
-    let result = value(
+    let result = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -236,7 +243,7 @@ async fn topic_environment_through_thread_style_needs_no_unemitted_template_or_m
             .await
             .unwrap();
     }
-    let ordinary = value(
+    let ordinary = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -253,7 +260,7 @@ async fn topic_environment_through_thread_style_needs_no_unemitted_template_or_m
         vec![rule("environment", env, "TopicEnvironmentList")],
     )
     .await;
-    let result = value(
+    let result = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -276,7 +283,7 @@ async fn topic_environment_through_thread_style_needs_no_unemitted_template_or_m
         ],
     )
     .await;
-    let same = value(
+    let same = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -514,7 +521,7 @@ async fn topic_environment_publication_keeps_the_original_native_reference_after
             );
             assert!(!String::from_utf8_lossy(&reply.raw).contains("Held environment"));
         } else {
-            let result = value(reply);
+            let result = environment_page(reply);
             assert_eq!(result[0]["id"], json!(env));
             assert_eq!(result[0]["template"]["id"], json!(old_template));
         }

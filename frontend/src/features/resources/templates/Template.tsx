@@ -343,7 +343,7 @@ export function TemplateScreen({ templateId, tab, onTab }: TemplateScreenProps) 
   return (
     <Page>
       {query.isError && <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />}
-      <PageHeader
+      <PageHeader compactResource
         adminAccess={template.access.admin_access} ownership={template} opening={{ kind: 'template', id: template.id }}
         back={back}
         mark={
@@ -356,7 +356,8 @@ export function TemplateScreen({ templateId, tab, onTab }: TemplateScreenProps) 
           template.enabled ? <Badge key="state" tone="accent">{t('templates.list.on')}</Badge> : <Badge key="state" tone="warning">{t('resources.disabled')}</Badge>,
           <Badge key="kind">{t(`templates.kind.${template.kind}`)}</Badge>,
         ]}
-        actions={<>{template.kind === 'environment' && holds(template.access, 'template.use') && <Tooltip content={template.enabled ? undefined : t('templates.overview.offLead')}><Button icon={<Plus aria-hidden />} blocked={!template.enabled} onClick={() => setMaking(true)}>{t('environments.make.here')}</Button></Tooltip>}<ResourceHeadingActs omit={shown === 'danger' ? ['enable', 'disable'] : shown === 'spec' ? ['edit', 'rename'] : []} admin={adminSpec(template, 'template.manage')} name={template.name} primary={primary} edit={edit} menu={menu} /></>}
+        actions={<ResourceHeadingActs omit={shown === 'danger' ? ['enable', 'disable'] : shown === 'spec' ? ['edit', 'rename'] : []} admin={adminSpec(template, 'template.manage')} name={template.name} primary={primary} edit={edit} menu={menu}
+          before={template.kind === 'environment' && holds(template.access, 'template.use') ? <Tooltip content={template.enabled ? undefined : t('templates.overview.offLead')}><Button size="sm" icon={<Plus aria-hidden />} blocked={!template.enabled} onClick={() => setMaking(true)}>{t('environments.make.here')}</Button></Tooltip> : undefined} />}
       />
       <ResourceTabs label={t('templates.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-6" />
       {acts.dialogs}

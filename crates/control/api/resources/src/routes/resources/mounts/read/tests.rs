@@ -256,7 +256,7 @@ async fn mount_fixture(world: &World, owner: &crate::places::Who) -> Id {
 
 fn reader(world: &World) -> TestApp {
     let mut registry = Registry::new();
-    read::register::<NativeCut, _, _>(&mut registry, MountGet, MountList);
+    read::register_children::<NativeCut, _, _>(&mut registry, MountGet, MountList);
     TestApp::over(world.app.app.clone(), world.app.clock.clone(), registry)
 }
 
@@ -305,7 +305,7 @@ async fn a_declared_snapshot_reader_cannot_return_content_without_its_actual_rea
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _caller: &'a orch_authz::Caller,
-        (): (),
+        _query: orch_api_contract::common::ChildCollectionQuery,
         (): (),
     ) -> crate::registry::OptionalOperationFuture<'a> {
         Box::pin(async { panic!("entry must not run the snapshot producer") })
@@ -321,7 +321,7 @@ async fn a_declared_snapshot_reader_cannot_return_content_without_its_actual_rea
         .await
         .ok();
     let mut registry = Registry::new();
-    registry.on_snapshot_read_with_optional_operation(MountGet, unopened, move |_, (), ()| {
+    registry.on_snapshot_read_with_optional_operation(MountGet, unopened, move |_, _query, ()| {
         let item = item.clone();
         async move { Ok::<_, ApiError>(item) }
     });
@@ -453,7 +453,7 @@ async fn native_get_context_uses_actual_session_mode_and_the_same_principal_time
         .await
         .unwrap();
     let mut registry = Registry::new();
-    read::register::<NativeCut, _, _>(&mut registry, MountGet, MountList);
+    read::register_children::<NativeCut, _, _>(&mut registry, MountGet, MountList);
     let app = registry
         .into_router_for(orch_api_contract::surface::HttpSurface::Browser)
         .with_state(world.app.app.clone());

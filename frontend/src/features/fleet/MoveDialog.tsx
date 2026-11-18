@@ -1,3 +1,4 @@
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Review several environments and recover each independently with one destination and one progress bar. */
 import { Hint } from '@/features/help/Hint';
@@ -95,12 +96,12 @@ function RecoveryForm({ ids, others, onStarted, onClose }: { ids: readonly strin
   return <Measurements plan={{ plans: countPlans }} active onReady={() => void plan.refetch()}><div className="flex min-w-0 flex-col gap-3">
     <ResourcePicker pickerKey="fleet.MoveDialog.loss.destinationHost" help={<Hint popover id="loss-recover" />} label={t('loss.destinationHost')} value={host === '' ? 'automatic' : host} onValueChange={(next) => setHost(next === 'automatic' ? '' : next)} options={hostOptions} />
     {(plan.data?.rows.some((row) => row.action === 'switch_threads') ?? false) && <BatchDestination value={destination} onChange={setDestination} sources={ids} allowSame={false} />}
-    {plan.isError ? <ErrorState compact error={plan.error} retrying={plan.isRefetching} onRetry={() => void plan.refetch()} /> : plan.isPending ? <SkeletonRows read={plan} rows={ids.length} /> : <div aria-busy={stale} className={stale ? 'opacity-60' : undefined}><Table label={t('loss.recoveryPlans')} rows={plan.data.rows} rowKey={(row) => row.environment.id} columns={[
+    {plan.isError ? <ErrorState compact error={plan.error} retrying={plan.isRefetching} onRetry={() => void plan.refetch()} /> : plan.isPending ? <SkeletonRows read={plan} rows={ids.length} /> : <div aria-busy={stale} className={stale ? 'opacity-60' : undefined}><CompleteCollection label={t('loss.recoveryPlans')} items={plan.data.rows} textOf={(row)=>row.environment.name}>{(page)=><Table label={t('loss.recoveryPlans')} rows={page} rowKey={(row) => row.environment.id} columns={[
       { id: 'name', header: t('loss.environment'), cell: (row, shown) => <div className="flex min-w-0 flex-col gap-1"><span className="flex items-center gap-2"><ResourceChip subject={{ kind: 'environment', environment: { id: row.environment.id, name: row.environment.name, status: row.environment.status } }} asChild hint={false}><a href={`/resources/environments/${row.environment.id}`}>{row.environment.name}</a></ResourceChip><EnvironmentDot status={row.environment.status} showLabel /></span>{!shown.has('carries') && <span className="text-sm text-text-muted">{carrying(row)}</span>}{!shown.has('action') && actions(row)}{!shown.has('host') && destinationFor(row)}{row.move_plan !== null && moveRemovesSoftware(row.move_plan) && <span className="text-sm text-warning-text">{t('isolation.replaced')}</span>}{row.blockers.filter((blocker) => blocker.code !== 'measurement_pending').map((blocker) => <span key={blocker.code} className="text-sm text-warning-text">{blockerWords(blocker, null, t).text}</span>)}</div> },
       { id: 'action', header: t('loss.action'), from: 'sm', cell: actions },
       { id: 'carries', header: t('loss.carries'), from: 'md', cell: (row) => <span className="text-sm text-text-muted">{carrying(row)}</span> },
       { id: 'host', header: t('loss.destinationHost'), from: 'lg', cell: destinationFor },
-    ]} /></div>}
+    ]} />}</CompleteCollection></div>}
     {others + (plan.data?.others ?? 0) > 0 && <Others count={others + (plan.data?.others ?? 0)} />}
     {(plan.data?.admin_grants ?? []).length > 0 && <StateLine compact tone="warning" message={t('loss.adminGrant')} />}
     {start.error !== null && <ErrorAlert error={start.error} />}
@@ -122,10 +123,10 @@ export function EnvironmentBatchProgress({ batch, onClose, onRetry, label, runni
   const stop = useMutation({ mutationFn: async () => { for (const row of rows.filter((row) => !isOver(row.job.state))) { const job = await cancelJob(row.job.id); client.setQueryData(forkKeys.job(job.id), job); } } });
   return <div className="flex flex-col gap-3" data-recovery-progress>
     {unknown ? <StateLine compact title={t('fleetMoves.progressUnavailable')} /> : <Meter look="progress" value={percent} label={over ? doneLabel ?? t('loss.progressOver') : runningLabel ?? t('loss.progressRunning')} />}
-    <Table label={label ?? t('loss.recoveryPlans')} rows={rows} rowKey={(row) => row.job.id} columns={[
+    <CompleteCollection label={label??t('loss.recoveryPlans')} items={rows} textOf={(row)=>row.environment.name}>{(page)=><Table label={label??t('loss.recoveryPlans')} rows={page} rowKey={(row) => row.job.id} columns={[
       { id: 'name', header: t('loss.environment'), cell: (row) => row.read?.isError === true ? <span>{t('fleetMoves.progressUnavailable')}</span> : row.job.environment_id !== row.environment.id ? <span>{t('envTransfer.operation')}</span> : <ResourceChip subject={{ kind: 'environment', environment: { id: row.environment.id, name: row.environment.name, status: row.environment.status } }} asChild hint={false}><a href={`/resources/environments/${row.environment.id}`}>{row.environment.name}</a></ResourceChip> },
       { id: 'state', header: t('loss.action'), cell: (row) => row.read?.isError === true ? <ErrorState compact error={row.read.error} onRetry={() => void row.read?.refetch()} /> : <div className="flex flex-col gap-1"><RecoveryState job={row.job} transfer={row.job.environment_id === row.environment.id ? transferFacts(transfers.find((plan) => plan.environment.id === row.environment.id)) : undefined} />{row.job.error !== null && <StateLine compact tone="danger" message={reasonWords(row.job, t, 10)} />}</div> },
-    ]} />
+    ]} />}</CompleteCollection>
     {stop.error !== null && <ErrorAlert error={stop.error} />}
     <div className="flex flex-wrap justify-end gap-2">{over && failed.length > 0 && <Button onClick={() => onRetry([...new Set(failed.map((row) => row.environment.id))])}>{t('change.batch.retry', { count: failed.length })}</Button>}{!over && !unknown && <Button variant="danger" pending={stop.isPending} onClick={() => setCancelling(true)}>{t('change.progress.cancel')}</Button>}<Button onClick={onClose}>{t(over ? 'common.close' : 'change.progress.hide')}</Button></div>
     <ConfirmDialog open={cancelling} onOpenChange={setCancelling} title={t('loss.cancelTitle')} confirmLabel={t('change.progress.cancel')} danger pending={stop.isPending} error={stop.error} onConfirm={() => { stop.mutate(undefined,{onSuccess:()=>setCancelling(false)}); }}>{t('loss.cancelEffect')}</ConfirmDialog>

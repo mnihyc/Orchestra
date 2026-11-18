@@ -509,7 +509,7 @@ async fn check_level(level: Level) {
         .query(&NameSearchListQuery {
             q: Some("Admin proof".to_owned()),
             // A page of names holds at most this many; the proof's few things fit in one.
-            limit: Some(orch_api_contract::search::NAME_SEARCH_LIMIT_MAX),
+            limit: Some(orch_api_contract::search::NAME_SEARCH_OVERVIEW_COUNT),
             ..Default::default()
         })
         .send()

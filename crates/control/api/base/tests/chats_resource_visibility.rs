@@ -312,3 +312,61 @@ async fn self_join_rechecks_privacy_after_the_actual_chat_row_wait() {
         assert_eq!(joined, !private);
     }
 }
+
+#[tokio::test]
+async fn a_conversation_name_search_finds_either_end_before_its_page_fills() {
+    let room = Room::new().await;
+    for index in 0..13 {
+        room.group(
+            &room.bea,
+            &[&room.gus],
+            Some(&format!("Release {index:02}")),
+        )
+        .await;
+    }
+    for name in ["Release 00", "Release 12"] {
+        let page = room
+            .world
+            .app
+            .call(OrgChatList, &[&room.root])
+            .token(&room.bea.token)
+            .query(&OrgChatListQuery {
+                q: Some(name.into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].base.name.as_deref(), Some(name));
+        assert!(page.next_cursor.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_group_roster_search_uses_disclosed_people_before_its_page_fills() {
+    let room = Room::new().await;
+    let made = room
+        .group(&room.bea, &[&room.cai, &room.gus], Some("Roster"))
+        .await;
+    let members = made.members.as_ref().unwrap();
+    for person in members {
+        let page = room
+            .world
+            .app
+            .call(ChatGet, &[&made.base.id])
+            .token(&room.bea.token)
+            .query(&orch_api_contract::chats::ChatGetQuery {
+                members_q: Some(person.display_name.clone()),
+                members_limit: Some(1),
+                members_cursor: None,
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.members.as_ref().unwrap().len(), 1);
+        assert_eq!(page.members.as_ref().unwrap()[0].id, person.id);
+        assert!(page.members_next_cursor.is_none());
+    }
+}

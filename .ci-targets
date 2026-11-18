@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/unit/usage.test.ts tests/component/usage-charts.test.tsx tests/component/usage-records.test.tsx tests/component/usage-requests.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
+web-e2e tests/e2e/usage.spec.ts tests/e2e/usage-axis.spec.ts --grep "a usage record aligns|the credit axis paints" --project=chromium

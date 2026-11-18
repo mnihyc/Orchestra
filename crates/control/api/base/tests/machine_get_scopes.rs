@@ -569,3 +569,56 @@ async fn machine_get_publication_rechecks_the_current_governor_of_the_same_regis
         environment
     );
 }
+
+#[tokio::test]
+async fn registered_profiles_are_found_before_the_machines_child_page() {
+    let world = World::new().await;
+    let owner = places::person(&world, "child-reader").await;
+    let machine = machine(&world, &owner, "Child collection machine").await;
+    for index in 0..13 {
+        let id = fixtures::insert_resource(
+            &mut *world.conn().await,
+            "agent",
+            Some(owner.id()),
+            Some(owner.person.personal_org),
+            &format!("Research profile {index:02}"),
+        )
+        .await
+        .unwrap();
+        own(&world, ObjectKind::Agent, id, owner.id()).await;
+        fixtures::register_on(&mut *world.conn().await, "agent", id, machine)
+            .await
+            .unwrap();
+    }
+    let all = shown(get(&world, &owner.token, machine).await);
+    assert_eq!(all.agents.len(), 13);
+    let reply = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .query(&json!({"collection":"agents","q":"Research profile 12","limit":1}))
+        .send_bytes()
+        .await;
+    let page = shown(reply);
+    assert_eq!(page.agents.len(), 1);
+    assert_eq!(page.agents[0].name, "Research profile 12");
+    let restricted = key(
+        &world,
+        owner.id(),
+        vec![rule("MachineGet", "machine", machine)],
+    )
+    .await;
+    let page = shown(
+        world
+            .app
+            .call(MachineGet, &[&machine])
+            .token(&restricted.secret)
+            .query(&json!({"collection":"agents","q":"Research profile 12","limit":1}))
+            .send_bytes()
+            .await,
+    );
+    assert!(
+        page.agents.is_empty(),
+        "search does not lend a foreign source's Read"
+    );
+}

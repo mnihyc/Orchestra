@@ -1,3 +1,4 @@
+import { channelPage, pageOf } from './collection.ts';
 /** What the fake API says of a person's own settings: their password, second step, sessions, tokens and the state the interface keeps; and of an org's settings, the settings of a node, channels and destinations.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: the same
@@ -60,7 +61,7 @@ const REGISTRY: readonly Key[] = [
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets' || ['composer.paste_inline_context_share', 'thread.plan_first', 'thread.silent_after_secs', 'thread.plan_answered_by', 'orch_tools.owner_reads', 'threads.opening_items'].includes(def.key)).map((def): Key => {
     if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
@@ -194,7 +195,7 @@ export const AUTHENTICATOR_CODE = '135790';
 const AUTHENTICATOR_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 /** The keys the interface may keep for a person: the nine the server admits. */
-const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
+const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'interface', 'sidebar', 'project_views', 'keys', 'reactions', 'picker_recents', 'inbox'] as const;
 
 /** A person's keys in the shape the server keeps them: the switch, and for each action its keys as text or none. */
 function keysFault(body: Record<string, unknown>): string | null {
@@ -1135,6 +1136,17 @@ export class Settings implements Part {
 
   // ---------------------------------------------------------------- what the interface keeps
 
+  /** Picker history belongs to the same account state as its other portable preferences. */
+  pickerRecentsOf(person:Person):{count:number;choices:Record<string,string[]>} {
+    const count=Number(SETTINGS_REGISTRY.find((def)=>def.key==='ui.picker_recent_count')?.default??5);
+    const raw=this.stateOf(person).picker_recents;
+    const choices=raw!==null&&typeof raw==='object'&&!Array.isArray(raw)?Object.fromEntries(Object.entries(raw).flatMap(([kind,keys])=>{
+      const kept=Array.isArray(keys)?keys.filter((key):key is string=>typeof key==='string').slice(0,count):[];
+      return kept.length===0?[]:[[kind,kept]];
+    })):{};
+    return {count,choices};
+  }
+
   /** The caller's one portable-state record, shared by parts which add a personal key. */
   stateOf(person: Person): Record<string, unknown> {
     let held = this.state.get(person.me.username);
@@ -1215,7 +1227,7 @@ export class Settings implements Part {
       case 'POST /me/email-code/disable':
         return this.mailCodeDisable(person, body);
       case 'GET /me/sessions':
-        return { status: 200, body: this.sessionsOf(person) };
+        return { status: 200, body: pageOf(this.sessionsOf(person), _query, (row) => row.user_agent + ' ' + (row.ip ?? '')) };
       case 'DELETE /me/sessions': {
         const kept = this.sessionsOf(person).filter((session) => session.current);
         this.world.revokeBrowserSessions(person);
@@ -1223,11 +1235,22 @@ export class Settings implements Part {
         return { status: 200, body: kept };
       }
       case 'GET /me/tokens':
-        return { status: 200, body: this.tokensOf(person).map((held) => held.info) };
+        return { status: 200, body: pageOf(this.tokensOf(person).map((held) => held.info), _query, (row) => row.name) };
       case 'GET /me/token-operations':
         return { status: 200, body: structuredClone(TOKEN_OPERATIONS) };
       case 'POST /me/tokens':
         return this.makeToken(person, body, actKey);
+      case 'GET /me/picker-recents':
+        return {status:200,body:this.pickerRecentsOf(person)};
+      case 'POST /me/picker-recents': {
+        const kind=asText(body.kind), key=asText(body.key);
+        if(kind===''||key.trim()==='')this.invalid('key','is empty');
+        const before=this.pickerRecentsOf(person);
+        if(before.count===0)return {status:200,body:{count:0,remembered:false}};
+        this.stateOf(person).picker_recents={...before.choices,[kind]:[...new Set([key,...before.choices[kind]??[]])].slice(0,before.count)};
+        this.world.users.tell(person.me.username,{what:'state',key:'picker_recents'});
+        return {status:200,body:{count:before.count,remembered:true}};
+      }
       case 'GET /me/state':
         return { status: 200, body: this.stateOf(person) };
       default:
@@ -1307,7 +1330,7 @@ export class Settings implements Part {
       const orgId = _query.get('org_id');
       if (orgId === null) return null;
       this.mayManageChannels(person, orgId);
-      return { status: 200, body: this.channels.get(orgId) ?? [] };
+      return { status: 200, body: channelPage(this.channels.get(orgId) ?? [], _query) };
     }
     if ((found = /^POST \/orgs\/([^/]+)\/notification-channels$/.exec(route))) {
       const orgId = found[1] ?? '';
@@ -1353,7 +1376,7 @@ export class Settings implements Part {
     }
     if ((found = /^GET \/nodes\/([^/]+)\/destinations$/.exec(route))) {
       this.world.places.node(person, found[1] ?? '');
-      return { status: 200, body: this.destinations.get(found[1] ?? '') ?? [] };
+      return { status: 200, body: pageOf(this.destinations.get(found[1] ?? '') ?? [], _query, (row) => row.name + ' ' + row.channel) };
     }
     if ((found = /^POST \/nodes\/([^/]+)\/destinations$/.exec(route))) {
       const nodeId = found[1] ?? '';

@@ -13,6 +13,7 @@ import { ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/feat
 import { Facts } from '@/features/resources/Facts';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
+import type { SkillTab } from '@/features/resources/tabs';
 import { languageOf } from '@/features/files/languages';
 import type { Skill, SkillOrigin, SkillVersionInfo } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
@@ -36,8 +37,6 @@ import { LibraryCounts, libraryQuery } from '@/features/resources/Library';
 import { SkillRefusal } from './Refusal';
 import { AddVersion } from './SkillDialog';
 
-export type SkillTab = 'overview' | 'versions' | 'draft' | 'access';
-export const SKILL_TABS: readonly SkillTab[] = ['overview', 'versions', 'draft', 'access'];
 
 /** Where a version came from, in a few words. */
 export function OriginWords({ origin }: { origin: SkillOrigin }) {
@@ -101,9 +100,9 @@ export function SkillScreen({ id, tab, onTab }: { id: string; tab?: SkillTab; on
     </div>}
     {latest !== null && <VersionFiles skillId={id} versionId={latest.id} />}
   </>;
-  return <Page><PageHeader adminAccess={skill.access.admin_access} ownership={skill} opening={{ kind: 'skill', id: skill.id }} back={back} title={skill.name} lead={skill.description}
+  return <Page><PageHeader compactResource facts={[t(skill.enabled ? 'resourceDetails.on' : 'resourceDetails.off')]} adminAccess={skill.access.admin_access} ownership={skill} opening={{ kind: 'skill', id: skill.id }} back={back} title={skill.name} lead={skill.description}
     mark={<PlaceMark><GraduationCap aria-hidden /></PlaceMark>}
-    actions={<><Hint id="skills" popover /><HeadingActs admin={admin} name={skill.name} primary={add} edit={null} menu={menu} /></>} />
+    help={<Hint id="skills" popover />} actions={<HeadingActs admin={admin} name={skill.name} primary={add} edit={null} menu={menu} />} />
     <Tabs label={t('resourceDetails.layout.tabs')} value={shown} onValueChange={onTab ?? setLocalTab} panelClassName="pt-4" tabs={[
       { value: 'overview', label: t('resourceDetails.overview'), panel: overview },
       { value: 'versions', label: t('resourceDetails.skill.versions'), panel: <Versions skill={skill} /> },
