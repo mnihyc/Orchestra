@@ -944,6 +944,8 @@ async fn read_directory(
         let mut cursor = None;
         loop {
             let body = FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: directory.clone(),
@@ -1010,6 +1012,7 @@ async fn read_directory(
     let mut files = Vec::with_capacity(found.len());
     for (relative, full, executable) in found {
         let body = FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: environment,
             mount: None,
             path: full,

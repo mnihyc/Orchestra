@@ -1,0 +1,11 @@
+# b43z-e: a trial assembly (private branch) at 07eb7299e
+test -p orch-engine --test background --test background_wake --test failures --test foreign_machine_streams --test limits --test provider_sign_in --test shared_write --test updates
+test -p orch-engine --test history_scale
+test -p orch-worker-core --test routes --test upkeep
+test -p orch-model-contract --test provider_ceiling
+test -p orch-conformance --test suites
+test -p orch-plugin --test adapter
+test -p orch-testkit --test database_budget --test harness_corpus
+test -p orch-db --test database_watch --test provider_keeper
+test -p orch-connector-core --test agent_role --test direct_machine_programs --test harness_tools --test real_harnesses
+test -p orch-api-core --test browsers --test hosted_environments --test provider_harness --test thread_continuation_search --test thread_history_scale --test threads_read --test users --test workspace_jobs_scopes
