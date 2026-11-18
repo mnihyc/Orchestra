@@ -6,6 +6,20 @@
 use crate::{Conn, DbError};
 use orch_types::Id;
 
+/// Keeps only the safe identity and reason of an event whose representation the database refused.
+pub async fn record_storage_gap(
+    conn: &mut Conn,
+    machine: Id,
+    stream: &str,
+    seq: i64,
+    code: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO machine_event_storage_gaps(machine_id,stream,event_seq,sqlstate,recorded_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
+        .bind(machine).bind(stream).bind(seq).bind(code).bind(at).execute(conn).await?;
+    Ok(())
+}
+
 /// Assigns the source of a segment once, accepting later opens only on that machine.
 pub async fn bind_segment(
     conn: &mut Conn,

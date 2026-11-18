@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test thread_move --test thread_opening_scopes --test documents
