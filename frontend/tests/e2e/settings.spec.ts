@@ -8,6 +8,8 @@ test.beforeEach(async () => {
   await scenario();
 });
 
+const accountKey = /^opat_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048][A-Za-z0-9]{6}$/;
+
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 
 /** Signs in and goes to a page by its address. */
@@ -193,7 +195,7 @@ test.describe('a person’s own settings', () => {
     const made = page.getByRole('dialog', { name: 'Token created' });
     await expect(made.getByText('This is the only time the token is shown.')).toBeVisible();
     const secret = await made.getByLabel('Token ci').inputValue();
-    expect(secret).toMatch(/^opat_[0-9a-f]{32}$/);
+    expect(accountKey.test(secret)).toBe(true);
     await made.getByRole('button', { name: 'Done' }).click();
 
     const row = page.getByRole('row', { name: /ci/ });
@@ -393,7 +395,7 @@ test.describe('an org’s settings', () => {
     await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'general'));
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
-    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Outside Orch']);
+    await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Email and channels']);
     await expectAccessibleSettled(page);
 
     // The departments are listed with what each holds, and one opens its own settings.
@@ -756,7 +758,7 @@ test.describe('an org’s settings', () => {
     expect(serviceId).toBeDefined();
     expect(await bodySent(serviceRequest)).toMatchObject({ rules: [{ target: { kind: 'account', id: serviceId, reach: 'subtree' }, resources: ['key'], allow: [{ operation: 'MeTokenList', actions: ['read'] }] }], proof: { password: PEOPLE.ada.password } });
     await expect(tokens.getByText('This is the only time the token is shown.')).toBeVisible();
-    await expect(tokens.getByLabel('Token prod', { exact: true })).toHaveValue(/^opat_/);
+    expect(accountKey.test(await tokens.getByLabel('Token prod', { exact: true }).inputValue())).toBe(true);
     await expectAccessibleSettled(page, '[role="dialog"]');
     await tokens.getByRole('button', { name: 'Close', exact: true }).last().click();
     await expect(list.getByRole('listitem').filter({ hasText: 'Deploy bot' })).toContainText('1 token');

@@ -162,6 +162,7 @@ impl Fixture {
         let plan: Plan = serde_json::from_value(job.plan.clone()).unwrap();
         let command = new_id();
         let body = json!(FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: world.environment,
             mount: None,
             path: row.workspace_dir

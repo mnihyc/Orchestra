@@ -35,6 +35,7 @@ bytes.workspace = true
 bzip2.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
+crc32fast.workspace = true
 ed25519-dalek.workspace = true  # a vendor's signature of its release manifest
 flate2.workspace = true
 form_urlencoded.workspace = true

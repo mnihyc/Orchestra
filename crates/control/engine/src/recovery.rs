@@ -331,6 +331,9 @@ impl Engine {
             None
         };
         let files = FilesPlan {
+            source_policy: None,
+            home_policy: None,
+            file_states_policy: None,
             kept_image_bytes: None,
             source: FilesSource::Cached,
             source_as_of,
@@ -504,6 +507,7 @@ pub(crate) async fn files(
                     machine,
                     SerialKey::Environment(recipe.environment),
                     &FsMaterialize {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: recipe.environment,
                         job_id: Some(job.id()),
@@ -944,6 +948,7 @@ pub(crate) async fn materialize_artifacts(
             machine,
             SerialKey::Environment(environment),
             &orch_link_contract::commands::FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: environment,
                 job_id: Some(job.id()),

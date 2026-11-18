@@ -309,6 +309,7 @@ async fn outside_host_rows_need_the_actual_publisher_read_without_a_fabricated_h
     let root = manager.person.personal_org;
     port_policy(&world, "port_host", "ask").await;
     let ports = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(HostPorts {
             incoming_address: "native-publisher.example.test".into(),
