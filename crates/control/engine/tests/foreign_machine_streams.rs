@@ -24,6 +24,7 @@ use serde_json::json;
 
 fn lost() -> Event {
     Event::SessionLost(SessionLost {
+        uncertain: false,
         reason: "the session closed".to_owned(),
     })
 }
