@@ -582,7 +582,7 @@ impl EnvironmentRole {
             TunnelKind::Exec | TunnelKind::Mcp => {
                 crate::tool_tunnels::serve(&self.relay, incoming).await;
             }
-            TunnelKind::Llm => incoming.refuse(
+            TunnelKind::Llm | TunnelKind::Program => incoming.refuse(
                 OpenErrorCode::NoSuchService,
                 "this machine does not serve tunnels of that kind",
             ),
@@ -1424,12 +1424,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;

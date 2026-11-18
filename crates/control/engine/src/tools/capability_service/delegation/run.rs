@@ -1,7 +1,7 @@
 //! One ordinary helper per retained call-rule attempt; accepted native output is never generated twice.
 use super::*;
 use crate::turns::{InputAfter, TurnEnd, error_json};
-use orch_db::queries::storage;
+use orch_provider_contract::capabilities::CapabilityResult;
 
 fn link(call: &CallContext) -> Result<ParentLink, EngineError> {
     let root = source::resource_id(
@@ -10,9 +10,8 @@ fn link(call: &CallContext) -> Result<ParentLink, EngineError> {
     );
     let attempt = recovery_binding::command(root)?;
     Ok(ParentLink {
-        answer: source::Source::captured()?.answer(),
+        work: crate::ids::derived("capability.work", &[attempt.as_bytes()]),
         helper: crate::ids::derived("capability.helper", &[attempt.as_bytes()]),
-        slot: format!("{SLOT}:{attempt}"),
     })
 }
 
@@ -23,20 +22,21 @@ async fn stop_owned(
     fulfilled: bool,
 ) -> Result<(), EngineError> {
     let mut tx = engine.db().begin().await?;
-    let record = parent.record(&mut tx).await?;
+    let Some(work) = capability_work::program(&mut tx, parent.work).await? else {
+        return Ok(());
+    };
     let Some(thread) = threads::lock(&mut tx, parent.helper).await? else {
         return Ok(());
     };
-    let Some(input) = threads::input_by_client(
-        &mut tx,
-        parent.helper,
-        Some(record.actor),
-        &format!("capability-helper:{}", record.attempt),
-    )
-    .await?
-    else {
+    let Some(input_id) = work.input else {
         return Ok(());
     };
+    let Some(input) = threads::input(&mut tx, input_id).await? else {
+        return Ok(());
+    };
+    if input.thread_id != parent.helper || input.author_id != Some(work.actor) {
+        return Ok(());
+    }
     let Some(turn) = input.turn_id else {
         return Ok(());
     };
@@ -92,6 +92,7 @@ struct Owned {
 impl Drop for Owned {
     fn drop(&mut self) {
         if self.armed
+            && !self.engine.is_stopped()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let engine = self.engine.clone();
@@ -105,29 +106,16 @@ impl Drop for Owned {
     }
 }
 
-#[derive(sqlx::FromRow)]
-struct Generated {
-    native_ref: String,
-    blob: String,
-    media_type: String,
-    revised_prompt: Option<String>,
-}
-
 async fn poll(
     engine: &Engine,
-    call: &CallContext,
     parent: &ParentLink,
-) -> Result<Option<Json>, EngineError> {
+) -> Result<Option<(Record, codecs::Receipt)>, EngineError> {
     let mut conn = engine.db().acquire().await?;
-    source::check_call(&mut conn, call).await?;
-    source::original_callers(
-        &mut conn,
-        call,
-        engine.inner.clock.as_ref(),
-        engine.inner.access.as_ref(),
-    )
-    .await?;
-    let record = parent.record(&mut conn).await?;
+    let (record, work) = parent.record_and_work(&mut conn).await?;
+    record.origin.before_read(engine, &mut conn).await?;
+    if !record.placement.current(&mut conn).await? {
+        return Err(EngineError::StaleToolSource);
+    }
     let input = threads::input_by_client(
         &mut conn,
         parent.helper,
@@ -136,6 +124,9 @@ async fn poll(
     )
     .await?
     .ok_or(EngineError::StaleToolSource)?;
+    if work.input != Some(input.id) {
+        return Err(EngineError::StaleToolSource);
+    }
     let Some(turn) = input.turn_id else {
         let helper = threads::thread(&mut conn, parent.helper)
             .await?
@@ -172,68 +163,46 @@ async fn poll(
     if foreign
         || turn.thread_id != parent.helper
         || turn.input_id != input.id
+        || turn.model != record.model
+        || turn.effort != record.effort
         || lane.provider_id != record.provider
         || lane.agent_id != record.agent
         || lane.credential_path != "native"
     {
         return Err(EngineError::StaleToolSource);
     }
-    let count = record
-        .input
-        .get("n")
-        .and_then(Json::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(1);
-    let bound = i64::try_from(count.saturating_add(1)).map_err(EngineError::unreadable)?;
-    let generated:Vec<Generated>=sqlx::query_as("SELECT native_ref,payload#>>'{tool,blob}' AS blob,payload#>>'{tool,media_type}' AS media_type,payload#>>'{tool,caption}' AS revised_prompt FROM items WHERE thread_id=$1 AND turn_id=$2 AND kind='tool_call' AND status='completed' AND payload#>>'{tool,kind}'='image' AND payload#>>'{tool,capability}'=$3 AND native_ref IS NOT NULL ORDER BY seq_created,id LIMIT $4")
-        .bind(parent.helper).bind(turn.id).bind(&record.capability).bind(bound).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
-    if generated.len() >= count {
-        let mut images = Vec::new();
-        for image in generated {
-            let blob: Hash = image.blob.parse().map_err(EngineError::unreadable)?;
-            let kept = storage::blob(&mut conn, &blob)
-                .await?
-                .ok_or(EngineError::StaleToolSource)?;
-            images.push(accepted::NativeImage {
-                blob,
-                size: kept.size,
-                media_type: image.media_type,
-                native_ref: image.native_ref,
-                revised_prompt: image.revised_prompt,
-            });
-        }
-        let command:Option<Id>=sqlx::query_scalar("SELECT id FROM commands WHERE serial_key=$1 AND machine_id=$2 AND kind IN ('turn.start','turn.start.fenced') AND state IN ('sent','accepted','succeeded','failed') AND COALESCE(body->>'turn_id',body#>>'{turn,turn_id}')=$3 AND COALESCE(body->>'thread_id',body#>>'{turn,thread_id}')=$4 ORDER BY created_at DESC,id DESC LIMIT 1")
-            .bind(SerialKey::Thread(parent.helper).wire()).bind(lane.machine_id).bind(turn.id.to_string()).bind(parent.helper.to_string())
-            .fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        let command = command.ok_or(EngineError::StaleToolSource)?;
-        source::check_call(&mut conn, call).await?;
-        let details = json!({"helper":record.helper_info(),"images":images});
-        let accepted = accepted::capture_native(
-            call,
+    let codec = codecs::installed()
+        .map_err(EngineError::unreadable)?
+        .get(&record.execution)?;
+    let frame = codecs::Frame {
+        helper: parent.helper,
+        turn: turn.id,
+        machine: lane.machine_id,
+        capability: &record.capability,
+        input: &record.input,
+    };
+    if let Some(receipt) = codec.read(&mut conn, &frame).await? {
+        record.origin.before_read(engine, &mut conn).await?;
+        return Ok(Some((record, receipt)));
+    }
+    if !session_login_current(&mut conn, record.provider, &work).await? {
+        return Err(CapabilityFailure::unavailable(
             &record.capability,
-            command,
-            parent.clone(),
-            &record.input,
-            images,
-            details,
-        )?;
-        drop(conn);
-        engine
-            .retain_native_capability_result(call, &accepted)
-            .await?;
-        return Ok(Some(Json::Null));
+            "program_sign_in_changed",
+            "The subscription sign-in changed while this work was running.",
+        )
+        .with_helper(record.helper_info())
+        .into());
     }
     let error:Option<Json>=sqlx::query_scalar("SELECT payload FROM items WHERE thread_id=$1 AND turn_id=$2 AND kind='error' AND payload#>>'{details,capability}'=$3 ORDER BY seq_created,id LIMIT 1")
         .bind(parent.helper).bind(turn.id).bind(&record.capability).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
     if let Some(error) = error {
         drop(conn);
         let failure = CapabilityFailure::native(&record.capability, &error, record.helper_info())?;
-        source::value(
-            engine,
-            &format!("delegated_failure:{}", record.attempt),
-            failure.rule_failure(),
-        )
-        .await?;
+        record
+            .origin
+            .retain_failure(engine, record.attempt, failure.rule_failure())
+            .await?;
         return Err(failure.into());
     }
     if !turn.is_active() {
@@ -247,12 +216,10 @@ async fn poll(
             )
             .with_helper(record.helper_info())
         };
-        source::value(
-            engine,
-            &format!("delegated_failure:{}", record.attempt),
-            failure.rule_failure(),
-        )
-        .await?;
+        record
+            .origin
+            .retain_failure(engine, record.attempt, failure.rule_failure())
+            .await?;
         return Err(failure.into());
     }
     Ok(None)
@@ -262,30 +229,49 @@ pub(crate) async fn execute(
     engine: &Engine,
     call: &CallContext,
     capability: &str,
-) -> Result<Json, EngineError> {
+    selected: selection::Selection,
+    required: &ExecutionSupport,
+) -> Result<CapabilityResult, EngineError> {
     let input = accepted::input(call, capability)?;
     let parent = link(call)?;
     let helper = engine
-        .start_delegated_capability_helper(call, capability, input)
+        .start_delegated_capability_helper(call, capability, input, selected, required)
         .await?;
     if helper != parent.helper {
         return Err(EngineError::ToolCallIdentity);
     }
+    await_result(engine, &parent).await
+}
+
+pub(super) async fn await_result(
+    engine: &Engine,
+    parent: &ParentLink,
+) -> Result<CapabilityResult, EngineError> {
     let mut owned = Owned {
         engine: engine.clone(),
         parent: parent.clone(),
         armed: true,
     };
+    #[cfg(test)]
+    source::tests::pause_program_wait(parent.helper).await;
     let deadline = {
         let mut conn = engine.db().acquire().await?;
         parent.record(&mut conn).await?.deadline
     };
     loop {
-        match poll(engine, call, &parent).await {
-            Ok(Some(result)) => {
-                stop_owned(engine, &parent, true).await?;
+        if engine.is_stopped() {
+            owned.armed = false;
+            return Err(crate::commands::CommandsError::Stopping.into());
+        }
+        match poll(engine, parent).await {
+            Ok(Some((record, receipt))) => {
+                record
+                    .origin
+                    .publish(engine, parent, &record, &receipt)
+                    .await?;
+                stop_owned(engine, parent, true).await?;
                 owned.armed = false;
-                return Ok(result);
+                return Ok(receipt.result);
             }
             Ok(None) => {}
             Err(error) => return Err(error),
@@ -303,6 +289,68 @@ pub(crate) async fn execute(
             ()=tokio::time::sleep(remaining.min(engine.inner.config.sweep_every))=>{},
         }
     }
+}
+
+/// Re-entry can deliver an already paid answer without admitting a new model effect.
+pub(super) async fn completed_result(
+    engine: &Engine,
+    parent: &ParentLink,
+) -> Result<Option<CapabilityResult>, EngineError> {
+    let Some((record, receipt)) = poll(engine, parent).await? else {
+        return Ok(None);
+    };
+    record
+        .origin
+        .publish(engine, parent, &record, &receipt)
+        .await?;
+    stop_owned(engine, parent, true).await?;
+    Ok(Some(receipt.result))
+}
+
+/// This reads actual completed native output only. It neither starts work nor checks a fresh paid allowance.
+pub(super) async fn reconcile(
+    engine: &Engine,
+    call: &CallContext,
+    capability: &str,
+) -> Result<Option<accepted::AcceptedCapabilityResult>, EngineError> {
+    let works = {
+        let mut conn = engine.db().acquire().await?;
+        source::check_call(&mut conn, call).await?;
+        capability_work::programs_for_tool(&mut conn, source::Source::captured()?.answer()).await?
+    };
+    for work in works {
+        if work.purpose != capability {
+            return Err(EngineError::ToolCallIdentity);
+        }
+        let parent = ParentLink {
+            work: work.id,
+            helper: work.helper,
+        };
+        {
+            let mut conn = engine.db().acquire().await?;
+            let record = parent.record(&mut conn).await?;
+            if !record.origin.matches_call(call)? {
+                return Err(EngineError::ToolCallIdentity);
+            }
+        }
+        let (record, receipt) = match poll(engine, &parent).await {
+            Ok(Some(ready)) => ready,
+            Ok(None) | Err(EngineError::Capability(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        let result = accepted::reconcile_native_result(
+            engine,
+            call,
+            capability,
+            record.input.clone(),
+            record.material.clone(),
+            record.origin.publish(engine, &parent, &record, &receipt),
+        )
+        .await?;
+        stop_owned(engine, &parent, true).await?;
+        return Ok(Some(result));
+    }
+    Ok(None)
 }
 
 /// The same call-rule recovery row consumes the actual native failure and reset, without a fake command.

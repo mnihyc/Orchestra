@@ -1,4 +1,5 @@
 /** A summary view is supplied by its ordinary authorized page reader. */
+import type { SummaryWait } from '@/generated/api-types';
 import type { ResourceSubject } from '@/features/resource-facts/facts';
 
 export interface SummaryTarget {
@@ -29,7 +30,7 @@ export interface SummarySnapshot {
   producer: SummaryProducer | null;
   updated_at: string | null;
   /** Actual native waiting reason/eligibility, independent of the previous paragraph's age. */
-  wait?: { reason: 'interval' | 'recovery' | 'queue'; until: string | null } | null;
+  wait?: SummaryWait | null;
   /** The ordinary request error, rendered by the shared error component. */
   error?: unknown;
 }
