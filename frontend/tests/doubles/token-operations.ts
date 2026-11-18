@@ -28487,6 +28487,60 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "MePickerRecentCreate",
+    "method": "POST",
+    "path": "/me/picker-recents",
+    "title": "Promotes one key atomically without replacing another device's choices.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MePickerRecentCreate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "account"
+            ],
+            "target": {
+              "kind": "current_account"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MePickerRecentsGet",
+    "method": "GET",
+    "path": "/me/picker-recents",
+    "title": "Reads this person's recent picker choices in one preference read.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MePickerRecentsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "account"
+            ],
+            "target": {
+              "kind": "current_account"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MeProfilePinsSet",
     "method": "PUT",
     "path": "/me/profile/pins",

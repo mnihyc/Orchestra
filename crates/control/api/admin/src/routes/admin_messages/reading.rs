@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::operation_sources::Declaration;
 
@@ -128,24 +128,30 @@ struct Position {
     id: Id,
 }
 
-fn audience(ctx: &Ctx, org: Option<Id>) -> ApiResult<Vec<u8>> {
+fn audience(ctx: &Ctx, org: Option<Id>, q: &str) -> ApiResult<Vec<u8>> {
     let mut purpose = b"administrator-messages/sent/v1/".to_vec();
     purpose.extend_from_slice(ctx.user()?.id().as_bytes());
     purpose.push(u8::from(org.is_some()));
     if let Some(org) = org {
         purpose.extend_from_slice(org.as_bytes());
     }
+    purpose.extend_from_slice(q.as_bytes());
     Ok(purpose)
 }
 
-fn open(ctx: &Ctx, org: Option<Id>, text: &str) -> ApiResult<(chrono::DateTime<chrono::Utc>, Id)> {
+fn open(
+    ctx: &Ctx,
+    org: Option<Id>,
+    text: &str,
+    q: &str,
+) -> ApiResult<(chrono::DateTime<chrono::Utc>, Id)> {
     let bad = || ApiError::invalid("cursor", "is not a cursor of this sent list");
     if text.len() > orch_realtime_contract::version::MAX_CLIENT_FRAME_BYTES {
         return Err(bad());
     }
     let sealed = URL_SAFE_NO_PAD.decode(text).map_err(|_| bad())?;
     let plain = crate::routes::resources::sealing::installed_master_key()?
-        .open(&sealed, &audience(ctx, org)?)
+        .open(&sealed, &audience(ctx, org, q)?)
         .map_err(|_| bad())?;
     let pos: Position = serde_json::from_slice(&plain).map_err(|_| bad())?;
     Ok((
@@ -154,14 +160,14 @@ fn open(ctx: &Ctx, org: Option<Id>, text: &str) -> ApiResult<(chrono::DateTime<c
     ))
 }
 
-fn seal(ctx: &Ctx, org: Option<Id>, row: &rows::SummaryRow) -> ApiResult<String> {
+fn seal(ctx: &Ctx, org: Option<Id>, row: &rows::SummaryRow, q: &str) -> ApiResult<String> {
     let plain = serde_json::to_vec(&Position {
         at: row.created_at.timestamp_micros(),
         id: row.id,
     })
     .map_err(ApiError::internal)?;
     let sealed = crate::routes::resources::sealing::installed_master_key()?
-        .seal(&plain, &audience(ctx, org)?)
+        .seal(&plain, &audience(ctx, org, q)?)
         .map_err(ApiError::internal)?;
     Ok(URL_SAFE_NO_PAD.encode(sealed))
 }
@@ -186,7 +192,7 @@ fn summary(row: &rows::SummaryRow) -> ApiResult<AdminMessageSummary> {
 
 impl<S: Scope> native::Selected for Sent<S> {
     type Source = Source;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = SentPage;
     type Reply = AdminMessageListResponse;
     const DECLARATION: &'static Declaration<Source> = S::ROW;
@@ -195,22 +201,40 @@ impl<S: Scope> native::Selected for Sent<S> {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         _: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(SentPage, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let org = S::org(ctx)?;
+            let q = query.q.as_deref().unwrap_or("").trim();
             let after = query
                 .cursor
                 .as_deref()
-                .map(|text| open(ctx, org, text))
+                .map(|text| open(ctx, org, text, q))
                 .transpose()?;
-            let limit = query.limit() as usize;
-            let mut selected =
-                rows::sent_page(conn, org, after, i64::from(query.limit()) + 1).await?;
+            let limit = usize::try_from(
+                query
+                    .limit
+                    .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT),
+            )
+            .map_err(ApiError::internal)?;
+            if limit == 0 {
+                return Err(ApiError::invalid("limit", "must be greater than zero"));
+            }
+            let mut selected = rows::sent_page_search(
+                conn,
+                org,
+                after,
+                i64::try_from(limit + 1).map_err(ApiError::internal)?,
+                &orch_db::queries::search::Query::parse(q).like_patterns(),
+            )
+            .await?;
             let more = selected.len() > limit;
             selected.truncate(limit);
             let next_cursor = if more {
-                selected.last().map(|row| seal(ctx, org, row)).transpose()?
+                selected
+                    .last()
+                    .map(|row| seal(ctx, org, row, q))
+                    .transpose()?
             } else {
                 None
             };
@@ -230,7 +254,7 @@ impl<S: Scope> native::Selected for Sent<S> {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         _: &'a Caller,
-        _: &'a PageQuery,
+        _: &'a CollectionQuery,
         opened: &'a SentPage,
     ) -> BoxFuture<'a, ApiResult<(SentPage, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
@@ -275,7 +299,7 @@ impl<S: Scope> native::Selected for Sent<S> {
         _: &'a Ctx,
         _: &'a mut Conn,
         _: &'a Principal,
-        _: &'a PageQuery,
+        _: &'a CollectionQuery,
         opened: &'a SentPage,
         fresh: &'a SentPage,
     ) -> BoxFuture<'a, ApiResult<bool>> {

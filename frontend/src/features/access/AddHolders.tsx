@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** The field that adds people, groups and roles to a page with one of the three choices and an optional end, and says what that comes to before it is done.
  *
  * It offers only what its reader may give: the choices, and on a place the roles, are those the page says they may give.
@@ -133,7 +134,8 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   const choices = CHOICE_ORDER.filter((entry) => catalogue.choice(entry, target.kind).length > 0);
   const off = outsiderReason(t, page, target);
   const defaultPlace = containerOf(page);
-  const candidates = useCandidates(query, orgId, { kinds: ['user', 'group', 'role', 'members'], enabled: !kept && (query.trim() !== '' || optionsOpen), browsePlaces: optionsOpen, thing: target.name, outsiderOff: off, placeId: place !== null ? target.id : (defaultPlace === null || defaultPlace === 'system' ? undefined : defaultPlace.id) });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const candidates = useCandidates(query, orgId, { kinds: ['user', 'group', 'role', 'members'], enabled: !kept && (query.trim() !== '' || optionsOpen || pickerOpen), browsePlaces: optionsOpen, thing: target.name, outsiderOff: off, placeId: place !== null ? target.id : (defaultPlace === null || defaultPlace === 'system' ? undefined : defaultPlace.id) });
   const stagedKeys = new Set(staged.map((entry) => JSON.stringify(entry.input)));
 
   // An address nobody is registered with is invited, where the caller may bring somebody from outside. An invitation is to this one place, so a place shared with what is in it is shared on its own when one is chosen.
@@ -279,13 +281,13 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   return (
     <div className="flex flex-col gap-2" data-tutorial-target="holder-picker">
       <div className="flex flex-wrap items-start gap-2">
-        <Combobox
+        <CandidatePicker candidates={candidates} onOpenChange={setPickerOpen}
           label={t('access.add.label')}
           hideLabel
           placeholder={t('access.add.placeholder')}
           query={query}
           onQueryChange={setQuery}
-          minChars={1}
+          minChars={0}
           loading={candidates.loading}
           empty={t('access.candidates.none')}
           groups={groups}

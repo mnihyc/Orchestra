@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test activity_depth --test thread_history_pages --test history_native_scopes --test access_everything --test access_transfer

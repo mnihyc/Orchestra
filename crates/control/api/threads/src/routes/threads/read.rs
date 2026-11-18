@@ -557,6 +557,7 @@ fn outline_line(
             ),
         ),
         "agent_message" => (OutlineKind::AgentMessage, said("text")),
+        "error" => (OutlineKind::Error, said("message")),
         "announcement"
             if row
                 .payload
@@ -622,12 +623,98 @@ pub(super) async fn outline_in(
     conn: &mut orch_db::Conn,
     query: ThreadOutlineGetQuery,
 ) -> ApiResult<ThreadOutlinePage> {
-    let thread = ctx.id("id")?;
-    let limit = i64::from(limit_of(
+    if query.q.as_deref().is_none_or(|q| q.trim().is_empty()) && query.kinds.is_none() {
+        return outline_page(ctx, conn, query).await;
+    }
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    let kinds = query
+        .kinds
+        .as_deref()
+        .map(|text| {
+            text.split(',')
+                .filter(|kind| !kind.trim().is_empty())
+                .map(|kind| {
+                    serde_json::from_value::<OutlineKind>(serde_json::Value::String(
+                        kind.trim().to_owned(),
+                    ))
+                    .map_err(|_| ApiError::invalid("kinds", "contains an unknown outline kind"))
+                })
+                .collect::<ApiResult<Vec<_>>>()
+        })
+        .transpose()?;
+    let wanted = usize::try_from(super::read_history::positive_limit(
         query.limit,
         THREAD_SYNC_DEFAULT_LIMIT,
-        THREAD_SYNC_MAX_LIMIT,
-    )?);
+    )?)
+    .map_err(ApiError::internal)?;
+    let mut scan = query.clone();
+    scan.limit = Some(
+        query
+            .limit
+            .unwrap_or(THREAD_SYNC_DEFAULT_LIMIT)
+            .max(THREAD_SYNC_DEFAULT_LIMIT),
+    );
+    let mut batches = super::read_history::search_batches(conn).await?;
+    let mut result = Vec::new();
+    loop {
+        let mut page = outline_page(ctx, conn, scan.clone()).await?;
+        let matching = page
+            .entries
+            .iter()
+            .filter(|entry| {
+                kinds
+                    .as_ref()
+                    .is_none_or(|kinds| kinds.contains(&entry.kind))
+                    && words.matches(&format!(
+                        "{} {} {}",
+                        entry.title,
+                        entry.goal_condition.as_deref().unwrap_or(""),
+                        entry
+                            .turn_ordinal
+                            .map(|n| n.to_string())
+                            .unwrap_or_default()
+                    ))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        result.extend(matching.into_iter().rev());
+        let mut points = std::collections::BTreeSet::new();
+        let mut extra = false;
+        result.retain(|entry| {
+            if !points.contains(&entry.seq) && points.len() == wanted {
+                extra = true;
+                return false;
+            }
+            points.insert(entry.seq);
+            true
+        });
+        if extra {
+            page.next_before = result.last().map(|entry| entry.seq);
+        }
+        batches = batches.saturating_sub(1);
+        if extra
+            || points.len() == wanted
+            || page.next_before.is_none()
+            || batches == 0
+            || query.around.is_some()
+            || query.turn.is_some()
+        {
+            result.sort_by_key(|entry| entry.seq);
+            page.entries = result;
+            return Ok(page);
+        }
+        scan.before = page.next_before;
+        scan.projection_revision = page.projection.as_ref().map(|p| p.projection_revision);
+    }
+}
+
+async fn outline_page(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    query: ThreadOutlineGetQuery,
+) -> ApiResult<ThreadOutlinePage> {
+    let thread = ctx.id("id")?;
+    let limit = super::read_history::positive_limit(query.limit, THREAD_SYNC_DEFAULT_LIMIT)?;
     let anchors = usize::from(query.before.is_some())
         + usize::from(query.around.is_some())
         + usize::from(query.turn.is_some());

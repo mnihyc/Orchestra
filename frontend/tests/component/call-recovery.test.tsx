@@ -254,3 +254,17 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(view.container).toHaveTextContent(i18n.t('capabilityRoutes.names.web_search'));
   });
 }
+
+it('finds a late recovery rule without narrowing its saved order or losing its step draft', async()=>{
+  const value=Array.from({length:60},(_,index)=>({...rule,id:`Recovery ${index}`}));
+  const change=vi.fn<(value:unknown)=>void>();
+  const user=userEvent.setup();show(<CallsRules shape={{type:'json'}} value={value} label={i18n.t('calls.rules')} onChange={change}/>);
+  const find=screen.getByRole('searchbox');await user.click(find);await user.paste('Recovery 59');
+  const actions=screen.getByRole('button',{name:new RegExp('Recovery 59')});await user.click(actions);
+  await user.click(screen.getByRole('menuitem',{name:i18n.t('calls.edit')}));
+  const name=screen.getByRole('textbox',{name:i18n.t('calls.name')});await user.clear(name);await user.paste('Kept recovery');
+  await user.click(screen.getByRole('button',{name:i18n.t('common.save')}));
+  const saved=change.mock.calls[0]?.[0];expect(Array.isArray(saved)).toBe(true);
+  if(!Array.isArray(saved))throw new Error('the complete rules remain an array');
+  expect(saved).toHaveLength(60);expect(saved[0]).toEqual(value[0]);expect(saved[59]).toEqual({...value[59],id:'Kept recovery'});
+});

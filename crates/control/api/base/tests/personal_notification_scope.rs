@@ -304,7 +304,7 @@ async fn personal_reads_require_the_current_account_and_keep_device_secrets_hidd
             "push list must use its existing safe metadata projection"
         );
     }
-    let rows = reply.ok();
+    let rows = reply.ok().items;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, own_device.0);
     assert_eq!(rows[0].endpoint_hash.len(), 64);
@@ -321,7 +321,8 @@ async fn personal_reads_require_the_current_account_and_keep_device_secrets_hidd
             .token(&owner.token)
             .send()
             .await
-            .ok(),
+            .ok()
+            .items,
         rows
     );
     assert_eq!(
@@ -331,7 +332,8 @@ async fn personal_reads_require_the_current_account_and_keep_device_secrets_hidd
             .token(&legacy.secret)
             .send()
             .await
-            .ok(),
+            .ok()
+            .items,
         rows
     );
     for refused in [&wrong_account.secret, &wrong_action.secret] {
@@ -886,8 +888,10 @@ async fn freshness_case(case: FreshCase, narrow: bool) {
                 assert_eq!(shown.quiet_hours.unwrap().start_minute, 60);
             }
             FreshCase::Devices => {
-                let shown: Vec<orch_api_contract::notifications::PushDevice> =
-                    serde_json::from_slice(&bytes).unwrap();
+                let shown: orch_api_contract::common::Page<
+                    orch_api_contract::notifications::PushDevice,
+                > = serde_json::from_slice(&bytes).unwrap();
+                let shown = shown.items;
                 assert_eq!(shown.len(), 1);
                 assert_eq!(shown[0].id, device.0);
             }
