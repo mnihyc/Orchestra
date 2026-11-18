@@ -546,6 +546,49 @@ async fn a_job_in_the_middle_of_its_work_when_the_api_restarts_is_finished_by_th
 }
 
 #[tokio::test]
+async fn taking_over_a_lease_keeps_the_retry_boundary_before_any_native_work_begins() {
+    use chrono::Utc;
+    use orch_types::{ManualClock, Time};
+    use std::sync::Arc;
+    let start = Time::new(Utc::now()).get();
+    let clock = Arc::new(ManualClock::new(start));
+    let world = World::with_clock(clock.clone()).await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-1", 16_384).await;
+    let template = template(&world).await;
+    let lease = start + chrono::Duration::seconds(1);
+    let retry = start + chrono::Duration::seconds(2);
+    let statement = format!("UPDATE jobs SET plan=plan || jsonb_build_object(
+        'runner',jsonb_build_object('id',gen_random_uuid()::text,'until','{lease}'::timestamptz),
+        'lifecycle_wait',jsonb_build_object('retry_eligible_at','{retry}'::timestamptz,
+            'last_attempt_at','{start}'::timestamptz,'reason_code','internal','observed_at','{start}'::timestamptz))
+        WHERE environment_id=(SELECT id FROM environments ORDER BY created_at DESC LIMIT 1)");
+    let made = hosting::make_after(&world, template, "Retained retry", &statement).await;
+    clock.advance(chrono::Duration::seconds(1));
+    eventually(
+        "the inherited retry wait or an early native command",
+        || async {
+            let plan: serde_json::Value = sqlx::query_scalar("SELECT plan FROM jobs WHERE id=$1")
+                .bind(made.job.id)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+            plan.pointer("/lifecycle_wait/waiting")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || !host.kinds().is_empty()
+        },
+    )
+    .await;
+    assert!(
+        host.kinds().is_empty(),
+        "a reclaimed lease cannot advance the captured retry time"
+    );
+    clock.advance(chrono::Duration::seconds(1));
+    host.wait_for(K::NodeImageEnsure, 1).await;
+}
+
+#[tokio::test]
 async fn a_job_whose_runner_died_is_taken_over_when_its_lease_has_run_out_and_not_before() {
     let world = World::new().await;
     serve(&world);

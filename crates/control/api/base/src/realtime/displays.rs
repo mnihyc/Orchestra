@@ -397,6 +397,39 @@ impl Sockets {
         Ok((view && (!action || control)).then_some(current).flatten())
     }
 
+    async fn input_message<W: tokio::io::AsyncWrite + Unpin>(
+        app: &App,
+        ticket: &Ticket,
+        writer: &mut W,
+        bytes: &[u8],
+        action: bool,
+    ) -> ApiResult<Option<std::io::Result<()>>> {
+        let mut epoch = app.realtime.inner.epoch.subscribe();
+        let viewing = async {
+            let mut tick =
+                tokio::time::interval_at(tokio::time::Instant::now() + KEEPER_TICK, KEEPER_TICK);
+            loop {
+                tokio::select! {
+                    changed = epoch.changed() => { if changed.is_err() { return Ok(None); } },
+                    _ = tick.tick() => {},
+                }
+                if Self::input_current(app, ticket, false).await?.is_none() {
+                    return Ok(None);
+                }
+            }
+        };
+        // Capacity wakes still own the first-byte Manage recheck. The independent lifetime
+        // future keeps View/expiry and shutdown alive while that native writer stays Pending.
+        tokio::select! {
+            biased;
+            _ = app.realtime.inner.stop.cancelled() => Ok(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted, "the display relay has stopped")))),
+            ended = viewing => ended,
+            written = super::publication::write_message(writer, bytes, app.clock.as_ref(),
+                || Self::input_current(app, ticket, action)) => written,
+        }
+    }
+
     async fn socket(&self, app: App, ticket: Ticket, mut socket: WebSocket) {
         let reason = self.relay(&app, &ticket, &mut socket).await;
         // Stopping a display can end RFB before the keeper observes its committed close.
@@ -506,7 +539,7 @@ impl Sockets {
                             for reply in header.replies{if !matches!(Self::publish_bytes(app,ticket,socket,reply).await,Ok(true)){failed=true;break;}}
                             if failed{break match Self::gates(app,ticket).await {Ok((false,_,reason,_))=>reason,_=>"link_lost"}}
                             if header.shared {
-                                match super::publication::write_message(&mut writer,&[1],app.clock.as_ref(),||Self::input_current(app,ticket,false)).await {
+                                match Self::input_message(app,ticket,&mut writer,&[1],false).await {
                                     Ok(Some(Ok(())))=>{},
                                     Ok(None)=>{break match Self::gates(app,ticket).await{Ok((false,_,reason,_))=>reason,_=>"link_lost"}},
                                     _=>break "link_lost",
@@ -519,7 +552,7 @@ impl Sockets {
                                 let (view,control,reason,_)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>{failure=Some("link_lost");break;}};
                                 if !view {failure=Some(reason);break;}
                                 if message.action&&!control{continue}
-                                match super::publication::write_message(&mut writer,&message.bytes,app.clock.as_ref(),||Self::input_current(app,ticket,message.action)).await {
+                                match Self::input_message(app,ticket,&mut writer,&message.bytes,message.action).await {
                                     Ok(Some(Ok(())))=>{if message.activity{self.input(app,ticket);}},
                                     Ok(None)=>{
                                         match Self::gates(app,ticket).await{
@@ -915,6 +948,25 @@ pub(super) fn ticket_input_fixture(app: App, id: Id, token: &str) -> Option<Inpu
             })
         },
     ))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn ticket_input_write_fixture<W: tokio::io::AsyncWrite + Unpin>(
+    app: App,
+    id: Id,
+    token: &str,
+    writer: &mut W,
+    bytes: &[u8],
+) -> ApiResult<Option<std::io::Result<()>>> {
+    let Some(ticket) = app.realtime.displays().redeem(
+        id,
+        token,
+        app.clock.now(),
+        orch_api_contract::surface::HttpSurface::Key,
+    ) else {
+        return Ok(None);
+    };
+    Sockets::input_message(&app, &ticket, writer, bytes, true).await
 }
 
 #[cfg(any(test, feature = "test-support"))]
