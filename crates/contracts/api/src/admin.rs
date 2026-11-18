@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::access::{PageChange, PagePreview, PermissionPage, Role};
 use crate::auth::SignInProof;
-use crate::common::{Page, PageQuery};
+use crate::common::{CollectionQuery, Page, PageQuery};
 use crate::documents::DeletedFilter;
 use crate::environment::{EnvironmentRef, NetworkState, TemplateRef};
 use crate::nodes::OrgType;
@@ -132,11 +132,14 @@ pub struct AdminTokenActivity {
 /// A bounded system credential inventory, newest first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdminTokenListQuery {
+    /// Words in the token's current name, matched before its page is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Select one actual owner; absent includes every account.
     pub owner_id: Option<Id>,
     /// Opaque continuation of this owner-filtered list.
     pub cursor: Option<String>,
-    /// Requested page size, bounded by the ordinary page limit.
+    /// Entries requested in one page, fifty by default; any positive u32 when supplied.
     pub limit: Option<u32>,
 }
 
@@ -292,9 +295,11 @@ pub struct PkiInfo {
     pub services: Vec<PkiService>,
     /// How many machines' certificates expire within 30 days.
     pub machines_expiring_30d: i64,
-    /// At most 50 active machines whose certificates end within 30 days, including those already
-    /// lapsed, soonest first. The count above includes machines beyond this list.
+    /// One searched expiry page of active machines, including already lapsed certificates, soonest first.
     pub machines_expiring: Vec<PkiInfoMachinesExpiring>,
+    /// Continue the same administrator, words and fixed expiry window; absent at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machines_next_cursor: Option<String>,
 }
 
 /// The parts of the system that report their own health.
@@ -1025,6 +1030,30 @@ pub struct AdminRuntimeListQuery {
     /// Only those of this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UnitKind>,
+    /// Words of the visible unit, resource or template name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same host, kind and name search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl AdminRuntimeListQuery {
+    /// Its named collection page, with the existing unit selectors kept separately.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Which stored series to read. A span inside `[retention] metrics_fine_days` is answered from the
@@ -1295,6 +1324,38 @@ pub struct SemanticSearchOrg {
     pub rebuild_seconds: Option<i64>,
 }
 
+/// A capability definition directory, including the interface's public localized aliases.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityListQuery {
+    /// Literal words in stored visible definition text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Positive entries per page; fifty by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same actor, words and public alias keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Comma-separated exact keys also matching a localized shipped capability name or description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<String>,
+}
+impl CapabilityListQuery {
+    /// The ordinary collection continuation, without losing its native alias intent.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// Search by meaning across the system.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SemanticSearchOverview {
@@ -1306,6 +1367,9 @@ pub struct SemanticSearchOverview {
     pub interval_secs: i64,
     /// The root orgs where it is on or that have an index, by name.
     pub orgs: Vec<SemanticSearchOrg>,
+    /// Continue the same administrator's root-org name search; absent at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orgs_next_cursor: Option<String>,
 }
 
 /// Accepted administrative index work without disclosing its configuration or progress.
@@ -1384,7 +1448,7 @@ crate::endpoints! {
     AdminUserTokenActivityList: GET "/admin/users/{id}/tokens/{token_id}/activity", Session, query crate::auth::ApiTokenActivityQuery, none, json Page<AdminTokenActivity>, 200,
         operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("token"));
     /// Lists the live browser sessions of this exact person.
-    AdminUserSessionList: GET "/admin/users/{id}/sessions", Session, query PageQuery, none, json Page<AdminSession>, 200,
+    AdminUserSessionList: GET "/admin/users/{id}/sessions", Session, query crate::common::CollectionQuery, none, json Page<AdminSession>, 200,
         operation Op::single(Read, &[Identity(I::Session)], Target::ResolvedCollection("results"));
     /// Ends one session of this exact person and its access tokens.
     AdminUserSessionDelete: DELETE "/admin/users/{id}/sessions/{session_id}", Session, none, none, none, 204,
@@ -1436,13 +1500,13 @@ crate::endpoints! {
     AdminDefaultsPreview: POST "/admin/defaults/preview", Session, none, json PageChange, json PagePreview, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every host on the system; hosts themselves are managed through their own requests.
-    AdminHostList: GET "/admin/hosts", Session, none, none, json Vec<Host>, 200,
+    AdminHostList: GET "/admin/hosts", Session, query CollectionQuery, none, json Page<Host>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Object(K::Host)], Target::ResolvedCollection("results")),
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Environment)], Target::ResolvedCollection("names")),
         ]);
     /// Lists the runtimes of both pools, whoever's they are.
-    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Vec<Runtime>, 200,
+    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Page<Runtime>, 200,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
             Facet::required(Manage, &[Object(K::Host),Object(K::Machine),Object(K::Template)], Target::ResolvedCollection("references")),
@@ -1455,10 +1519,10 @@ crate::endpoints! {
     AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json crate::resources::OrgAgentCreateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::agent_sources::SYSTEM_CREATE_FACETS));
     /// Lists the external implementations loaded anywhere, with how they fare.
-    AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200,
+    AdminPluginList: GET "/admin/plugins", Session, query CollectionQuery, none, json Page<AdminPlugin>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the definitions of capabilities.
-    AdminCapabilityList: GET "/admin/capabilities", Session, none, none, json Vec<CapabilityDef>, 200,
+    AdminCapabilityList: GET "/admin/capabilities", Session, query CapabilityListQuery, none, json crate::common::Page<CapabilityDef>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Writes the definition of a capability, adding it or replacing it.
     AdminCapabilitySet: PUT "/admin/capabilities/{key}", Session, none, json CapabilityDef, json CapabilityDef, 200,
@@ -1546,7 +1610,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("names")),
         ]));
     /// Lists the identity providers.
-    AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200,
+    AdminIdentityProviderList: GET "/admin/identity-providers", Session, query CollectionQuery, none, json Page<IdentityProvider>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds an identity provider.
     AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProviderCreateResponse, 200,
@@ -1564,7 +1628,7 @@ crate::endpoints! {
     AdminStorageGet: GET "/admin/storage", Session, none, none, json StorageStats, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the state of the system's certificates.
-    AdminPkiGet: GET "/admin/pki", Session, none, none, json PkiInfo, 200,
+    AdminPkiGet: GET "/admin/pki", Session, query crate::common::CollectionQuery, none, json PkiInfo, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the state of the system: its release, its parts and its queues.
     AdminSystemGet: GET "/admin/system", Session, none, none, json SystemInfo, 200,
@@ -1579,7 +1643,7 @@ crate::endpoints! {
     AdminBackupRestoreList: GET "/admin/backup-restore-list", Session, none, none, json Option<BackupRestoreList>, 200,
         operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Reads where search by meaning stands for each root org where it is on or that has an index.
-    AdminSemanticSearchGet: GET "/admin/semantic-search", Session, none, none, json SemanticSearchOverview, 200,
+    AdminSemanticSearchGet: GET "/admin/semantic-search", Session, query crate::common::CollectionQuery, none, json SemanticSearchOverview, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Rebuilds a root org's index in place: its vectors are removed and made anew with the model named.
     AdminSemanticSearchRebuild: POST "/admin/semantic-search/{id}/rebuild", Session, none, none, json SemanticSearchResponse, 200,

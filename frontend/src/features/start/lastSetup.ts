@@ -1,6 +1,7 @@
 /** A successful setup on this device; native binding options revalidate it before reuse. */
 import { useViewChoice, writeViewChoice } from '@/lib/viewChoices';
-import type { Picks } from './choices';
+import { NO_PICKS, type Picks } from './choices';
+import type { DeviceChoiceObservation } from '@/lib/viewChoiceFacts';
 
 export interface LastSetup { place: string; picks: Picks }
 
@@ -21,8 +22,16 @@ export function readLastSetup(raw: string): LastSetup | null {
 }
 
 export function useLastSetup(): LastSetup | null {
-  const [raw] = useViewChoice<string>('thread', 'setup', '');
-  return readLastSetup(raw);
+  return useLastSetupObservation()[0];
+}
+
+/** Metadata shares the existing successful-setup read; no read is added when its facts open. */
+export function useLastSetupObservation(): [LastSetup | null, DeviceChoiceObservation<Picks>?] {
+  const [raw, , observation] = useViewChoice<string>('thread', 'setup', '');
+  const value = readLastSetup(raw);
+  const saved = typeof observation?.saved === 'string' ? readLastSetup(observation.saved) : null;
+  return [value, observation === undefined ? undefined : { ...observation, chosen: value?.picks, effective: value?.picks ?? NO_PICKS, saved: saved?.picks,
+    saved_choice_availability: raw !== '' && value === null ? 'unavailable' : observation.saved_choice_availability }];
 }
 
 export function rememberSetup(user: string | null, setup: LastSetup): void {

@@ -1,7 +1,10 @@
 /** One retained-storage report reuses Usage's scope, figures, breakdowns and records frame. */
 import { useInfiniteQuery } from '@tanstack/react-query';
+import { deviceChoiceOf } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
 import { Filter, HardDrive, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import type { TFunction } from 'i18next';
 import { ApiError } from '@/api/client';
 import { useTranslation } from 'react-i18next';
 import { storagePagesQuery } from '@/api/storage';
@@ -17,8 +20,12 @@ import type { KeptRecord, KeptWhy, StorageBreakdownRow, StorageDimension, Storag
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { useScreenHeading } from '@/shell/screen';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CompleteCollection } from '@/ui/CompleteCollection';
+import { Input } from '@/ui/Input';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
+import { CopyId } from '@/ui/CopyId';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
@@ -44,8 +51,10 @@ function Reason({ row }: { row: KeptRecord }) {
   return <div className="flex flex-col gap-1"><StatusDot showLabel label={t(`storage.whys.${row.why}`)} tone={row.why === 'unknown' ? 'warning' : 'idle'} />{row.until !== null && <RelativeTime at={row.until} className="text-sm text-text-muted" />}{row.blocker !== null && <span className="text-sm text-text-muted">{t(`storage.blockers.${row.blocker}`,{defaultValue:row.blocker})}</span>}</div>;
 }
 
-export function DependentName({ row }: { row: Pick<VisibleDependent, 'object' | 'name'> }) {
+export function DependentName({ row }: { row: Pick<VisibleDependent, 'object' | 'name'> & Partial<Pick<VisibleDependent, 'relation'>> }) {
+  const { t } = useTranslation();
   const object = row.object;
+  if (object === null && row.relation === 'native_dependency') return <span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('storage.cleanup.itemUnknown')}</span><CopyId value={row.name} /></span>;
   if (object === null) return <span className="min-w-0 truncate" title={row.name}>{row.name}</span>;
   const subject = resourceSubjectOf(object, row.name);
   if (subject !== null) return <ResourceChip subject={subject} hint={false} />;
@@ -53,12 +62,19 @@ export function DependentName({ row }: { row: Pick<VisibleDependent, 'object' | 
   return <span className="min-w-0 truncate" title={row.name}>{row.name}</span>;
 }
 
-/** Logical retained data names its resource; physical artifacts keep their own inventory name. */
+const NATIVE_KINDS: readonly StorageKind[] = ['unit','volume','network','image','kept_layer','build','tool_version'];
+
+/** Native handles stay available for support; a person reads their kind beside the report's host, time and dependents. */
+export function recordLabel(row: KeptRecord, t: TFunction): string {
+  return NATIVE_KINDS.includes(row.kind) ? t(`storage.kinds.${row.kind}`) : row.name || t(`storage.kinds.${row.kind}`);
+}
+
+/** Logical retained data names its resource; physical inventory offers its handle through Copy ID. */
 export function RecordName({ row }: { row: KeptRecord }) {
   const { t } = useTranslation();
-  const name = row.name || t(`storage.kinds.${row.kind}`);
+  const name = recordLabel(row, t);
   const subject = row.resource !== null && (row.kind === 'environment_files' || row.kind === 'mount_data') ? resourceSubjectOf(row.resource, name) : null;
-  return subject !== null ? <ResourceChip subject={subject} hint={false} /> : <Tooltip content={name}><span className="truncate font-medium">{name}</span></Tooltip>;
+  return subject !== null ? <ResourceChip subject={subject} hint={false} /> : <span className="flex min-w-0 items-center gap-1"><Tooltip content={name}><span className="truncate font-medium">{name}</span></Tooltip>{NATIVE_KINDS.includes(row.kind) && <CopyId value={row.name || row.id} />}</span>;
 }
 
 /** Logical place and physical host are independently permission-filtered by the report. */
@@ -104,12 +120,13 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
   const canAdminister = useManagementAvailable();
   const adminMode = useAdminMode();
   const selectionKey=JSON.stringify(storageRequest(search));
+  const finder=useCollectionSearch('storage:'+selectionKey);
   const [choice,setChoice]=useState<{key:string;ids:Set<string>}>({key:selectionKey,ids:new Set()});
   const selected=choice.key===selectionKey ? choice.ids : new Set<string>();
   const setSelected=(value:Set<string>|((before:Set<string>)=>Set<string>))=>setChoice((before)=>({key:selectionKey,ids:typeof value==='function' ? value(before.key===selectionKey ? before.ids : new Set()) : value}));
   const scope = search.scope ?? 'me';
   const scopeBlocked = scope === 'system' && adminMode.data?.as_admin !== true;
-  const query = useInfiniteQuery({ ...storagePagesQuery(storageRequest(search)), enabled: !scopeBlocked });
+  const query = useInfiniteQuery({ ...storagePagesQuery({...storageRequest(search),...(finder.q===''?{}:{q:finder.q})}), enabled: !scopeBlocked });
   const data = query.data?.pages[0];
   useEffect(() => { if (query.isSuccess && !scopeBlocked) onReportReady?.(); }, [query.isSuccess, scopeBlocked, onReportReady]);
   useEffect(() => {
@@ -120,17 +137,19 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
   const scopeKind = scope.startsWith('node:') ? 'node' : scope.startsWith('host:') ? 'host' : scope === 'system' ? 'system' : 'me';
   const scopeName = (data?.name === '' ? undefined : data?.name) ?? (scope === 'system' ? t('storage.system') : data?.items.find((row) => row.host !== null)?.host?.name ?? data?.unavailable.find((row) => row.host !== null)?.host?.name ?? null);
   const filters = <>
+    <Input type="search" hideLabel label={t('ui.collection.find',{name:t('storage.records')})} placeholder={t('ui.collection.search')} value={finder.text} onChange={(event)=>finder.onText(event.target.value)}/>
     <ScopePicker scope={{kind:scopeKind}} name={scopeName} kinds={['org', 'project', 'host']} mineLabel={t('storage.mine')} placeholder={t('storage.scopeSearch')} nothing={t('storage.scopeEmpty')} onChange={(next) => onSearch({scope:next === 'me' ? undefined : next})} />
     {canAdminister && <Button size="sm" variant="ghost" onClick={() => onSearch({scope:scope === 'system' ? undefined : 'system'})}>{t(scope === 'system' ? 'storage.mine' : 'storage.system')}</Button>}
     <Select<StorageKind | typeof ALL> size="sm" label={t('storage.kind')} value={search.kind ?? ALL} onValueChange={(kind) => onSearch({kind:kind === ALL ? undefined : kind})} options={[{value:ALL,name:t('storage.allKinds')},...STORAGE_KINDS.map((kind) => ({value:kind,name:t(`storage.kinds.${kind}`)}))]} />
     <Select<KeptWhy | typeof ALL> size="sm" label={t('storage.why')} value={search.why ?? ALL} onValueChange={(why) => onSearch({why:why === ALL ? undefined : why})} options={[{value:ALL,name:t('storage.allReasons')},...STORAGE_WHYS.map((why) => ({value:why,name:t(`storage.whys.${why}`)}))]} />
     {(search.kind !== undefined || search.why !== undefined || search.age !== undefined || search.host !== undefined || search.place !== undefined || search.owner !== undefined || search.resource_id !== undefined) && <Button size="sm" variant="ghost" onClick={() => onSearch({kind:undefined,why:undefined,age:undefined,host:undefined,place:undefined,owner:undefined,resource_id:undefined,resource_kind:undefined})}>{t('storage.clearFilters')}</Button>}
     <IconButton size="sm" icon={<RefreshCw aria-hidden />} label={t('storage.refresh')} onClick={() => void query.refetch()} />
+    <DeviceChoiceFacts observation={deviceChoiceOf(onSearch)} current={<>{scopeName ?? t(scope === 'system' ? 'storage.system' : 'storage.mine')} · {search.kind === undefined ? t('storage.allKinds') : t(`storage.kinds.${search.kind}`)} · {search.why === undefined ? t('storage.allReasons') : t(`storage.whys.${search.why}`)} · {t(`storage.grouping.${by}`)}</>} />
   </>;
   const rows = query.data?.pages.flatMap((page) => page.items) ?? [];
   const columns: Column<KeptRecord>[] = [
-    ...(onCleanup === undefined ? [] : [{id:'selected',header:<Checkbox label={<span className="sr-only">{t('storage.selectAll')}</span>} checked={rows.length > 0 && rows.every((row) => selected.has(row.id))} onCheckedChange={(value) => setSelected(value ? new Set(rows.map((row) => row.id)) : new Set())} />,className:'w-9',cell:(row:KeptRecord) => <Checkbox label={<span className="sr-only">{t('storage.select', {name:row.name || t(`storage.kinds.${row.kind}`)})}</span>} checked={selected.has(row.id)} onCheckedChange={(value) => setSelected((before) => {const next=new Set(before);if(value)next.add(row.id);else next.delete(row.id);return next;})} />}]),
-    {id:'name',header:t('storage.name'),grow:true,cell:(row,shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={row} /><span className="text-sm text-text-muted">{t(`storage.kinds.${row.kind}`)}</span>{!shown.has(COLUMN.why) && <Reason row={row} />}{!shown.has(COLUMN.bytes) && <span className="text-sm text-text-muted">{row.bytes === null ? '—' : formatBytes(row.bytes,locale)}</span>}{!shown.has(COLUMN.owner) && row.owner !== null && <UserChip user={row.owner} />}{!shown.has(COLUMN.where) && <Where row={row} />}{!shown.has(COLUMN.dependents) && <Dependents row={row} />}{!shown.has(COLUMN.observed) && <RelativeTime at={row.observed_at} className="text-sm text-text-muted" />}</div>},
+    ...(onCleanup === undefined ? [] : [{id:'selected',header:<Checkbox label={<span className="sr-only">{t('storage.selectAll')}</span>} checked={rows.length > 0 && rows.every((row) => selected.has(row.id))} onCheckedChange={(value) => setSelected(value ? new Set(rows.map((row) => row.id)) : new Set())} />,className:'w-9',cell:(row:KeptRecord) => <Checkbox label={<span className="sr-only">{t('storage.select', {name:recordLabel(row,t)})}</span>} checked={selected.has(row.id)} onCheckedChange={(value) => setSelected((before) => {const next=new Set(before);if(value)next.add(row.id);else next.delete(row.id);return next;})} />}]),
+    {id:'name',header:t('storage.name'),grow:true,cell:(row,shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={row} />{recordLabel(row,t) !== t(`storage.kinds.${row.kind}`) && <span className="text-sm text-text-muted">{t(`storage.kinds.${row.kind}`)}</span>}{!shown.has(COLUMN.why) && <Reason row={row} />}{!shown.has(COLUMN.bytes) && <span className="text-sm text-text-muted">{row.bytes === null ? '—' : formatBytes(row.bytes,locale)}</span>}{!shown.has(COLUMN.owner) && row.owner !== null && <UserChip user={row.owner} />}{!shown.has(COLUMN.where) && <Where row={row} />}{!shown.has(COLUMN.dependents) && <Dependents row={row} />}{!shown.has(COLUMN.observed) && <RelativeTime at={row.observed_at} className="text-sm text-text-muted" />}</div>},
     {id:'open',header:t('adminArtifacts.open'),hideHeader:true,align:'end',cell:(row) => <StorageOpening row={row} />},
     {id:'why',header:t('storage.why'),from:'sm',cell:(row) => <Reason row={row} />},
     {id:'bytes',header:t('storage.size'),from:'sm',align:'end',cell:(row) => row.bytes === null ? <Tooltip content={t('storage.notMeasured')}><span>—</span></Tooltip> : <span className="tabular-nums">{formatBytes(row.bytes,locale)}</span>},
@@ -148,13 +167,13 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
       else if (dimension === 'why') onSearch({why:STORAGE_WHYS.find((why) => why === row.key)});
       else onSearch({age:row.key});
     };
-    return <Table label={t(`storage.dimensions.${dimension}`)} rows={rows} rowKey={(row) => row.key} columns={[
+    return <CompleteCollection label={t(`storage.dimensions.${dimension}`)} items={rows} textOf={(row)=>row.name}>{(page)=><Table virtual label={t(`storage.dimensions.${dimension}`)} rows={page} rowKey={(row) => row.key} columns={[
       {id:'member',header:t(`storage.dimensions.${dimension}`),grow:true,cell:(row) => row.owner !== null || row.object !== null
         ? <div className="flex min-w-0 items-center gap-1">{row.owner !== null ? <UserChip user={row.owner} /> : <DependentName row={{object:row.object,name:row.name}} />}<IconButton size="sm" icon={<Filter aria-hidden />} label={t('storage.filter')} onClick={() => filter(row)} /></div>
         : <Button size="sm" variant="ghost" onClick={() => filter(row)}>{dimension === 'kind' ? t(`storage.kinds.${row.key}`,{defaultValue:row.name}) : dimension === 'why' ? t(`storage.whys.${row.key}`,{defaultValue:row.name}) : dimension === 'age' ? t(`storage.ages.${row.key}`,{defaultValue:row.name}) : row.key === 'server' ? t('storage.server') : row.key === 'unknown' ? t('storage.unknown') : row.name}</Button>},
       {id:'items',header:t('storage.records'),align:'end',cell:(row) => formatNumber(row.totals.items,locale)},
       {id:'bytes',header:t('storage.size'),align:'end',cell:(row) => sizeOf(row.totals,locale)},
-    ]} />;
+    ]} />}</CompleteCollection>;
   };
   return <ReportFrame title={t('storage.title')} icon={<HardDrive aria-hidden />} filters={filters} actions={<ArticleGuideLink article="storage-cleanup" heading="storage-report" title={t('storage.guide')} />}>
     {scopeBlocked ? <StateLine title={t('storage.adminOnly')} action={<AdminModeEnableAction />} /> : null}
@@ -163,7 +182,7 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
       <ul aria-label={t('storage.figures')} className="grid grid-cols-1 gap-3 sm:grid-cols-3 xl:grid-cols-5"><ReportFigure label={t('storage.totalKept')} value={sizeOf(data.totals,locale,data.unavailable.length > 0)} />{STORAGE_WHYS.map((why) => <ReportFigure key={why} label={t(`storage.whys.${why}`)} value={sizeOf(data.breakdowns.find((table)=>table.by==='why')?.rows.find((row)=>row.key===why)?.totals ?? {items:0,bytes:0,unknown:0},locale,data.unavailable.length > 0)} />)}</ul>
       <ReportBreakdowns label={t('storage.breakdowns')} value={by} onValueChange={(by) => onSearch({by})} tabs={STORAGE_DIMENSIONS.map((dimension) => ({value:dimension,label:t(`storage.grouping.${dimension}`),panel:table(dimension)}))} />
       <ReportRecords id="storage-records" title={t('storage.records')} about={<span className="text-sm text-text-muted">{t('storage.recordSummary',{records:formatNumber(data.totals.items,locale),unmeasured:formatNumber(data.totals.unknown,locale)})}</span>} actions={onCleanup === undefined ? undefined : <Button size="sm" disabled={selected.size === 0} onClick={() => onCleanup([...selected])}>{t('storage.clean')}</Button>}>
-        {rows.length === 0 ? <EmptyState compact icon={<HardDrive aria-hidden />} title={t('storage.empty')} /> : <Table boundedIdentity label={t('storage.records')} columns={columns} rows={rows} rowKey={(row) => row.id} />}
+        {rows.length === 0 ? <EmptyState compact icon={<HardDrive aria-hidden />} title={t('storage.empty')} /> : <Table virtual boundedIdentity label={t('storage.records')} columns={columns} rows={rows} rowKey={(row) => row.id} />}
         <Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.isFetchNextPageError ? query.error : undefined} onMore={() => void query.fetchNextPage()} />
       </ReportRecords>
     </>}

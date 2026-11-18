@@ -342,17 +342,26 @@ async fn require_where_it_runs(
 
 // ---------------------------------------------------------------- the snapshots of a thread
 
-/// A cursor over a thread's snapshots: where the last of the page before was.
-fn cursor_of(row: &SnapshotRow) -> String {
-    format!("{}.{}", row.created_at.timestamp_micros(), row.id)
+fn snapshot_list_source(ctx: &Ctx) -> ApiResult<String> {
+    Ok(format!(
+        "snapshots:{}:{}:{}",
+        ctx.route.name,
+        ctx.user()?.id(),
+        ctx.id("id")?
+    ))
 }
-
-fn after_of(cursor: &str) -> ApiResult<(chrono::DateTime<chrono::Utc>, Id)> {
-    let bad = || ApiError::invalid("cursor", "this is not a place in the list");
-    let (micros, id) = cursor.split_once('.').ok_or_else(bad)?;
-    let at = chrono::DateTime::from_timestamp_micros(micros.parse().map_err(|_| bad())?)
-        .ok_or_else(bad)?;
-    Ok((at, id.parse().map_err(|_| bad())?))
+fn cursor_of(
+    ctx: &Ctx,
+    query: &orch_api_contract::common::CollectionQuery,
+    row: &SnapshotRow,
+) -> ApiResult<String> {
+    crate::collection::cursor(query, &snapshot_list_source(ctx)?, (row.created_at, row.id))
+}
+fn after_of(
+    ctx: &Ctx,
+    query: &orch_api_contract::common::CollectionQuery,
+) -> ApiResult<Option<(chrono::DateTime<chrono::Utc>, Id)>> {
+    crate::collection::after(query, &snapshot_list_source(ctx)?)
 }
 
 /// A label for a snapshot that was not given one.
@@ -688,6 +697,7 @@ async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirL
     let truncated = listing::cut(&mut entries);
     read.check().await?;
     Ok(DirListing {
+        facts: None,
         path,
         mount: None,
         source: orch_api_contract::forks::FilesSource::Cached,

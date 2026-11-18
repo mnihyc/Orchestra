@@ -20,6 +20,7 @@ use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::common::{CollectionQuery, Page};
 use crate::nodes::NodeRef;
 use crate::routes::Access::{Cookie, Permission, Public, Session, User};
 use crate::users::{Density, Locale, Me, Theme};
@@ -158,6 +159,17 @@ pub enum OrgCreation {
     Invited,
 }
 
+/// Installation defaults for a person's reading experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InterfaceDefaults {
+    /// Extra recently closed views to retain; open views always retain their state.
+    pub kept_closed_tabs: i64,
+    /// Milliseconds before a read shows a loading indication.
+    pub progress_delay_ms: i64,
+    /// Freshness in milliseconds for directory, lookup, report and status reads.
+    pub read_freshness_ms: std::collections::BTreeMap<String, i64>,
+}
+
 /// What a client may know before anybody has signed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Meta {
@@ -202,6 +214,8 @@ pub struct Meta {
     pub link_endpoints: Vec<MetaLinkEndpoint>,
     /// The sizes the system accepts.
     pub limits: MetaLimits,
+    /// Installation defaults for choices each person may override in Interface.
+    pub interface_defaults: InterfaceDefaults,
 }
 
 /// What a sign-in, a registration or a refresh answers with.
@@ -1177,7 +1191,7 @@ crate::endpoints! {
         operation Op::browser_elevation();
     /// Lists the sessions of the signed-in person.
     /// Reading the account collection requires its Read scope; each returned credential also needs this operation's own Read scope. Account self alone does not reveal its credentials.
-    MeSessionList: GET "/me/sessions", User, none, none, json Vec<SessionInfo>, 200,
+    MeSessionList: GET "/me/sessions", User, query CollectionQuery, none, json Page<SessionInfo>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Session)], Target::CurrentAccount),
             Facet::response_content(&[Identity(I::Session)], Target::ResolvedCollection("listed_sessions")),
@@ -1193,7 +1207,7 @@ crate::endpoints! {
         operation Op::legacy_tokens(&[], &Op::single(Manage, &[Identity(I::Session)], Target::Path("id")));
     /// Lists the API tokens of the signed-in person.
     /// Reading the account collection requires its Read scope; each returned credential also needs this operation's own Read scope. Account self alone does not reveal its credentials.
-    MeTokenList: GET "/me/tokens", User, none, none, json Vec<ApiTokenInfo>, 200,
+    MeTokenList: GET "/me/tokens", User, query CollectionQuery, none, json Page<ApiTokenInfo>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Key)], Target::CurrentAccount),
             Facet::response_content(&[Identity(I::Key)], Target::ResolvedCollection("listed_keys")),
