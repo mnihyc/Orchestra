@@ -142,6 +142,17 @@ pub const REVOKE: Declaration<Source> = Declaration {
     bindings: UPDATE.bindings,
 };
 
+/// Directory names retain their exact Read operation and ordinary machine registration authority.
+pub const DIRECTORIES: Declaration<Source> = Declaration {
+    operation: "MachineDirectoryList",
+    bindings: &[Binding {
+        source: Source::Governor,
+        target: SUBJECT,
+        usage: FacetUsage::Required,
+        cardinality: Cardinality::One,
+    }],
+};
+
 /// A native facts probe has one actual physical subject, independent of optional readback.
 pub const PROBE: Declaration<Source> = Declaration {
     operation: "MachineProbe",

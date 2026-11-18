@@ -5,7 +5,10 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
-use orch_link_contract::commands::{FsMaterialize, FsMaterializeResult};
+use orch_link_contract::commands::{
+    DirectoryCopyOutcome, FsDirectoryCopyResult, FsMaterialize, FsMaterializeIfAbsent,
+    FsMaterializeResult,
+};
 use orch_types::Hash;
 use serde::{Deserialize, Serialize};
 
@@ -34,10 +37,53 @@ struct Journal {
     parent_device: u64,
     parent_inode: u64,
     ignore_fingerprint: Hash,
-    stage: String,
-    stage_device: u64,
-    stage_inode: u64,
-    result: Option<FsMaterializeResult>,
+    stage: Option<Stage>,
+    result: Option<FsDirectoryCopyResult>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stage {
+    name: String,
+    device: u64,
+    inode: u64,
+}
+
+fn conditional_request(request: &FsMaterializeIfAbsent) -> FsMaterialize {
+    FsMaterialize {
+        work: request.work.clone(),
+        environment_id: request.environment_id,
+        job_id: Some(request.job_id),
+        manifest_blob: request.manifest_blob,
+        target_root: request.target_root.clone(),
+        purpose: orch_link_contract::commands::MaterializePurpose::Exact,
+    }
+}
+
+fn journal_path(
+    states: &FileStates,
+    request: &FsMaterialize,
+    conditional: bool,
+) -> Result<std::path::PathBuf> {
+    let job = request
+        .job_id
+        .ok_or_else(|| HostError::Unsupported("exact saved files require a durable job".into()))?;
+    Ok(if conditional {
+        states
+            .store()
+            .root()
+            .join("conditional-materialize-jobs")
+            .join(format!(
+                "{job}-{}.json",
+                Hash::of(request.target_root.as_bytes())
+            ))
+    } else {
+        states
+            .store()
+            .root()
+            .join("materialize-jobs")
+            .join(format!("{job}.json"))
+    })
 }
 
 fn save(path: &Path, journal: &Journal) -> Result<()> {
@@ -53,14 +99,24 @@ pub(crate) fn completed(
     request: &FsMaterialize,
     generation: i64,
 ) -> Result<Option<FsMaterializeResult>> {
-    let Some(job) = request.job_id else {
-        return Ok(None);
-    };
-    let path = states
-        .store()
-        .root()
-        .join("materialize-jobs")
-        .join(format!("{job}.json"));
+    Ok(completed_inner(states, request, generation, false)?.map(|result| result.counts))
+}
+
+pub(crate) fn completed_if_absent(
+    states: &FileStates,
+    request: &FsMaterializeIfAbsent,
+    generation: i64,
+) -> Result<Option<FsDirectoryCopyResult>> {
+    completed_inner(states, &conditional_request(request), generation, true)
+}
+
+fn completed_inner(
+    states: &FileStates,
+    request: &FsMaterialize,
+    generation: i64,
+    conditional: bool,
+) -> Result<Option<FsDirectoryCopyResult>> {
+    let path = journal_path(states, request, conditional)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -151,7 +207,7 @@ pub(crate) fn inventory(
     Ok(count)
 }
 
-/// Every object is verified before workspace effects, and a final directory race is refused by rename.
+/// The ordinary exact publisher keeps its existing count-only result.
 pub async fn apply(
     files: &Files,
     states: &FileStates,
@@ -160,8 +216,121 @@ pub async fn apply(
     source: &dyn BlobSource,
     generation: i64,
 ) -> Result<FsMaterializeResult> {
-    files.gates().require_remote_write()?;
+    Ok(apply_inner(
+        files,
+        states,
+        request,
+        parsed,
+        source,
+        generation,
+        false,
+        &orch_types::SystemClock,
+    )
+    .await?
+    .counts)
+}
+
+/// The same verified staging and publication, with a durable positive keep decision.
+pub async fn apply_if_absent(
+    files: &Files,
+    states: &FileStates,
+    request: &FsMaterializeIfAbsent,
+    parsed: &Parsed,
+    source: &dyn BlobSource,
+    generation: i64,
+    clock: &dyn orch_types::Clock,
+) -> Result<FsDirectoryCopyResult> {
+    apply_inner(
+        files,
+        states,
+        &conditional_request(request),
+        parsed,
+        source,
+        generation,
+        true,
+        clock,
+    )
+    .await
+}
+
+fn keep_directory(
+    parent: &Dir,
+    journal_path: &Path,
+    journal: &mut Journal,
+    wanted: &BTreeMap<String, ManifestEntry>,
+    clock: &dyn orch_types::Clock,
+) -> Result<FsDirectoryCopyResult> {
+    let at = clock.time();
+    let cleanup_pending =
+        journal
+            .stage
+            .as_ref()
+            .is_some_and(|stage| match parent.lstat(OsStr::new(&stage.name)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Ok(meta)
+                    if meta.is_dir() && (meta.dev, meta.ino) == (stage.device, stage.inode) =>
+                {
+                    let safe = parent
+                        .open_child(OsStr::new(&stage.name))
+                        .ok()
+                        .is_some_and(|held| inventory(&held, "", wanted, false).is_ok());
+                    !safe
+                        || crate::files::remove_tree(parent, OsStr::new(&stage.name), 0)
+                            .and_then(|()| {
+                                parent.sync().map_err(|error| {
+                                    HostError::io("syncing conditional copy cleanup", error)
+                                })
+                            })
+                            .is_err()
+                }
+                _ => true,
+            });
+    let result = FsDirectoryCopyResult {
+        outcome: DirectoryCopyOutcome::TargetKept,
+        counts: FsMaterializeResult {
+            files: 0,
+            bytes: 0,
+            skipped: 0,
+        },
+        at,
+        cleanup_pending,
+    };
+    journal.result = Some(result.clone());
+    save(journal_path, journal)?;
+    Ok(result)
+}
+
+fn target_exists(parent: &Dir, name: &str) -> Result<bool> {
+    match parent.lstat(OsStr::new(name)) {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(HostError::Changed(
+            "the destination is not a directory; its object is kept".into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(HostError::io("checking the conditional directory", error)),
+    }
+}
+
+/// Every object is verified before publication; the target is never merged or replaced.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one exact publisher receives the conditional outcome rule and its native clock"
+)]
+async fn apply_inner(
+    files: &Files,
+    states: &FileStates,
+    request: &FsMaterialize,
+    parsed: &Parsed,
+    source: &dyn BlobSource,
+    generation: i64,
+    conditional: bool,
+    clock: &dyn orch_types::Clock,
+) -> Result<FsDirectoryCopyResult> {
+    if !conditional {
+        files.gates().require_remote_write()?;
+    }
     let _held = states.action_gate().await;
+    crate::error::check_cancelled()?;
     let job = request
         .job_id
         .ok_or_else(|| HostError::Unsupported("exact saved files require a durable job".into()))?;
@@ -172,7 +341,22 @@ pub async fn apply(
         ));
     }
     let parent_path = directory.parent().unwrap_or_else(RelPath::root);
-    let located = files.root().locate(&parent_path, Locate::THROUGH)?;
+    let located = match files.root().locate(&parent_path, Locate::THROUGH) {
+        Ok(located) => located,
+        Err(HostError::NotFound(_)) if conditional => {
+            files.gates().require_remote_write()?;
+            files.make_dir(&parent_path)?;
+            files.root().locate(&parent_path, Locate::THROUGH)?
+        }
+        Err(error) => return Err(error),
+    };
+    let located = if conditional && located.meta.is_none() && !parent_path.is_root() {
+        files.gates().require_remote_write()?;
+        files.make_dir(&parent_path)?;
+        files.root().locate(&parent_path, Locate::THROUGH)?
+    } else {
+        located
+    };
     files.check_visible(&parent_path, &located, true)?;
     if located.real != parent_path {
         return Err(HostError::Changed(
@@ -189,12 +373,21 @@ pub async fn apply(
     let request_hash = Hash::of(
         &serde_json::to_vec(request).map_err(|error| HostError::Internal(error.to_string()))?,
     );
-    let rules = crate::file_states::GitRules::read(files, &[], &directory)?;
-    let journal_path = states
-        .store()
-        .root()
-        .join("materialize-jobs")
-        .join(format!("{job}.json"));
+    // Notes deliberately stay out of Git; native path visibility and write gates still govern them.
+    let notes = conditional
+        && directory.file_name() == Some(crate::directories::MEMORY_DIR)
+        && directory
+            .parent()
+            .is_some_and(|parent| parent.file_name() == Some(crate::paths::ORCH_DIR));
+    let rules = if notes {
+        None
+    } else {
+        Some(crate::file_states::GitRules::read(files, &[], &directory)?)
+    };
+    let fingerprint = rules
+        .as_ref()
+        .map_or_else(|| Hash::of(b"agent notes"), |rules| rules.fingerprint);
+    let journal_path = journal_path(states, request, conditional)?;
     let mut wanted = BTreeMap::new();
     let mut named = std::collections::BTreeSet::new();
     for entry in &parsed.entries {
@@ -220,7 +413,10 @@ pub async fn apply(
             meta: None,
         };
         files.check_visible(&final_path, &visible, entry.t == EntryKind::Dir)?;
-        if rules.ignored(&final_path, entry.t == EntryKind::Dir) {
+        if rules
+            .as_ref()
+            .is_some_and(|rules| rules.ignored(&final_path, entry.t == EntryKind::Dir))
+        {
             return Err(HostError::Ignored(
                 "current rules hide part of the exact saved coverage".into(),
             ));
@@ -252,18 +448,31 @@ pub async fn apply(
             .map_err(|_| HostError::Unsupported("the exact-file journal is unavailable".into()))?;
         if journal.request != request_hash
             || journal.generation != generation
-            || journal.ignore_fingerprint != rules.fingerprint
+            || journal.ignore_fingerprint != fingerprint
             || (journal.parent_device, journal.parent_inode) != (parent_meta.dev, parent_meta.ino)
         {
             return Err(HostError::Changed(
                 "the exact-file plan, generation or parent changed".into(),
             ));
         }
-        if let Some(result) = journal.result {
-            return Ok(result);
+        if let Some(result) = &journal.result {
+            return Ok(result.clone());
         }
         journal
     } else {
+        if conditional && target_exists(&parent, name)? {
+            let mut kept = Journal {
+                request: request_hash,
+                generation,
+                parent_device: parent_meta.dev,
+                parent_inode: parent_meta.ino,
+                ignore_fingerprint: fingerprint,
+                stage: None,
+                result: None,
+            };
+            return keep_directory(&parent, &journal_path, &mut kept, &wanted, clock);
+        }
+        files.gates().require_remote_write()?;
         match parent.lstat(OsStr::new(name)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) => {
@@ -278,7 +487,14 @@ pub async fn apply(
                 ));
             }
         }
-        let stage = format!(".orch-tmp-exact-{job}");
+        let stage = if conditional {
+            format!(
+                ".orch-tmp-exact-{job}-{}",
+                Hash::of(request.target_root.as_bytes())
+            )
+        } else {
+            format!(".orch-tmp-exact-{job}")
+        };
         parent
             .mkdir(OsStr::new(&stage), STAGE_MODE)
             .map_err(|error| HostError::io("making the exact-file stage", error))?;
@@ -290,28 +506,39 @@ pub async fn apply(
             generation,
             parent_device: parent_meta.dev,
             parent_inode: parent_meta.ino,
-            ignore_fingerprint: rules.fingerprint,
-            stage,
-            stage_device: meta.dev,
-            stage_inode: meta.ino,
+            ignore_fingerprint: fingerprint,
+            stage: Some(Stage {
+                name: stage,
+                device: meta.dev,
+                inode: meta.ino,
+            }),
             result: None,
         };
         save(&journal_path, &journal)?;
         journal
     };
-    let staged = parent.lstat(OsStr::new(&journal.stage));
+    let own_publication = journal.stage.as_ref().is_some_and(|stage| {
+        parent
+            .lstat(OsStr::new(name))
+            .is_ok_and(|meta| meta.is_dir() && (meta.dev, meta.ino) == (stage.device, stage.inode))
+    });
+    if conditional && target_exists(&parent, name)? && !own_publication {
+        return keep_directory(&parent, &journal_path, &mut journal, &wanted, clock);
+    }
+    if !conditional || !own_publication {
+        files.gates().require_remote_write()?;
+    }
+    let stage = journal
+        .stage
+        .clone()
+        .ok_or_else(|| HostError::Changed("the owned exact-file stage is unavailable".into()))?;
+    let staged = parent.lstat(OsStr::new(&stage.name));
     let already_published = match staged {
-        Ok(meta)
-            if (meta.dev, meta.ino) == (journal.stage_device, journal.stage_inode)
-                && meta.is_dir() =>
-        {
-            false
-        }
+        Ok(meta) if (meta.dev, meta.ino) == (stage.device, stage.inode) && meta.is_dir() => false,
         Err(error)
             if error.kind() == std::io::ErrorKind::NotFound
                 && parent.lstat(OsStr::new(name)).is_ok_and(|meta| {
-                    (meta.dev, meta.ino) == (journal.stage_device, journal.stage_inode)
-                        && meta.is_dir()
+                    (meta.dev, meta.ino) == (stage.device, stage.inode) && meta.is_dir()
                 }) =>
         {
             true
@@ -326,7 +553,7 @@ pub async fn apply(
         .open_child(OsStr::new(if already_published {
             name
         } else {
-            &journal.stage
+            &stage.name
         }))
         .map_err(|error| HostError::io("opening the exact-file stage", error))?;
     inventory(&current, "", &wanted, already_published)?;
@@ -354,9 +581,13 @@ pub async fn apply(
             }
             verified.insert(entry.p.clone(), temporary);
         }
+        if conditional && target_exists(&parent, name)? {
+            return keep_directory(&parent, &journal_path, &mut journal, &wanted, clock);
+        }
         inventory(&current, "", &wanted, false)?;
-        if crate::file_states::GitRules::read(files, &[], &directory)?.fingerprint
-            != journal.ignore_fingerprint
+        if rules.is_some()
+            && crate::file_states::GitRules::read(files, &[], &directory)?.fingerprint
+                != journal.ignore_fingerprint
         {
             return Err(HostError::Changed(
                 "ignore coverage changed while exact bytes were received".into(),
@@ -433,8 +664,9 @@ pub async fn apply(
         }
         inventory(&current, "", &wanted, true)?;
         files.gates().require_remote_write()?;
-        if crate::file_states::GitRules::read(files, &[], &directory)?.fingerprint
-            != journal.ignore_fingerprint
+        if rules.is_some()
+            && crate::file_states::GitRules::read(files, &[], &directory)?.fingerprint
+                != journal.ignore_fingerprint
         {
             return Err(HostError::Changed(
                 "ignore coverage changed before exact-file publication".into(),
@@ -453,14 +685,18 @@ pub async fn apply(
                 "the exact-file parent was recreated".into(),
             ));
         }
-        parent
-            .rename_to(OsStr::new(&journal.stage), &parent, OsStr::new(name), false)
-            .map_err(|error| {
-                HostError::io(
-                    "publishing exact files only into the still-unused directory",
-                    error,
-                )
-            })?;
+        crate::error::check_cancelled()?;
+        if let Err(error) =
+            parent.rename_to(OsStr::new(&stage.name), &parent, OsStr::new(name), false)
+        {
+            if conditional && target_exists(&parent, name)? {
+                return keep_directory(&parent, &journal_path, &mut journal, &wanted, clock);
+            }
+            return Err(HostError::io(
+                "publishing exact files only into the still-unused directory",
+                error,
+            ));
+        }
         parent
             .sync()
             .map_err(|error| HostError::io("syncing the published exact directory", error))?;
@@ -482,7 +718,13 @@ pub async fn apply(
         bytes,
         skipped: 0,
     };
-    journal.result = Some(result);
+    let result = FsDirectoryCopyResult {
+        outcome: DirectoryCopyOutcome::Copied,
+        counts: result,
+        at: clock.time(),
+        cleanup_pending: false,
+    };
+    journal.result = Some(result.clone());
     save(&journal_path, &journal)?;
     states.invalidate("not_ready");
     Ok(result)
@@ -570,6 +812,7 @@ mod tests {
         };
         let manifest = crate::manifest::build(&parsed.header, parsed.entries.clone()).unwrap();
         let request = FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: orch_types::new_id(),
             job_id: Some(orch_types::new_id()),
@@ -578,6 +821,270 @@ mod tests {
             purpose: MaterializePurpose::Exact,
         };
         (temp, files, states, blobs, parsed, request)
+    }
+
+    fn conditional(request: &FsMaterialize) -> orch_link_contract::commands::FsMaterializeIfAbsent {
+        orch_link_contract::commands::FsMaterializeIfAbsent {
+            work: None,
+            environment_id: request.environment_id,
+            job_id: request.job_id.unwrap(),
+            manifest_blob: request.manifest_blob,
+            target_root: request.target_root.clone(),
+        }
+    }
+    struct NeverRead;
+    #[async_trait::async_trait]
+    impl BlobSource for NeverRead {
+        async fn get(
+            &self,
+            _: Hash,
+            _: &mut dyn BlobWriter,
+        ) -> std::result::Result<i64, BlobError> {
+            panic!("a retained conditional outcome must not read or replace source bytes")
+        }
+    }
+
+    #[tokio::test]
+    async fn an_existing_note_directory_is_kept_without_write_authority_and_the_first_outcome_survives_replay()
+     {
+        let (_temp, files, states, _blobs, parsed, request) = fixture(&[]);
+        let target = files.root().root_path().join("exact");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("mine"), b"existing notes").unwrap();
+        files.gates().set(Gates {
+            remote_write: false,
+            ..Gates::OPEN
+        });
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        let request = conditional(&request);
+        let kept = apply_if_absent(&files, &states, &request, &parsed, &NeverRead, 2, &clock)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&kept).unwrap()["outcome"],
+            "target_kept"
+        );
+        assert!(!kept.cleanup_pending);
+        assert_eq!(
+            std::fs::read(target.join("mine")).unwrap(),
+            b"existing notes"
+        );
+        assert!(!target.join("binary").exists());
+        std::fs::remove_dir_all(&target).unwrap();
+        clock.advance(chrono::Duration::hours(1));
+        assert_eq!(
+            apply_if_absent(&files, &states, &request, &parsed, &NeverRead, 2, &clock)
+                .await
+                .unwrap(),
+            kept
+        );
+        assert!(
+            !target.exists(),
+            "replay does not invent a later copy after the recorded keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_directory_created_during_the_native_copy_wins_and_the_unchanged_private_stage_is_cleaned()
+     {
+        let (_temp, files, states, blobs, parsed, request) = fixture(&[]);
+        let target = files.root().root_path().join("exact");
+        let racing = Racing {
+            blobs,
+            target: target.clone(),
+        };
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        let result = apply_if_absent(
+            &files,
+            &states,
+            &conditional(&request),
+            &parsed,
+            &racing,
+            2,
+            &clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["outcome"],
+            "target_kept"
+        );
+        assert_eq!(
+            std::fs::read(target.join("later")).unwrap(),
+            b"another writer"
+        );
+        assert!(!target.join("binary").exists());
+        assert!(!result.cleanup_pending);
+        assert!(
+            std::fs::read_dir(files.root().root_path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".orch-tmp-exact-"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copied_note_directory_replays_its_first_receipt_without_overwriting_later_notes() {
+        let (_temp, files, states, blobs, parsed, request) = fixture(&[]);
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        let request = conditional(&request);
+        let copied = apply_if_absent(&files, &states, &request, &parsed, &blobs, 2, &clock)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(&copied).unwrap()["outcome"], "copied");
+        assert_eq!(copied.counts.files, 1);
+        let path = files.root().root_path().join("exact/binary");
+        std::fs::write(&path, b"later notes").unwrap();
+        clock.advance(chrono::Duration::hours(1));
+        assert_eq!(
+            apply_if_absent(&files, &states, &request, &parsed, &NeverRead, 2, &clock)
+                .await
+                .unwrap(),
+            copied
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"later notes");
+    }
+
+    #[tokio::test]
+    async fn a_conditional_publication_with_a_lost_answer_recovers_as_copied_instead_of_claiming_an_existing_target()
+     {
+        let (_temp, files, states, blobs, parsed, original) = fixture(&[]);
+        let request = conditional(&original);
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        apply_if_absent(&files, &states, &request, &parsed, &blobs, 2, &clock)
+            .await
+            .unwrap();
+        let path = journal_path(&states, &conditional_request(&request), true).unwrap();
+        let mut journal: Journal = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal.result = None;
+        save(&path, &journal).unwrap();
+        let recovered = apply_if_absent(&files, &states, &request, &parsed, &NeverRead, 2, &clock)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(recovered).unwrap()["outcome"],
+            "copied"
+        );
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("exact/binary")).unwrap(),
+            [0, 255, 17]
+        );
+    }
+
+    struct ChangedPrivateStage {
+        racing: Racing,
+        parent: std::path::PathBuf,
+    }
+    #[async_trait::async_trait]
+    impl BlobSource for ChangedPrivateStage {
+        async fn get(
+            &self,
+            hash: Hash,
+            writer: &mut dyn BlobWriter,
+        ) -> std::result::Result<i64, BlobError> {
+            let stage = std::fs::read_dir(&self.parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".orch-tmp-exact-")
+                })
+                .unwrap();
+            std::fs::write(stage.join("authored"), b"later work").unwrap();
+            self.racing.get(hash, writer).await
+        }
+    }
+    #[tokio::test]
+    async fn a_racing_target_and_changed_private_stage_preserve_both_and_report_unfinished_cleanup()
+    {
+        let (_temp, files, states, blobs, parsed, request) = fixture(&[]);
+        let parent = files.root().root_path().to_path_buf();
+        let source = ChangedPrivateStage {
+            racing: Racing {
+                blobs,
+                target: parent.join("exact"),
+            },
+            parent: parent.clone(),
+        };
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        let kept = apply_if_absent(
+            &files,
+            &states,
+            &conditional(&request),
+            &parsed,
+            &source,
+            2,
+            &clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&kept).unwrap()["outcome"],
+            "target_kept"
+        );
+        assert!(kept.cleanup_pending);
+        let stage = std::fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".orch-tmp-exact-")
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read(stage.join("authored")).unwrap(),
+            b"later work"
+        );
+        assert_eq!(
+            std::fs::read(parent.join("exact/later")).unwrap(),
+            b"another writer"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_workspace_copy_keeps_its_git_exclusions_without_creating_the_target() {
+        let (_temp, files, states, _blobs, parsed, original) = fixture(&[]);
+        std::fs::write(files.root().root_path().join(".gitignore"), "denied/\n").unwrap();
+        let mut request = conditional(&original);
+        request.target_root = "denied".into();
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        let result =
+            apply_if_absent(&files, &states, &request, &parsed, &NeverRead, 2, &clock).await;
+        assert!(matches!(result, Err(HostError::Ignored(_))));
+        assert!(!files.root().root_path().join("denied").exists());
+    }
+
+    #[tokio::test]
+    async fn notes_only_copy_creates_missing_parents_only_when_native_writes_are_allowed() {
+        let (_temp, files, states, blobs, parsed, original) = fixture(&[]);
+        let mut request = conditional(&original);
+        request.target_root = "fresh/.orch/memory".into();
+        let clock = orch_types::ManualClock::new("2026-11-15T10:00:00Z".parse().unwrap());
+        files.gates().set(Gates {
+            remote_write: false,
+            ..Gates::OPEN
+        });
+        assert!(matches!(
+            apply_if_absent(&files, &states, &request, &parsed, &blobs, 2, &clock).await,
+            Err(HostError::RemoteWriteDisabled)
+        ));
+        assert!(!files.root().root_path().join("fresh").exists());
+        files.gates().set(Gates::OPEN);
+        let made = apply_if_absent(&files, &states, &request, &parsed, &blobs, 2, &clock)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(made).unwrap()["outcome"], "copied");
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("fresh/.orch/memory/binary")).unwrap(),
+            [0, 255, 17]
+        );
     }
 
     #[tokio::test]
