@@ -177,6 +177,7 @@ pub(crate) struct PreparedNames {
     pub admin_places: HashMap<(String, Id), orch_access_contract::roles::AdminReach>,
     pub participation: HashSet<(String, Id)>,
     pub partial: bool,
+    pub next_cursor: Option<String>,
     pub bounds: NameBounds,
     pub addresses: BTreeSet<Id>,
     pub grouping: crate::routes::resources::grouping::Prepared,
@@ -273,14 +274,17 @@ async fn select_names_in(
     overview: Option<(&Principal, &crate::routes::nodes::overview::Reading<'_>)>,
 ) -> ApiResult<(PreparedNames, Vec<native::Facts<Source>>)> {
     let limit = query.limit.unwrap_or(NAME_SEARCH_LIMIT_DEFAULT);
-    if limit == 0 || limit > NAME_SEARCH_LIMIT_MAX {
-        return Err(invalid("limit", "is outside the names page limits"));
+    if limit == 0 {
+        return Err(invalid("limit", "must be greater than zero"));
     }
     let batch = i64::from(limit.max(NAME_SEARCH_LIMIT_DEFAULT)) * NAME_BATCH_PAGES;
     let limit = usize::try_from(limit).map_err(ApiError::internal)?;
     let kinds = kinds(query.kinds.as_deref(), NAME_KINDS)?;
     let text = query.q.as_deref().unwrap_or_default().trim();
-    if !text.is_empty() && text.chars().count() < NAME_QUERY_MIN_CHARS {
+    if !query.picker.unwrap_or(false)
+        && !text.is_empty()
+        && text.chars().count() < NAME_QUERY_MIN_CHARS
+    {
         return Err(invalid(
             "q",
             "type at least two characters, or leave it empty for recent visits",
@@ -321,18 +325,72 @@ async fn select_names_in(
         held.as_deref().map(|sets| &sets.held),
     )
     .await?;
-    let mut offset = 0;
+    let recent = if query.picker.unwrap_or(false) && text.is_empty() {
+        let mut recent = orch_api_base::picker_recents::read(conn, principal.user()).await?;
+        recent.choices.retain(|kind, _| kinds.contains(kind));
+        Some(recent)
+    } else {
+        None
+    };
+    let picker_count = if query.picker.unwrap_or(false) {
+        Some(
+            recent
+                .as_ref()
+                .map(|recent| i64::try_from(recent.count).map_err(ApiError::internal))
+                .transpose()?
+                .unwrap_or(0),
+        )
+    } else {
+        None
+    };
+    let recent_revision = if let Some(recent) = &recent {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(
+            serde_json::to_vec(&recent.choices).map_err(ApiError::internal)?,
+        ))
+    } else {
+        String::new()
+    };
+    let source = format!(
+        "names:{}:{:?}:{:?}:{}:{}:{:?}:{recent_revision}",
+        principal.user(),
+        query.id,
+        query.org_id,
+        kinds.join(","),
+        query.starred.unwrap_or(false),
+        (query.participating.unwrap_or(false), picker_count)
+    );
+    let page_query = orch_api_contract::common::CollectionQuery {
+        q: query.q.clone(),
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+    };
+    let mut offset = orch_api_base::collection::after::<i64>(&page_query, &source)?.unwrap_or(0);
+    if offset < 0 {
+        return Err(invalid("cursor", "has a negative position"));
+    }
+    let mut batches_left = orch_settings::get::<u64>(
+        conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::SEARCH_NAME_CANDIDATE_BATCHES,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::internal("the names work setting has no value"))?;
+    let mut yielded_offset = None;
+    let mut continuation_offset = None;
     let mut selected = Vec::new();
     let mut selected_targets = std::collections::HashMap::new();
     let mut admin_places = std::collections::HashMap::new();
     let mut participation = std::collections::HashSet::new();
-    let mut partial = false;
-    for _ in 0..NAME_BATCHES_MAX {
+    let identifiers = query.id.map(|id| [id]);
+    loop {
         let candidates = rows::names(
             conn,
             &Names {
-                identifiers: None,
+                identifiers: identifiers.as_ref().map(|ids| &ids[..]),
                 starred: query.starred.unwrap_or(false),
+                picker_count,
                 at: ctx.now,
                 user: principal.user(),
                 trees: principal.member_of(),
@@ -359,8 +417,9 @@ async fn select_names_in(
             None => None,
         };
         let mut admitted = Vec::new();
+        let mut positions = Vec::new();
         let mut targets_for_batch = Vec::new();
-        for row in candidates {
+        for (position, row) in candidates.into_iter().enumerate() {
             let (family, target) = match name_target(conn, &row).await {
                 Err(error)
                     if error.problem.code == orch_api_contract::common::ErrorCode::NotFound =>
@@ -387,16 +446,21 @@ async fn select_names_in(
             if allowed {
                 selected_targets.insert((row.kind.clone(), row.id), (family, target.clone()));
                 targets_for_batch.push((family, target));
+                positions.push(position);
                 admitted.push(row);
             }
         }
         let candidates = admitted;
         if candidates.is_empty() {
-            partial = count == batch;
             if count < batch {
                 break;
             }
             offset += count;
+            batches_left = batches_left.saturating_sub(1);
+            if batches_left == 0 {
+                yielded_offset = Some(continuation_offset.unwrap_or(offset));
+                break;
+            }
             continue;
         }
         let principal = match overview {
@@ -443,18 +507,41 @@ async fn select_names_in(
                 .map(|(key, place)| (key.clone(), *place)),
         );
         participation.extend(visible.participating.iter().cloned());
-        selected.extend(candidates.into_iter().filter(|row| {
-            visible.contains(&(row.kind.clone(), row.id))
+        for (row, position) in candidates.into_iter().zip(positions) {
+            if visible.contains(&(row.kind.clone(), row.id))
                 && (row.kind != "chat" || searchable_chats.contains(&row.id))
                 && (!query.participating.unwrap_or(false)
                     || visible.participating.contains(&(row.kind.clone(), row.id)))
-        }));
-        partial = count == batch || selected.len() > limit;
-        if selected.len() >= limit || count < batch {
+            {
+                selected.push(row);
+                if selected.len() == limit {
+                    continuation_offset =
+                        Some(offset + i64::try_from(position).map_err(ApiError::internal)? + 1);
+                }
+                if selected.len() > limit {
+                    break;
+                }
+            }
+        }
+        if selected.len() > limit || count < batch {
+            break;
+        }
+        batches_left = batches_left.saturating_sub(1);
+        if batches_left == 0 {
+            yielded_offset = Some(continuation_offset.unwrap_or(offset + count));
             break;
         }
         offset += count;
     }
+    let partial = selected.len() > limit || yielded_offset.is_some();
+    let next_cursor = if partial {
+        yielded_offset
+            .or(continuation_offset)
+            .map(|offset| orch_api_base::collection::cursor(&page_query, &source, offset))
+            .transpose()?
+    } else {
+        None
+    };
     selected.truncate(limit);
     let results = selected
         .iter()
@@ -537,6 +624,7 @@ async fn select_names_in(
             admin_places,
             participation,
             partial,
+            next_cursor,
             bounds,
             addresses,
             grouping,
@@ -558,6 +646,7 @@ struct RelatedAccess<'a> {
     ctx: &'a Ctx,
     caller: &'a Caller,
     document: KeyResolvedTarget,
+    query: &'a str,
 }
 
 impl orch_engine::links::SourceAccess for RelatedAccess<'_> {
@@ -615,9 +704,37 @@ impl orch_engine::links::SourceAccess for RelatedAccess<'_> {
             )?;
             let principal =
                 native::preparation_principal(self.ctx, conn, self.caller, &plan).await?;
-            orch_engine::links::readable_by_person(conn, &principal, &selected)
+            let mut readable = orch_engine::links::readable_by_person(conn, &principal, &selected)
                 .await
-                .map_err(ApiError::internal)
+                .map_err(ApiError::internal)?;
+            let words = orch_db::queries::search::Query::parse(self.query);
+            if !words.terms().is_empty() {
+                let ids = readable.iter().copied().collect::<Vec<_>>();
+                let items = orch_db::queries::related::items(conn, &ids).await?;
+                let mut matching = HashSet::new();
+                for item in items {
+                    let name = if item.kind == "chat" && item.name.is_empty() {
+                        match orch_db::queries::chats::chat(conn, item.source_id).await? {
+                            Some(chat) => {
+                                let members =
+                                    orch_db::queries::chats::members(conn, chat.id).await?;
+                                crate::routes::chats::people_label(
+                                    conn, &principal, &chat, &members,
+                                )
+                                .await?
+                            }
+                            None => String::new(),
+                        }
+                    } else {
+                        item.name
+                    };
+                    if words.matches(&name) {
+                        matching.insert(item.source_id);
+                    }
+                }
+                readable.retain(|id| matching.contains(id));
+            }
+            Ok(readable)
         }
         .await;
         prepared.map_err(|error| orch_engine::EngineError::unreadable(error.to_string()))
@@ -662,7 +779,7 @@ pub(super) struct RelatedReader;
 
 impl native::Selected for RelatedReader {
     type Source = Source;
-    type Query = orch_api_contract::common::PageQuery;
+    type Query = orch_api_contract::search::DocumentRelatedListQuery;
     type Value = PreparedRelated;
     type Reply = orch_api_contract::search::RelatedItems;
     const DECLARATION: &'static Declaration<Source> = &sources::RELATED;
@@ -674,6 +791,17 @@ impl native::Selected for RelatedReader {
     ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let mut cancellation = rows::cancel_on_drop(&ctx.app.db, conn).await?;
+            if query.limit == Some(0) {
+                return Err(invalid("limit", "must be greater than zero"));
+            }
+            let text = query.q.as_deref().unwrap_or("").trim();
+            if !text.is_empty()
+                && orch_db::queries::search::Query::parse(text)
+                    .terms()
+                    .is_empty()
+            {
+                return Err(invalid("q", "give at least one word or quoted phrase"));
+            }
             let document = ctx.id("id")?;
             let target = targets::page_object(
                 conn,
@@ -700,8 +828,9 @@ impl native::Selected for RelatedReader {
                 ctx,
                 caller,
                 document: target,
+                query: text,
             };
-            let page = ctx
+            let mut page = ctx
                 .app
                 .engine
                 .related_page_for_access(
@@ -709,15 +838,15 @@ impl native::Selected for RelatedReader {
                     &principal,
                     document,
                     after,
-                    query.limit.map(|limit| {
-                        usize::try_from(limit.clamp(1, orch_api_contract::common::MAX_LIMIT))
-                            .unwrap_or(1)
-                    }),
+                    query.limit.map(|limit| usize::try_from(limit).unwrap_or(1)),
                     &access,
                 )
                 .await
                 .map_err(ApiError::internal)?
                 .ok_or_else(ApiError::not_found)?;
+            page.fingerprint = orch_types::Hash::of(
+                &serde_json::to_vec(&(page.fingerprint, text)).map_err(ApiError::internal)?,
+            );
             if continued.is_some_and(|(_, fingerprint)| fingerprint != page.fingerprint) {
                 return Err(invalid("cursor", "the related list changed; start again"));
             }

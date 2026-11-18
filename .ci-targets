@@ -1,0 +1,2 @@
+clippy
+test -p orch-api-core --test notifications_inbox --test admin_messages --test personal_native_scopes --test program_admin --test people_scale

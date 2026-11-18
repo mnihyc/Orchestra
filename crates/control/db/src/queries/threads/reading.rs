@@ -154,7 +154,7 @@ pub async fn outline_points_view(
           AND ($3::bigint IS NULL OR i.seq_created {comparison} $3)
           AND (i.turn_id IS NULL OR (SELECT t.ordinal BETWEEN o.first_turn AND o.last_turn
             FROM turns t WHERE t.id=i.turn_id))
-          AND (i.kind IN ('user_message','agent_message','approval')
+          AND (i.kind IN ('user_message','agent_message','approval','error')
             OR (i.kind='announcement' AND v.payload->>'category'='milestone')
             OR (i.kind='tool_call' AND v.payload #>> '{{tool,kind}}'='orch'
               AND v.payload #>> '{{tool,tool}}'='announce' AND v.payload #>> '{{tool,arguments,category}}'='milestone')
@@ -175,6 +175,7 @@ pub async fn outline_points_view(
             FROM regexp_split_to_table(COALESCE(i.payload->>'text',''),E'\\n') WITH ORDINALITY lines(line,ordinal)
             WHERE line ~ '[^[:space:]]' ORDER BY ordinal LIMIT 1))
           WHEN 'announcement' THEN jsonb_build_object('title',left(i.payload->>'title',$5::int),'category',i.payload->'category')
+          WHEN 'error' THEN jsonb_build_object('message',left(i.payload->>'message',$5::int))
           WHEN 'approval' THEN jsonb_build_object('approval_id',i.payload->'approval_id')
           WHEN 'tool_call' THEN CASE WHEN i.payload #>> '{{tool,kind}}'='orch'
             AND i.payload #>> '{{tool,tool}}'='announce' AND i.payload #>> '{{tool,arguments,category}}'='milestone'

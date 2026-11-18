@@ -10,9 +10,10 @@ import { meQuery, metaKey } from '@/api/auth';
 import { client } from '@/api/client';
 import type * as ClientModule from '@/api/client';
 import { orgsQuery } from '@/api/nodes';
-import { favoritesQuery, meStateQuery } from '@/api/personal';
+import { favoritesQuery, meStateKey, meStateQuery } from '@/api/personal';
 import { queryClient as applicationQueries } from '@/api/query';
-import { ensureShellBootstrap, useShellBootstrap } from '@/shell/bootstrap';
+import { dispatchPersonalEvent, retirePersonalEvents } from '@/realtime/personalSource';
+import { BASELINE_CHECK_AFTER_MS, ensureShellBootstrap, useShellBootstrap } from '@/shell/bootstrap';
 import { useSelectedOrg } from '@/shell/org';
 import { useChatStates } from '@/realtime/stores/chat';
 import { useUserStore } from '@/realtime/stores/user';
@@ -21,8 +22,8 @@ import { bootstrap } from '../doubles/bootstrap';
 import { World } from '../doubles/world';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: { signal?: AbortSignal }) => Promise<unknown>>(), admitted: vi.fn<() => Promise<void>>() }));
-vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof LiveModule>(), ensurePersonalSource: calls.admitted }));
+const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: { signal?: AbortSignal }) => Promise<unknown>>(), admitted: vi.fn<(baseline?: boolean) => Promise<void>>(), joined: vi.fn<() => boolean>() }));
+vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof LiveModule>(), ensurePersonalSource: calls.admitted, personalSourceJoined: calls.joined }));
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: (request: Promise<unknown>) => request };
@@ -36,6 +37,7 @@ beforeEach(async () => {
   calls.get.mockReset();
   calls.get.mockResolvedValue(data);
   calls.admitted.mockReset().mockResolvedValue();
+  calls.joined.mockReset().mockReturnValue(false);
 });
 function Readers() {
   useQuery(permissionsQuery);
@@ -85,18 +87,53 @@ it('loads the aggregate once, seeds all shell readers and leaves the Inbox page 
   }
 });
 
-it('holds the root loader and shell readers behind the same accepted source without an authority pre-read', async () => {
+it('sends the first read beside the join of the person\'s own feed, and applies what was told meanwhile after it', async () => {
   const session = client.session.getState();
-  let admit!: () => void;
-  calls.admitted.mockImplementation(() => new Promise<void>((resolve) => { admit = resolve; }));
+  // The feed never joins in this case: the read must not wait for it.
+  calls.admitted.mockImplementation(() => new Promise<void>(() => undefined));
+  let answer!: (value: unknown) => void;
+  calls.get.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
   const cache = new QueryClient({ defaultOptions: applicationQueries.getDefaultOptions() });
   client.session.setState({ status: 'signed_in', userId: data.person.id });
+  const told: boolean[] = [];
   try {
     const loader = ensureShellBootstrap(cache, data.person.id);
-    await Promise.resolve(); expect(calls.get).not.toHaveBeenCalled();
-    admit(); const opened = await loader;
+    await vi.waitFor(() => { expect(calls.get).toHaveBeenCalledOnce(); });
+    expect(calls.admitted).toHaveBeenCalledWith(true);
+    // Something told by the feed while the read is out is held until the read is in the cache.
+    dispatchPersonalEvent(() => { told.push(cache.getQueryData(metaKey) !== undefined); });
+    expect(told).toEqual([]);
+    answer(data);
+    const opened = await loader;
     expect(opened.person.id).toBe(data.person.id);
+    expect(told).toEqual([true]);
     expect(await ensureShellBootstrap(cache, data.person.id)).toEqual(opened);
     expect(calls.get.mock.calls.map(([path]) => path)).toEqual(['/me/bootstrap']);
-  } finally { cache.clear(); client.session.setState(session); }
+  } finally { retirePersonalEvents(); cache.clear(); client.session.setState(session); }
+});
+
+it.each(['nothing was missed', 'a change was missed'] as const)('checks the first read once after the feed has joined: %s', async (case_) => {
+  vi.useFakeTimers();
+  const session = client.session.getState();
+  const cache = new QueryClient({ defaultOptions: applicationQueries.getDefaultOptions() });
+  client.session.setState({ status: 'signed_in', userId: data.person.id });
+  // The first read is made before the feed has joined; by the check it has.
+  calls.joined.mockReset().mockReturnValueOnce(false).mockReturnValue(true);
+  const later = { ...data, state: { ...data.state, starredElsewhere: 'a place starred on another device' } } as MeBootstrapReply;
+  calls.get.mockReset().mockResolvedValueOnce(data).mockResolvedValueOnce(case_ === 'nothing was missed' ? data : later);
+  try {
+    await ensureShellBootstrap(cache, data.person.id);
+    const held = cache.getQueryState(meStateKey)?.dataUpdateCount;
+    expect(calls.get).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(BASELINE_CHECK_AFTER_MS);
+    await vi.waitFor(() => { expect(calls.get).toHaveBeenCalledTimes(2); });
+    if (case_ === 'nothing was missed') {
+      await vi.advanceTimersByTimeAsync(0);
+      // What was held already said everything the later read says: nothing was taken again.
+      expect(cache.getQueryState(meStateKey)?.dataUpdateCount).toBe(held);
+    } else await vi.waitFor(() => { expect(cache.getQueryData(meStateKey)).toEqual(later.state); });
+    // However it went, one check was made and no more.
+    await vi.advanceTimersByTimeAsync(BASELINE_CHECK_AFTER_MS * 4);
+    expect(calls.get).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); retirePersonalEvents(); cache.clear(); client.session.setState(session); }
 });

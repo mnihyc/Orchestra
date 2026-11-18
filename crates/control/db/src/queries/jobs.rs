@@ -2017,9 +2017,22 @@ pub async fn document_notices_page(
     after: Option<Id>,
     limit: i64,
 ) -> Result<Vec<JobRow>, DbError> {
+    document_notices_search(conn, by, document, after, limit, &[]).await
+}
+
+/// Active owned work is searchable by its displayed state, phase, progress message and date.
+pub async fn document_notices_search(
+    conn: &mut Conn,
+    by: Id,
+    document: Id,
+    after: Option<Id>,
+    limit: i64,
+    patterns: &[String],
+) -> Result<Vec<JobRow>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM jobs WHERE kind='document_notices' AND state IN ('queued','running')
-        AND created_by=$1 AND plan#>>'{{notice,document}}'=$2::uuid::text AND ($3::uuid IS NULL OR id<$3) ORDER BY id DESC LIMIT $4")))
-        .bind(by).bind(document).bind(after).bind(limit).fetch_all(conn).await?)
+        AND created_by=$1 AND plan#>>'{{notice,document}}'=$2::uuid::text AND ($3::uuid IS NULL OR id<$3)
+        AND concat_ws(' ',state,progress->>'phase',progress->>'message',created_at::text) ILIKE ALL($5::text[]) ORDER BY id DESC LIMIT $4")))
+        .bind(by).bind(document).bind(after).bind(limit).bind(patterns).fetch_all(conn).await?)
 }
 
 /// One next notification job; only four valid leases can precede a queued row under the durable slots.

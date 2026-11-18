@@ -29,7 +29,6 @@ import { matches as queryMatches, matchScore, wordsOf } from '../../src/features
 
 /** The most a page of a list holds, and how many names a request without a limit gets: the contract's numbers. */
 const NAME_LIMIT_DEFAULT = 20;
-const NAME_LIMIT_MAX = 50;
 const PAGE_DEFAULT = 20;
 const PAGE_MAX = 200;
 /** The least characters of a search of what was written, and of one that can use the index. */
@@ -309,7 +308,11 @@ export class SearchWorld implements Part {
     const typed = fold(query.get('q') ?? '').trim();
     const kindsParam = query.get('kinds');
     const kinds = new Set((kindsParam ?? '').split(',').filter((kind) => kind !== ''));
-    const limit = Math.min(NAME_LIMIT_MAX, Math.max(1, Number(query.get('limit') ?? NAME_LIMIT_DEFAULT) || NAME_LIMIT_DEFAULT));
+    const limit = Math.max(1, Number(query.get('limit') ?? NAME_LIMIT_DEFAULT) || NAME_LIMIT_DEFAULT);
+    const offset=Number(query.get('cursor')??0);
+    const end=offset+limit;
+    const picker=query.get('picker')==='true';
+    const picked=this.world.settings.pickerRecentsOf(person).choices;
     const root = query.get('org_id');
     const recent = new Set(this.recents.get(person.me.username) ?? []);
     const order = new Map([...recent].map((id, index) => [id, index]));
@@ -332,13 +335,19 @@ export class SearchWorld implements Part {
       return hit.kind === 'chat' && this.world.chats.forSearch(person).some((entry) => entry.chat.id === hit.id && entry.chat.org_id === root);
     });
 
+    if (typed === '' && picker) {
+      return pool.sort((one,other)=>{
+        const position=(hit:NameHit)=>{const at=picked[hit.kind]?.indexOf(hit.id)??-1;return at<0?Infinity:at;};
+        return position(one)-position(other)||(order.get(key(one))??Infinity)-(order.get(key(other))??Infinity)||this.updatedOf(other).localeCompare(this.updatedOf(one));
+      }).slice(offset,end);
+    }
     if (typed === '') {
-      if (onlyStarred) return pool.sort((one, other) => (savedOrder.get(key(one)) ?? 0) - (savedOrder.get(key(other)) ?? 0)).slice(0, limit);
+      if (onlyStarred) return pool.sort((one, other) => (savedOrder.get(key(one)) ?? 0) - (savedOrder.get(key(other)) ?? 0)).slice(offset, end);
       // No letters: the places the caller went to lately, the last first.
       return pool
         .filter((hit) => recent.has(key(hit)))
         .sort((one, other) => (order.get(key(one)) ?? 0) - (order.get(key(other)) ?? 0))
-        .slice(0, limit);
+        .slice(offset, end);
     }
     const matches = (hit: NameHit): boolean => queryMatches(typed, hit.name, hit.address, hit.kind === 'user' ? this.usernameOf(hit) : '');
     return pool
@@ -350,7 +359,7 @@ export class SearchWorld implements Part {
         if (recency !== 0) return recency;
         return this.updatedOf(other).localeCompare(this.updatedOf(one));
       })
-      .slice(0, limit);
+      .slice(offset, end);
   }
 
   private usernameOf(hit: NameHit): string {
@@ -640,10 +649,12 @@ export class SearchWorld implements Part {
     }
     if (this.failing) throw new Refusal(500, 'internal', 'the names are not available');
     const text = query.get('q')?.trim() ?? '';
-    if (text !== '' && Array.from(text).length < QUERY_MIN) throw new Refusal(422, 'request.invalid', 'Type at least two characters.');
-    const items = this.names(person, query);
-    const limit = Math.min(NAME_LIMIT_MAX, Math.max(1, Number(query.get('limit') ?? NAME_LIMIT_DEFAULT)));
-    return { status: 200, body: { items, partial: items.length === limit } };
+    if (query.get('picker')!=='true' && text !== '' && Array.from(text).length < QUERY_MIN) throw new Refusal(422, 'request.invalid', 'Type at least two characters.');
+    const limit = Math.max(1, Number(query.get('limit') ?? NAME_LIMIT_DEFAULT));
+    const lookahead=new URLSearchParams(query);lookahead.set('limit',String(limit+1));
+    const items=this.names(person,lookahead);
+    const more=items.length>limit;
+    return {status:200,body:{items:items.slice(0,limit),partial:more,next_cursor:more?String(Number(query.get('cursor')??0)+limit):null}};
   }
 
   /** What only a test can do. */

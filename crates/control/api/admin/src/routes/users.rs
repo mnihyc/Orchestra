@@ -110,7 +110,7 @@ use orch_api_contract::users::InvitationPreviewOrg;
 
 use orch_api_contract::users::InvitationPreviewWhat;
 
-use orch_api_contract::users::USER_SEARCH_MAX_RESULTS;
+use orch_api_contract::users::USER_SEARCH_DEFAULT_RESULTS;
 
 use orch_api_contract::users::USER_SEARCH_MIN_CHARS;
 
@@ -214,7 +214,11 @@ orch_api_base::__api_bind_43faf5f5b7!();
 
 /// People whose name starts or holds what is asked among those who share an
 /// org with the caller, and by an exact username or address anywhere.
-async fn user_search(ctx: Ctx, query: UserSearchQuery, (): ()) -> ApiResult<Vec<UserRef>> {
+async fn user_search(
+    ctx: Ctx,
+    query: UserSearchQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::users::UserSearchReply> {
     crate::key_operations::native::selected_read::<search::Accounts>(ctx, query, ()).await
 }
 
@@ -939,11 +943,49 @@ async fn invitation_list(
     ctx: Ctx,
     query: InvitationListQuery,
     (): (),
-) -> ApiResult<Vec<Invitation>> {
-    crate::key_operations::snapshot_read::run(ctx, move |ctx| {
+) -> ApiResult<orch_api_contract::common::Page<Invitation>> {
+    let source = format!(
+        "invitations:{}:{:?}:{}",
+        ctx.user()?.id(),
+        query.org_id,
+        query.active.unwrap_or(false)
+    );
+    let page = query.collection();
+    let active = query.active.unwrap_or(false);
+    let now = ctx.now;
+    let rows = crate::key_operations::snapshot_read::run(ctx, move |ctx| {
         invitation_list_snapshot(ctx, query.clone())
     })
-    .await
+    .await?;
+    let rows = rows
+        .into_iter()
+        .filter(|row| {
+            !active || !row.revoked && row.uses < row.max_uses && row.expires_at.get() > now
+        })
+        .collect();
+    orch_api_base::collection::snapshot(
+        &page,
+        &source,
+        rows,
+        |row: &Invitation| (row.created_at, row.id),
+        |row| {
+            format!(
+                "{} {} {} {} {}",
+                row.email.as_deref().unwrap_or(""),
+                row.note,
+                row.created_by.display_name,
+                row.org
+                    .as_ref()
+                    .and_then(|value| value.name.as_deref())
+                    .unwrap_or(""),
+                row.node
+                    .as_ref()
+                    .and_then(|value| value.name.as_deref())
+                    .unwrap_or("")
+            )
+        },
+        true,
+    )
 }
 
 async fn invitation_list_snapshot(

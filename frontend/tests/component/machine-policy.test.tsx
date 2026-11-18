@@ -1,5 +1,5 @@
 /** Policy rows are compact; one native invocation, not a key's role, identifies the enforcing program. */
-import { screen,within } from '@testing-library/react';
+import { screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach,expect,it,vi } from 'vitest';
 import { ApiError } from '@/api/client';
@@ -149,4 +149,23 @@ it('shows a mixed failure in the field and the existing alert', async () => {
   expect(await screen.findByRole('alert')).toBeVisible();
   expect(editor).toHaveAttribute('aria-invalid', 'true');
   expect(editor).toHaveAccessibleDescription(new RegExp(i18n.t('machines.policy.driverFaults.type')));
+});
+
+it('finds every complete policy declaration while its open driver draft survives filtering and paging', async () => {
+  const initial = policy();
+  initial.keys = [{ ...entry('drivers', ['node'], { allowed: ['docker'] }), delegated: true, writable: true },
+    ...Array.from({ length: 1000 }, (_, index) => ({ ...entry(`future.${index}`, ['node'], true), definition: { ...entry(`future.${index}`, ['node'], true).definition, title: `Future ${index}` } }))];
+  read.mockResolvedValue(initial); write.mockResolvedValue(initial);
+  const user = userEvent.setup(); show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+  await user.click(await screen.findByRole('button', { name: i18n.t('machines.policy.editTitle', { key: i18n.t('machines.policy.keys.drivers.title') }) }));
+  const editor = screen.getByRole('textbox', { name: i18n.t('machines.policy.value') });
+  await user.clear(editor); await user.paste('{"allowed":["podman"]}');
+  const search = screen.getByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('machines.policy.sections.node.name') }) });
+  await user.click(search); await user.paste('future.999'); expect(await screen.findByText('Future 999')).toBeVisible();
+  expect(editor).toHaveValue('{"allowed":["podman"]}');
+  await user.clear(search); await user.click(screen.getByRole('button', { name: i18n.t('resourceDetails.layout.next') }));
+  expect(editor).toHaveValue('{"allowed":["podman"]}');
+  await user.click(screen.getByRole('button', { name: i18n.t('machines.policy.save') }));
+  await waitFor(() => expect(write).toHaveBeenCalledWith('machine', { drivers: { allowed: ['podman'] } }));
+  expect(read).toHaveBeenCalledOnce();
 });
