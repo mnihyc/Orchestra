@@ -178,5 +178,18 @@ pub async fn managed_world_provider(world: &World, host: &ScriptedHost, template
     .await
     .unwrap();
     drop(conn);
+    let source = orch_link_contract::native_target::RuntimeSource {
+        incarnation: Some(new_id()),
+    };
+    host.record_native_source(runtime, source, true);
+    let mut tx = world.pool.begin().await.unwrap();
+    rows::lock(&mut tx, world.provider).await.unwrap();
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(&mut tx, host.id, runtime, source, false)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+
     runtime
 }

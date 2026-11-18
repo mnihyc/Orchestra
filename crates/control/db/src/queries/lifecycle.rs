@@ -85,7 +85,7 @@ pub async fn cancel_delivery(
 /// Pending lifecycle controls, with an interrupt before a close made by the same act.
 pub async fn controls(conn: &mut Conn, limit: i64) -> Result<Vec<CommandRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT id,machine_id,kind,body,serial_key,state,result,error,attempts,deadline_at,created_at,updated_at
+        "SELECT id,machine_id,kind,body,serial_key,state,result,error,attempts,deadline_at,authority_until,created_at,updated_at
          FROM commands c WHERE state IN ('queued','sent','accepted')
           AND (kind IN ('turn.interrupt','lease.close','session.close','session.close.fenced','session.continuation.close','node.runtime.stop','provider.stop','env.detach','mcp.forget')
             OR (kind='approval.resolve' AND EXISTS(SELECT 1 FROM approvals a WHERE a.state='cancelled'
@@ -105,9 +105,10 @@ pub async fn busy_registration_detaches(
     limit: i64,
 ) -> Result<Vec<CommandRow>, DbError> {
     Ok(sqlx::query_as("SELECT c.id,c.machine_id,c.kind,c.body,c.serial_key,c.state,c.result,c.error,c.attempts,
-        c.deadline_at,c.created_at,c.updated_at FROM commands c JOIN environments e ON e.id::text=c.body->>'environment_id'
+        c.deadline_at,c.authority_until,c.created_at,c.updated_at FROM commands c JOIN environments e ON e.id::text=c.body->>'environment_id'
         WHERE c.kind='env.detach' AND c.state='failed' AND c.error @> '{\"code\":\"busy\",\"retryable\":true}'::jsonb
         AND c.error#>>'{details,retry_command}' IS NULL AND c.updated_at<=$1 AND c.deadline_at>$2
+        AND (c.authority_until IS NULL OR c.authority_until>$2)
         AND e.deleted_at IS NOT NULL AND e.machine_id=c.machine_id ORDER BY c.updated_at,c.id LIMIT $3")
         .bind(ready_before).bind(now).bind(limit).fetch_all(conn).await?)
 }
@@ -124,7 +125,7 @@ pub async fn claim_busy_registration_detach(
         ||jsonb_build_object('retry_command',$2::uuid::text),true)
         WHERE c.id=$1 AND c.kind='env.detach' AND c.state='failed'
         AND c.error @> '{\"code\":\"busy\",\"retryable\":true}'::jsonb AND c.error#>>'{details,retry_command}' IS NULL
-        AND c.deadline_at>$3 AND EXISTS(SELECT 1 FROM environments e WHERE e.id::text=c.body->>'environment_id'
+        AND c.deadline_at>$3 AND (c.authority_until IS NULL OR c.authority_until>$3) AND EXISTS(SELECT 1 FROM environments e WHERE e.id::text=c.body->>'environment_id'
             AND e.deleted_at IS NOT NULL AND e.machine_id=c.machine_id)")
         .bind(previous).bind(next).bind(now).execute(conn).await?.rows_affected() == 1)
 }

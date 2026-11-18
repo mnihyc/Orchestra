@@ -250,15 +250,12 @@ impl Rig {
     ) {
         let script = Arc::new(script);
         for kind in [CommandKind::SessionOpen, CommandKind::SessionOpenFenced] {
-            let (script, peer, ordered, refusals, machine) = (
+            let (script, peer, refusals) = (
                 script.clone(),
                 self.native.clone(),
-                self.world.ordered.clone(),
                 self.open_refusals.clone(),
-                self.world.machine_id,
             );
             self.world.machine.handler.on(kind, move |command| {
-                ordered.lock().unwrap().push((machine, command.clone()));
                 let open = match command {
                     Command::SessionOpen(open) => open,
                     Command::SessionOpenFenced(open) => &open.session,
@@ -1618,6 +1615,7 @@ async fn a_full_fork_of_a_side_contains_its_captured_parent_and_keeps_newer_side
         .await;
     rig.world.wait_turn(longer.turn_id, "running").await;
     let segment = rig.world.segment_of(side).await;
+    let opening = rig.world.opening_of(side).await;
     let stream = Stream::Session {
         thread_id: side,
         segment_id: segment,
@@ -1635,18 +1633,27 @@ async fn a_full_fork_of_a_side_contains_its_captured_parent_and_keeps_newer_side
     for reference in &references {
         rig.world
             .machine
-            .publish(&stream, &common::message_began(longer.turn_id, reference))
+            .publish_from(
+                Some(opening),
+                &stream,
+                &common::message_began(longer.turn_id, reference),
+            )
             .await;
     }
     for (reference, answer) in references.iter().zip(&answers) {
         rig.world
             .machine
-            .publish(&stream, &common::message_done(reference, answer))
+            .publish_from(
+                Some(opening),
+                &stream,
+                &common::message_done(reference, answer),
+            )
             .await;
     }
     rig.world
         .machine
-        .publish(
+        .publish_from(
+            Some(opening),
             &stream,
             &common::turn_ended(longer.turn_id, TurnOutcome::Completed),
         )
