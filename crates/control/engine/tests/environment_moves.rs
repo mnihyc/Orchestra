@@ -1612,6 +1612,15 @@ async fn local_turn(
     let turn = found.unwrap();
     let segment = world.segment_of(thread).await;
     world.open_session_for_reports(thread, segment).await;
+    let producer = orch_testkit::doubles::sessions::first_turn_opening(
+        world.pool.pool(),
+        thread,
+        segment,
+        turn.turn_id,
+    )
+    .await
+    .unwrap()
+    .expect("the admitted local turn retains its original physical opening");
     let stream = orch_link_contract::streams::Stream::Session {
         thread_id: thread,
         segment_id: segment,
@@ -1625,9 +1634,37 @@ async fn local_turn(
             orch_link_contract::events::TurnOutcome::Completed,
         ),
     ] {
-        unit.added.machine.publish(&stream, &event).await;
+        unit.added
+            .machine
+            .publish_from(Some(producer), &stream, &event)
+            .await;
     }
     world.wait_turn(turn.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    let opened: std::collections::BTreeSet<_> = world
+        .ordered()
+        .into_iter()
+        .filter_map(|(_, command)| match command {
+            Command::LeaseOpen(body) if body.thread_id == thread => Some(body.lease_id),
+            _ => None,
+        })
+        .collect();
+    common::eventually(
+        "the earlier turn's actual opened leases are told to close",
+        || {
+            let closed: std::collections::BTreeSet<_> = world
+                .ordered()
+                .into_iter()
+                .filter_map(|(_, command)| match command {
+                    Command::LeaseClose(body) => Some(body.lease_id),
+                    _ => None,
+                })
+                .collect();
+            let done = opened.is_subset(&closed);
+            async move { done }
+        },
+    )
+    .await;
     turn
 }
 

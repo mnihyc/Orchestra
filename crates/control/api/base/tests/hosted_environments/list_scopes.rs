@@ -8,7 +8,10 @@ use orch_api_contract::environment::{EnvironmentHolding, EnvironmentList, Enviro
 use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
+use orch_link_contract::native_target::RuntimeSource;
 use orch_types::{Json, new_id};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[path = "trust_scopes.rs"]
 mod trust;
@@ -89,11 +92,19 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     Key { id, secret }
 }
 
+#[derive(Clone, Copy)]
+struct NativeUnit {
+    receiver: Id,
+    source: RuntimeSource,
+    running: bool,
+}
+
 struct Scene {
     world: World,
     team: Team,
     first: Environment,
     second: Environment,
+    native_units: Arc<Mutex<HashMap<Id, NativeUnit>>>,
 }
 
 impl Scene {
@@ -120,29 +131,61 @@ impl Scene {
             .ok()
             .into_full()
             .expect("ordinary standalone creation remains full");
-        // Reuse the ordinary restart fixture's persisted running-unit state. No native RPC is needed.
+        // These are the fixture's own native units, allocated before any operation is admitted.
+        let receiver: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+            .bind(team.host)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        let native_units = Arc::new(Mutex::new(HashMap::new()));
         for environment in [first.base.id, second.base.id] {
+            let runtime = new_id();
+            let source = RuntimeSource {
+                incarnation: Some(new_id()),
+            };
+            let mut tx = world.db.pool.begin().await.unwrap();
+            orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+                .await
+                .unwrap()
+                .unwrap();
             sqlx::query("UPDATE jobs SET state='cancelled',finished_at=$2 WHERE environment_id=$1")
                 .bind(environment)
                 .bind(world.now())
-                .execute(&world.db.pool)
+                .execute(&mut *tx)
                 .await
                 .unwrap();
             sqlx::query("UPDATE environments SET status='running',generation=1 WHERE id=$1")
                 .bind(environment)
-                .execute(&world.db.pool)
+                .execute(&mut *tx)
                 .await
                 .unwrap();
             sqlx::query("INSERT INTO runtimes(id,kind,host_id,unit_name,environment_id,driver,template_id,spec_hash,generation,state,volumes) VALUES($1,'environment',$2,$3,$4,'docker',$5,$6,1,'running','{}')")
-                .bind(new_id()).bind(team.host).bind(format!("scoped-unit-{environment}"))
+                .bind(runtime).bind(team.host).bind(format!("scoped-unit-{environment}"))
                 .bind(environment).bind(team.template).bind([1_u8;32].as_slice())
-                .execute(&world.db.pool).await.unwrap();
+                .execute(&mut *tx).await.unwrap();
+            native_units.lock().unwrap().insert(
+                runtime,
+                NativeUnit {
+                    receiver,
+                    source,
+                    running: true,
+                },
+            );
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut tx, team.host, runtime, source, false
+                )
+                .await
+                .unwrap()
+            );
+            tx.commit().await.unwrap();
         }
         Self {
             world,
             team,
             first,
             second,
+            native_units,
         }
     }
 

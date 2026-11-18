@@ -11,6 +11,7 @@ import type { Machine, MachinePrograms } from '@/generated/api-types';
 import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { detailAccess, detailMachine } from './resource-detail-fixtures';
+import { GRACE } from '../doubles/chat-rows';
 
 const read = vi.hoisted(() => vi.fn<() => Promise<MachinePrograms>>());
 vi.mock('@/api/machinePrograms', () => ({ machineProgramsKey: (id: string) => ['machine-programs', id], machineProgramsQuery: (id: string) => ({ queryKey: ['machine-programs', id], queryFn: read }), changeMachinePrograms: vi.fn() }));
@@ -20,7 +21,7 @@ vi.mock('@/features/resources/machines/Enrollment', () => ({ AddMachineDialog: (
 vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#machine">{children}</a> }));
 
 const binary = { kind: 'codex', path: '/usr/local/bin/codex', version: '0.164.0', daemon: true };
-const report = (flag = false): MachinePrograms => ({ entries: [], capabilities: [], config_file: '/instance/config.toml', can_manage: flag });
+const report = (flag = false): MachinePrograms => ({ approvals: [], entries: [], capabilities: [], config_file: '/instance/config.toml', can_manage: flag });
 function machine(manages: boolean, programs: unknown = report(!manages)): Machine {
   return { ...detailMachine, id: 'projection-machine', roles: ['environment'],
     access: { ...detailAccess, permissions: manages ? ['machine.view', 'machine.use', 'machine.manage'] : ['machine.view'], through: [] },
@@ -100,5 +101,35 @@ it('retires the open Programs data together with a revoked Machine view', async 
   await act(async () => { await applyChanges(resourceChanges('machine', initial.id, { what: 'changed', view_revoked: true }), view.cache); });
   expect(view.cache.getQueryData(['machine-programs', initial.id])).toBeUndefined();
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument());
+  expect(read).not.toHaveBeenCalled();
+});
+
+
+it('shows server-verified program attribution from the current Machine without another request', async () => {
+  const approval = { subject: { kind: 'program' as const, harness_kind: binary.kind, path: binary.path }, by: GRACE, at: '2026-10-31T00:00:00Z' };
+  const current = { ...machine(true), execution_approvals: [approval], facts: {
+    programs: report(), harnesses: [binary], discovered_harnesses: [], searched_harness_kinds: ['codex'],
+    policy: { 'agent.harnesses': [{ kind: binary.kind, path: binary.path }], 'policy.delegated': ['agent.harnesses'] },
+  } };
+  const view = draw(current);
+  expect(await screen.findByRole('button', { name: GRACE.display_name })).toBeVisible();
+  expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+  expect(read).not.toHaveBeenCalled();
+  const withdrawn = { ...current, execution_approvals: [] };
+  await act(async () => { await applyChanges(resourceChanges('machine', current.id, { what: 'changed', row: { kind: 'machine', value: withdrawn } }), view.cache); });
+  await waitFor(() => expect(screen.queryByRole('button', { name: GRACE.display_name })).not.toBeInTheDocument());
+  expect(read).not.toHaveBeenCalled();
+});
+
+it('does not take a human approver from the native registry report', async () => {
+  const alleged = { subject: { kind: 'program' as const, harness_kind: binary.kind, path: binary.path }, by: GRACE, at: '2026-10-31T00:00:00Z' };
+  const current = { ...machine(true), facts: {
+    programs: { ...report(), approvals: [alleged] }, harnesses: [binary], discovered_harnesses: [], searched_harness_kinds: ['codex'],
+    policy: { 'agent.harnesses': [{ kind: binary.kind, path: binary.path }], 'policy.delegated': ['agent.harnesses'] },
+  } };
+  const view = draw(current);
+  await screen.findByText('Confirmed', { exact: true });
+  expect(screen.queryByRole('button', { name: GRACE.display_name })).not.toBeInTheDocument();
+  expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeNull();
   expect(read).not.toHaveBeenCalled();
 });

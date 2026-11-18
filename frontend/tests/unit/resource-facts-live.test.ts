@@ -33,3 +33,26 @@ it('never follows provider facts from an administrative-only or absent projectio
   expect(wantedResourceFeeds(cache)).toEqual(new Set());
   stop(); cache.clear();
 });
+
+it('refreshes a shown place only when the capacity of a machine it may read changes', async () => {
+  const cache = new QueryClient();
+  const key = ['start-options', 'topic', ''];
+  const capacity = { cpus: 4, memory_bytes: 4000, data_volume_bytes: 8000, capacity_refresh_secs: 600 };
+  const restricted = { machine: { id: 'quiet' } };
+  const choices = (memory_bytes: number) => ({
+    environments: [{ machine: { id: 'visible' }, capacity: { ...capacity, memory_bytes } }, restricted],
+  });
+  const read = vi.fn(() => Promise.resolve(choices(3600)));
+  const stop = new QueryObserver(cache, { queryKey: key, initialData: choices(4000), staleTime: Infinity, queryFn: read }).subscribe(() => undefined);
+  try {
+    expect(wantedResourceFeeds(cache)).toEqual(new Set(['machine:visible']));
+    for (const id of ['visible', 'quiet']) applyRow(cache, { kind: 'machine', id, value: { id, facts: { ...capacity, rates: { up_bps: 10 } } } });
+    expect(read).not.toHaveBeenCalled();
+    applyRow(cache, { kind: 'machine', id: 'visible', value: { id: 'visible', facts: { ...capacity, memory_bytes: 3600 } } });
+    await vi.waitFor(() => expect(cache.getQueryData(key)).toEqual(choices(3600)));
+    expect(read).toHaveBeenCalledOnce();
+  } finally {
+    stop();
+    cache.clear();
+  }
+});

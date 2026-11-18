@@ -168,6 +168,8 @@ and open the viewer in the main area; Terminal opens below, including from
 the status bar. The status bar also names the environment, branch, changed
 lines and any limit that needs attention.
 
+In **Displays**, choose **Attach VNC server** for a VM or application that already serves VNC on this machine. Enter its loopback port and its VNC password if required. People with View can watch using their Orch account. Closing the display leaves the existing server running. On a connected Linux machine with an accessible local X11 session and x11vnc installed, **Share this machine’s desktop** shares that session. Where the machine has delegated `environment.vnc`, its policy manager can choose **Enable VNC** in the Displays tab.
+
 An empty terminal shows one current state, with its access explanation beside
 the new-shell action. Environment facts use short rows; their questions open
 the full network, credential and server explanations.

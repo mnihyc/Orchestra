@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "programs/confirmations.rs"]
+pub(super) mod confirmations;
+
 use crate::key_operations::native;
 
 use crate::key_operations::native::Stored;
@@ -108,6 +111,8 @@ async fn projection_facts(
         }
         None => MachinePrograms::default(),
     };
+    // Reported display names are not evidence that a human made a decision.
+    programs.approvals = confirmations::projection(conn, machine, &facts).await?;
     programs.can_manage = orch_authz::resources::check_machine(
         conn,
         principal,
@@ -241,7 +246,17 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         ),
         MachineProgramsCommand::Reload => ("reloaded", None, None, None),
     };
-    let command = Outgoing::new(orch_types::new_id(), id, SerialKey::Machine, &body)
+    let confirmation = matches!(&body, MachineProgramsCommand::ConfirmHarness { .. }).then(|| {
+        orch_agent_programs::confirmation::Confirmation {
+            by: guard.principal().user(),
+            at: ctx.app.clock.time(),
+        }
+    });
+    let native = orch_link_contract::commands::MachineProgramsRequest {
+        request: body.clone(),
+        confirmation,
+    };
+    let command = Outgoing::new(orch_types::new_id(), id, SerialKey::Machine, &native)
         .map_err(ApiError::internal)?;
     let authority = MachineProgramsAuthority::capture(
         &mut conn,
@@ -260,6 +275,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    native_target: command.native_target.clone(),
                     id: Some(command.id),
                     machine: id,
                     kind: command.kind.as_str().into(),
@@ -276,7 +292,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
             )
             .await?;
         dispatcher
-            .wait_for::<MachineProgramsCommand>(command.id)
+            .wait_for::<orch_link_contract::commands::MachineProgramsRequest>(command.id)
             .await
     }
     .await;
@@ -322,6 +338,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         })?;
     guard.check_deadline(&ctx)?;
     acknowledgement::deadline(&ctx, &accepted, until)?;
+    confirmations::complete_program(&mut tx, id, &body, confirmation, &written).await?;
     queries_set_facts(&mut tx, id, &written, &facts, ctx.app.clock.now()).await?;
     let who = actor_name(&ctx)?;
     let mut details = json!({"operation":operation,"name":name,"kind":kind});

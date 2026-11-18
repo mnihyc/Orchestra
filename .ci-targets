@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-node --test program -- a_fresh_bundled_node_enrolls_and_comes_online_after_a_database_registration_failure
+test -p orch-api-core --test installation_records --features test-support -- only_system_administrators_can_see_and_retry_a_bundled_host_registration_failure
+test -p orch-api-core --test certificates --features test-support -- bundled_node
+test -p orch-connector-core --lib -- connector::facts_tests::
+test -p orch-api-core --lib -- backplane::rate_presence_tests::
+test -p orch-api-core --test binding_options --features test-support -- a_directory_choice_reads_updated_capacity_with_its_machine_view_permission
+web lint
+web test -- tests/component/admin-host-policy.test.tsx tests/component/move-machine-choice.test.tsx tests/unit/resource-facts-live.test.ts
