@@ -472,15 +472,6 @@ pub struct ExecOffer {
     pub reason: Option<String>,
 }
 
-/// A manager's recorded consent for the current version of one machine program.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EnvironmentProgramApproval {
-    /// The person who allowed this program version.
-    pub by: crate::users::UserRef,
-    /// When the environment manager allowed it.
-    pub at: Time,
-}
-
 /// An executor supplied by a confirmed program on the connected machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMachineProgram {
@@ -491,7 +482,7 @@ pub struct EnvironmentMachineProgram {
     /// Its current probed version, or unknown.
     pub version: String,
     /// Consent matching this exact path and version, including a historical writer's reference.
-    pub approval: Option<EnvironmentProgramApproval>,
+    pub approval: Option<crate::machine_programs::ExecutionApproval>,
 }
 
 /// What an environment's exec node offers.

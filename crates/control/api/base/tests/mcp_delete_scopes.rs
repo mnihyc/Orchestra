@@ -435,6 +435,7 @@ async fn committed_mcp_cleanup_is_exact_reducing_work_and_cannot_admit_a_fresh_c
         .link
         .dispatcher()
         .issue_stored(StoredCommand {
+            native_target: None,
             id: Some(fresh),
             machine,
             kind: saved.command.kind.clone(),

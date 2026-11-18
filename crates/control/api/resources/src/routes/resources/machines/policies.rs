@@ -231,6 +231,7 @@ async fn execute(
         Ok(value) => value,
         Err(error) => return Err(failure(&mut conn, error).await?),
     };
+    let machine = prepared.row.id;
     if prepared.changes.is_empty() {
         guard.check_deadline(&ctx)?;
         let accepted = guard.principal().caller().clone();
@@ -248,8 +249,19 @@ async fn execute(
     let PolicyPreparation {
         row,
         before,
-        changes,
+        mut changes,
     } = prepared;
+    super::programs::confirmations::prepare_policy(
+        &mut conn,
+        machine,
+        before.as_ref(),
+        &mut changes,
+        orch_agent_programs::confirmation::Confirmation {
+            by: guard.principal().user(),
+            at: ctx.app.clock.time(),
+        },
+    )
+    .await?;
     let sent = MachinePolicySet {
         values: changes
             .iter()
@@ -291,6 +303,7 @@ async fn execute(
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    native_target: command.native_target.clone(),
                     id: Some(command.id),
                     machine,
                     kind: command.kind.as_str().into(),
@@ -335,6 +348,14 @@ async fn execute(
     let now_in_force = serde_json::to_value(&result.policy).map_err(ApiError::internal)?;
     guard.check_deadline(&ctx)?;
     acknowledgement::deadline(&ctx, &accepted, until)?;
+    super::programs::confirmations::complete_policy(
+        &mut tx,
+        machine,
+        &sent.values,
+        &result.applied,
+        &result.policy,
+    )
+    .await?;
     queries::set_machine_policy(&mut tx, machine, &now_in_force, ctx.now).await?;
     let applied: Vec<&str> = result.applied.iter().map(String::as_str).collect();
     let values_of = |policy: Option<&LocalPolicy>| -> Json {

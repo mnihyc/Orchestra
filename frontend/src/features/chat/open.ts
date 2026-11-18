@@ -7,10 +7,7 @@
 import { type RegisteredRouter, useRouter } from '@tanstack/react-router';
 import { useCallback } from 'react';
 
-/** Whether a click is an ordinary one: with a modifier or another button the browser's own link behaviour (a new tab) is wanted. */
-export function isPlainClick(event: { defaultPrevented: boolean; button: number; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }): boolean {
-  return !event.defaultPrevented && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-}
+export { isPlainClick } from '@/lib/linkClick';
 
 /**
  * A function that goes to a path of the application, such as `/topic/ab12?panel=chat`. Drawn outside a

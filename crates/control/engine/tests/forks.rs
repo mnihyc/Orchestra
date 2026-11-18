@@ -4104,7 +4104,11 @@ impl Remembering {
         });
         for kind in [CommandKind::TurnStart, CommandKind::TurnStartFenced] {
             handler.on(kind, {
-                let (harness, machine) = (Arc::clone(&harness), Arc::clone(&rig.world.machine));
+                let (harness, machine, pool) = (
+                    Arc::clone(&harness),
+                    Arc::clone(&rig.world.machine),
+                    rig.world.pool.clone(),
+                );
                 move |command| {
                     let start = match command {
                         Command::TurnStart(start) => start,
@@ -4126,23 +4130,47 @@ impl Remembering {
                     };
                     let (thread, turn, machine) =
                         (start.thread_id, start.turn_id, Arc::clone(&machine));
+                    let pool = pool.clone();
                     tokio::spawn(async move {
+                        let opening = orch_testkit::doubles::sessions::first_turn_opening(
+                            pool.pool(),
+                            thread,
+                            segment,
+                            turn,
+                        )
+                        .await
+                        .expect("the original turn command is readable")
+                        .expect("the remembered answer has its own admitted opening");
                         let stream = Stream::Session {
                             thread_id: thread,
                             segment_id: segment,
                         };
-                        machine.publish(&stream, &common::turn_began(turn)).await;
                         machine
-                            .publish(&stream, &common::message_began(turn, "m"))
+                            .publish_from(Some(opening), &stream, &common::turn_began(turn))
                             .await;
                         machine
-                            .publish(&stream, &common::message_grew("m", 0, &reply))
+                            .publish_from(Some(opening), &stream, &common::message_began(turn, "m"))
                             .await;
                         machine
-                            .publish(&stream, &common::message_done("m", &reply))
+                            .publish_from(
+                                Some(opening),
+                                &stream,
+                                &common::message_grew("m", 0, &reply),
+                            )
                             .await;
                         machine
-                            .publish(&stream, &common::turn_ended(turn, TurnOutcome::Completed))
+                            .publish_from(
+                                Some(opening),
+                                &stream,
+                                &common::message_done("m", &reply),
+                            )
+                            .await;
+                        machine
+                            .publish_from(
+                                Some(opening),
+                                &stream,
+                                &common::turn_ended(turn, TurnOutcome::Completed),
+                            )
                             .await;
                     });
                     Ok(if kind == CommandKind::TurnStart {

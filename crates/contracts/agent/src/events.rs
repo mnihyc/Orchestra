@@ -1029,6 +1029,8 @@ pub struct BlobRef {
 /// [`crate::session::SessionOpened`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpenedEvent {
+    /// The physical opening that produced this report.
+    pub opening_id: Id,
     /// The harness's id for the session.
     pub native_session_ref: String,
     /// Whether it continues one that existed.
@@ -1052,6 +1054,10 @@ pub struct SessionTitle {
 /// The session is gone; the next turn reopens it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// A planned idle retirement keeps the conversation without recording an error.
+    pub expected: bool,
+    /// The physical opening that produced this report.
+    pub opening_id: Id,
     /// Why.
     pub reason: String,
 }
@@ -1573,10 +1579,10 @@ mod tests {
     #[test]
     fn every_kind_of_event_of_the_catalogue_reads_and_writes_as_the_spec_shows_it() {
         let events = [
-            json!({ "kind": "session.opened", "body": { "native_session_ref": "thr_1", "resumed": false } }),
+            json!({ "kind": "session.opened", "body": { "opening_id":id(3),"native_session_ref": "thr_1", "resumed": false } }),
             json!({ "kind": "session.instructions", "body": { "sources": [] } }),
             json!({ "kind": "session.title", "body": { "title": "Fix the login redirect" } }),
-            json!({ "kind": "session.lost", "body": { "reason": "the harness process exited" } }),
+            json!({ "kind": "session.lost", "body": { "expected":false,"opening_id":id(3),"reason": "the harness process exited" } }),
             json!({ "kind": "session.background_tasks", "body": { "self_waking": true, "tasks": [], "native_wake": null } }),
             json!({ "kind": "turn.started", "body": { "turn_id": id(1), "native_turn_ref": "turn_9" } }),
             json!({ "kind": "item.started", "body": {
