@@ -60,7 +60,7 @@ it('uses one bounded opening for inactive history and durable viewed status, wit
   const url = new URL(transport.calls[0]?.url ?? 'http://invalid');
   expect(url.pathname).toBe(`/api/v1/threads/${sync.thread.id}/opening`);
   expect(url.searchParams.get('continuation_id')).toBe(B);
-  expect(url.searchParams.get('limit')).toBe('200');
+  expect(url.searchParams.has('limit')).toBe(false);
   expect(url.searchParams.has('projection_revision')).toBe(false);
   await vi.advanceTimersByTimeAsync(60_000);
   expect(transport.calls).toHaveLength(1);
@@ -259,7 +259,7 @@ it('constructs scoped query options without mutating store state during render',
   expect(threadViewOf(id).read).toBeNull();
 });
 
-it('primes the native outline/settings/draft before publishing the opening thread to controls', async () => {
+it('primes the draft before publishing the opening while leaving panels unread', async () => {
   const sync = snapshot(); const id = sync.thread.id;
   const response = opening(sync);
   const transport = http(() => Promise.resolve(Response.json(response)));
@@ -268,7 +268,7 @@ it('primes the native outline/settings/draft before publishing the opening threa
   const stop = useThreadStore.subscribe(() => {
     if (threadViewOf(id).thread === null) return;
     published += 1;
-    expect(queryClient.getQueryData(threadKeys.outline(id))).toMatchObject({ pages: [response.outline], pageParams: [null] });
+    expect(queryClient.getQueryData(threadKeys.outline(id))).toBeUndefined();
     expect(queryClient.getQueryState(threadKeys.draft(id))).toBeDefined();
   });
   try { await fetchThreadSync(id, null); }

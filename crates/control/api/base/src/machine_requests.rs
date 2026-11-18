@@ -284,6 +284,7 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
         &principal,
         environment.id,
         EnvironmentMcpImportCreateBody {
+            origin: Some(orch_engine::environment_mcp::discovery_origin(environment.id, &serde_json::json!({"profile":request.profile,"source":request.source,"scope":request.scope,"directory":request.directory,"name":request.name}))),
             source: request.source,
             scope: request.scope,
             name: request.name,

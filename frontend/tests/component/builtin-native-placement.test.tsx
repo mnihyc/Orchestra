@@ -40,7 +40,7 @@ vi.mock('@/features/change/RunsOn', async (load) => ({ ...await load<typeof Runs
   </>,
 }));
 vi.mock('@/features/change/History', () => ({ HistoryChoices: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 function source(): Thread {
   const thread = snapshot().thread;

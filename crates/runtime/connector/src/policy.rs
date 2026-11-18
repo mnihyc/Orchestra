@@ -333,10 +333,7 @@ pub fn explicit_local_keys(text: &str) -> Result<Vec<String>, toml::de::Error> {
         .filter(|key| **key != PolicyKey::PolicyDelegated)
         .filter(|key| match key.as_str().split_once('.') {
             Some((section, member)) => written.get(section).and_then(|v| v.get(member)).is_some(),
-            None => {
-                written.get(key.as_str()).is_some()
-                    || (**key == PolicyKey::Storages && written.get("storage").is_some())
-            }
+            None => written.get(key.as_str()).is_some(),
         })
         .map(|key| key.as_str().into())
         .collect())
@@ -761,6 +758,8 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             "environment.remote_write",
             "this machine accepts no file written from outside",
         )?,
+        // An existing directory needs no write; the native conditional publisher enforces remote-write immediately before any namespace effect.
+        Command::FsMaterializeIfAbsent(_) => {}
         Command::FsMaterialize(materialize) => match materialize.purpose {
             MaterializePurpose::Delivery => check(
                 policy.check_deliver_files(),
@@ -1533,6 +1532,7 @@ mod tests {
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
+            output_capture_bytes: 67_108_864,
             native_model: None,
             transport_only: false,
             turn_changes_require_restart: false,
@@ -1559,6 +1559,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,
@@ -1977,6 +1978,8 @@ mod tests {
         let policy = here();
         let attach = |root: &str| {
             Command::EnvAttach(EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
