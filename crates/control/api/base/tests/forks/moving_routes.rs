@@ -401,6 +401,71 @@ async fn over(w: &Forks, id: Id) -> orch_db::queries::jobs::JobRow {
         .unwrap()
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn a_move_reviews_the_destination_model_policy_before_it_can_end_the_source() -> Proof {
+    let w = Forks::new().await;
+    let source = w.thread_with_history("Destination model policy").await;
+    let topic = destination(&w).await;
+    let model = "recipient-model";
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by)
+        SELECT $1,provider_id,$3,$3,parameters,true,'manual',created_by FROM provider_models WHERE provider_id=$2 AND model_name=$4")
+        .bind(orch_types::new_id()).bind(w.provider).bind(model).bind(MODEL)
+        .execute(w.s.rig.db.pool()).await?;
+    sqlx::query("INSERT INTO settings(node_id,key,value) VALUES ($1,'models.allowed',$2)")
+        .bind(topic)
+        .bind(json!([model]))
+        .execute(w.s.rig.db.pool())
+        .await?;
+    let review: ThreadMoveOutPreviewResponse =
+        serde_json::from_value(ok(&preview(&w, source, topic, &w.s.ada.token).await)?)?;
+    let blocked = review
+        .plan
+        .into_full()
+        .map_err(|_| "expected owner review")?;
+    assert!(
+        blocked
+            .blockers
+            .iter()
+            .any(|b| b.code == "model_not_allowed")
+    );
+    let reply = confirm(&w, source, blocked.preflight_id, &w.s.ada.token, false).await;
+    assert!(!reply.status.is_success());
+    assert_eq!(
+        w.count("SELECT count(*) FROM jobs WHERE kind='thread_fork'")
+            .await,
+        0
+    );
+    let replacement = ForkRequest {
+        topic_id: Some(topic),
+        to: Some(ForkTo {
+            provider_id: Some(w.provider),
+            agent_id: Some(w.agent),
+            model: Some(model.into()),
+            ..ForkTo::default()
+        }),
+        ..w.fork()
+    };
+    let reply =
+        w.s.rig
+            .world
+            .app
+            .call(ThreadMoveOutPreview, &[&source])
+            .token(&w.s.ada.token)
+            .body(&replacement)
+            .send_bytes()
+            .await;
+    let reviewed: ThreadMoveOutPreviewResponse = serde_json::from_value(ok(&reply)?)?;
+    let accepted = reviewed
+        .plan
+        .into_full()
+        .map_err(|_| "expected replacement review")?;
+    assert!(accepted.blockers.is_empty(), "{:?}", accepted.blockers);
+    assert_eq!(accepted.to.provider.id, w.provider);
+    assert_eq!(accepted.to.agent.id, w.agent);
+    assert_eq!(accepted.to.model, model);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_the_original_once()
 -> Proof {
     let w = Forks::new().await;
@@ -410,6 +475,21 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
         .bind(w.s.tree.topic.base.id)
         .bind(json!("summary"))
         .execute(w.s.rig.db.pool())
+        .await?;
+    const REPLIES: &str = "SELECT payload->>'text' FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created";
+    let original_replies: Vec<String> = sqlx::query_scalar(REPLIES)
+        .bind(source)
+        .fetch_all(w.s.rig.db.pool())
+        .await?;
+    assert!(
+        original_replies
+            .iter()
+            .any(|text| text == "The plan is ready")
+    );
+    const WORKSPACE: &str = "SELECT environment_id,workspace_dir FROM threads WHERE node_id=$1";
+    let original_workspace: (Id, String) = sqlx::query_as(WORKSPACE)
+        .bind(source)
+        .fetch_one(w.s.rig.db.pool())
         .await?;
     let original: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM items WHERE thread_id=$1 AND kind NOT IN ('marker','announcement')",
@@ -451,6 +531,24 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
             .fetch_one(w.s.rig.db.pool())
             .await?;
     assert!(source_deleted);
+    let progress =
+        w.s.rig
+            .world
+            .app
+            .call(orch_api_contract::workspace::JobGet, &[&job])
+            .token(&w.s.ada.token)
+            .send()
+            .await;
+    assert_eq!(
+        progress.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&progress.raw)
+    );
+    let progress = progress.ok();
+    assert_eq!(progress.id, job);
+    let result = progress.result.ok_or("completed move job result absent")?;
+    assert_eq!(result["thread_id"], json!(target));
     let new: (Id, Id) = sqlx::query_as(
         "SELECT topic_id,owner_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE t.node_id=$1",
     )
@@ -465,6 +563,20 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
     .fetch_one(w.s.rig.db.pool())
     .await?;
     assert_eq!(copied, original);
+    let moved_replies: Vec<String> = sqlx::query_scalar(REPLIES)
+        .bind(target)
+        .fetch_all(w.s.rig.db.pool())
+        .await?;
+    let moved_workspace: (Id, String) = sqlx::query_as(WORKSPACE)
+        .bind(target)
+        .fetch_one(w.s.rig.db.pool())
+        .await?;
+    assert_eq!(moved_replies, original_replies);
+    assert_eq!(
+        moved_workspace, original_workspace,
+        "keeping the binding keeps the files in the same workspace"
+    );
+
     assert_eq!(
         row.plan["confirmed_history_source"]["operation"]["origin"]["operation"],
         "ThreadMoveOut"

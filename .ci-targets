@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test forks -- moving_routes::
+test -p orch-api-core --test thread_move
