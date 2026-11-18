@@ -636,7 +636,7 @@ async fn a_foreground_connector_or_node_adopts_a_saved_replacement_without_anoth
                 public_url: "https://orch.test".into(),
             },
             pin: String::new(),
-            protocol_version: 1,
+            protocol_version: 2,
             enrolled_at: manual.time(),
             managed: role == Role::Node,
         };

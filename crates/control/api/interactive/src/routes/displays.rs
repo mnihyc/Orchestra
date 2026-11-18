@@ -280,7 +280,7 @@ async fn list(
         let site = rows::site(&mut conn, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
-        if site.status == "running" && site.machine_online == Some(true) {
+        if !site.stopping && site.status == "running" && site.machine_online == Some(true) {
             drop(conn);
             ctx.app
                 .engine

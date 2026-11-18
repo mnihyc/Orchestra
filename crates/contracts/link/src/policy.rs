@@ -250,6 +250,9 @@ pub struct PolicyHarness {
     pub kind: String,
     /// Where its program is on the machine, or the daemon to attach to.
     pub path: String,
+    /// The server-recorded manager decision; absent for a local operator's selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<orch_agent_programs::confirmation::Confirmation>,
 }
 
 impl PolicyKey {
@@ -887,14 +890,7 @@ impl LocalPolicy {
                     .map(|kind| kind.as_str())
                     .collect::<Vec<_>>(),
             ),
-            PolicyKey::AgentHarnesses => Json::from(
-                self.agent_harnesses
-                    .iter()
-                    .map(
-                        |harness| serde_json::json!({ "kind": harness.kind, "path": harness.path }),
-                    )
-                    .collect::<Vec<_>>(),
-            ),
+            PolicyKey::AgentHarnesses => serde_json::json!(self.agent_harnesses),
             PolicyKey::ToolsFetch => Json::Bool(self.tools_fetch),
             PolicyKey::AgentPrograms => Json::Bool(self.agent_programs),
             PolicyKey::ProviderPrograms => Json::Bool(self.provider_programs),
@@ -1175,7 +1171,7 @@ impl LocalPolicy {
     }
 }
 
-/// The scoped policy in a machine report; older unscoped policies retain their wire shape.
+/// The policy for the roles this machine actually offers.
 pub(crate) fn serialize_reported<S: serde::Serializer>(
     policy: &Option<LocalPolicy>,
     serializer: S,
@@ -1190,6 +1186,51 @@ pub(crate) fn serialize_reported<S: serde::Serializer>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn saved_and_reported_program_choices_keep_the_actual_manager_without_attributing_local_choices()
+     {
+        let manager = orch_types::new_id();
+        let at = "2026-10-31T00:00:00.000Z".parse().unwrap();
+        let confirmation = orch_agent_programs::confirmation::Confirmation { by: manager, at };
+        let policy = LocalPolicy {
+            roles: Some(vec![crate::session::Role::Environment]),
+            agent_harnesses: vec![
+                PolicyHarness {
+                    kind: "codex".into(),
+                    path: "/confirmed/codex".into(),
+                    confirmation: Some(confirmation),
+                },
+                PolicyHarness {
+                    kind: "claude-code".into(),
+                    path: "/operator/claude".into(),
+                    confirmation: None,
+                },
+            ],
+            ..LocalPolicy::default()
+        };
+        let expected = json!([
+            {"kind":"codex","path":"/confirmed/codex","confirmation":{"by":manager,"at":at}},
+            {"kind":"claude-code","path":"/operator/claude"}
+        ]);
+        assert_eq!(
+            policy.get(PolicyKey::AgentHarnesses),
+            expected,
+            "the saved delegated value keeps the actual decision"
+        );
+        assert_eq!(
+            policy.reported()["agent.harnesses"],
+            expected,
+            "role-filtered machine facts keep the same decision"
+        );
+        let again: LocalPolicy =
+            serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+        assert_eq!(
+            again.harness("codex").unwrap().confirmation,
+            Some(confirmation)
+        );
+        assert!(again.harness("claude-code").unwrap().confirmation.is_none());
+    }
 
     #[test]
     fn environment_switches_follow_the_same_machine_ceiling_and_an_explicit_narrowing_stays_off() {

@@ -392,11 +392,13 @@ async fn observe(report: &mut Json) -> Result<()> {
     let registered = issue(
         &controller,
         &SerialKey::Machine,
-        &MachineProgramsCommand::Register(MachineProgramRegistration {
-            kind: MachineProgramKind::Agent,
-            name: "platform-observed".into(),
-            command: scripted_program(directory.path())?,
-        }),
+        &native_program_request(MachineProgramsCommand::Register(
+            MachineProgramRegistration {
+                kind: MachineProgramKind::Agent,
+                name: "platform-observed".into(),
+                command: scripted_program(directory.path())?,
+            },
+        )),
     )
     .await?;
     ensure!(

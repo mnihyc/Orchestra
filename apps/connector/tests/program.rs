@@ -404,6 +404,15 @@ fn run_program(data: &Path) -> Child {
         .unwrap()
 }
 
+fn native_program_request(
+    request: orch_api_contract::machine_programs::MachineProgramsCommand,
+) -> orch_link_contract::commands::MachineProgramsRequest {
+    orch_link_contract::commands::MachineProgramsRequest {
+        request,
+        confirmation: None,
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn programs_register_describe_run_survive_restart_remove_and_reload_with_the_local_policy_enforced()
@@ -450,7 +459,7 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     let registered = command(
         &controller,
         &SerialKey::Machine,
-        &Request::Register(request.clone()),
+        &native_program_request(Request::Register(request.clone())),
     )
     .await;
     assert_eq!(
@@ -497,7 +506,7 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     let tested = command(
         &controller,
         &SerialKey::Machine,
-        &Request::Test(identity.clone()),
+        &native_program_request(Request::Test(identity.clone())),
     )
     .await;
     assert_eq!(
@@ -517,11 +526,11 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     let registered = command(
         &controller,
         &SerialKey::Machine,
-        &Request::Register(MachineProgramRegistration {
+        &native_program_request(Request::Register(MachineProgramRegistration {
             kind: Kind::Agent,
             name: "tiny-live".into(),
             command: adapter,
-        }),
+        })),
     )
     .await;
     let adapter = registered["adapters"]
@@ -571,7 +580,12 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
             .await,
         "configured sources regain their metadata preview at startup, without a page/native read"
     );
-    let reloaded = command(&controller, &SerialKey::Machine, &Request::Reload).await;
+    let reloaded = command(
+        &controller,
+        &SerialKey::Machine,
+        &native_program_request(Request::Reload),
+    )
+    .await;
     assert_eq!(
         reloaded["programs"]["entries"].as_array().unwrap().len(),
         2,
@@ -580,7 +594,7 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     let removed = command(
         &controller,
         &SerialKey::Machine,
-        &Request::Remove(identity.clone()),
+        &native_program_request(Request::Remove(identity.clone())),
     )
     .await;
     assert!(
@@ -603,7 +617,11 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     let mut keep = program(directory.path());
     keep.args(["policy", "set", "provider.programs", "false"]);
     succeeds(keep).await;
-    let id = controller.issue(&SerialKey::Machine, deadline(), &Request::Register(request));
+    let id = controller.issue(
+        &SerialKey::Machine,
+        deadline(),
+        &native_program_request(Request::Register(request)),
+    );
     let refusal = tokio::time::timeout(PATIENCE, controller.wait_command(id))
         .await
         .unwrap();
@@ -633,7 +651,12 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     )
     .unwrap();
     drop(file);
-    let local = command(&controller, &SerialKey::Machine, &Request::Reload).await;
+    let local = command(
+        &controller,
+        &SerialKey::Machine,
+        &native_program_request(Request::Reload),
+    )
+    .await;
     let reloaded = local.clone();
     let local = local["programs"]["entries"]
         .as_array()
@@ -646,7 +669,7 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
     let id = controller.issue(
         &SerialKey::Machine,
         deadline(),
-        &Request::Remove(identity.clone()),
+        &native_program_request(Request::Remove(identity.clone())),
     );
     let refused = tokio::time::timeout(PATIENCE, controller.wait_command(id))
         .await
@@ -655,7 +678,12 @@ async fn programs_register_describe_run_survive_restart_remove_and_reload_with_t
         matches!(refused, orch_link::commands::Progress::Failed(_)),
         "{refused:?}"
     );
-    let tested = command(&controller, &SerialKey::Machine, &Request::Test(identity)).await;
+    let tested = command(
+        &controller,
+        &SerialKey::Machine,
+        &native_program_request(Request::Test(identity)),
+    )
+    .await;
     assert!(
         tested["programs"]["entries"]
             .as_array()
@@ -787,11 +815,11 @@ async fn a_source_that_needs_provider_context_can_register_even_when_its_metadat
     let registered = command(
         &controller,
         &SerialKey::Machine,
-        &Request::Register(MachineProgramRegistration {
+        &native_program_request(Request::Register(MachineProgramRegistration {
             kind: Kind::ProviderSource,
             name: "configured-source".into(),
             command: source,
-        }),
+        })),
     )
     .await;
     let entry = &registered["programs"]["entries"][0];

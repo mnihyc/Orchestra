@@ -13,6 +13,10 @@ A failed action keeps its human explanation and available recovery. These stable
 
 | Reference | Meaning |
 | --- | --- |
+| `error:public_address.busy` | Another public address change is being prepared. The current addresses stay in force. |
+| `error:public_address.unverified` | The browser origin could not be verified. The current addresses stay in force. |
+| `error:public_address.mismatch` | This browser origin does not prove that it serves this installation. |
+| `error:public_address.frontend_not_ready` | The frontend has not loaded the prepared certificate. The current addresses stay in force. |
 | `error:request.invalid` | Something in this request is not valid. Check what you entered and try again. |
 | `error:request.value_refused` | A value in this request is not one that can be kept. Check what you entered and try again. |
 | `error:admin.risk_not_acknowledged` | This change carries a risk that has to be acknowledged first. Tick the acknowledgement and try again. |

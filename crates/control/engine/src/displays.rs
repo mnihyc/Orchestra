@@ -139,6 +139,9 @@ impl Displays {
         if orch_db::queries::environment_facts::refuses(conn, site.id, "environment.vnc").await? {
             return Ok(Some(BrowsersOff::MachinePolicy));
         }
+        if site.stopping {
+            return Ok(Some(BrowsersOff::EnvironmentStopping));
+        }
         if site.status != "running"
             || site.machine_id.is_none()
             || site.machine_online != Some(true)
@@ -788,7 +791,8 @@ impl Displays {
             let reason = match &site {
                 None => Some("environment_stopped"),
                 Some(site)
-                    if site.generation != row.env_generation
+                    if site.stopping
+                        || site.generation != row.env_generation
                         || !matches!(site.status.as_str(), "running" | "offline") =>
                 {
                     Some("environment_stopped")

@@ -151,10 +151,11 @@ function OffNotice({ off, environment }: { off: NonNullable<EnvironmentDisplays[
     disabled_by_policy: t('vnc.off.policy', { environment: environment.name }),
     environment_switch_off: t('vnc.off.switch', { environment: environment.name, owner: environment.owner.display_name }),
     machine_policy: t('vnc.off.machine', { machine: environment.machine?.name ?? environment.name }),
+    environment_stopping: t('terminal.refused.environment_stopping'),
     environment_offline: t('vnc.off.offline', { environment: environment.name }),
   }[off];
   return (
-    <InlineAlert tone={off === 'environment_offline' ? 'info' : 'warning'}>
+    <InlineAlert tone={off === 'environment_offline' || off === 'environment_stopping' ? 'info' : 'warning'}>
       <span data-displays-off={off}>{words}</span>
     </InlineAlert>
   );
