@@ -26,7 +26,7 @@ import { approvalAtItem, approvalOutcome } from '@/features/approvals/current';
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 import { AnswersForm, decisionOfOption, ElicitationForm, type HarnessApproval, OptionButtons, optionWords, planDecision, RequestBody } from '@/features/approvals/Harness';
 import { PlanAnswer } from '@/features/approvals/PlanAnswer';
-import { useTimelineContext } from '@/features/timeline/context';
+import { useConversationTurn, useTimelineContext } from '@/features/timeline/context';
 import { ItemFrame } from '@/features/timeline/ItemActions';
 import { useThreadPart, useThreadView } from '@/realtime/stores/thread';
 import { actionName } from '@/ui/actions';
@@ -61,10 +61,12 @@ function decidedWhat(approval: Approval, t: TFunction): string {
   }
 }
 
-function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostTo: Approval | null; children?: React.ReactNode }) {
+function DecidedLine({ approval, turnId, lostTo, children }: { approval: Approval; turnId: string | null; lostTo: Approval | null; children?: React.ReactNode }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const what = decidedWhat(approval, t);
+  const turn = useConversationTurn(turnId);
+  const what = approval.state === 'cancelled' && turn?.error?.code === 'turn_lost'
+    ? t('inbox.actions.approvalCancelled') : decidedWhat(approval, t);
   const Icon = ['approved', 'answered'].includes(approvalOutcome(approval)) ? ShieldCheck : approval.state === 'pending' ? ShieldQuestionMark : ShieldX;
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-3 py-2">
@@ -296,7 +298,7 @@ export function ApprovalCard({ item, pinned = false }: { item: ApprovalItem; pin
       );
   } else {
     body = (
-      <DecidedLine approval={approval} lostTo={lostTo}>
+      <DecidedLine approval={approval} turnId={item.turn_id} lostTo={lostTo}>
         {approval.kind === 'harness' && (approval.request.request_kind === 'user_input' ? <QuestionAnswers approval={approval} /> : <RequestBody request={approval.request} />)}
       </DecidedLine>
     );
