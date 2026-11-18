@@ -98,6 +98,7 @@ impl Anchor {
                 EngineError::unreadable("the recorded state has no keeping period")
             })?,
             command: FsRestorePlan {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 touched: None,
                 environment_id: environment.id,
                 snapshot_id: snapshot.id,
@@ -161,6 +162,7 @@ impl Anchor {
             witness: crate::archive::snapshot_authority::ReadWitness::from_snapshot(snapshot),
             until: Time::new(until),
             command: FsRestorePlan {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment.id,
                 snapshot_id: snapshot.id,
                 directory: snapshot
@@ -390,7 +392,7 @@ impl NativeSource for ReviewSource {
                 .execute(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.anchor.machine)
                 .execute(conn)
                 .await
@@ -1249,9 +1251,11 @@ fn body_matches(
         ("fs.record", CommandStage::UndoMetadata) => {
             serde_json::from_value::<FsRecord>(body.clone())?
                 == FsRecord {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: plan.environment,
                     snapshot_id: expected.undo_snapshot_id,
                     directory: directory.clone(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Restore,
                     record_days: *record_days,
                     max_bytes: *max_bytes,
@@ -1449,7 +1453,7 @@ async fn physical_cleanup(conn: &mut Conn, request: &Request) -> Result<(), Stop
         .execute(&mut *conn)
         .await
         .map_err(DbError::from)?;
-    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
         .bind(request.anchor.machine)
         .execute(&mut *conn)
         .await

@@ -33,6 +33,7 @@ async fn page(
         .call(EnvironmentFileList, &[&site.environment])
         .token(token)
         .query(&EnvironmentFileListQuery {
+            prefix: None,
             thread: None,
             path: path.to_owned(),
             source,
@@ -186,6 +187,7 @@ async fn offline_opened_versions_are_bounded_deduplicated_and_change_invalidates
             &mut conn,
             site.environment,
             &storage::CachedFile {
+                minimum_reach: orch_access_contract::permissions::FileReach::Roots,
                 path: path.to_owned(),
                 size,
                 mtime_ns: size,
@@ -238,6 +240,7 @@ async fn offline_opened_versions_are_bounded_deduplicated_and_change_invalidates
         &mut conn,
         site.environment,
         &storage::CachedFile {
+            minimum_reach: orch_access_contract::permissions::FileReach::Roots,
             path: "wide/new".to_owned(),
             size: 5,
             mtime_ns: 5,
@@ -264,6 +267,7 @@ struct Gate {
 struct PagedMachine {
     disk: Arc<Disk>,
     clock: Arc<dyn Clock>,
+    observed_from: Option<Time>,
     gate: Option<Arc<Gate>>,
 }
 
@@ -310,7 +314,7 @@ impl Machine for PagedMachine {
             revision,
             next_cursor,
             as_of: self.clock.time(),
-            observed_from: None,
+            observed_from: self.observed_from,
             expires_at: Time::new(self.clock.now() + chrono::Duration::minutes(5)),
         });
         serde_json::to_value(result).map_err(bad)
@@ -325,6 +329,7 @@ async fn live_continuation_is_wrapped_and_the_last_page_is_the_actual_end() -> P
     site.power_on_with(Arc::new(PagedMachine {
         disk: Arc::clone(&site.disk),
         clock: Arc::clone(&site.app().app.clock),
+        observed_from: None,
         gate: None,
     }));
     let first = page(&site, &site.ada.token, "wide", None, None, 1)
@@ -375,6 +380,7 @@ async fn authority_revoked_while_the_native_page_waits_never_returns_its_entries
     site.power_on_with(Arc::new(PagedMachine {
         disk: Arc::clone(&site.disk),
         clock: Arc::clone(&site.app().app.clock),
+        observed_from: None,
         gate: Some(Arc::clone(&gate)),
     }));
     let id = new_id();
@@ -421,6 +427,131 @@ async fn authority_revoked_while_the_native_page_waits_never_returns_its_entries
             .problem()
             .code,
         ErrorCode::AuthzDenied
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_live_folder_continues_when_its_observation_time_moves_forward() -> Proof {
+    let mut site = Site::new().await;
+    site.disk.put("wide/a", b"a");
+    site.disk.put("wide/b", b"b");
+    let began = site.app().app.clock.time();
+    site.power_on_with(Arc::new(PagedMachine {
+        disk: Arc::clone(&site.disk),
+        clock: Arc::clone(&site.app().app.clock),
+        observed_from: Some(began),
+        gate: None,
+    }));
+    let first = page(
+        &site,
+        &site.ada.token,
+        "wide",
+        Some(FileListSource::Live),
+        None,
+        1,
+    )
+    .await
+    .ok();
+    site.world.advance(chrono::Duration::seconds(1));
+    let last = page(
+        &site,
+        &site.ada.token,
+        "wide",
+        Some(FileListSource::Live),
+        first.next_cursor,
+        1,
+    )
+    .await
+    .ok();
+    assert_eq!(last.entries[0].name, "b");
+    assert_eq!(last.revision, first.revision);
+    assert_eq!(last.observed_from, Some(began));
+    assert!(last.as_of > first.as_of);
+    assert!(last.next_cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_interrupted_source_transfer_keeps_its_expiry_and_is_not_disclosed_to_another_reader()
+-> Proof {
+    use orch_api_contract::environment::ThroughThreadQuery;
+    use orch_api_contract::workspace::{EnvironmentFileTransferGet, FileTransferState};
+    let site = Site::new().await;
+    let hash = Hash::of(b"unfinished manifest");
+    let at = site.world.now();
+    let mut conn = site.world.conn().await;
+    let generation =
+        orch_db::queries::environments::workspace::environment(&mut conn, site.environment)
+            .await?
+            .ok_or("no source")?
+            .generation;
+    storage::record_source_transfer(
+        &mut conn,
+        site.environment,
+        site.machine,
+        i64::from(generation),
+        &hash,
+        "interrupted",
+        at,
+    )
+    .await?;
+    storage::begin_upload(
+        &mut conn,
+        &hash,
+        10000,
+        Some(site.machine),
+        at,
+        storage::UploadRetention {
+            seconds: 120,
+            default_source: false,
+        },
+    )
+    .await?;
+    storage::advance_upload(&mut conn, &hash, 100, None, at).await?;
+    sqlx::query("INSERT INTO settings(node_id,key,value) VALUES(NULL,'storage.machine_upload_idle_secs','1') ON CONFLICT(node_id,key) DO UPDATE SET value=EXCLUDED.value").execute(&mut *conn).await?;
+    drop(conn);
+    let reply = site
+        .app()
+        .call(EnvironmentFileTransferGet, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&ThroughThreadQuery { thread: None })
+        .send()
+        .await
+        .ok();
+    let transfer = reply.transfer.ok_or("no transfer receipt")?;
+    assert_eq!(transfer.state, FileTransferState::Interrupted);
+    assert_eq!(
+        transfer.expires_at,
+        Some(Time::new(at + chrono::Duration::seconds(120)))
+    );
+    assert_eq!(transfer.idle_retention_secs, Some(120));
+    assert_eq!(transfer.last_piece_at, Some(Time::new(at)));
+    let denied = site
+        .app()
+        .call(EnvironmentFileTransferGet, &[&site.environment])
+        .token(&site.eve.token)
+        .query(&ThroughThreadQuery { thread: None })
+        .send()
+        .await;
+    assert_eq!(denied.status, http::StatusCode::FORBIDDEN);
+    let mut conn = site.world.conn().await;
+    sqlx::query("UPDATE environments SET generation=generation+1 WHERE id=$1")
+        .bind(site.environment)
+        .execute(&mut *conn)
+        .await?;
+    drop(conn);
+    let later = site
+        .app()
+        .call(EnvironmentFileTransferGet, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&ThroughThreadQuery { thread: None })
+        .send()
+        .await
+        .ok();
+    assert!(
+        later.transfer.is_none(),
+        "an earlier incarnation is not the current source transfer"
     );
     Ok(())
 }
