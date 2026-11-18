@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/workbench-grid.spec.ts tests/e2e/admin-mode.spec.ts tests/e2e/chat.spec.ts tests/accessibility/chat.spec.ts --project=chromium --grep "keeps the active view tab fully visible|the same person reaches private content|several people make a group with a name|an admin reads a chat among others|an admin can identify and open a private chat"

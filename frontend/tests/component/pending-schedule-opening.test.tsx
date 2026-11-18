@@ -8,7 +8,7 @@ import { client } from '@/api/client';
 import { feedSequences } from '@/api/cache';
 import { pendingAgentSchedulesQuery, seedPendingAgentSchedules, topicSchedulesQuery, type ThreadPendingAgentSchedules } from '@/api/inputSchedules';
 import { scheduledReads } from '@/api/readScheduler';
-import { PendingAgentSchedules } from '@/features/schedules/Schedules';
+import { PendingAgentSchedules } from '@/features/schedules/PendingAgentSchedules';
 import { i18n, setLocale } from '@/i18n';
 import type { HttpTransport } from '../doubles/http-wire';
 import { inputSchedule, SCHEDULE_THREAD, SCHEDULE_TOPIC } from '../doubles/input-schedules';

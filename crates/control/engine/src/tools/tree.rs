@@ -238,6 +238,36 @@ pub fn parse_path(text: &str) -> Option<Named> {
     Some(Named::Path { absolute, parts })
 }
 
+/// A document's browser address names the same local object as its shared-tree identity.
+#[must_use]
+pub fn parse_address(text: &str, origins: &[String]) -> Option<Named> {
+    let text = text.trim();
+    let path = if text.starts_with("http://") || text.starts_with("https://") {
+        let address = url::Url::parse(text).ok()?;
+        if !origins.iter().any(|origin| {
+            url::Url::parse(origin).is_ok_and(|local| local.origin() == address.origin())
+        }) || !address.username().is_empty()
+            || address.password().is_some()
+        {
+            return None;
+        }
+        address.path().to_owned()
+    } else if text.starts_with("/doc/") {
+        text.split(['?', '#']).next()?.to_owned()
+    } else {
+        return parse_path(text);
+    };
+    let mut parts = path.trim_matches('/').split('/');
+    if parts.next()? != "doc" {
+        return None;
+    }
+    let id = parts.next()?.parse::<Id>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Named::Id(id))
+}
+
 /// A pattern over the names of entries, as a shell has it: `*`, `?` and `[…]`.
 #[derive(Debug, Clone)]
 pub struct Pattern(GlobMatcher);
@@ -3186,6 +3216,40 @@ mod tests {
         let id = new_id();
         assert_eq!(parse_path(&format!("id:{id}")), Some(Named::Id(id)));
         assert_eq!(parse_path("id:nonsense"), None);
+    }
+
+    #[test]
+    fn a_pasted_document_link_resolves_on_this_installation_without_fetching_another_site() {
+        let id = new_id();
+        let origin = "https://orch.example.test";
+        let origins = vec![
+            origin.to_owned(),
+            "https://alternate.example.test".to_owned(),
+        ];
+        for address in [
+            format!("{origin}/doc/{id}?block={}", new_id()),
+            format!("/doc/{id}#heading"),
+        ] {
+            assert_eq!(parse_address(&address, &origins), Some(Named::Id(id)));
+        }
+        for address in [
+            format!("https://another.example.test/doc/{id}"),
+            format!("https://person@orch.example.test/doc/{id}"),
+            format!("{origin}/doc/not-an-identifier"),
+        ] {
+            assert_eq!(parse_address(&address, &origins), None);
+        }
+        assert_eq!(
+            parse_address("docs/Plan.md", &origins),
+            parse_path("docs/Plan.md")
+        );
+        assert_eq!(
+            parse_address(
+                &format!("https://alternate.example.test/doc/{id}"),
+                &origins
+            ),
+            Some(Named::Id(id))
+        );
     }
 
     #[test]

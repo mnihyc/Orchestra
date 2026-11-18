@@ -254,6 +254,23 @@ impl Dir {
     }
 
     /// Writes this directory's own changes to disk, where the system can.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
+        Ok(Box::new(std::iter::from_fn(move || {
+            loop {
+                let entry = match listing.read()? {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(io_error(error))),
+                };
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    return Some(Ok(OsString::from_vec(name.to_vec())));
+                }
+            }
+        })))
+    }
+
     /// Visits names directly from the directory stream; false stops without collecting or sorting the rest.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
