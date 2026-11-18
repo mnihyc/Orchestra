@@ -1170,6 +1170,8 @@ commands! {
     WatchSet = "watch.set": ENVIRONMENT, None, 15, None, WatchSet => Empty;
     /// Makes a unit for a runtime.
     NodeRuntimeCreate = "node.runtime.create": NODE, Runtime, 600, None, NodeRuntimeCreate => NodeRuntimeCreateResult;
+    /// Admits one source-owned isolated program over an actual provider placement.
+    NodeProgramAdmit = "node.program.admit": NODE, Runtime, 120, None, NodeProgramAdmit => Empty;
     /// Starts a runtime's unit.
     NodeRuntimeStart = "node.runtime.start": NODE, Runtime, 120, None, NodeRuntimeStart => Empty;
     /// Stops a runtime's unit.
@@ -1811,6 +1813,9 @@ pub struct SessionOpenMcp {
 /// The body of `session.open`: everything a session is set up with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpen {
+    /// The actual owned isolated work; its ticket stays with the trusted adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_work: Option<crate::program_work::Session>,
     /// Current admitted model metadata and unchanged core capability resolutions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
@@ -1867,6 +1872,8 @@ pub struct SessionOpen {
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the selected program's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -4008,6 +4015,16 @@ pub struct NodeRuntimeCreateResult {
     pub unit: foreign::UnitRef,
 }
 
+/// Admit a private capability program without creating a unit or lending environment access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeProgramAdmit {
+    /// The work identity used by its native serial key.
+    pub runtime_id: Id,
+    /// Immutable physical facts supplied by the real controller producer.
+    pub work: crate::program_work::Admission,
+}
+
 /// The body of `node.runtime.start`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeRuntimeStart {
@@ -5114,7 +5131,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
-            "background_wake": true,
+            "web_action_wait_secs": 120, "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",

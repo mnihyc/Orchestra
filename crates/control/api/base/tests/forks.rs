@@ -316,7 +316,12 @@ impl Forks {
 
     /// A thread of Ada's that has said something and been answered.
     async fn thread_with_history(&self, name: &str) -> Id {
-        let thread = self.s.thread_by(&self.s.ada, name).await.base.id;
+        self.thread_with_history_by(&self.s.ada, name).await
+    }
+
+    /// A thread of `owner`'s that has said something (Ada says it) and been answered.
+    async fn thread_with_history_by(&self, owner: &Who, name: &str) -> Id {
+        let thread = self.s.thread_by(owner, name).await.base.id;
         self.s
             .exchange(thread, 0, "Plan the work", "The plan is ready")
             .await;
