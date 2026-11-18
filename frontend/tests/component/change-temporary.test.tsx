@@ -11,7 +11,7 @@ import { creationHost } from '../unit/start-fixtures';
 import { snapshot } from '../unit/continuation-fixtures';
 import { show } from './support';
 vi.mock('@/api/forks', async (load) => ({ ...await load<typeof ForksApi>(), placesQuery: (id: string) => ({ queryKey: ['temporary-places', id], queryFn: () => Promise.resolve([creationHost()]) }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 afterEach(async () => { cleanup(); await setLocale('en'); });
 function Placement({ result }: { result: 'new' | 'replace' }) {
   const [choices, setChoices] = useState(initialChoices(result));

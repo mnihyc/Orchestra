@@ -218,7 +218,7 @@ pub(crate) async fn authorize_recovery(
     side: &threads::ThreadRow,
     recipient: &threads::SegmentRow,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), EngineError> {
+) -> Result<cuts::Cut, EngineError> {
     let original = cuts::cut(conn, side.node_id)
         .await?
         .filter(|cut| {
@@ -296,7 +296,8 @@ pub(crate) async fn authorize_recovery(
                 EngineError::unreadable("The retained recovery conversation is unavailable.")
             })?;
     }
-    authorize_source_grant(engine, conn, side, &original, &auth, now).await
+    authorize_source_grant(engine, conn, side, &original, &auth, now).await?;
+    Ok(original)
 }
 
 /// A durable successful creation can precede SessionOpened/engine publication.
