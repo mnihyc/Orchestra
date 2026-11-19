@@ -561,9 +561,35 @@ pub async fn host_places_among(
     .await
 }
 
+/// Judge one factual pool member through the ordinary native host/template admission.
+pub async fn host_places_at_pool(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &Ask<'_>,
+    selection: orch_authz::pools::Selection<'_>,
+    registered: Option<Id>,
+) -> Result<Vec<HostPlace>, EngineError> {
+    if selection.path.is_empty() {
+        return Err(EngineError::unreadable(
+            "the host pool has no current membership path",
+        ));
+    }
+    host_places_inner(
+        conn,
+        principal,
+        ask,
+        None,
+        None,
+        Some(HostSelection::Pool(selection, registered)),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
 enum HostSelection<'a> {
     Capped(&'a [Id]),
     Window(&'a [Id]),
+    Pool(orch_authz::pools::Selection<'a>, Option<Id>),
 }
 
 /// Plans placement of this current environment, retaining only its own existing capacity slot.
@@ -574,6 +600,25 @@ pub async fn host_places_for_environment(
     environment: Id,
 ) -> Result<Vec<HostPlace>, EngineError> {
     host_places_inner(conn, principal, ask, Some(environment), None, None).await
+}
+
+/// Recheck an accepted host window while retaining this new registration's own capacity slot.
+pub async fn host_places_for_environment_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &Ask<'_>,
+    environment: Id,
+    hosts: &[Id],
+) -> Result<Vec<HostPlace>, EngineError> {
+    host_places_inner(
+        conn,
+        principal,
+        ask,
+        Some(environment),
+        None,
+        Some(HostSelection::Window(hosts)),
+    )
+    .await
 }
 
 /// A completed environment may retain its exact published host/template through
@@ -625,12 +670,26 @@ async fn host_places_inner(
     retained_host: Option<Id>,
     selected: Option<HostSelection<'_>>,
 ) -> Result<Vec<HostPlace>, EngineError> {
+    let (pool, registered) = match selected {
+        Some(HostSelection::Pool(selection, registered)) => (Some(selection), registered),
+        _ => (None, None),
+    };
     let may_use = if let Some(host) = retained_host {
         vec![host]
+    } else if let Some(selection) = pool {
+        match selection.leaf {
+            orch_provider_contract::pools::Leaf::Host { id } => vec![*id],
+            _ => return Err(EngineError::unreadable("the selected member is not a host")),
+        }
     } else if let Some(selection) = selected {
         let (ids, capped) = match selection {
             HostSelection::Capped(ids) => (ids, true),
             HostSelection::Window(ids) => (ids, false),
+            HostSelection::Pool(..) => {
+                return Err(EngineError::unreadable(
+                    "the host pool selection was not prepared",
+                ));
+            }
         };
         let mut allowed = resources::effective_among(conn, principal, ids, Policy::default())
             .await?
@@ -694,7 +753,14 @@ async fn host_places_inner(
     let mut loads = loads_by_host(rows::loads(conn, &may_use).await?);
     let system_when_full = system_when_full(conn).await?;
     let full_percent = system_full_percent(conn).await?;
-    let policies = policies_at(conn, ask.home).await?;
+    let policies = if let Some(selection) = pool {
+        let mut ids = ask.wanted.mounts.clone();
+        ids.extend(may_use.iter().copied());
+        ids.push(ask.wanted.template.id);
+        crate::access::resource_policies_for_choice(conn, &ids, selection.path).await?
+    } else {
+        policies_at(conn, ask.home).await?
+    };
     let wanted = ask.wanted;
     let mut places: Vec<HostPlace> = Vec::new();
     for host in hosts {
@@ -817,7 +883,28 @@ async fn host_places_inner(
                     )
                     .await?
                 }
-                None => check_creation(conn, principal, &request, &policies).await?,
+                None => match pool {
+                    Some(selection) => match registered {
+                        Some(environment) => {
+                            orch_authz::environments::check_registered_creation_at_pool(
+                                conn,
+                                principal,
+                                &request,
+                                &policies,
+                                selection,
+                                environment,
+                            )
+                            .await?
+                        }
+                        None => {
+                            orch_authz::environments::check_creation_at_pool(
+                                conn, principal, &request, &policies, selection,
+                            )
+                            .await?
+                        }
+                    },
+                    None => check_creation(conn, principal, &request, &policies).await?,
+                },
             };
             match decision {
                 Creating::Allowed(created) => Some(*created),

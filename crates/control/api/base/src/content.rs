@@ -5,17 +5,13 @@
 //! send. Nothing is moved for its own sake: every request names a command that is open for that
 //! machine. An upload is taken only for a kind of command that uploads and only up to the largest
 //! file the system stores; a download is served only for content that the command itself lists
-//! (and, for a command that writes a tree down, the files its list names); at most four transfers
-//! run for a machine at once. Content a machine produces on its own account, including its tree,
-//! shell outputs and retained agent outputs, names the nil command. Environment and agent roles
-//! may probe and upload that content; neither may download on the standing account.
+//! (and, for a command that writes a tree down, the files its list names). The accepted system
+//! policy bounds concurrent pieces. Standing environment and agent content names the nil command;
+//! it can be probed and uploaded but not downloaded on that account.
 //!
-//! **A piece is the next piece.** An upload has a row (`blob_uploads`) that says how many bytes
-//! have arrived, and a file where they wait. A piece that begins anywhere else is refused with the
-//! number that has arrived, which is how a machine whose answer was lost finds out where to go on.
-//! The last piece completes the upload: the file is put in the store, which checks it against the
-//! hash and the size it was announced with, and an upload whose content is not what its hash says
-//! is thrown away with a refusal the machine acts on.
+//! Pieces may arrive in any order. The parent upload lock serializes durable file writes and
+//! PostgreSQL coalesces acknowledged byte intervals. A retry may repeat identical bytes; the last
+//! missing range completes the upload only after the whole file passes its size and hash checks.
 
 use crate::certificates::LinkFault;
 
@@ -83,7 +79,7 @@ use orch_link_contract::content::ChunkRefusal;
 
 use orch_link_contract::content::HASH_MISMATCH;
 
-use orch_link_contract::content::MAX_CHUNK_BYTES;
+use orch_link_contract::content::TransferStatus;
 
 use orch_link_contract::content::MAX_MISSING_HASHES;
 
@@ -98,8 +94,6 @@ use orch_link_contract::content::RECEIVED_HEADER;
 use orch_link_contract::content::STATUS_HASH_MISMATCH;
 
 use orch_link_contract::content::STATUS_OFFSET_CONFLICT;
-
-use orch_link_contract::content::accept_chunk;
 
 use orch_link_contract::content::listed_hashes;
 
@@ -166,6 +160,7 @@ const AGENT_ROLE: &str = "agent";
 pub fn routes() -> Router<App> {
     Router::new()
         .route("/internal/link/blobs/missing", post(missing))
+        .route("/internal/link/blobs/{hash}/progress", get(transfer_status))
         .route(
             "/internal/link/blobs/{hash}",
             get(download).head(probe).put(upload),
@@ -352,7 +347,7 @@ impl Asker {
         if listed_hashes(body).contains(hash) {
             return Ok(true);
         }
-        if *kind != CommandKind::FsMaterialize {
+        if !writes_a_tree_down(*kind) {
             return Ok(false);
         }
         let Some(manifest) = body
@@ -369,6 +364,16 @@ impl Asker {
             .map_err(|e| LinkFault::internal(&e))?;
         Ok(files.contains(hash))
     }
+}
+
+/// Whether a command of this kind writes a tree down from a list it names in `manifest_blob`, and
+/// fetches every file of the list by its hash: a copy of a workspace, and the import of a data part
+/// that a machine move carries. Their bodies hold the list alone, so the files are those the list names.
+fn writes_a_tree_down(kind: CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::FsMaterialize | CommandKind::FsMaterializeIfAbsent | CommandKind::FsDataImport
+    )
 }
 
 fn denied(wants: Wants) -> LinkFault {
@@ -521,6 +526,82 @@ async fn probe(
     }
 }
 
+/// Resumption uses a finite JSON body rather than a range vector in HEAD headers.
+async fn transfer_status(
+    State(app): State<App>,
+    Extension(peer): Extension<Peer>,
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, LinkFault> {
+    let asker = asker(&app, &peer, &headers).await?;
+    let hash = hash_of(&hash)?;
+    if !asker.permits(Wants::Probe) {
+        return Err(denied(Wants::Probe));
+    }
+    let source = asker.archives(&app, hash).await?;
+    let mut tx = app.db.begin().await.map_err(|e| LinkFault::internal(&e))?;
+    // One snapshot gives ranges and count from the same committed acknowledgement.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| LinkFault::internal(&e))?;
+    let row = storage::upload(&mut tx, &hash)
+        .await
+        .map_err(|e| LinkFault::internal(&e))?;
+    if row
+        .as_ref()
+        .is_some_and(|row| row.machine_id != Some(asker.machine.id))
+    {
+        return Err(LinkFault::forbidden(
+            "that unfinished upload belongs to another sender",
+        ));
+    }
+    let policy = if row.is_some() {
+        storage::upload_policy(&mut tx, &hash)
+            .await
+            .map_err(|e| LinkFault::internal(&e))?
+    } else {
+        crate::uploads::transfer_policy(&mut tx)
+            .await
+            .map_err(source_fault)?
+    };
+    let size = app
+        .blobs
+        .store()
+        .size(&hash)
+        .await
+        .map_err(|e| LinkFault::internal(&e))?;
+    let status = match size {
+        Some(size) => TransferStatus {
+            progress: BlobProgress {
+                received: size,
+                complete: true,
+            },
+            ranges: if size == 0 {
+                vec![]
+            } else {
+                vec![orch_api_contract::threads::UploadRange {
+                    start: 0,
+                    len: size,
+                }]
+            },
+            policy,
+        },
+        None => TransferStatus {
+            progress: BlobProgress {
+                received: row.map_or(0, |row| row.received),
+                complete: false,
+            },
+            ranges: storage::upload_ranges(&mut tx, &hash)
+                .await
+                .map_err(|e| LinkFault::internal(&e))?,
+            policy,
+        },
+    };
+    drop(tx);
+    archive_response(source, json_reply(&status)).await
+}
+
 // ---------------------------------------------------------------- POST missing
 
 async fn missing(
@@ -570,9 +651,22 @@ async fn download(
         return Err(denied(Wants::Download));
     }
     let source = asker.archives(&app, hash).await?;
+    let policy = {
+        let mut conn = app
+            .db
+            .acquire()
+            .await
+            .map_err(|e| LinkFault::internal(&e))?;
+        crate::uploads::transfer_policy(&mut conn)
+            .await
+            .map_err(source_fault)?
+    };
     let transfer = app
         .blobs
-        .begin_transfer(asker.machine.id)
+        .begin_transfer(
+            asker.machine.id,
+            u32::try_from(policy.requests).unwrap_or(u32::MAX),
+        )
         .map_err(|error| LinkFault::new(429, "rate_limited", error.to_string()))?;
     let range = header_text(&headers, header::RANGE.as_str()).and_then(ByteRange::from_header);
     let read = match app.blobs.read(&hash, range).await {
@@ -651,9 +745,24 @@ async fn upload(
         return Err(denied(Wants::Upload));
     }
     let max = max_blob_bytes(&app).await?;
+    let policy = {
+        let mut conn = app.db.acquire().await.map_err(|e| failed(&e))?;
+        match storage::optional_upload_policy(&mut conn, &hash)
+            .await
+            .map_err(|e| failed(&e))?
+        {
+            Some(policy) => policy,
+            None => crate::uploads::transfer_policy(&mut conn)
+                .await
+                .map_err(source_fault)?,
+        }
+    };
     let _transfer = app
         .blobs
-        .begin_transfer(asker.machine.id)
+        .begin_transfer(
+            asker.machine.id,
+            u32::try_from(policy.requests).unwrap_or(u32::MAX),
+        )
         .map_err(|error| LinkFault::new(429, "rate_limited", error.to_string()))?;
     // Content the store holds already needs nothing more, whatever piece this is.
     if let Some(size) = app
@@ -682,14 +791,16 @@ async fn upload(
     }
     let piece = to_bytes(
         body,
-        usize::try_from(MAX_CHUNK_BYTES).unwrap_or(usize::MAX) + 1,
+        usize::try_from(policy.max_piece_bytes)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1),
     )
     .await
     .map_err(|_| {
         LinkFault::new(
             413,
             "request.too_large",
-            "a piece carries at most four mebibytes",
+            "the piece exceeds its accepted size",
         )
     })?;
     let len = i64::try_from(piece.len()).unwrap_or(i64::MAX);
@@ -699,16 +810,27 @@ async fn upload(
         .await
         .map_err(|e| failed(&e))?;
     if row.is_none() {
-        // Only a first piece may begin an upload: any other is told where to begin.
-        if query.offset != 0 {
-            return Ok(refused_piece(ChunkRefusal::Offset { received: 0 }));
-        }
         if query.size < 0 || query.size > max {
             return Ok(refused_piece(ChunkRefusal::BlobTooLarge));
         }
-        storage::begin_upload(&mut tx, &hash, query.size, Some(asker.machine.id), now)
+        let retention = crate::cache::upload_retention(&mut tx)
             .await
             .map_err(|e| failed(&e))?;
+        let created = storage::begin_upload(
+            &mut tx,
+            &hash,
+            query.size,
+            Some(asker.machine.id),
+            now,
+            retention,
+        )
+        .await
+        .map_err(|e| failed(&e))?;
+        if created {
+            storage::set_upload_policy(&mut tx, &hash, policy)
+                .await
+                .map_err(|e| failed(&e))?;
+        }
         row = storage::lock_upload(&mut tx, &hash)
             .await
             .map_err(|e| failed(&e))?;
@@ -726,15 +848,42 @@ async fn upload(
             "the size is not the one this content was announced with",
         ));
     }
-    let progress = match accept_chunk(row.received, query, len, max) {
-        Ok(progress) => progress,
-        Err(refusal) => return Ok(refused_piece(refusal)),
-    };
-    app.blobs.make_uploads_dir().await.map_err(|e| failed(&e))?;
-    let part = app.blobs.part_of(&hash);
-    crate::blobs::write_piece(&part, row.received, &piece)
+    let policy = storage::upload_policy(&mut tx, &hash)
         .await
         .map_err(|e| failed(&e))?;
+    let range = match orch_link_contract::content::validate_piece(
+        query,
+        len,
+        row.size,
+        policy.max_piece_bytes,
+    ) {
+        Ok(range) => range,
+        Err(refusal) => return Ok(refused_piece(refusal)),
+    };
+    let end = range.start + range.len;
+    let ranges = storage::upload_ranges(&mut tx, &hash)
+        .await
+        .map_err(|e| failed(&e))?;
+    app.blobs.make_uploads_dir().await.map_err(|e| failed(&e))?;
+    let part = app.blobs.part_of(&hash);
+    let file = crate::blobs::prepare_piece(&part, query.offset)
+        .await
+        .map_err(|e| failed(&e))?;
+    if let Err(error) = file.write_unreceived(&piece, &ranges).await {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            return Ok(refused_piece(ChunkRefusal::Offset {
+                received: row.received,
+            }));
+        }
+        return Err(failed(&error));
+    }
+    let received = storage::cover_upload(&mut tx, &hash, query.offset, end)
+        .await
+        .map_err(|e| failed(&e))?;
+    let progress = BlobProgress {
+        received,
+        complete: received == row.size,
+    };
     storage::advance_upload(
         &mut tx,
         &hash,

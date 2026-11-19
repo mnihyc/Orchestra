@@ -169,7 +169,7 @@ pub(super) async fn run(job: &Job, environment: Id, phase: &str) -> Result<Done,
                     "the connected copy generation changed",
                 ));
             }
-            let session:Option<chrono::DateTime<Utc>>=sqlx::query_scalar("SELECT COALESCE(session_started_at,last_seen_at) FROM machines WHERE id=$1 AND status='active' AND online AND deleted_at IS NULL FOR SHARE")
+            let session:Option<chrono::DateTime<Utc>>=sqlx::query_scalar("SELECT COALESCE(session_started_at,last_seen_at) FROM machines WHERE id=$1 AND status='active' AND online AND deleted_at IS NULL FOR KEY SHARE")
                 .bind(machine).fetch_optional(&mut *tx).await.map_err(DbError::from)?
                 .ok_or_else(||failed("copy_unavailable","the target machine is offline"))?;
             sqlx::query("UPDATE environments SET status='running',status_detail=NULL,attached_session=$2,updated_at=$3 WHERE id=$1 AND status='provisioning'")
