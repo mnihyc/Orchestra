@@ -86,6 +86,8 @@ pub struct ReadScope {
 /// One reader's row cut; it is never reused across credentials or snapshots.
 #[derive(Debug)]
 struct Snapshot {
+    retained_inputs: Vec<orch_api_contract::threads::RetainedInput>,
+    retained_inputs_next: Vec<orch_api_contract::threads::RetainedInputContinuation>,
     projection: Option<ThreadContinuationProjection>,
     inputs_next_after: Option<Id>,
     inputs_queue_revision: Option<i64>,
@@ -106,6 +108,8 @@ struct Snapshot {
 impl Snapshot {
     fn empty() -> Self {
         Self {
+            retained_inputs: Vec::new(),
+            retained_inputs_next: Vec::new(),
             projection: None,
             inputs_next_after: None,
             inputs_queue_revision: None,
@@ -303,6 +307,8 @@ async fn load(
         })
         .collect();
     Ok(Snapshot {
+        retained_inputs: synced.retained_inputs,
+        retained_inputs_next: synced.retained_inputs_next,
         projection: Some(synced.projection),
         inputs_next_after: synced.inputs_next_after,
         inputs_queue_revision: Some(synced.inputs_queue_revision),
@@ -379,7 +385,7 @@ pub(crate) async fn read_scoped(
     // Personalized rows and authority share one cut. Do not reuse another credential's
     // snapshot, even when its user and numeric cursor happen to match.
     let mut tx = feeds::begin_reading(&inner.db).await?;
-    let snapshot = load(inner, &mut tx, thread, after, scope).await?;
+    let mut snapshot = load(inner, &mut tx, thread, after, scope).await?;
     #[cfg(any(test, feature = "test-support"))]
     super::history_read_tests::pause(super::history_read_tests::Cut::SocketRows).await;
     if snapshot.gone {
@@ -398,9 +404,6 @@ pub(crate) async fn read_scoped(
     if !snapshot.complete || snapshot.seq < upto {
         return Ok(Rows::TooMany);
     }
-    let Some(principal) = principal_of(inner, &mut tx, person).await? else {
-        return Ok(Rows::Nothing);
-    };
     let projection = snapshot
         .projection
         .as_ref()
@@ -419,59 +422,101 @@ pub(crate) async fn read_scoped(
     }
     let mut ids = orch_engine::continuations::projection::item_inputs(&snapshot.items);
     ids.extend(changed);
-    let metadata = orch_engine::continuations::projection::metadata(
-        inner.engine()?,
-        &mut tx,
-        &principal,
-        thread,
-        projection.viewed_continuation_id,
-        ids,
-    )
-    .await
-    .map_err(Fail::other)?;
-    let mut highest = snapshot.highest;
-    if !metadata.summaries.is_empty() || metadata.viewed_prompt.is_some() {
-        highest = highest.max(Some(snapshot.seq));
-    }
-    let mut own = None;
-    if snapshot.state_stamp > after
-        && let Some(mut found) = thread_view(inner, &mut tx, &principal, thread).await?
-    {
-        found.my_last_read_seq = continuation_rows::reading::last_read(
-            &mut tx,
-            person,
-            thread,
-            projection.viewed_continuation_id,
-        )
-        .await?;
-        highest = highest.max(Some(snapshot.state_stamp));
-        own = Some(found);
-    }
-    let Some(highest) = highest else {
-        return Ok(Rows::Nothing);
-    };
-    // Only this credential's items receive its approval authority.
+    let state_changed = snapshot.state_stamp > after;
+    let prompt_changed = !ids.is_empty()
+        || state_changed
+        || snapshot
+            .inputs
+            .iter()
+            .any(|input| input.seq_updated > after)
+        || snapshot.turns.iter().any(|turn| turn.seq_updated > after)
+        || snapshot
+            .segments
+            .iter()
+            .any(|segment| segment.seq_updated > after);
     let mut items = snapshot.items;
-    if items.iter().any(|item| {
+    let approvals_changed = items.iter().any(|item| {
         matches!(
             &item.payload,
             orch_api_contract::threads::ItemPayload::Approval(_)
         )
-    }) {
-        crate::routes::threads::approval_items::project(
-            &mut tx,
-            &principal,
-            thread,
-            &mut items,
-            inner.clock.now(),
-            inner.engine()?,
-        )
-        .await
-        .map_err(Fail::other)?;
+    });
+    let mut metadata = orch_engine::continuations::projection::PromptMetadata {
+        summaries: Vec::new(),
+        viewed_prompt: None,
+    };
+    let mut highest = snapshot.highest;
+    let mut own = None;
+    // Item-only frames retain the socket's current admission and the boundary recheck in deliver.
+    // Older segments/turns may accompany a new item as its context; they do not change the prompt.
+    // Their raw rows need no account/prompt projection. Changed prompt groups, other timeline rows,
+    // the thread's state or an approval still use the full current personalized projection.
+    if prompt_changed || approvals_changed {
+        let Some(principal) = principal_of(inner, &mut tx, person).await? else {
+            return Ok(Rows::Nothing);
+        };
+        if prompt_changed {
+            metadata = orch_engine::continuations::projection::metadata(
+                inner.engine()?,
+                &mut tx,
+                &principal,
+                thread,
+                projection.viewed_continuation_id,
+                ids,
+            )
+            .await
+            .map_err(Fail::other)?;
+        }
+        if state_changed
+            && let Some(mut found) = thread_view(inner, &mut tx, &principal, thread).await?
+        {
+            if projection.viewed_continuation_id != projection.active_continuation_id {
+                found.queue.eligibility =
+                    Some(orch_api_contract::threads::QueueEligibility::Unreported);
+            }
+            found.my_last_read_seq = continuation_rows::reading::last_read(
+                &mut tx,
+                person,
+                thread,
+                projection.viewed_continuation_id,
+            )
+            .await?;
+            highest = highest.max(Some(snapshot.state_stamp));
+            own = Some(found);
+        }
+        if approvals_changed {
+            crate::routes::threads::approval_items::project(
+                &mut tx,
+                &principal,
+                thread,
+                &mut items,
+                inner.clock.now(),
+                inner.engine()?,
+            )
+            .await
+            .map_err(Fail::other)?;
+        }
     }
+    if !metadata.summaries.is_empty() || metadata.viewed_prompt.is_some() {
+        highest = highest.max(Some(snapshot.seq));
+    }
+    let Some(highest) = highest else {
+        return Ok(Rows::Nothing);
+    };
+    // `principal_of` admits only the socket's own user: item-only frames read no principal.
+    orch_engine::notifications::decisions::project(
+        &mut tx,
+        person,
+        &mut snapshot.turns,
+        &mut items,
+    )
+    .await
+    .map_err(Fail::other)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(Rows::Frame(Box::new(Frame {
         data: SyncData::Thread(ThreadData {
+            retained_inputs: some(snapshot.retained_inputs),
+            retained_inputs_next: some(snapshot.retained_inputs_next),
             projection: snapshot.projection,
             prompt_summaries: metadata.summaries,
             viewed_prompt: metadata.viewed_prompt,

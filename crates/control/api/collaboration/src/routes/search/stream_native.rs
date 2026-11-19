@@ -240,8 +240,12 @@ async fn prepare(
         let value = stream::prepare(ctx, conn, stream::validate(query.clone())?).await?;
         let origin = value.origin().cloned();
         let current = current_caller(ctx, conn, caller, origin.as_ref()).await?;
-        let (_, _, _, interest) =
+        let (principal, scopes, exhausted, interest) =
             search::content_frame(ctx, conn, &current, &STREAM, value.selection()).await?;
+        let mut value = value;
+        value
+            .prepare_facts(ctx, conn, &principal, &scopes, exhausted)
+            .await?;
         cancellation.disarm();
         return Ok((
             Prepared {
