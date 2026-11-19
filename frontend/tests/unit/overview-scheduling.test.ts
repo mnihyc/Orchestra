@@ -1,6 +1,5 @@
 // @vitest-environment node
 /** Native observers and authority repair share the overview owner, retaining explicit paging and retry. */
-import type * as ClientModule from '@/api/client';
 import { InfiniteQueryObserver, QueryClient, QueryObserver } from '@tanstack/react-query';
 import { expect, it, vi } from 'vitest';
 import { firstStepsQuery } from '@/api/firstSteps';
@@ -14,7 +13,7 @@ import { World } from '../doubles/world';
 
 const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: unknown) => Promise<{ data: unknown; response: Response }>>() }));
 vi.mock('@/api/client', async (original) => {
-  const actual = await original<typeof ClientModule>();
+  const actual = await original<typeof import('@/api/client')>();
   return { ...actual, api: { ...actual.api, GET: calls.get } };
 });
 

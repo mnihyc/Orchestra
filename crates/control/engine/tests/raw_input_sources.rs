@@ -46,27 +46,17 @@ fn prefix(destination: u128) -> Prepared {
 
 fn complete(destination: u128, upload: u128) -> Prepared {
     let mut plan = prefix(destination);
-    let reads = plan
+    let source = plan
         .variant()
         .facets
         .iter()
-        .enumerate()
-        .filter(|(_, facet)| {
+        .position(|facet| {
             facet.usage == FacetUsage::Required
-                && facet.action == orch_access_contract::key_scope::KeyAction::Read
+                && facet.target == TargetResolver::Resolved("attachment_source")
         })
-        .map(|(index, facet)| (index, facet.resources.contains(&UPLOAD)))
-        .collect::<Vec<_>>();
-    for (index, retained_upload) in reads {
-        if retained_upload {
-            let account =
-                KeyTargetKind::Identity(orch_access_contract::key_scope::KeyIdentityKind::Account);
-            plan.bind_collection(index, &[(UPLOAD, vec![target(account, upload)])])
-                .unwrap();
-        } else {
-            plan.bind_empty(index).unwrap();
-        }
-    }
+        .unwrap();
+    plan.bind(source, UPLOAD, &[target(UPLOAD, upload)])
+        .unwrap();
     plan
 }
 

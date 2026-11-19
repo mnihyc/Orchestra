@@ -292,9 +292,6 @@ pub struct InvitationPreviewWhat {
 /// What an invitation shows to whoever holds its token, before it is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InvitationPreview {
-    /// Current effective organization terms, or null for no terms and system invitations.
-    #[serde(default)]
-    pub terms: Option<InvitationTerms>,
     /// What it invites to.
     pub kind: InvitationKind,
     /// The org, for an org invitation.
@@ -311,15 +308,6 @@ pub struct InvitationPreview {
     pub email_bound: bool,
     /// When it stops being good.
     pub expires_at: Time,
-}
-
-/// Exact joined Markdown shown to the invitee, and its SHA-256 acknowledgement identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct InvitationTerms {
-    /// The effective text, root organization first, joined by the ordinary setting resolver.
-    pub text: String,
-    /// Lowercase hexadecimal SHA-256 of the UTF-8 bytes of exactly text.
-    pub hash: String,
 }
 
 /// Searches for people by the start of a username or a part of a display name
@@ -377,15 +365,12 @@ pub struct InvitationCreateReply {
     /// The invitation.
     pub invitation: Invitation,
     /// The secret of the link, shown once.
-    pub token: Option<String>,
+    pub token: String,
     /// The address of the link to give out.
-    pub url: Option<String>,
+    pub url: String,
     /// True when a personal link went out by mail. It is false where the org cannot send mail, and
     /// then the caller hands the link on.
     pub sent: bool,
-    /// A completed repeat has no retrievable secret or link.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
 }
 
 /// The authorized new capability without existing invitation or destination content.
@@ -396,14 +381,11 @@ pub struct InvitationCreateReceipt {
     /// The offer that was created.
     pub invitation_id: Id,
     /// The newly generated secret, shown once.
-    pub token: Option<String>,
+    pub token: String,
     /// The generated capability link.
-    pub url: Option<String>,
+    pub url: String,
     /// Whether the native mail intent was accepted.
     pub sent: bool,
-    /// A completed repeat has no retrievable secret or link.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
 }
 
 crate::common::full_or_receipt! {
@@ -430,9 +412,6 @@ pub struct InvitationListQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvitationAcceptBody {
-    /// SHA-256 from the effective terms displayed before this acceptance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_terms_hash: Option<String>,
     /// The secret of the link.
     pub token: String,
 }

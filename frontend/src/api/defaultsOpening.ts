@@ -11,7 +11,7 @@ import { editableValue } from '@/features/settings/settingParts';
 import { settingShape } from '@/features/settings/settingText';
 import type { Node, NodeChatOpeningGetQuery, NodeDefaultsOpening, Problem, ResolvedSetting, SettingDef } from '@/generated/api-types';
 
-export type DefaultsDemand = Pick<NodeChatOpeningGetQuery, 'defaults' | 'settings_only' | 'secret_names' | 'default_provider_name' | 'embeddings_provider_name'>;
+export type DefaultsDemand = Pick<NodeChatOpeningGetQuery, 'defaults' | 'secret_names' | 'default_provider_name' | 'embeddings_provider_name'>;
 export const providerDefaultKey = (id: string, reader = defaultProviderReader()) => [...providerKey(id), 'default-choice', reader] as const;
 export function defaultProviderReader(): string { const state = client.session.getState(); return `${state.userId ?? ''}:${state.readerVersion ?? 0}`; }
 

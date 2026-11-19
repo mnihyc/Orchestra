@@ -224,7 +224,7 @@ pub async fn prepare_decision(
             plan.bind(
                 slot,
                 KeyTargetKind::Object(ObjectKind::Thread),
-                std::slice::from_ref(&subject),
+                &[subject.clone()],
             )
             .map_err(crate::EngineError::unreadable)?;
         } else {
@@ -421,16 +421,17 @@ pub async fn lock_decision(
             .as_access_decision()
             .is_some_and(|decision| decision.approve)
         && current.state == "pending"
-        && let Some(object) = super::access::request_object(conn, &current).await?
     {
-        let target = if object.kind.node().is_some() {
-            orch_authz::pages::Target::Live(object.id)
-        } else {
-            orch_authz::pages::Target::Resource(object)
-        };
-        // Reuse the exact page writer prefix, including a document's container scope.
-        // Decline never grants a page and therefore takes none of these locks.
-        orch_authz::pages::lock_change_target(conn, target).await?;
+        if let Some(object) = super::access::request_object(conn, &current).await? {
+            let target = if object.kind.node().is_some() {
+                orch_authz::pages::Target::Live(object.id)
+            } else {
+                orch_authz::pages::Target::Resource(object)
+            };
+            // Reuse the exact page writer prefix, including a document's container scope.
+            // Decline never grants a page and therefore takes none of these locks.
+            orch_authz::pages::lock_change_target(conn, target).await?;
+        }
     }
     let mut capability = if current.kind == "capability"
         && current.state == "pending"
@@ -468,20 +469,19 @@ pub async fn lock_decision(
             _ => {}
         }
     }
-    if current.state == "pending"
-        && matches!(current.kind.as_str(), "plan" | "input")
-        && let (Some(thread), Some(source)) = (current.thread_id, current.object_id)
-    {
-        let source = if current.kind == "plan" {
-            orch_db::queries::notifications::inbox::RequestSource::Plan(source)
-        } else {
-            orch_db::queries::notifications::inbox::RequestSource::Input(source)
-        };
-        // Share the direct source writer's exact late recipient/Inbox prefix too.
-        // Approval keeps its own operation/actor; this is only actual native locks.
-        engine
-            .lock_source_control(conn, thread, source, true)
-            .await?;
+    if current.state == "pending" && matches!(current.kind.as_str(), "plan" | "input") {
+        if let (Some(thread), Some(source)) = (current.thread_id, current.object_id) {
+            let source = if current.kind == "plan" {
+                orch_db::queries::notifications::inbox::RequestSource::Plan(source)
+            } else {
+                orch_db::queries::notifications::inbox::RequestSource::Input(source)
+            };
+            // Share the direct source writer's exact late recipient/Inbox prefix too.
+            // Approval keeps its own operation/actor; this is only actual native locks.
+            engine
+                .lock_source_control(conn, thread, source, true)
+                .await?;
+        }
     }
     Ok(Some(DecisionLocks {
         row: current,

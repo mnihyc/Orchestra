@@ -1145,13 +1145,15 @@ async fn an_agent_describes_a_document_and_list_shared_shows_its_first_line_or_e
     )
     .await);
     assert_eq!(described["created"], false);
-    let text: String = sqlx::query_scalar("SELECT description FROM documents WHERE id = $1")
-        .bind(doc)
-        .fetch_one(&mut *d.world.pool.acquire().await.unwrap())
-        .await
-        .unwrap();
+    let (text, source): (String, String) =
+        sqlx::query_as("SELECT description, description_source FROM documents WHERE id = $1")
+            .bind(doc)
+            .fetch_one(&mut *d.world.pool.acquire().await.unwrap())
+            .await
+            .unwrap();
     assert_eq!(
-        text, "Release checklist\nfor the web",
+        (text.as_str(), source.as_str()),
+        ("Release checklist\nfor the web", "user"),
         "a description an agent writes is kept as a person's is"
     );
     assert_eq!(

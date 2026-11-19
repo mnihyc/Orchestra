@@ -7,49 +7,6 @@ use orch_link_contract::commands::{Command, CommandKind};
 use orch_link_contract::events::TurnOutcome;
 use serde_json::json;
 
-fn session_open_count(world: &World, transport_only: bool) -> usize {
-    world
-        .seen
-        .all()
-        .iter()
-        .filter(|command| match command {
-            Command::SessionOpen(open) => open.transport_only == transport_only,
-            Command::SessionOpenFenced(open) => open.session.transport_only == transport_only,
-            _ => false,
-        })
-        .count()
-}
-
-async fn task_recorded(
-    world: &World,
-    thread: orch_types::Id,
-    task: &orch_link_contract::background::BackgroundTask,
-    state: &str,
-) {
-    common::eventually(
-        "the actual task lifecycle report to be committed",
-        || async {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM items i
-              CROSS JOIN LATERAL jsonb_each(i.payload->'background_tasks') entry
-              WHERE i.thread_id=$1 AND i.native_ref=$2
-                AND entry.value->'task'->>'id'=$3
-                AND entry.value->'task'->>'run_id' IS NOT DISTINCT FROM $4::text
-                AND entry.value->'task'->>'state'=$5)",
-            )
-            .bind(thread)
-            .bind(&task.native_item_ref)
-            .bind(&task.id)
-            .bind(&task.run_id)
-            .bind(state)
-            .fetch_one(world.pool.pool())
-            .await
-            .unwrap()
-        },
-    )
-    .await;
-}
-
 async fn command_task(
     world: &World,
     thread: orch_types::Id,
@@ -93,7 +50,6 @@ async fn command_task(
             }),
         )
         .await;
-    task_recorded(world, thread, &task, "running").await;
     task
 }
 
@@ -122,30 +78,6 @@ async fn native_finished(
             }),
         )
         .await;
-}
-
-async fn native_refusal_state(world: &World, thread: orch_types::Id) -> (String, Option<String>) {
-    tokio::time::timeout(common::PATIENCE, async {
-        world.wait_ran(CommandKind::TurnInterrupt, 1).await;
-        // The interrupt is sent immediately, before admission commits. Take its thread
-        // lock so the assertion reads that transaction's result, including a rollback.
-        let mut tx = world.pool.begin().await.unwrap();
-        orch_db::queries::threads::lock(&mut tx, thread)
-            .await
-            .unwrap()
-            .unwrap();
-        let state = sqlx::query_as(
-            "SELECT state,state_detail FROM thread_inputs WHERE thread_id=$1 AND source='system' ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(thread)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-        tx.rollback().await.unwrap();
-        state
-    })
-    .await
-    .expect("the native interrupt and its admission transaction must finish before reading the hold")
 }
 
 #[tokio::test]
@@ -210,11 +142,6 @@ async fn a_native_followup_uses_the_original_author_and_records_its_cause_before
     world.wait_state(thread, "idle").await;
     native_finished(&world, thread, task).await;
     let next = world.turn_start(thread, 1).await;
-    assert_eq!(
-        world.seen.of_kind(CommandKind::TurnInterrupt).len(),
-        0,
-        "preparation keeps the native continuation parked until admission"
-    );
     assert_eq!(next.native_wake.as_deref(), Some("native-followup"));
     let (author, origin, marker_turn): (Option<orch_types::Id>, String, Option<orch_types::Id>) =
         sqlx::query_as("SELECT q.author_id,i.payload->'data'->>'origin_input',i.turn_id FROM items i JOIN thread_inputs q ON q.id=(i.payload->'data'->>'input_id')::uuid WHERE i.thread_id=$1 AND i.payload->>'marker'='background_wake'")
@@ -237,7 +164,10 @@ async fn a_refused_native_followup_is_interrupted_and_keeps_its_completion_pendi
     world.wait_state(thread, "idle").await;
     world.access.deny(world.ada);
     native_finished(&world, thread, task).await;
-    let (state, detail) = native_refusal_state(&world, thread).await;
+    world.wait_ran(CommandKind::TurnInterrupt, 1).await;
+    let (state, detail): (String, Option<String>) = sqlx::query_as(
+        "SELECT state,state_detail FROM thread_inputs WHERE thread_id=$1 AND source='system' ORDER BY created_at DESC LIMIT 1")
+        .bind(thread).fetch_one(world.pool.pool()).await.unwrap();
     assert_eq!(state, "pending");
     assert_eq!(detail.as_deref(), Some("model_use_required"));
     assert_eq!(world.turn_starts(thread).len(), 1);
@@ -264,7 +194,10 @@ async fn losing_interact_holds_a_native_completion_instead_of_cancelling_its_ori
     world.wait_state(thread, "idle").await;
     world.take(role).await;
     native_finished(&world, thread, task).await;
-    let (state, detail) = native_refusal_state(&world, thread).await;
+    world.wait_ran(CommandKind::TurnInterrupt, 1).await;
+    let (state, detail): (String, Option<String>) = sqlx::query_as(
+        "SELECT state,state_detail FROM thread_inputs WHERE thread_id=$1 AND source='system' ORDER BY created_at DESC LIMIT 1")
+        .bind(thread).fetch_one(world.pool.pool()).await.unwrap();
     assert_eq!(state, "pending");
     assert_eq!(detail.as_deref(), Some("author_lost_access"));
     assert_eq!(world.turn_starts(thread).len(), 1);
@@ -390,7 +323,7 @@ async fn a_late_child_completion_starts_a_controller_turn_with_its_reported_name
 }
 
 #[tokio::test]
-async fn running_work_retains_one_lease_for_both_authors_until_the_last_task_ends() {
+async fn running_work_retains_its_lease_and_queues_a_different_author_until_the_last_task_ends() {
     use orch_link_contract::background::{BackgroundTaskState, BackgroundTasks};
     let world = World::on_a_key("scripted-background-provider").await;
     let thread = world.thread("Shared running work").await;
@@ -424,18 +357,11 @@ async fn running_work_retains_one_lease_for_both_authors_until_the_last_task_end
         .submit_input(&Caller::session(author), thread, queued("Other author"))
         .await
         .unwrap();
-    let third = world.turn_start(thread, 2).await;
-    assert_ne!(
-        submitted.input.state_detail.as_deref(),
-        Some("background_author")
-    );
-    assert_eq!(world.open_lease_of(thread).await, lease);
-    assert_eq!(session_open_count(&world, false), 1);
-    assert_eq!(
-        session_open_count(&world, true),
-        2,
-        "each later forwarded turn rebinds transport without reopening the native session"
-    );
+    common::eventually("the different author to be visibly held", || async {
+        world.input_state(submitted.input.id).await.1.as_deref() == Some("background_author")
+    })
+    .await;
+    assert_eq!(world.turn_starts(thread).len(), 2);
     task.state = BackgroundTaskState::Stopped;
     world
         .say(
@@ -448,29 +374,8 @@ async fn running_work_retains_one_lease_for_both_authors_until_the_last_task_end
             }),
         )
         .await;
-    world
-        .say(thread, turn_ended(third.turn_id, TurnOutcome::Completed))
-        .await;
-    world.wait_state(thread, "idle").await;
-    world
-        .engine()
-        .submit_input(
-            &Caller::session(author),
-            thread,
-            queued("After all work ends"),
-        )
-        .await
-        .unwrap();
-    let fourth = world.turn_start(thread, 3).await;
+    world.turn_start(thread, 2).await;
     assert_ne!(world.open_lease_of(thread).await, lease);
-    assert!(
-        !world
-            .scalar::<bool>(
-                "SELECT background_overlap FROM turns WHERE id=$1",
-                fourth.turn_id
-            )
-            .await
-    );
 }
 
 #[tokio::test]
@@ -542,35 +447,6 @@ async fn instruction_refresh_waits_for_live_work_without_replacing_its_session_g
     assert!(world.seen.of_kind(CommandKind::SessionOpen).iter().any(|command| {
         matches!(command, Command::SessionOpen(open) if open.instructions.contains("NEW-INSTRUCTIONS-AFTER-TASKS"))
     }));
-}
-
-#[tokio::test]
-async fn human_input_without_a_background_hold_preserves_the_existing_ordinary_queue_hold() {
-    let world = World::new().await;
-    let thread = world.thread("Ordinary queue hold").await;
-    sqlx::query("UPDATE threads SET queue_held=true WHERE node_id=$1")
-        .bind(thread)
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
-    let sent = world
-        .engine()
-        .submit_input(
-            &Caller::session(world.ada),
-            thread,
-            queued("Keep this queued"),
-        )
-        .await
-        .unwrap();
-    assert!(sent.input.queue_held);
-    world.engine().preflight(thread).await.unwrap();
-    let held: bool = sqlx::query_scalar("SELECT queue_held FROM threads WHERE node_id=$1")
-        .bind(thread)
-        .fetch_one(world.pool.pool())
-        .await
-        .unwrap();
-    assert!(held);
-    assert!(world.turn_starts(thread).is_empty());
 }
 
 #[tokio::test]
@@ -696,7 +572,6 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             ),
         )
         .await;
-    task_recorded(&world, thread, &task, "lost").await;
     let payload: serde_json::Value = sqlx::query_scalar(
         "SELECT payload FROM items WHERE thread_id=$1 AND native_ref='background-command'",
     )
@@ -712,19 +587,6 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
         .unwrap();
     assert_eq!(facts["task"]["state"], "lost");
     assert!(facts.get("lost_at").is_some());
-    let stream = orch_link_contract::streams::Stream::Session {
-        thread_id: thread,
-        segment_id: world.segment_of(thread).await,
-    };
-    // The loss row and its stream cursor committed together. Waiting past that
-    // exact cursor proves the late report was handled, even when it is discarded.
-    let through_loss =
-        orch_db::queries::link::cursors(&mut world.pool.acquire().await.unwrap(), world.machine_id)
-            .await
-            .unwrap()
-            .get(&stream.to_string())
-            .copied()
-            .unwrap_or(0);
     world
         .say(
             thread,
@@ -736,11 +598,6 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             }),
         )
         .await;
-    common::eventually(
-        "the late native history report to be acknowledged",
-        || async { world.commands.acknowledged(world.machine_id, &stream) > through_loss },
-    )
-    .await;
     let lost: bool = sqlx::query_scalar(r#"SELECT payload @? '$.background_tasks.*.task.state ? (@ == "lost")' FROM items WHERE thread_id=$1 AND native_ref='background-command'"#)
         .bind(thread).fetch_one(world.pool.pool()).await.unwrap();
     assert!(lost);
@@ -859,312 +716,32 @@ async fn a_confirmed_exact_end_wins_over_a_later_natural_completion_without_star
 }
 
 #[tokio::test]
-async fn different_authors_can_steer_or_interrupt_while_background_work_runs() {
+async fn different_authors_cannot_steer_or_interrupt_while_owned_background_work_runs() {
     for delivery in [
         orch_api_contract::threads::Delivery::Steer,
         orch_api_contract::threads::Delivery::Interrupt,
     ] {
         let world = World::new().await;
-        let thread = world.thread("Shared background session").await;
+        let thread = world.thread("Author delivery fence").await;
         let (first, _) = world.running_turn(thread, "Begin").await;
         command_task(&world, thread, first.turn_id).await;
         let person = world.person("reviewer").await;
         world.give(person, "interactor").await;
-        let mut input = queued("Continue while the earlier work runs");
+        let mut input = queued("Wait for the earlier author");
         input.delivery = delivery;
-        let submitted = world
+        let held = world
             .engine()
             .submit_input(&Caller::session(person), thread, input)
             .await
             .unwrap();
-        assert_ne!(
-            submitted.input.state_detail.as_deref(),
+        assert_eq!(
+            held.input.state_detail.as_deref(),
             Some("background_author")
         );
-        let command = if delivery == orch_api_contract::threads::Delivery::Steer {
-            CommandKind::TurnSteer
-        } else {
-            CommandKind::TurnInterrupt
-        };
-        world.wait_ran(command, 1).await;
-        assert_eq!(
-            submitted.input.author.as_ref().map(|author| author.id),
-            Some(person)
-        );
-        if delivery == orch_api_contract::threads::Delivery::Steer {
-            let charge: Option<orch_types::Id> = world
-                .scalar(
-                    "SELECT background_charge_to FROM turns WHERE id=$1",
-                    first.turn_id,
-                )
-                .await;
-            assert_eq!(charge, Some(world.ada));
-        }
+        assert_eq!(world.seen.of_kind(CommandKind::TurnSteer).len(), 0);
+        assert_eq!(world.seen.of_kind(CommandKind::TurnInterrupt).len(), 0);
+        assert_eq!(world.turn_starts(thread).len(), 1);
     }
-}
-
-fn overlap_request(
-    turn: orch_types::Id,
-    model: &str,
-    id: &str,
-    tokens: i64,
-    child: bool,
-) -> orch_link_contract::events::Event {
-    use orch_agent_contract::requests::{RequestTokens, UsageRequest};
-    let mut request = UsageRequest {
-        id: id.into(),
-        model: Some(model.into()),
-        subagent: child,
-        tokens: RequestTokens {
-            input_tokens: Some(tokens),
-            cached_input_tokens: Some(0),
-            cache_write_tokens: Some(0),
-            output_tokens: Some(0),
-            reasoning_tokens: None,
-            total_tokens: Some(tokens),
-        },
-        ..Default::default()
-    };
-    request.finish("done", None, None);
-    orch_link_contract::events::Event::ModelRequest(orch_link_contract::events::ModelRequest {
-        turn_id: turn,
-        request,
-    })
-}
-
-async fn request_recorded(
-    world: &World,
-    turn: orch_types::Id,
-    reference: &str,
-) -> orch_db::usage::ledger::EventRow {
-    common::eventually("the actual request report to be counted", || async {
-        world
-            .ledger_of(turn)
-            .await
-            .iter()
-            .any(|row| row.request_ref.as_deref() == Some(reference))
-    })
-    .await;
-    world
-        .ledger_of(turn)
-        .await
-        .into_iter()
-        .find(|row| row.request_ref.as_deref() == Some(reference))
-        .unwrap()
-}
-
-#[tokio::test]
-async fn overlapping_authors_keep_their_authority_and_charge_native_and_forwarded_usage_to_the_first_owner()
- {
-    use orch_link_contract::events::{Event, LeaseUsage};
-    for forwarded in [false, true] {
-        let world = if forwarded {
-            World::on_a_key("sk-orch-overlap-fixture").await
-        } else {
-            World::new().await
-        };
-        let thread = world.thread("Overlap accounting").await;
-        let bea = world.person("bea").await;
-        let carl = world.person("carl").await;
-        world.give(bea, "interactor").await;
-        world.give(carl, "interactor").await;
-        let submitted = world
-            .engine()
-            .submit_input(&Caller::session(bea), thread, queued("Run background work"))
-            .await
-            .unwrap();
-        let first = world.turn_start(thread, 0).await;
-        world.say(thread, common::turn_began(first.turn_id)).await;
-        world.wait_turn(first.turn_id, "running").await;
-        let task = command_task(&world, thread, first.turn_id).await;
-        let original_segment = world.segment_of(thread).await;
-        let lease = if forwarded {
-            Some(world.open_lease_of(thread).await)
-        } else {
-            None
-        };
-        let usage = |lease, reference: &str, tokens| {
-            Event::LeaseUsage(LeaseUsage {
-                lease_id: lease,
-                model: first.model.clone(),
-                request_ref: Some(reference.into()),
-                timing: None,
-                usage: serde_json::from_value(
-                    json!({"input_tokens":tokens,"cached_input_tokens":0,"output_tokens":0,
-                "reasoning_tokens":0,"total_tokens":tokens}),
-                )
-                .unwrap(),
-            })
-        };
-        if let Some(lease) = lease {
-            world
-                .say_of_provider(usage(lease, "before-overlap", 20))
-                .await;
-        } else {
-            world
-                .say(
-                    thread,
-                    overlap_request(first.turn_id, &first.model, "before-overlap", 20, false),
-                )
-                .await;
-        }
-        let before = request_recorded(&world, first.turn_id, "before-overlap").await;
-        assert!(before.counted);
-        assert_eq!(before.user_id, Some(bea));
-        world
-            .say(thread, turn_ended(first.turn_id, TurnOutcome::Completed))
-            .await;
-        world.wait_state(thread, "idle").await;
-        let next_input = world
-            .engine()
-            .submit_input(&Caller::session(carl), thread, queued("Work alongside it"))
-            .await
-            .unwrap();
-        let second = world.turn_start(thread, 1).await;
-        world.say(thread, common::turn_began(second.turn_id)).await;
-        world.wait_turn(second.turn_id, "running").await;
-        assert_ne!(
-            next_input.input.state_detail.as_deref(),
-            Some("background_author")
-        );
-        assert_eq!(world.segment_of(thread).await, original_segment);
-        assert_eq!(session_open_count(&world, false), 1);
-        assert_eq!(session_open_count(&world, true), usize::from(forwarded));
-        let authors:Vec<(orch_types::Id,Option<orch_types::Id>,bool,Option<orch_types::Id>)>=sqlx::query_as(
-            "SELECT t.input_id,q.author_id,t.background_overlap,t.background_charge_to FROM turns t JOIN thread_inputs q ON q.id=t.input_id WHERE t.id=ANY($1) ORDER BY t.ordinal")
-            .bind(vec![first.turn_id,second.turn_id]).fetch_all(world.pool.pool()).await.unwrap();
-        assert_eq!(
-            authors,
-            vec![
-                (submitted.input.id, Some(bea), true, Some(world.ada)),
-                (next_input.input.id, Some(carl), true, Some(world.ada))
-            ]
-        );
-        let late = overlap_request(first.turn_id, &first.model, "overlap-child", 30, true);
-        world.say(thread, late.clone()).await;
-        world.say(thread, late).await;
-        let late = request_recorded(&world, first.turn_id, "overlap-child").await;
-        assert_eq!(late.user_id, Some(world.ada));
-        assert_eq!(late.counted, !forwarded);
-        let current = if let Some(lease) = lease {
-            assert_eq!(world.open_lease_of(thread).await, lease);
-            let mut conn = world.pool.acquire().await.unwrap();
-            assert_eq!(
-                orch_db::usage::ledger::attribution_of_lease(&mut conn, lease)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .user_id,
-                Some(world.ada)
-            );
-            usage(lease, "overlap-main", 40)
-        } else {
-            overlap_request(second.turn_id, &second.model, "overlap-main", 40, false)
-        };
-        if forwarded {
-            world.say_of_provider(current.clone()).await;
-            world.say_of_provider(current).await;
-        } else {
-            world.say(thread, current.clone()).await;
-            world.say(thread, current).await;
-        }
-        let current = request_recorded(&world, second.turn_id, "overlap-main").await;
-        assert_eq!(current.user_id, Some(world.ada));
-        assert!(current.counted);
-        assert_eq!(current.total_tokens, 40);
-        // Already counted rows keep their original author when the shared phase begins.
-        assert_eq!(
-            request_recorded(&world, first.turn_id, "before-overlap")
-                .await
-                .user_id,
-            Some(bea)
-        );
-        world
-            .say(thread, turn_ended(second.turn_id, TurnOutcome::Completed))
-            .await;
-        world.wait_state(thread, "idle").await;
-        native_finished(&world, thread, task).await;
-        let wake = world.turn_start(thread, 2).await;
-        let (wake_author,charged):(Option<orch_types::Id>,Option<orch_types::Id>)=sqlx::query_as(
-            "SELECT q.author_id,t.background_charge_to FROM turns t JOIN thread_inputs q ON q.id=t.input_id WHERE t.id=$1")
-            .bind(wake.turn_id).fetch_one(world.pool.pool()).await.unwrap();
-        assert_eq!(wake_author, Some(bea));
-        assert_eq!(charged, Some(world.ada));
-        assert_eq!(
-            world
-                .ledger_of(second.turn_id)
-                .await
-                .iter()
-                .filter(|row| row.request_ref.as_deref() == Some("overlap-main") && row.counted)
-                .count(),
-            1
-        );
-    }
-}
-
-#[tokio::test]
-async fn same_author_background_continuations_keep_ordinary_billing_and_model_refusals_do_not_start_an_overlap()
- {
-    let world = World::new().await;
-    let thread = world.thread("One background author").await;
-    let bea = world.person("bea").await;
-    let carl = world.person("carl").await;
-    world.give(bea, "interactor").await;
-    world.give(carl, "interactor").await;
-    world
-        .engine()
-        .submit_input(&Caller::session(bea), thread, queued("Begin"))
-        .await
-        .unwrap();
-    let first = world.turn_start(thread, 0).await;
-    world.say(thread, common::turn_began(first.turn_id)).await;
-    world.wait_turn(first.turn_id, "running").await;
-    command_task(&world, thread, first.turn_id).await;
-    world.access.deny(carl);
-    let refused = world
-        .engine()
-        .submit_input(&Caller::session(carl), thread, steering("No model access"))
-        .await
-        .unwrap();
-    assert_eq!(
-        refused.input.state_detail.as_deref(),
-        Some("model_use_required")
-    );
-    assert_eq!(world.seen.of_kind(CommandKind::TurnSteer).len(), 0);
-    assert!(
-        !world
-            .scalar::<bool>(
-                "SELECT background_overlap FROM turns WHERE id=$1",
-                first.turn_id
-            )
-            .await
-    );
-    world
-        .engine()
-        .submit_input(&Caller::session(bea), thread, steering("Keep going"))
-        .await
-        .unwrap();
-    world.wait_ran(CommandKind::TurnSteer, 1).await;
-    world
-        .say(
-            thread,
-            overlap_request(first.turn_id, &first.model, "same-author", 10, false),
-        )
-        .await;
-    assert_eq!(
-        request_recorded(&world, first.turn_id, "same-author")
-            .await
-            .user_id,
-        Some(bea)
-    );
-    assert!(
-        !world
-            .scalar::<bool>(
-                "SELECT background_overlap FROM turns WHERE id=$1",
-                first.turn_id
-            )
-            .await
-    );
 }
 
 #[tokio::test]
@@ -1273,20 +850,6 @@ async fn a_running_child_request_is_not_finalized_by_its_foreground_turn_ending(
     world.say(thread,Event::decode("item.started",json!({"turn_id":first.turn_id,"native_ref":"child-source","stream":"main","parent_native_ref":null,"kind":"tool_call",
         "payload":{"tool":{"kind":"subagent","child_stream":"sub:child","name":"Review","role":null,"prompt":"Review","state":"running","model":null},
         "title":"Review","started_at":world.clock.time(),"duration_ms":null,"raw":{"name":"Agent","input":{"inline":"","total_len":0,"truncated":false,"blob":null},"output":null,"is_error":false}}})).unwrap()).await;
-    let child = BackgroundTask {
-        id: "child".into(),
-        run_id: None,
-        native_item_ref: "child-source".into(),
-        origin_turn: first.turn_id,
-        kind: BackgroundTaskKind::Subagent,
-        label: "Review".into(),
-        name: Some("Review".into()),
-        nickname: None,
-        role: None,
-        state: BackgroundTaskState::Running,
-        exit_code: None,
-        can_end: false,
-    };
     world
         .say(
             thread,
@@ -1294,11 +857,23 @@ async fn a_running_child_request_is_not_finalized_by_its_foreground_turn_ending(
                 self_waking: false,
                 native_idle: false,
                 native_wake: None,
-                tasks: vec![child.clone()],
+                tasks: vec![BackgroundTask {
+                    id: "child".into(),
+                    run_id: None,
+                    native_item_ref: "child-source".into(),
+                    origin_turn: first.turn_id,
+                    kind: BackgroundTaskKind::Subagent,
+                    label: "Review".into(),
+                    name: Some("Review".into()),
+                    nickname: None,
+                    role: None,
+                    state: BackgroundTaskState::Running,
+                    exit_code: None,
+                    can_end: false,
+                }],
             }),
         )
         .await;
-    task_recorded(&world, thread, &child, "running").await;
     let mut request = UsageRequest {
         id: "in-flight-child".into(),
         subagent: true,
@@ -1343,18 +918,7 @@ async fn a_running_child_request_is_not_finalized_by_its_foreground_turn_ending(
     });
     world.say(thread, event.clone()).await;
     world.say(thread, event).await;
-    common::eventually("the child request's terminal report to commit", || async {
-        world.ledger_of(first.turn_id).await.iter().any(|row| {
-            row.request_ref.as_deref() == Some("in-flight-child")
-                && row
-                    .timing()
-                    .outcome
-                    .value()
-                    .is_some_and(|outcome| outcome == "done")
-        })
-    })
-    .await;
-    let rows = world.ledger_of(first.turn_id).await;
+    let rows = world.wait_ledger(first.turn_id, 1).await;
     assert_eq!(
         rows.iter()
             .filter(|row| row.counted)

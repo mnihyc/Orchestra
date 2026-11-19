@@ -9,7 +9,6 @@ import type * as ThreadsApi from '@/api/threads';
 import { ApprovalModePicker } from '@/features/composer/ApprovalMode';
 import type { NodeSettingSetBody, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
 import { show } from './support';
-import { nativeModeSetting, modeParameters } from '../doubles/mode-controls';
 
 const server = vi.hoisted(() => ({ rows: [] as ResolvedSetting[], parameters: {} as ThreadParameters, settingReads: vi.fn(), parameterReads: vi.fn(), write: vi.fn<(id: string, key: string, body: NodeSettingSetBody) => Promise<ResolvedSetting>>() }));
 vi.mock('@/api/settings', async (importOriginal) => ({ ...await importOriginal<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => { server.settingReads(); return Promise.resolve(server.rows); }, staleTime: Infinity }) }));
@@ -19,8 +18,9 @@ vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<ty
 }));
 vi.mock('@/realtime/live', () => ({ refreshThread: vi.fn() }));
 
-const row = (value: string, revision: number) => nativeModeSetting('approval.mode', value, revision);
-const parameters = modeParameters;
+const row = (value: string, revision: number): ResolvedSetting => ({ key: 'approval.mode', value, own: { value, revision, locked: false }, source: { scope: 'thread', node: null }, locked_by: null, writable: true, parts: [] });
+const parameters = (mode: string): ThreadParameters => ({ model: { value: 'model-1', options: [], writable: true, source: { scope: 'thread', node: null } },
+  effort: { value: null, writable: true, supported: false, source: { scope: 'default', node: null } }, parameters: [], approval_mode: mode, approval_modes: ['ask', 'on_request'], approval_reviewer: null });
 const thread = { id: 'thread-1', archived: false, side_of: null, binding: { provider: { id: 'provider-1' } }, owner: { display_name: 'Ada' }, access: { permissions: ['thread.manage'] } } as Thread;
 
 beforeEach(() => {

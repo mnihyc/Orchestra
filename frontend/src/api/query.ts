@@ -13,7 +13,6 @@ import { QueryClient, type InvalidateOptions, type InvalidateQueryFilters, type 
 import { ApiError } from '@/api/client';
 import { scheduledReads } from '@/api/readScheduler';
 import { NetworkError, retryPause, retryRead } from '@/lib/requests';
-import { setOrchLinkSource, type OrchLinkAddresses } from '@/lib/orchLinks';
 
 /**
  * How long an answer counts as fresh. Within it a screen that is opened again shows what it has and
@@ -64,13 +63,8 @@ export const queryClient = new LiveQueryClient({
   },
 });
 
-setOrchLinkSource(() => queryClient.getQueryData<OrchLinkAddresses>(['meta']));
-
 queryClient.getQueryCache().subscribe((event) => {
-  if (event.type === 'removed') {
-    const key: unknown = event.query.queryKey;
-    if (Array.isArray(key)) scheduledReads.release(key);
-  }
+  if (event.type === 'removed') scheduledReads.release(event.query.queryKey);
 });
 
 /** An error as a screen tells it apart: an answer of the API, no answer, or a fault of the page itself. */

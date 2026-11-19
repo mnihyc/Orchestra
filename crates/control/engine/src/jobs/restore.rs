@@ -3,9 +3,7 @@
 use async_trait::async_trait;
 use orch_api_contract::forks::ActiveTurn;
 use orch_db::queries::{jobs, source, storage, threads};
-use orch_link_contract::commands::{
-    CommandBody, ProcList, ProcResume, ProcResumeOwned, ProcSuspend, ProcSuspendOwned, SerialKey,
-};
+use orch_link_contract::commands::{CommandBody, ProcList, ProcResume, ProcSuspend, SerialKey};
 use orch_link_contract::source::{
     FsRecord, FsRecordResult, FsRestoreResult, RecordKind, RecordState,
 };
@@ -20,9 +18,6 @@ use crate::{
     commands::{Outcome, Outgoing},
     unit::Unit,
 };
-
-pub mod operation;
-pub mod touched;
 
 /// Explicit writer waiting precedes the only filesystem effect; the last phase releases writers.
 pub const PHASES: [Phase; 4] = [
@@ -49,7 +44,6 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 pub struct Restoring {
     engine: Engine,
     plan: Plan,
-    operation: Option<operation::Request>,
 }
 
 impl Restoring {
@@ -60,24 +54,7 @@ impl Restoring {
                 "a restore job has no restore recipe",
             ));
         }
-        let operation = operation::Request::from_job(row)?;
-        if operation::restricted(row) && operation.is_none() {
-            return Err(EngineError::unreadable(
-                "the original recorded restore operation is missing",
-            ));
-        }
-        Ok(Self {
-            engine,
-            plan,
-            operation,
-        })
-    }
-
-    async fn check(&self, job: &Job) -> Result<(), Stop> {
-        match &self.operation {
-            Some(request) => operation::check(job, &self.plan, request).await,
-            None => super::source::check(job, &self.plan).await,
-        }
+        Ok(Self { engine, plan })
     }
 
     /// A negative command answer gets a new envelope while keeping the native job/effect identity.
@@ -124,20 +101,13 @@ impl Restoring {
                 job.remember(&json!({ "file_attempts": attempts })).await?;
                 continue;
             }
-            let mut command = Outgoing::new(
+            let command = Outgoing::new(
                 id,
                 self.plan.machine,
                 SerialKey::Environment(self.plan.environment),
                 body,
             )
             .map_err(EngineError::from)?;
-            if let Some(request) = &self.operation {
-                command = job.prepare_command(command).await?;
-                let row = job.row().await?;
-                command.authority = Some(crate::commands::CommandAuthority::workspace_restore(
-                    operation::RestoreCommand::job(&row, request, &command)?,
-                ));
-            }
             return if undo {
                 job.command_to_undo(command).await
             } else {
@@ -160,63 +130,56 @@ impl Restoring {
         for thread in writers {
             loop {
                 job.check()?;
-                let active = if self.operation.is_some() {
-                    operation::active_turn(job, &self.plan, *thread).await?
-                } else {
+                let active = {
                     let mut conn = self.engine.db().acquire().await?;
                     threads::active_turn(&mut conn, *thread).await?
                 };
                 let Some(turn) = active else { break };
                 if options.active_turn == ActiveTurn::Interrupt {
-                    if let Some(request) = &self.operation {
-                        operation::interrupt(job, &self.plan, request, *thread).await?;
-                    } else {
-                        // The reviewed interruption permission is asked again for the current caller.
-                        let mut conn = self.engine.db().acquire().await?;
-                        let principal =
-                            super::source::principal(&mut conn, job, &self.plan).await?;
-                        let env = orch_authz::resources::check(
+                    // The reviewed interruption permission is asked again for the current caller.
+                    let mut conn = self.engine.db().acquire().await?;
+                    let principal = super::source::principal(&mut conn, job, &self.plan).await?;
+                    let env = orch_authz::resources::check(
+                        &mut conn,
+                        &principal,
+                        orch_access_contract::decisions::ObjectRef {
+                            kind: orch_access_contract::permissions::ObjectKind::Environment,
+                            id: self.plan.environment,
+                        },
+                        orch_access_contract::permissions::Permission::EnvironmentManage,
+                        orch_authz::Policy::default(),
+                    )
+                    .await
+                    .map_err(EngineError::from)?;
+                    if !matches!(
+                        env,
+                        orch_access_contract::decisions::Decision::Allowed { .. }
+                    ) {
+                        let allowed = orch_authz::nodes::check(
                             &mut conn,
                             &principal,
-                            orch_access_contract::decisions::ObjectRef {
-                                kind: orch_access_contract::permissions::ObjectKind::Environment,
-                                id: self.plan.environment,
-                            },
-                            orch_access_contract::permissions::Permission::EnvironmentManage,
+                            *thread,
+                            orch_access_contract::permissions::Permission::ThreadInteract,
+                            orch_authz::Act::Use,
                             orch_authz::Policy::default(),
                         )
                         .await
                         .map_err(EngineError::from)?;
                         if !matches!(
-                            env,
+                            allowed,
                             orch_access_contract::decisions::Decision::Allowed { .. }
                         ) {
-                            let allowed = orch_authz::nodes::check(
-                                &mut conn,
-                                &principal,
-                                *thread,
-                                orch_access_contract::permissions::Permission::ThreadInteract,
-                                orch_authz::Act::Use,
-                                orch_authz::Policy::default(),
+                            return Err(Failure::new(
+                                "access.denied",
+                                "current authority does not permit stopping a writer",
                             )
-                            .await
-                            .map_err(EngineError::from)?;
-                            if !matches!(
-                                allowed,
-                                orch_access_contract::decisions::Decision::Allowed { .. }
-                            ) {
-                                return Err(Failure::new(
-                                    "access.denied",
-                                    "current authority does not permit stopping a writer",
-                                )
-                                .into());
-                            }
+                            .into());
                         }
-                        drop(conn);
-                        self.engine
-                            .interrupt_for_change(*thread, &turn, self.plan.caller)
-                            .await?;
                     }
+                    drop(conn);
+                    self.engine
+                        .interrupt_for_change(*thread, &turn, self.plan.caller)
+                        .await?;
                 }
                 if job.now() - began >= chrono::Duration::minutes(options.wait_minutes) {
                     return Err(Failure::new(
@@ -229,56 +192,42 @@ impl Restoring {
             }
         }
         if *suspend {
-            if self.operation.is_some() {
-                self.command(
-                    job,
-                    "restore.suspend",
-                    &ProcSuspendOwned {
-                        environment_id: self.plan.environment,
-                        owner_id: job.id(),
-                    },
-                    false,
+            let mut conn = self.engine.db().acquire().await?;
+            let principal = super::source::principal(&mut conn, job, &self.plan).await?;
+            let allowed = orch_authz::resources::check(
+                &mut conn,
+                &principal,
+                orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Environment,
+                    id: self.plan.environment,
+                },
+                orch_access_contract::permissions::Permission::TerminalManage,
+                orch_authz::Policy::default(),
+            )
+            .await
+            .map_err(EngineError::from)?;
+            if !matches!(
+                allowed,
+                orch_access_contract::decisions::Decision::Allowed { .. }
+            ) {
+                return Err(Failure::new(
+                    "access.denied",
+                    "current authority does not permit suspending writers",
                 )
-                .await?;
-                job.remember(&json!({"suspension_requested":true})).await?;
-            } else {
-                let mut conn = self.engine.db().acquire().await?;
-                let principal = super::source::principal(&mut conn, job, &self.plan).await?;
-                let allowed = orch_authz::resources::check(
-                    &mut conn,
-                    &principal,
-                    orch_access_contract::decisions::ObjectRef {
-                        kind: orch_access_contract::permissions::ObjectKind::Environment,
-                        id: self.plan.environment,
-                    },
-                    orch_access_contract::permissions::Permission::TerminalManage,
-                    orch_authz::Policy::default(),
-                )
-                .await
-                .map_err(EngineError::from)?;
-                if !matches!(
-                    allowed,
-                    orch_access_contract::decisions::Decision::Allowed { .. }
-                ) {
-                    return Err(Failure::new(
-                        "access.denied",
-                        "current authority does not permit suspending writers",
-                    )
-                    .into());
-                }
-                drop(conn);
-                job.remember(&json!({ "suspension_requested": true }))
-                    .await?;
-                self.command(
-                    job,
-                    "restore.suspend",
-                    &ProcSuspend {
-                        environment_id: self.plan.environment,
-                    },
-                    false,
-                )
-                .await?;
+                .into());
             }
+            drop(conn);
+            job.remember(&json!({ "suspension_requested": true }))
+                .await?;
+            self.command(
+                job,
+                "restore.suspend",
+                &ProcSuspend {
+                    environment_id: self.plan.environment,
+                },
+                false,
+            )
+            .await?;
         } else {
             loop {
                 let value = self
@@ -339,29 +288,13 @@ impl Restoring {
             .get("restore_recovery_required")
             .and_then(Json::as_bool)
             .unwrap_or(false);
-        if let Some(request) = &self.operation {
-            operation::before_apply(job, request, recovering).await?;
-        } else {
-            if !recovering {
-                self.check(job).await?;
-            }
-            job.pass_commit().await?;
-            job.remember(&json!({ "restore_recovery_required": true }))
-                .await?;
+        if !recovering {
+            super::source::check(job, &self.plan).await?;
         }
-        let mut native = body.clone();
-        if recovering && self.operation.is_some() {
-            native.recovery_only = Some(true);
-        }
-        let value = match self
-            .command(
-                job,
-                "restore.apply",
-                &native,
-                recovering && self.operation.is_some(),
-            )
-            .await
-        {
+        job.pass_commit().await?;
+        job.remember(&json!({ "restore_recovery_required": true }))
+            .await?;
+        let value = match self.command(job, "restore.apply", body, false).await {
             Ok(value) => value,
             Err(Stop::Failed(failure))
                 if failure.code != "restore.recovery_required" && !recovering =>
@@ -374,15 +307,7 @@ impl Restoring {
                 }
                 return Err(Stop::Failed(failure));
             }
-            Err(stop) => {
-                if let Some(request) = &self.operation
-                    && operation::not_issued(job, request).await?
-                {
-                    job.remember(&json!({"restore_recovery_required":false}))
-                        .await?;
-                }
-                return Err(stop);
-            }
+            Err(stop) => return Err(stop),
         };
         let result: FsRestoreResult =
             serde_json::from_value(value.clone()).map_err(EngineError::from)?;
@@ -397,9 +322,6 @@ impl Restoring {
     }
 
     async fn commit(&self, job: &Job) -> Result<Done, Stop> {
-        if let Some(request) = &self.operation {
-            operation::reconcile(job, request).await?;
-        }
         let Action::Restore {
             body,
             directory,
@@ -525,22 +447,6 @@ impl Restoring {
     }
 
     async fn resume(&self, job: &Job) -> Result<(), Stop> {
-        if let Some(request) = &self.operation {
-            if operation::has_suspension(job, request).await? {
-                self.command(
-                    job,
-                    "restore.resume",
-                    &ProcResumeOwned {
-                        environment_id: self.plan.environment,
-                        owner_id: job.id(),
-                    },
-                    true,
-                )
-                .await?;
-            }
-            job.remember(&json!({"suspension_requested":false})).await?;
-            return Ok(());
-        }
         if job
             .plan()
             .await?
@@ -577,7 +483,7 @@ impl Phased for Restoring {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         match phase {
             "validate" => {
-                self.check(job).await?;
+                super::source::check(job, &self.plan).await?;
                 Ok(Done::Finished)
             }
             "lock" => self.lock(job).await,

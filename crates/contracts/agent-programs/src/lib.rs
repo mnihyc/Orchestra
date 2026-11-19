@@ -7,7 +7,6 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`browsers`] | Browser names and installation paths used by environment discovery |
 //! | [`localized`] | Words by language, with the English fallback |
 //! | [`catalogue`] | Titles of what a check of a build reports |
 //! | [`manifest`] | The manifest and its parts: launch, placement, checks, files, privacy |
@@ -17,7 +16,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod browsers;
 pub mod catalogue;
 pub mod channels;
 pub mod executors;

@@ -60,9 +60,7 @@ for (const locale of ['en', 'zh-CN'] as const) test(`resource tabs retain names,
   expect(faults).toEqual([]);
   await page.screenshot({ path: info.outputPath(`resource-titles-${locale}.png`), animations: 'disabled' });
   reads.length = 0;
-  await selected.locator('..').getByRole('button', {
-    name: locale === 'en' ? 'Close Mounts' : '关闭“挂载”', exact: true, includeHidden: true,
-  }).click();
+  await selected.locator('..').locator('button').click();
   await expect(selected).toHaveCount(0);
   await expect(page).toHaveURL(/\/resources\/mcp\/?$/);
   await expect.poll(() => reads).toEqual(['mcp_server']);

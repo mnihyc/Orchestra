@@ -48,16 +48,6 @@ pub(crate) struct Plan {
     pub approval_origin_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_binding: Option<authority::Binding>,
-    /// The actual key operation that already removed this capability from desired state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revocation_origin: Option<orch_authz::CapturedOperation>,
-    /// Missing known provenance never turns a removal into an older unrestricted job.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub revocation_origin_required: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 pub(crate) async fn queue(
@@ -175,7 +165,7 @@ impl Applying {
             &body,
         )
         .map_err(EngineError::from)?;
-        let command = if authority::has_origin(&self.plan) {
+        let command = if self.plan.approval_origin_required || self.plan.approval_origin.is_some() {
             command.with_authority(crate::commands::CommandAuthority::capability_change(
                 authority::CapabilityChangeAuthority::capture(job.id(), undo),
             ))

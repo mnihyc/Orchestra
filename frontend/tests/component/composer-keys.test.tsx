@@ -1,5 +1,5 @@
 /** The running composer's hint matches its actual native delivery keys, independent of the place's preferred delivery. */
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as ThreadsApi from '@/api/threads';
@@ -10,7 +10,7 @@ import type * as Uploads from '@/lib/uploads';
 import type * as Live from '@/realtime/live';
 import type * as Draft from '@/features/composer/Draft';
 import { Composer } from '@/features/composer/Composer';
-import { composerWriter, useComposerStore } from '@/features/composer/Draft';
+import { useComposerStore } from '@/features/composer/Draft';
 import { client } from '@/api/client';
 import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters, ThreadLimits, LimitReached } from '@/generated/api-types';
 import type { PastedTextPart } from '@/lib/pastedText';
@@ -41,7 +41,7 @@ vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>()
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), metaQuery: { queryKey: ['keyboard-meta'], queryFn: () => Promise.resolve(meta()) } }));
 vi.mock('@/api/context', async (load) => ({ ...await load<typeof ContextApi>(), threadContextQuery: (id: string, detail: 'kept' | 'count', revision: number) => ({ queryKey: ['keyboard-context', id, detail, revision], queryFn: () => server.context() }) }));
 vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>Model</button> }));
-vi.mock('@/features/composer/ApprovalMode', () => ({ ApprovalModePicker: () => <button>Mode</button>, ConfinementPicker: () => <button>Sandbox</button> }));
+vi.mock('@/features/composer/ApprovalMode', () => ({ ApprovalModePicker: () => <button>Mode</button> }));
 vi.mock('@/features/usage/context/ContextRing', () => ({ ContextRing: () => <button>Context</button> }));
 vi.mock('@/ui/CodeView', () => ({ CodeView: (props: CodeViewProps) => <textarea aria-label={props.label} defaultValue={props.text} readOnly={props.readOnly} onChange={(event) => { props.onEdit?.(true); props.onSettled?.(event.target.value); }} /> }));
 vi.mock('@/lib/uploads', async (load) => ({ ...await load<typeof Uploads>(), releaseUpload: () => Promise.resolve(), UploadTask: class {
@@ -68,7 +68,7 @@ beforeEach(() => {
   const world = new World(); const person = world.people.get('ada');
   const node = world.places.rowOf(ACME.mainThread);
   if (person === undefined || node === undefined) throw new Error('The keyboard test needs the native thread fixture');
-  native = { ...world.threads.thread(person, node), state: 'running', current_turn_id: 'running-key-turn' };
+  native = { ...world.threads.thread(person, node), state: 'running' };
   client.session.setState({ userId: person.me.id });
   useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {}, cannotSteer: {}, passNext: {}, planning: {} });
   threadWriter.reset(native.id, { thread: native, turns: [turn('running-key-turn', { ordinal: 1, state: 'running', inputId: 'earlier' })] }, false);
@@ -126,25 +126,6 @@ it('recomputes paste delivery from the selected model’s reported estimate', as
   expect(screen.queryByText(/^Sent in the message/)).not.toBeInTheDocument();
 });
 
-for (const locale of ['en', 'zh-CN'] as const) it.each([true, false])('sends the explicit alternative to an automatic paste choice in '+locale+' (inline: %s)', async (inline) => {
-  await setLocale(locale);
-  parameters.model.options = [{ model_name: 'fake-1', display_name: 'Example', parameters: {}, allowed: true, reason: null,
-    token_estimate: { ascii_prose_x100: 400, ascii_structured_x100: 300, other_x100: 100, image_tokens: 1000, measured: false } }];
-  const now = '2026-10-26T00:00:00Z';
-  server.context.mockResolvedValue({ harness_kind: null, harness: null, reports: { tokens: true, context: true, breakdown: false }, fill: { count: 'orch', used: inline ? 900 : 960, window: 1000, compact_at: null, scaled: false, at: now, parts: [] }, turn_id: null, shortened: null, can_count: false });
-  native = { ...native, state: 'idle', current_turn_id: null, model: 'fake-1' };
-  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
-  const part: PastedTextPart = { type: 'pasted_text', blob: 'b'.repeat(64), name: 'choice.txt', path: '.orch/attachments/choice.txt', characters: 100, ascii_characters: 100, size: 100 };
-  useComposerStore.setState({ parts: { [native.id]: [part] } });
-  show(<Composer thread={native} />);
-  expect(await screen.findByText(i18n.t('uploads.pasteSuggested'), { exact: true })).toBeVisible();
-  expect(screen.getByRole('radio', { name: i18n.t(inline ? 'uploads.inMessage' : 'uploads.asFile') })).toBeChecked();
-  await userEvent.click(screen.getByRole('radio', { name: i18n.t(inline ? 'uploads.asFile' : 'uploads.inMessage') }));
-  expect(screen.queryByText(i18n.t('uploads.pasteSuggested'), { exact: true })).not.toBeInTheDocument();
-  fireEvent.keyDown(screen.getByRole('textbox', { name: i18n.t('composer.label') }), { key: 'Enter' });
-  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ ...part, delivery: inline ? 'file' : 'inline' }], 'queue', undefined, undefined, false);
-});
-
 for (const language of ['en', 'zh-CN'] as const) for (const delivery of ['inline', 'file'] as const) it(`keeps an explicit ${delivery} choice without model estimates or a completed context read in ${language}`, async () => {
   await setLocale(language);
   server.context.mockImplementation(() => new Promise(() => undefined));
@@ -198,46 +179,30 @@ it('can drop an edited paste after permission is lost without leaving sending bl
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('running delivery keys %s / %s', (language, look) => {
   beforeEach(async () => { await setLocale(language); document.documentElement.setAttribute('data-theme', look); });
-  it.each(['idle', 'running'] as const)('keeps an offline %s draft and explains why Enter cannot send it', (state) => {
-    native = { ...native, state };
-    if (state === 'idle') threadWriter.reset(native.id, { thread: native, turns: [] }, false);
-    server.live = false;
-    const view = show(<Composer thread={native} />);
-    const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
-    fireEvent.change(box, { target: { value: 'Keep this until the connection returns' } });
-    fireEvent.keyDown(box, { key: 'Enter' });
-    expect(server.submit).not.toHaveBeenCalled();
-    expect(box).toHaveValue('Keep this until the connection returns');
-    expect(screen.getByText(i18n.t('composer.reason.offline'), { exact: true })).toBeVisible();
-    server.live = true;
-    view.rerender(<Composer thread={native} />);
-    expect(screen.queryByText(i18n.t('composer.reason.offline'), { exact: true })).not.toBeInTheDocument();
-    fireEvent.keyDown(box, { key: 'Enter' });
-    expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Keep this until the connection returns' }], 'queue', undefined, undefined, false);
-  });
   it('queues with Enter, steers with Ctrl+Enter and interrupts only with the explicit modified key', async () => {
     show(<Composer thread={native} />);
     const hint = i18n.t(isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint');
     expect(screen.getAllByText(hint, { exact: true })).toHaveLength(1);
     const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
     const user = userEvent.setup();
-    await user.click(box); fireEvent.change(box, { target: { value: 'Check the redirect' } });
+    await user.type(box, 'Check the redirect');
     fireEvent.compositionStart(box); fireEvent.keyDown(box, { key: 'Enter', isComposing: true }); fireEvent.compositionEnd(box);
     fireEvent.keyDown(box, { key: 'Enter', altKey: true }); fireEvent.keyDown(box, { key: 'Enter', shiftKey: true });
     expect(server.submit).not.toHaveBeenCalled();
     await user.keyboard('{Enter}');
     expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Check the redirect' }], 'queue', undefined, undefined, false);
     expect(box).toHaveValue('');
-    await user.click(box); fireEvent.change(box, { target: { value: 'Keep the return URL' } }); await user.keyboard('{Control>}{Enter}{/Control}');
+    await user.type(box, 'Keep the return URL'); await user.keyboard('{Control>}{Enter}{/Control}');
     expect(server.submit).toHaveBeenNthCalledWith(2, defaultThreadRead(native.id), [{ type: 'text', text: 'Keep the return URL' }], 'steer', undefined, undefined, false);
-    await user.click(box); fireEvent.change(box, { target: { value: 'Stop and check auth' } }); await user.keyboard('{Control>}{Shift>}{Enter}{/Shift}{/Control}');
+    await user.type(box, 'Stop and check auth'); await user.keyboard('{Control>}{Shift>}{Enter}{/Shift}{/Control}');
     expect(server.submit).toHaveBeenNthCalledWith(3, defaultThreadRead(native.id), [{ type: 'text', text: 'Stop and check auth' }], 'interrupt', undefined, undefined, false);
     expect(server.submit).toHaveBeenCalledTimes(3);
   });
   it('does not promise unsupported steering and removes the running hint when idle or offline', async () => {
     if (native.binding === null) throw new Error('The fixture must name its agent');
+    const agentId = native.binding.agent.id;
     const view = show(<Composer thread={native} />);
-    act(() => composerWriter.noteCannotSteer(native.id, 'running-key-turn'));
+    act(() => useComposerStore.setState({ cannotSteer: { [agentId]: true } }));
     expect(screen.getByText(i18n.t('composer.runningQueueHint'), { exact: true })).toBeVisible();
     const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
     await userEvent.type(box, 'Still here{Control>}{Enter}{/Control}');
@@ -268,25 +233,7 @@ it('offers Plan only where the agent program plans, and sends with Plan on as a 
   expect(plan).toHaveAttribute('aria-pressed', 'true');
 });
 
-it.each(['en', 'zh-CN'] as const)('forgets a learned steering refusal when the next turn starts in %s', async (locale) => {
-  await setLocale(locale);
-  composerWriter.noteCannotSteer(native.id, 'running-key-turn');
-  show(<Composer thread={native} />);
-  expect(screen.getByText(i18n.t('composer.runningQueueHint'), { exact: true })).toBeVisible();
-  native = { ...native, current_turn_id: 'next-key-turn', seq: native.seq + 2 };
-  act(() => threadWriter.apply(native.id, { thread: native, turns: [
-    { ...turn('running-key-turn', { ordinal: 1, state: 'completed', inputId: 'earlier' }), seq_updated: native.seq + 1 },
-    { ...turn('next-key-turn', { ordinal: 2, state: 'running', inputId: 'next' }), seq_updated: native.seq + 2 },
-  ] }));
-  const hint = i18n.t(isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint');
-  expect(await screen.findByText(hint, { exact: true })).toBeVisible();
-  expect(screen.queryByText(i18n.t('composer.runningQueueHint'), { exact: true })).not.toBeInTheDocument();
-  const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
-  fireEvent.change(box, { target: { value: 'Steer this new turn' } }); fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
-  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Steer this new turn' }], 'steer', undefined, undefined, false);
-});
-
-it('sends the original image through file delivery when the build has no native image prompts', async () => {
+it('keeps Send held for a build-disabled native image after the file and paste flows are combined', async () => {
   const binding = native.binding;
   if (binding === null) throw new Error('The composer fixture needs a binding');
   const image = { type: 'image' as const, blob: 'c'.repeat(64), name: 'diagram.png', media_type: 'image/png' as const };
@@ -299,11 +246,10 @@ it('sends the original image through file delivery when the build has no native 
   show(<Composer thread={native} />);
   const reason = i18n.t('programVersions.featureOff', { feature: i18n.t('programVersions.features.input_images'), name: 'Codex', version: '0.162.1' });
   expect(await screen.findByText(reason)).toBeVisible();
-  expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled();
-  expect(screen.getByText(i18n.t('fileMedia.imageByPath'))).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeDisabled();
   expect(screen.queryByRole('button', { name: i18n.t('uploads.changeModel') })).not.toBeInTheDocument();
   fireEvent.keyDown(screen.getByRole('textbox', { name: i18n.t('composer.label') }), { key: 'Enter' });
-  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [image], 'queue', undefined, undefined, false);
+  expect(server.submit).not.toHaveBeenCalled();
 });
 
 for (const language of ['en', 'zh-CN'] as const) it(`uses the reported program name for a disabled image (${language})`, async () => {
@@ -320,33 +266,10 @@ for (const language of ['en', 'zh-CN'] as const) it(`uses the reported program n
   show(<Composer thread={native} />);
   const reason = i18n.t('programVersions.featureOff', { feature: i18n.t('programVersions.features.input_images'), name: language === 'zh-CN' ? '研究助理' : 'Research assistant', version: '1.2.3' });
   expect(await screen.findByText(reason)).toBeVisible();
-  expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled();
-  expect(screen.getByText(i18n.t('fileMedia.imageByPath'))).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeDisabled();
   expect(document.body).not.toHaveTextContent('research-agent');
 });
 
-
-for (const language of ['en', 'zh-CN'] as const) for (const mode of [
-  { width: 400, theme: 'light', delivery: 'queue' },
-  { width: 400, theme: 'dark', delivery: 'steer' },
-  { width: 1440, theme: 'light', delivery: 'interrupt' },
-  { width: 1440, theme: 'dark', delivery: 'queue' },
-] as const) it(`retains an image for a text-only model when sending ${mode.delivery} in ${language} at ${mode.width}px ${mode.theme}`, async () => {
-  await setLocale(language);
-  document.documentElement.dataset.theme = mode.theme;
-  parameters.model.options = [{ model_name: 'opaque-text-model', display_name: 'Text model', parameters: { input_images: false }, allowed: true, reason: null, token_estimate: { ascii_prose_x100: 400, ascii_structured_x100: 300, other_x100: 100, image_tokens: 1000, measured: false } }];
-  native = { ...native, model: 'opaque-text-model', state: mode.delivery === 'queue' ? 'idle' : 'running', current_turn_id: mode.delivery === 'queue' ? null : 'running-key-turn' };
-  threadWriter.reset(native.id, { thread: native, turns: mode.delivery === 'queue' ? [] : [turn('running-key-turn', { ordinal: 1, state: 'running', inputId: 'earlier' })] }, false);
-  const image = { type: 'image' as const, blob: 'd'.repeat(64), name: 'screenshot.png', media_type: 'image/png' as const };
-  useComposerStore.setState({ parts: { [native.id]: [image] } });
-  show(<div style={{ width: mode.width }}><Composer thread={native} /></div>);
-  expect(await screen.findByText(i18n.t('fileMedia.imageByPath'))).toBeVisible();
-  expect(screen.getByText('screenshot.png')).toBeVisible();
-  fireEvent.keyDown(screen.getByRole('textbox', { name: i18n.t('composer.label') }), {
-    key: 'Enter', ctrlKey: mode.delivery !== 'queue', shiftKey: mode.delivery === 'interrupt',
-  });
-  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [image], mode.delivery, undefined, undefined, false);
-});
 
 function cachedVendorLimit(): LimitReached {
   if (native.binding === null) throw new Error('Quota controls need the existing provider binding');
@@ -387,23 +310,5 @@ it('still prompts for a configured provider cap alongside cached vendor quota', 
   const dialog = await screen.findByRole('dialog', { name: i18n.t('ui.limit.title') });
   expect(dialog).not.toHaveTextContent('weekly');
   await user.click(screen.getByRole('button', { name: i18n.t('ui.limit.proceed') }));
-  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Explicit cap approval' }], 'queue', { caps: [cap.cap.id] }, undefined, false);
-});
-
-it('marks the first-message Plan default and retires the mark after an explicit choice', async () => {
-  if (native.binding === null) throw new Error('The fixture needs its reported program');
-  native = { ...native, state: 'idle', current_turn_id: null, usage: null, binding: { ...native.binding, plan_mode: true } };
-  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
-  settings.push({ key: 'thread.plan_first', value: true, own: null, source: { scope: 'topic', node: null }, locked_by: null, writable: false, parts: [] });
-  try {
-    show(<Composer thread={native} />);
-    const plan = () => screen.getByRole('button', { name: i18n.t('composer.plan.label') });
-    await waitFor(() => expect(plan()).toHaveAttribute('aria-pressed', 'true'));
-    expect(within(plan()).getByText(i18n.t('composer.plan.placeDefault'))).toBeVisible();
-    await userEvent.click(plan());
-    expect(plan()).toHaveAttribute('aria-pressed', 'false');
-    expect(within(plan()).queryByText(i18n.t('composer.plan.placeDefault'))).toBeNull();
-    await userEvent.type(screen.getByRole('textbox', { name: i18n.t('composer.label') }), 'Work directly{Enter}');
-    expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Work directly' }], 'queue', undefined, undefined, false);
-  } finally { settings.pop(); }
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(native.id, [{ type: 'text', text: 'Explicit cap approval' }], 'queue', { caps: [cap.cap.id] }, undefined, false);
 });

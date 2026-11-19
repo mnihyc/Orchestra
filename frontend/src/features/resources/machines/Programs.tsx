@@ -111,7 +111,7 @@ export function RegisterMachineProgram({machineId,kind,onRegistered,onClose}:{ma
         onClick={()=>{if(valid) apply.mutate({action:'register',kind,name:name.trim(),command:argv});}}>{t('machinePrograms.register')}</Button>}
     </>}>
     <div className="flex flex-col gap-3 py-2">
-      {query.isPending?<SkeletonRows read={query} rows={3}/>:query.isError?<ErrorState compact title={t('machinePrograms.readFailed')} error={query.error} retrying={query.isRefetching} onRetry={()=>void query.refetch()}/>:<>
+      {query.isPending?<SkeletonRows rows={3}/>:query.isError?<ErrorState compact title={t('machinePrograms.readFailed')} error={query.error} retrying={query.isRefetching} onRetry={()=>void query.refetch()}/>:<>
         <p className="flex items-center gap-2 text-sm text-text-muted">{t(`machinePrograms.kinds.${kind}.name`)}<ProgramsHelp/></p>
         <Input label={t('machinePrograms.name')} value={name} disabled={apply.isPending}
           onChange={(event)=>{setName(event.target.value);setTested(null);apply.reset();}} autoComplete="off"/>
@@ -159,7 +159,7 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
   },onError:(error,body)=>{
     if((body.action==='confirm_harness' || body.action==='remove_harness') && error instanceof ApiError && error.is('policy.not_delegated'))setUnconfirming(null);
   }});
-  if(query.isPending) return <SkeletonRows read={query} rows={3}/>;
+  if(query.isPending) return <SkeletonRows rows={3}/>;
   if(query.isError) return <ErrorState title={t('machinePrograms.readFailed')} error={query.error} retrying={query.isRefetching} onRetry={()=>void query.refetch()}/>;
   const programs:MachinePrograms=query.data;
   const roles=machine.role_management;

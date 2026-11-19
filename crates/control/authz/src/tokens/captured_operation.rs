@@ -44,37 +44,6 @@ impl CapturedOperation {
         self.caller.user()
     }
 
-    /// Preserve every earlier ceiling while retaining this same admitted operation again.
-    /// This retains restrictions only; targets and ordinary permission must still be rechecked.
-    pub fn narrowed_with(&self, caller: &Caller) -> Result<Self, KeyScopeRefusal> {
-        if caller.admitted_operation() != Some(self.operation()) {
-            return Err(KeyScopeRefusal::Unclassified);
-        }
-        Ok(Self {
-            operation: self.operation.clone(),
-            caller: self.caller.narrowed_with(caller)?,
-        })
-    }
-
-    /// Add a genuine restored transport ceiling without restoring any target admission.
-    pub fn with_ceiling(&self, caller: &Caller) -> Result<Self, KeyScopeRefusal> {
-        Ok(Self {
-            operation: self.operation.clone(),
-            caller: self.caller.narrowed_with(caller)?,
-        })
-    }
-
-    /// Conjoin accepted source snapshots of this same act; no target admission is restored.
-    pub fn intersect(&self, current: &Self) -> Result<Self, KeyScopeRefusal> {
-        if self.operation != current.operation {
-            return Err(KeyScopeRefusal::Unclassified);
-        }
-        Ok(Self {
-            operation: self.operation.clone(),
-            caller: self.caller.intersect(&current.caller)?,
-        })
-    }
-
     /// Rechecks current credential validity and policy, returning an unadmitted caller. The
     /// original selection remains on this carrier; current targets must come from the producer.
     pub async fn restore(&self, conn: &mut Conn, now: Time) -> Result<Option<Caller>, Error> {

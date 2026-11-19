@@ -1,6 +1,6 @@
 /** A native fake subscription reports later changes, not an invented initial change to every row. */
 import { expect, it } from 'vitest';
-import type { Machine, Provider } from '../../src/generated/api-types.ts';
+import type { Provider } from '../../src/generated/api-types.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
 import { World } from '../doubles/world.ts';
 
@@ -17,20 +17,11 @@ it('keeps initial resources quiet and publishes an actual later rename to the sa
   expect(frames).toEqual([]);
   const path = `/providers/${RUNS_ON.openAiKey}`;
   const before = world.resources.handle(person, 'GET', path, new URLSearchParams(), {})?.body as Provider;
-  const machineId = before.machine?.id;
-  if (machineId === undefined) throw new Error('The native provider fixture needs its machine');
   const changed = world.resources.handle(person, 'PATCH', path, new URLSearchParams(), { name: 'Renamed fixture provider', expected_revision: before.revision });
   expect(changed?.status).toBe(200);
   await world.requestFeeds.changed();
-  const provider = world.resources.handle(person, 'GET', path, new URLSearchParams(), {})?.body as Provider;
-  const machine = world.resources.handle(person, 'GET', `/machines/${machineId}`, new URLSearchParams(), {})?.body as Machine;
-  expect(provider.name).toBe('Renamed fixture provider');
-  expect(machine.providers.find((entry) => entry.id === provider.id)?.name).toBe(provider.name);
-  // The machine's native provider reference changed too; both complete projections are news.
-  expect(frames).toEqual([
-    { op: 'event', id: 1, feed: 'user', data: { what: 'resources', kind: 'provider', id: provider.id, row: provider } },
-    { op: 'event', id: 1, feed: 'user', data: { what: 'resources', kind: 'machine', id: machine.id, row: machine } },
-  ]);
+  expect(frames).toEqual([expect.objectContaining({ op: 'event', feed: 'user', data: expect.objectContaining({ what: 'resources',
+    kind: 'provider', id: RUNS_ON.openAiKey, row: expect.objectContaining({ name: 'Renamed fixture provider' }) }) })]);
   frames.length = 0;
   await world.requestFeeds.changed();
   expect(frames).toEqual([]);

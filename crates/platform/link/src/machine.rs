@@ -48,7 +48,6 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 mod auxiliary;
-mod primary;
 
 /// How often the core looks at the clocks: to force the spool to disk, to see
 /// whether a stream has stalled, to forget what is old. A fifth of a second is
@@ -67,7 +66,7 @@ pub enum LinkStatus {
         /// How many attempts in a row failed before this one.
         failures: u32,
     },
-    /// A session is installed for commands, streams and tunnels.
+    /// A session stands.
     Connected {
         /// The session.
         session_id: Id,
@@ -288,12 +287,9 @@ fn send_input(
 /// What the core needs of a session that stands.
 #[derive(Debug)]
 struct SessionStart {
-    retained_supported: bool,
-    gateway_id: String,
     ready: Ready,
     sender: SessionSender,
     clock_offset_ms: i64,
-    installed: oneshot::Sender<()>,
 }
 
 #[derive(Debug)]
@@ -305,9 +301,9 @@ struct Shared {
     primary_changed: tokio::sync::Notify,
     gateway: Mutex<PrimaryGateway>,
     gateway_id: Mutex<Option<String>>,
+    last_primary_gateway: Mutex<Option<String>>,
     gateway_measurements: Mutex<Vec<orch_link_contract::gateways::GatewayMeasurement>>,
     gateway_measured_at: Mutex<Option<orch_types::Time>>,
-    gateway_reports: watch::Sender<u64>,
     advertised_gateways: watch::Sender<Option<Vec<orch_link_contract::gateways::GatewayInstance>>>,
     directory: PathBuf,
     access_token: Mutex<Option<String>>,
@@ -362,10 +358,10 @@ pub enum MachineRequestError {
     #[error("the connector is not connected to the system")]
     Offline,
     /// The bounded pending set is full or already carries this key.
-    #[error("too many local requests are awaiting the system")]
+    #[error("too many local imports are awaiting the system")]
     Busy,
     /// The system may have committed before the reply was lost; never claim it certainly failed.
-    #[error("the local request was not confirmed; inspect the machine's Tools before trying again")]
+    #[error("the import was not confirmed; inspect the machine's Tools before trying again")]
     Unconfirmed,
 }
 
@@ -439,12 +435,6 @@ impl MachineLink {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-    }
-
-    /// Probe reports drive the normal facts and local persistence paths without browser polling.
-    #[must_use]
-    pub fn gateway_changes(&self) -> watch::Receiver<u64> {
-        self.shared.gateway_reports.subscribe()
     }
 
     /// Last probe time and the connector's own persisted primary choice.
@@ -562,15 +552,13 @@ impl MachineLink {
         let shared = Arc::new_cyclic(|parent| Shared {
             auxiliary: auxiliary::Pool::new(
                 parent.clone(),
-                auxiliary::PoolConfig {
-                    identity: auxiliary_identity,
-                    dialer: Arc::clone(&dialer),
-                    clock: Arc::clone(&clock),
-                    options: config.tunnels,
-                    gauge: config.tunnel_gauge.clone(),
-                    budget: Arc::clone(&budget),
-                    incoming: incoming_tx.clone(),
-                },
+                auxiliary_identity,
+                Arc::clone(&dialer),
+                Arc::clone(&clock),
+                config.tunnels,
+                config.tunnel_gauge.clone(),
+                Arc::clone(&budget),
+                incoming_tx.clone(),
             ),
             incoming: Mutex::new(Some(IncomingTunnels::from_receiver(incoming_rx))),
             primary_attaching: Mutex::new(None),
@@ -580,9 +568,9 @@ impl MachineLink {
             primary_changed: tokio::sync::Notify::new(),
             gateway: Mutex::new(config.gateway),
             gateway_id: Mutex::new(None),
+            last_primary_gateway: Mutex::new(None),
             gateway_measurements: Mutex::new(Vec::new()),
             gateway_measured_at: Mutex::new(None),
-            gateway_reports: watch::channel(0).0,
             advertised_gateways,
             directory: config.data_dir.clone(),
             access_token: Mutex::new(None),
@@ -789,12 +777,11 @@ impl MachineLink {
             .clone()
     }
 
-    /// Asks the system to file or forget a local tool server on this authenticated channel.
+    /// Asks the system to file one local import. The same request id is safe to repeat after an uncertain answer.
     pub async fn import_mcp(
         &self,
-        request: impl Into<orch_link_contract::mcp_import::McpLocalAsk>,
+        request: orch_link_contract::mcp_import::McpImportAsk,
     ) -> Result<orch_link_contract::mcp_import::McpImportAnswer, MachineRequestError> {
-        let request = request.into();
         let sender = self
             .shared
             .session
@@ -803,7 +790,7 @@ impl MachineLink {
             .clone()
             .ok_or(MachineRequestError::Offline)?;
         let (tell, told) = oneshot::channel();
-        let id = request.request_id();
+        let id = request.request_id;
         {
             let mut pending = self
                 .shared
@@ -881,7 +868,7 @@ impl MachineLink {
         .map_err(|_| MachineRequestError::Offline)
     }
 
-    /// Waits until the authenticated session is installed for commands, streams and tunnels.
+    /// Waits until a session stands.
     pub async fn connected(&self) {
         let mut status = self.status();
         loop {
@@ -1127,6 +1114,18 @@ async fn supervise(
         let mut named_by_gateway = None;
         let why = match attempt {
             Ok((established, endpoint)) => {
+                let previous = shared
+                    .last_primary_gateway
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .replace(established.gateway_id.clone());
+                if previous
+                    .as_ref()
+                    .is_some_and(|previous| *previous != established.gateway_id)
+                {
+                    // Cross-gateway resumption is deferred; preserve the ordinary reset/recovery.
+                    shared.tunnels.reset_all();
+                }
                 endpoints.worked(&endpoint);
                 *shared
                     .gateway_id
@@ -1176,34 +1175,18 @@ async fn supervise(
                     }
                 }
                 backoff.succeeded();
-                let session_id = established.ready.session_id;
-                let (installed, installation) = oneshot::channel();
-                let session = run_session(
+                status.send_replace(LinkStatus::Connected {
+                    session_id: established.ready.session_id,
+                    endpoint: endpoint.url.clone(),
+                });
+                let ended = run_session(
                     established,
                     &inputs,
-                    installed,
-                    &shared,
-                    dialer.as_ref(),
-                    clock.as_ref(),
+                    &shared.primary_changed,
                     #[cfg(feature = "test-observers")]
                     &shared.observed_inputs,
-                );
-                tokio::pin!(session);
-                let ended = tokio::select! {
-                    ended = &mut session => ended,
-                    ready = installation => {
-                        if ready.is_ok() {
-                            // Public readiness includes the command, stream and tunnel consumers.
-                            status.send_replace(LinkStatus::Connected {
-                                session_id,
-                                endpoint: endpoint.url.clone(),
-                            });
-                            session.await
-                        } else {
-                            EndReason::Local
-                        }
-                    }
-                };
+                )
+                .await;
                 format!("the session ended: {ended:?}")
             }
             Err(PrimaryFailure::Selection(detail)) => detail,
@@ -1229,12 +1212,10 @@ async fn supervise(
             .active_endpoint
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
-        if !shared.tunnels.admissions_paused() {
-            *shared
-                .primary_attaching
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = None;
-        }
+        *shared
+            .primary_attaching
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         *shared
             .gateway_id
             .lock()
@@ -1277,7 +1258,6 @@ async fn establish_primary(
         .candidates(dialer, endpoints.list(), endpoints.last_worked())
         .await
         .map_err(PrimaryFailure::Selection)?;
-    let measured_at = (!measurements.is_empty()).then(|| clock.time());
     *shared
         .gateway_measurements
         .lock()
@@ -1285,16 +1265,12 @@ async fn establish_primary(
     *shared
         .gateway_measured_at
         .lock()
-        .unwrap_or_else(PoisonError::into_inner) = measured_at;
-    shared
-        .gateway_reports
-        .send_modify(|revision| *revision = revision.wrapping_add(1));
+        .unwrap_or_else(PoisonError::into_inner) = (policy.choice.selection
+        == orch_link_contract::gateways::GatewaySelection::Automatic)
+        .then(|| clock.time());
     let mut failures = Vec::new();
     let mut busy = None;
     for candidate in candidates {
-        shared
-            .auxiliary
-            .unpause_other_gateways(candidate.gateway_id.as_deref());
         if let Some(id) = &candidate.gateway_id {
             *shared
                 .primary_attaching
@@ -1353,10 +1329,7 @@ fn keep_connected_endpoint(data_dir: &std::path::Path, endpoint: &Endpoint) -> s
 async fn run_session(
     established: Established,
     inputs: &mpsc::UnboundedSender<Input>,
-    installed: oneshot::Sender<()>,
-    shared: &Shared,
-    dialer: &dyn Dialer,
-    clock: &dyn Clock,
+    primary_changed: &tokio::sync::Notify,
     #[cfg(feature = "test-observers")] observed: &Arc<crate::test_observers::QueueGauge>,
 ) -> EndReason {
     let Established {
@@ -1364,23 +1337,13 @@ async fn run_session(
         mut inbox,
         ready,
         clock_offset_ms,
-        gateway_id,
-        capabilities,
         ..
     } = established;
-    let maintenance = primary::reconsider(shared, dialer, clock);
-    tokio::pin!(maintenance);
-    let mut moving = false;
     let operator_sender = sender.clone();
     let start = SessionStart {
-        retained_supported: capabilities.iter().any(|capability| {
-            capability == orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY
-        }),
-        gateway_id,
         ready,
         sender,
         clock_offset_ms,
-        installed,
     };
     if send_input(
         inputs,
@@ -1395,8 +1358,7 @@ async fn run_session(
     loop {
         let event = tokio::select! {
             event = inbox.next() => event,
-            () = shared.primary_changed.notified() => { operator_sender.end(); continue; },
-            () = &mut maintenance, if !moving => { moving = true; operator_sender.end(); continue; },
+            () = primary_changed.notified() => { operator_sender.end(); continue; },
         };
         match event {
             Some(SessionEvent::Frame(frame)) => {
@@ -1480,7 +1442,6 @@ async fn core(
     #[cfg(feature = "test-observers")] observed: crate::test_observers::ReceiverLifetime,
 ) {
     let mut session: Option<SessionSender> = None;
-    let mut session_gateway: Option<String> = None;
     let mut ticker = tokio::time::interval(CORE_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ticks: u32 = 0;
@@ -1557,12 +1518,9 @@ async fn core(
                 }
                 Input::Ready(start) => {
                     let SessionStart {
-                        retained_supported,
-                        gateway_id,
                         ready,
                         sender,
                         clock_offset_ms,
-                        installed,
                     } = *start;
                     *shared
                         .versions
@@ -1574,9 +1532,7 @@ async fn core(
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner) = Some(sender.clone());
                     commands.set_session(Some(sender.clone()), clock_offset_ms);
-                    session_gateway = Some(gateway_id.clone());
-                    tunnels.session_up_at(sender.clone(), &gateway_id, retained_supported);
-                    shared.auxiliary.primary_ready();
+                    tunnels.session_up(sender.clone());
                     match streams.on_ready(&ready.cursors, sender.max_frame_bytes(), now) {
                         Ok(frames) => send_all(Some(&sender), frames),
                         Err(error) => {
@@ -1584,7 +1540,6 @@ async fn core(
                         }
                     }
                     session = Some(sender);
-                    let _ = installed.send(());
                 }
                 Input::Frame(frame) => {
                     let frame = *frame;
@@ -1671,9 +1626,6 @@ async fn core(
                         }
                         continue;
                     }
-                    if let (Frame::Resume(resume), Some(gateway)) = (&frame, &session_gateway) {
-                        shared.auxiliary.adopt_resume(&tunnels, gateway, resume);
-                    }
                     dispatch(
                         frame,
                         &mut streams,
@@ -1698,9 +1650,6 @@ async fn core(
                     streams.on_session_down();
                     commands.set_session(None, 0);
                     tunnels.session_down();
-                    if let Some(gateway) = session_gateway.take() {
-                        shared.auxiliary.session_lost(&tunnels, &gateway);
-                    }
                 }
                 Input::Shutdown(done) => {
                     shutdown = Some(done);

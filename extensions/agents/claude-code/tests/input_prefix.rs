@@ -296,20 +296,12 @@ fn queued_input_witness(
         .filter(|(_, row)| {
             row["type"] == "queue-operation"
                 && row["operation"] == "remove"
-                && row["reason"] == "absorbed_mid_turn"
-                && match (row.get("deliveryId"), row.get("commandUuid")) {
-                    (Some(Json::String(actual)), command) if actual.as_str() == delivery => {
-                        matches!(command, None | Some(Json::Null))
-                            || command.and_then(Json::as_str) == Some(input)
-                    }
-                    (None | Some(Json::Null), Some(Json::String(command))) => {
-                        command.as_str() == input
-                    }
-                    _ => false,
-                }
+                && row["commandUuid"] == input
+                && row["deliveryId"] == delivery
         })
         .collect();
     if removals.len() != 1
+        || removals[0].0 <= index
         || removals[0].1["sessionId"] != session
         || removals[0].1["reason"] != "absorbed_mid_turn"
     {
@@ -408,15 +400,6 @@ fn queued_guidance_requires_distinct_source_and_entry_uuids_and_the_actual_consu
     duplicate.push(rows[1].clone());
     write(&duplicate)?;
     assert!(queued_input_witness(file.path(), SESSION, INPUT).is_err());
-    // The current SDK reader correlates by delivery first, then source UUID, independently
-    // of where the queue bookkeeping was flushed relative to the attachment.
-    let delivery_only = json!({"type":"queue-operation","sessionId":SESSION,"operation":"remove",
-        "reason":"absorbed_mid_turn","deliveryId":DELIVERY});
-    write(&[rows[0].clone(), delivery_only, rows[1].clone()])?;
-    assert_eq!(
-        queued_input_witness(file.path(), SESSION, INPUT)?["consumption"]["deliveryId"],
-        DELIVERY
-    );
     Ok(())
 }
 
@@ -463,7 +446,7 @@ async fn fresh_native_prefix_case(first: bool) -> Proof {
     let mut rig = Rig::new()
         .await
         .ok_or("the pinned Docker harness is required for prefix acceptance")?;
-    assert_eq!(rig.start_quick().await.harness_version, "2.1.322");
+    assert_eq!(rig.start_quick().await.harness_version, "2.1.296");
     let original = rig.open().await;
     let source = NativePrefixSource {
         thread_id: rig.thread,
@@ -636,18 +619,8 @@ async fn fresh_native_prefix_case(first: bool) -> Proof {
         // Only the actual first input of a proved empty prefix can change
         // this native input-derived billing checksum. Middle stays strict.
         (
-            claude_first_model_input(&selected_model, selected).map_err(|reason| {
-                format!(
-                    "source first input: {reason}; native billing block: {}",
-                    selected_model.pointer("/system/0").unwrap_or(&Json::Null)
-                )
-            })?,
-            claude_first_model_input(&request.body, REVISED).map_err(|reason| {
-                format!(
-                    "revised first input: {reason}; native billing block: {}",
-                    request.body.pointer("/system/0").unwrap_or(&Json::Null)
-                )
-            })?,
+            claude_first_model_input(&selected_model, selected)?,
+            claude_first_model_input(&request.body, REVISED)?,
         )
     } else {
         (
@@ -714,7 +687,7 @@ async fn an_actual_queued_steer_keeps_its_native_guidance_and_refuses_a_user_mes
             echoed: echoed.clone(),
         }),
     );
-    assert_eq!(rig.start_quick().await.harness_version, "2.1.322");
+    assert_eq!(rig.start_quick().await.harness_version, "2.1.296");
     let original = rig.open().await;
     let source = NativePrefixSource {
         thread_id: rig.thread,

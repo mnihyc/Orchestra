@@ -21,7 +21,6 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
 import { InlineAlert } from '@/ui/InlineAlert';
-import { StateLine } from '@/ui/StateLine';
 import { toast } from '@/ui/Toast';
 import { UserChip } from '@/ui/UserChip';
 
@@ -48,7 +47,7 @@ function CreatedUser({ reply, onClose }: { reply: AdminUserCreateReply; onClose:
       open
       onOpenChange={(open) => !open && onClose()}
       title={t('admin.users.made.title', { name: reply.user.display_name })}
-      description={typeof reply.reset_url === 'string' ? t('admin.users.made.lead') : undefined}
+      description={t('admin.users.made.lead')}
       footer={
         <Button variant="primary" onClick={onClose}>
           {t('admin.common.done')}
@@ -57,9 +56,8 @@ function CreatedUser({ reply, onClose }: { reply: AdminUserCreateReply; onClose:
     >
       <div className="flex flex-col gap-4 py-2">
         <UserChip user={reply.user} size={32} showUsername />
-        {typeof reply.reset_url === 'string' ? <><LinkField url={reply.reset_url} label={t('admin.users.link.url')} copyLabel={t('admin.users.link.copy')} />
-          <InlineAlert tone="info">{t('admin.users.made.note')}</InlineAlert></>
-          : <StateLine message={t('admin.users.link.alreadyShown')} compact />}
+        <LinkField url={reply.reset_url} label={t('admin.users.link.url')} copyLabel={t('admin.users.link.copy')} />
+        <InlineAlert tone="info">{t('admin.users.made.note')}</InlineAlert>
       </div>
     </Dialog>
   );
@@ -156,14 +154,10 @@ export function ResetLinkDialog({ user, onClose }: { user: AdminUser; onClose: (
   const timeZone = useAppearance((state) => state.timeZone);
   const [clear, setClear] = useState(false);
   const [link, setLink] = useState<AdminUserResetLinkCreateReply | null>(null);
-  const keyOf = useActKey();
   const hasSecondStep = user.totp_enabled || user.email_code_second_step;
 
   const make = useMutation({
-    mutationFn: () => {
-      const body = { clear_second_step: clear };
-      return makeResetLink(user.id, body, keyOf({ user: user.id, body }));
-    },
+    mutationFn: () => makeResetLink(user.id, { clear_second_step: clear }),
     onSuccess: setLink,
   });
 
@@ -205,8 +199,7 @@ export function ResetLinkDialog({ user, onClose }: { user: AdminUser; onClose: (
           </>
         ) : (
           <>
-            {typeof link.url === 'string' ? <LinkField url={link.url} label={t('admin.users.link.url')} copyLabel={t('admin.users.link.copy')} />
-              : <StateLine message={t('admin.users.link.alreadyShown')} compact />}
+            <LinkField url={link.url} label={t('admin.users.link.url')} copyLabel={t('admin.users.link.copy')} />
             <p className="text-sm text-text-muted">{t('admin.users.link.expires', { time: formatDateTime(link.expires_at, { locale, timeZone }) })}</p>
             {clear && <InlineAlert tone="info">{t('admin.users.link.clearDone')}</InlineAlert>}
           </>

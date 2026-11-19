@@ -124,7 +124,7 @@ pub(super) async fn load(
         paths.extend(home.path.iter().copied());
     }
     for chat in rows::people_chats(conn, &chat_ids.into_iter().collect::<Vec<_>>()).await? {
-        paths.insert(chat.home_id);
+        paths.insert(chat.org_id);
     }
     let content_ids = content.keys().copied().collect();
     let mut places: BTreeMap<_, _> = rows::places(conn, &paths.into_iter().collect::<Vec<_>>())
@@ -159,7 +159,7 @@ pub(super) async fn headers(
         .copied()
         .chain(agent.path.iter().copied())
         .chain(documents.iter().map(|row| row.node_id))
-        .chain(chats.iter().map(|row| row.home()))
+        .chain(chats.iter().map(|row| row.node_id.unwrap_or(row.org_id)))
         .collect();
     if let Scope::Under(id) = scope {
         homes.insert(id);

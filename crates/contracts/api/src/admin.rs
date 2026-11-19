@@ -1,8 +1,7 @@
 //! Management views: users and their state with what a new person's own org starts as and which proofs are closed at their name, a reset link that may switch a second step off, root orgs and their two limits, both pools of runtimes, health, stored metric series and PKI.
 //!
-//! Management requests require current system administration. A browser session must have its
-//! explicit administrative mode enabled; an operation-scoped key must admit the actual native
-//! operation and every required subject. Shared program metadata and scoped version fetches use
+//! Management requests need a system admin in a browser session: a request made with an API token
+//! is refused with `auth.session_required`. Shared program metadata and scoped version fetches use
 //! their declared user, environment and settings authority. Inside an org a system admin uses the ordinary
 //! requests, as the Admin of every org that they are. A [`Runtime`] is a
 //! unit that a host runs, an [`AdminUser`] a person with what only a system
@@ -33,7 +32,7 @@ use crate::environment::{EnvironmentRef, NetworkState, TemplateRef};
 use crate::nodes::OrgType;
 use crate::nodes::{AuditEntry, NodeRef, Org};
 use crate::resources::{
-    CapabilityDef, Host, MachineOs, MachineRef, OrgAgentCreateBody, ProviderRef, UnitKind,
+    Agent, CapabilityDef, Host, MachineOs, MachineRef, OrgAgentCreateBody, ProviderRef, UnitKind,
 };
 use crate::routes::Access::{Permission, Public, Rule, Session, User};
 use crate::settings::{ResolvedSetting, SettingReach};
@@ -97,47 +96,6 @@ pub struct AdminUser {
     pub created_at: Time,
     /// When they were last seen.
     pub last_seen_at: Option<Time>,
-}
-
-/// An API token in the system inventory, without its secret or hash.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminToken {
-    /// The current credential metadata, including operation rules and retained ceilings.
-    pub info: crate::auth::ApiTokenInfo,
-    /// The actual owning account, including service identities.
-    pub owner: UserRef,
-    /// This metadata was opened through current system administration.
-    pub admin_access: bool,
-}
-
-/// Browser session metadata opened through current system administration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminSession {
-    /// The same ordinary session metadata, never authentication material.
-    #[serde(flatten)]
-    pub info: crate::auth::SessionInfo,
-    /// This metadata was opened through system administration.
-    pub admin_access: bool,
-}
-/// Recent token activity opened through current system administration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminTokenActivity {
-    /// The existing bounded native activity record.
-    #[serde(flatten)]
-    pub info: crate::auth::ApiTokenActivity,
-    /// This metadata was opened through system administration.
-    pub admin_access: bool,
-}
-
-/// A bounded system credential inventory, newest first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminTokenListQuery {
-    /// Select one actual owner; absent includes every account.
-    pub owner_id: Option<Id>,
-    /// Opaque continuation of this owner-filtered list.
-    pub cursor: Option<String>,
-    /// Requested page size, bounded by the ordinary page limit.
-    pub limit: Option<u32>,
 }
 
 /// The accepted standing change without the account's current private metadata.
@@ -904,33 +862,10 @@ pub struct AdminUserCreateBody {
 pub struct AdminUserCreateReply {
     /// The person.
     pub user: AdminUser,
-    /// The one-time link; absent on replay after its first successful response.
-    pub reset_url: Option<String>,
+    /// The link to give them.
+    pub reset_url: String,
     /// When the link stops being redeemable, according to the server's clock.
     pub expires_at: Time,
-    /// A retry found this accepted creation; no one-time link is returned again.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
-}
-
-crate::common::full_or_receipt! {
-    /// Current ordinary account metadata and a first-only link, or the accepted identities.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum AdminUserCreateResponse {Full(AdminUserCreateReply),Receipt(AdminUserCreateReceipt),}
-}
-/// Accepted account and one-time-link identities without private account content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminUserCreateReceipt {
-    /// Restricted acknowledgement marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual created account.
-    pub user_id: Id,
-    /// The actual native reset-link record.
-    pub reset_link_id: Id,
-    /// The first link's accepted expiry.
-    pub expires_at: Time,
-    /// The first result already showed its one-time link.
-    pub already_created: bool,
 }
 
 /// Changes a person. Making somebody a system admin, or any change to one, needs
@@ -962,13 +897,10 @@ pub struct AdminUserResetLinkCreateBody {
 /// A link to give a person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdminUserResetLinkCreateReply {
-    /// The one-time link, returned only on the successful first response.
-    pub url: Option<String>,
+    /// The link.
+    pub url: String,
     /// When it stops being good.
     pub expires_at: Time,
-    /// A retry found the first accepted link and returns no secret again.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
 }
 
 /// Sets a setting of the system.
@@ -1338,70 +1270,13 @@ pub struct SemanticSearchKeepBody {
     pub generation_id: Id,
 }
 
-crate::common::full_or_receipt! {
-    /// The current identity-provider configuration or its accepted identity without content.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum IdentityProviderCreateResponse {
-        Full(IdentityProvider),
-        Receipt(IdentityProviderCreateReceipt),
-    }
-}
-/// Accepted provider identity without sign-in configuration or secret metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct IdentityProviderCreateReceipt {
-    /// Restricted acknowledgement marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The identity provider actually accepted.
-    pub identity_provider_id: Id,
-}
-
 crate::endpoints! {
-    /// Lists the system's unrevoked API tokens, including expired tokens, without secret values.
-    AdminTokenList: GET "/admin/tokens", Session, query AdminTokenListQuery, none, json Page<AdminToken>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Key)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("token_org_names")),
-            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("token_project_names")),
-            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("token_topic_names")),
-            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("token_thread_names")),
-        ]);
-    /// Revokes the selected API token through current system administration.
-    AdminTokenDelete: DELETE "/admin/tokens/{id}", Session, none, none, none, 204,
-        operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("token"));
-    /// Lists one person's API tokens with their current scope and activity timestamps.
-    AdminUserTokenList: GET "/admin/users/{id}/tokens", Session, query AdminTokenListQuery, none, json Page<AdminToken>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Key)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("token_org_names")),
-            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("token_project_names")),
-            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("token_topic_names")),
-            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("token_thread_names")),
-        ]);
-    /// Revokes the selected API token of this exact person.
-    AdminUserTokenDelete: DELETE "/admin/users/{id}/tokens/{token_id}", Session, none, none, none, 204,
-        operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("token"));
-    /// Reads this person's recent token calls, including retained history after revocation.
-    AdminUserTokenActivityList: GET "/admin/users/{id}/tokens/{token_id}/activity", Session, query crate::auth::ApiTokenActivityQuery, none, json Page<AdminTokenActivity>, 200,
-        operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("token"));
-    /// Lists the live browser sessions of this exact person.
-    AdminUserSessionList: GET "/admin/users/{id}/sessions", Session, query PageQuery, none, json Page<AdminSession>, 200,
-        operation Op::single(Read, &[Identity(I::Session)], Target::ResolvedCollection("results"));
-    /// Ends one session of this exact person and its access tokens.
-    AdminUserSessionDelete: DELETE "/admin/users/{id}/sessions/{session_id}", Session, none, none, none, 204,
-        operation Op::returning(Manage, &[Identity(I::Session)], Target::Resolved("session"));
-    /// Ends all this person's unrevoked sessions, including the caller's if selected.
-    AdminUserSessionsDelete: DELETE "/admin/users/{id}/sessions", Session, none, none, none, 204,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Identity(I::Session)],Target::TypedPath{parameter:"id",kind:Identity(I::Account)}),
-            Facet::required(Manage,&[Identity(I::Session)],Target::ResolvedCollection("session_subjects")),
-            Facet::response_content(&[Identity(I::Session)],Target::TypedPath{parameter:"id",kind:Identity(I::Account)}),
-        ]));
     /// Lists the people of the system with what only a system admin reads about them.
     AdminUserList: GET "/admin/users", Session, query AdminUserListQuery, none, json Page<AdminUser>, 200,
         operation Op::single(Manage, &[Identity(I::Account)], Target::System);
     /// Makes a person, their optional personal org, and a link to set a password.
-    AdminUserCreate: POST "/admin/users", Session, none, json AdminUserCreateBody, json AdminUserCreateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::System));
+    AdminUserCreate: POST "/admin/users", Session, none, json AdminUserCreateBody, json AdminUserCreateReply, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::System);
     /// Suspends a person or lets them sign in again, or changes whether they are a system admin.
     AdminUserUpdate: PATCH "/admin/users/{id}", Session, none, json AdminUserUpdateBody, json AdminUserUpdateResponse, 200,
         operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) }));
@@ -1452,8 +1327,8 @@ crate::endpoints! {
     AdminMetricList: GET "/admin/metrics", Session, query AdminMetricListQuery, none, json Vec<MetricSeries>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Makes an agent profile of the system, whose profile has no home.
-    AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json crate::resources::OrgAgentCreateResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::agent_sources::SYSTEM_CREATE_FACETS));
+    AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json Agent, 200,
+        operation Op::returning(Manage, &[Object(K::Agent)], Target::System);
     /// Lists the external implementations loaded anywhere, with how they fare.
     AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
@@ -1522,7 +1397,7 @@ crate::endpoints! {
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Imports a carried-in vendor checksum list and audits its digest.
     AdminHarnessChecksumsImport: POST "/admin/harnesses/checksums", Session, none, json HarnessChecksumsImportBody, json HarnessChecksumsImportReply, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Checks every kept build of a harness at a version again, in the background, and lists the builds.
     AdminHarnessCheck: POST "/admin/harnesses/{kind}/{version}/check", Session, none, none, json Vec<HarnessBuild>, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);
@@ -1549,8 +1424,8 @@ crate::endpoints! {
     AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds an identity provider.
-    AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProviderCreateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
+    AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProvider, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Changes an identity provider.
     AdminIdentityProviderUpdate: PATCH "/admin/identity-providers/{id}", Session, none, json IdentityProviderUpdateBody, json IdentityProvider, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);

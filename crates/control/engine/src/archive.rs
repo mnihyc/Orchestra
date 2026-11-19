@@ -9,27 +9,6 @@ pub mod snapshot_authority;
 /// Native deletion operands, selected and held before the first hierarchy/lifecycle effect.
 pub mod deletion;
 
-/// Private retained artifacts keep their maker's custody. Only the existing browser
-/// system-administration mode extends that read; keys and ordinary page grants do not.
-#[must_use]
-pub fn may_read_custody(principal: &orch_authz::Principal, maker: Option<orch_types::Id>) -> bool {
-    maker == Some(principal.user()) || principal.is_system_admin() && principal.caller().as_admin()
-}
-
-/// The existing inspection marker for a read that used administrative artifact custody.
-#[must_use]
-pub fn custody_inspection(
-    principal: &orch_authz::Principal,
-    maker: Option<orch_types::Id>,
-) -> Option<orch_api_contract::access::AdminAccess> {
-    (maker != Some(principal.user()) && may_read_custody(principal, maker)).then_some(
-        orch_api_contract::access::AdminAccess {
-            place: orch_api_contract::nodes::NodeOrSystem::SYSTEM,
-            private: true,
-        },
-    )
-}
-
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -62,22 +41,6 @@ impl From<orch_db::DbError> for RemovalScheduleError {
     fn from(error: orch_db::DbError) -> Self {
         Self::Internal(error.into())
     }
-}
-
-/// The original removal job prerequisite, also used by a read-only Delete preview.
-pub async fn check_environment_removal(
-    conn: &mut Conn,
-    environment: Id,
-) -> Result<(), RemovalScheduleError> {
-    if let Some(job) = orch_db::queries::jobs::retained::open_of_environment(conn, environment)
-        .await
-        .map_err(EngineError::from)?
-        .into_iter()
-        .find(|job| job.kind != orch_db::queries::jobs::kind::ENVIRONMENT_REMOVE)
-    {
-        return Err(RemovalScheduleError::Busy(Box::new(job)));
-    }
-    Ok(())
 }
 
 /// Counts of work settled by one lifecycle action.
@@ -434,7 +397,15 @@ impl Engine {
         conn: &mut Conn,
         environment: Id,
     ) -> Result<(), RemovalScheduleError> {
-        check_environment_removal(conn, environment).await
+        if let Some(job) = orch_db::queries::jobs::retained::open_of_environment(conn, environment)
+            .await
+            .map_err(EngineError::from)?
+            .into_iter()
+            .find(|job| job.kind != orch_db::queries::jobs::kind::ENVIRONMENT_REMOVE)
+        {
+            return Err(RemovalScheduleError::Busy(Box::new(job)));
+        }
+        Ok(())
     }
 
     /// Settles every live thread below an archived node inside its caller's authority transaction.

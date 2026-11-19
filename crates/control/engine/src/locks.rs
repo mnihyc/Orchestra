@@ -168,7 +168,6 @@ pub(crate) async fn cancel_pending_approvals_in(
         let Some(refusal) = refusal_for(&approval) else {
             continue;
         };
-        unit.before_effect()?;
         if approval_queries::decide(&mut *unit.conn, approval.id, "denied", None, &refusal, now)
             .await?
         {

@@ -148,22 +148,13 @@ pub(crate) enum PreparedCapabilityGrant {
     None,
     Live {
         environment: Id,
-        plan: Box<crate::jobs::capability_change::Plan>,
+        plan: crate::jobs::capability_change::Plan,
     },
-    Stored(Box<StoredCapabilityGrant>),
-}
-
-/// The materialized stored grant travels together until its existing native writer.
-pub(crate) struct StoredCapabilityGrant {
-    facts: EnvironmentFacts,
-    definition: DefinitionRow,
-    marker: Option<PreparedCapabilityMarker>,
-}
-
-struct SettledCapability<'a> {
-    approved: bool,
-    by: Option<Id>,
-    note: Option<&'a str>,
+    Stored {
+        facts: EnvironmentFacts,
+        definition: DefinitionRow,
+        marker: Option<PreparedCapabilityMarker>,
+    },
 }
 
 /// Only the ordinary marker's materialized thread/segment facts; never an authority grant.
@@ -216,8 +207,8 @@ impl PreparedCapabilityGrant {
         conn: &mut orch_db::Conn,
         thread: Option<Id>,
     ) -> Result<(), EngineError> {
-        if let Self::Stored(stored) = self {
-            stored.marker = Some(PreparedCapabilityMarker::prepare(conn, thread).await?);
+        if let Self::Stored { marker, .. } = self {
+            *marker = Some(PreparedCapabilityMarker::prepare(conn, thread).await?);
         }
         Ok(())
     }
@@ -226,9 +217,8 @@ impl PreparedCapabilityGrant {
         conn: &mut orch_db::Conn,
         thread: Option<Id>,
     ) -> Result<(), EngineError> {
-        if let Self::Stored(stored) = self {
-            stored
-                .marker
+        if let Self::Stored { marker, .. } = self {
+            marker
                 .as_ref()
                 .ok_or_else(|| {
                     EngineError::unreadable(
@@ -263,11 +253,13 @@ pub(crate) async fn capability_host(
     let Some(machine) = facts.machine_id else {
         return Ok(None);
     };
-    sqlx::query_as("SELECT id,drivers FROM hosts WHERE machine_id=$1")
-        .bind(machine)
-        .fetch_optional(conn)
-        .await
-        .map_err(orch_db::DbError::from)
+    Ok(
+        sqlx::query_as("SELECT id,drivers FROM hosts WHERE machine_id=$1")
+            .bind(machine)
+            .fetch_optional(conn)
+            .await
+            .map_err(orch_db::DbError::from)?,
+    )
 }
 
 pub(crate) async fn capability_policy(
@@ -759,10 +751,7 @@ impl Engine {
             {
                 return Ok(PreparedCapabilityGrant::None);
             }
-            return Ok(PreparedCapabilityGrant::Live {
-                environment,
-                plan: Box::new(plan),
-            });
+            return Ok(PreparedCapabilityGrant::Live { environment, plan });
         }
         // This is the exact Env row the ordinary stored-grant UPDATE already takes.
         if orch_db::queries::environments::hosting::lock_environment(conn, environment)
@@ -785,18 +774,13 @@ impl Engine {
             .live_capability_plan(conn, &facts, key, true, None, None)
             .await?
         {
-            return Ok(PreparedCapabilityGrant::Live {
-                environment,
-                plan: Box::new(plan),
-            });
+            return Ok(PreparedCapabilityGrant::Live { environment, plan });
         }
-        Ok(PreparedCapabilityGrant::Stored(Box::new(
-            StoredCapabilityGrant {
-                facts,
-                definition,
-                marker: None,
-            },
-        )))
+        Ok(PreparedCapabilityGrant::Stored {
+            facts,
+            definition,
+            marker: None,
+        })
     }
     pub(crate) async fn apply_capability_grant(
         &self,
@@ -849,12 +833,11 @@ impl Engine {
                     live_job: Some(row.id),
                 })
             }
-            PreparedCapabilityGrant::Stored(stored) => {
-                let StoredCapabilityGrant {
-                    facts,
-                    definition,
-                    marker,
-                } = *stored;
+            PreparedCapabilityGrant::Stored {
+                facts,
+                definition,
+                marker,
+            } => {
                 let granted = self
                     .record_capability_grant_with_marker(
                         unit,
@@ -949,41 +932,23 @@ impl Engine {
             approval_origin: None,
             approval_origin_required: false,
             approval_binding: None,
-            revocation_origin: None,
-            revocation_origin_required: false,
         }))
     }
-    async fn queue_live_revocation(
+    pub(crate) async fn queue_live_capability(
         &self,
         unit: &mut Unit<'_>,
         facts: &EnvironmentFacts,
         key: &str,
-        caller: &Caller,
+        grant: bool,
+        requester: Option<Id>,
+        decided_by: Option<Id>,
     ) -> Result<Option<RecreateJob>, EngineError> {
-        let Some(mut plan) = self
-            .live_capability_plan(unit.conn, facts, key, false, None, Some(caller.user()))
+        let Some(plan) = self
+            .live_capability_plan(unit.conn, facts, key, grant, requester, decided_by)
             .await?
         else {
             return Ok(None);
         };
-        if let Some(operation) = caller.admitted_operation() {
-            if operation != "EnvironmentCapabilityRevoke" {
-                return Err(EngineError::unreadable(
-                    "the live removal has another originating operation",
-                ));
-            }
-            plan.revocation_origin = Some(
-                orch_authz::CapturedOperation::capture(caller).map_err(EngineError::unreadable)?,
-            );
-            plan.revocation_origin_required = true;
-        } else if caller
-            .grant()
-            .is_some_and(|grant| grant.operation_scope().is_some())
-        {
-            return Err(EngineError::unreadable(
-                "the scoped live removal has no admitted originating operation",
-            ));
-        }
         let now = unit.now();
         let row = crate::jobs::capability_change::queue(unit.conn, facts.id, &plan, now)
             .await
@@ -1153,15 +1118,9 @@ impl Engine {
             .await?;
         draft.recipe.capability_grace_secs = Some(grace);
         draft.recipe.options.wait_minutes = (grace + 59) / 60;
-        let mut row = crate::jobs::recreate::queue(&mut *unit.conn, draft, None, now)
+        let row = crate::jobs::recreate::queue(&mut *unit.conn, draft, None, now)
             .await
             .map_err(|error| EngineError::unreadable(error.to_string()))?;
-        if let Some(caller) = invoking {
-            crate::jobs::recreate::capability_revocation::record(
-                unit.conn, &mut row, caller, capability, now,
-            )
-            .await?;
-        }
         Ok(Some(RecreateJob {
             id: row.id,
             environment_id: environment,
@@ -1380,11 +1339,9 @@ impl Engine {
             self.settle_capability(
                 &mut unit,
                 &approval,
-                SettledCapability {
-                    approved: *approve,
-                    by: Some(caller.user()),
-                    note: note.as_deref(),
-                },
+                *approve,
+                Some(caller.user()),
+                note.as_deref(),
                 prepared,
                 caller,
             )
@@ -1404,11 +1361,12 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         approval: &ApprovalRow,
-        decision: SettledCapability<'_>,
+        approved: bool,
+        by: Option<Id>,
+        note: Option<&str>,
         prepared: PreparedCapabilityGrant,
         caller: &Caller,
     ) -> Result<(), EngineError> {
-        let SettledCapability { approved, by, note } = decision;
         let now = unit.now();
         let key = approval
             .request
@@ -1747,7 +1705,7 @@ impl Engine {
             let job = if orch_driver_contract::capabilities::gateway_given(key) {
                 None
             } else if let Some(job) = self
-                .queue_live_revocation(&mut unit, facts, key, caller)
+                .queue_live_capability(&mut unit, facts, key, false, None, Some(caller.user()))
                 .await?
             {
                 Some(job)

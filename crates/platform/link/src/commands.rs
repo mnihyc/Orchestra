@@ -9,8 +9,6 @@
 //! deadline has passed, writes the result down before it says how the command
 //! ended, and answers a command it has seen before from what it wrote down
 //! instead of running it again.
-//! A transport-only session rebind retains the same serial queue and in-flight ownership,
-//! but never enters the journal: a lost live call is requested again by its caller.
 //!
 //! [`CommandIssuer`] is the system's end. It sends a command when a session is
 //! ready, sends the ones that have not ended again whenever a session becomes
@@ -25,7 +23,7 @@ use async_trait::async_trait;
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
     ACK_RESENDS, ACK_TIMEOUT_SECS, Cmd, CmdAck, CmdCancel, CmdRes, Command, CommandBody,
-    CommandError, CommandKind, CommandResult, ErrorCode, SerialKey, is_transport_rebind,
+    CommandError, CommandKind, CommandResult, ErrorCode, SerialKey,
 };
 use orch_link_contract::frames::Frame;
 use orch_link_contract::session::Role;
@@ -231,8 +229,6 @@ struct InHand {
     /// Whether it is written down, and so acknowledged: a copy that arrives
     /// before is not acknowledged, since the machine does not have it yet.
     written: bool,
-    /// A live transport replacement is acknowledged and executed entirely in memory.
-    transport_only: bool,
     accepted: Instant,
     finishing: bool,
     finalizer: Option<tokio::task::JoinHandle<()>>,
@@ -434,14 +430,15 @@ impl CommandServer {
         self.take_in_hand(cmd);
     }
 
-    /// Takes a command in hand in its key's line. Ordinary work is written before admission;
-    /// a live transport rebind is admitted in memory and uses the same serial worker.
+    /// Takes a command in hand: in the line of its key, or to run beside the others, once it is written
+    /// down. One that is written down already runs in its turn; one that is not is written down first, by a
+    /// task of its own ([`CommandServer::write_down`]).
     fn take_in_hand(&self, cmd: Cmd) {
         let id = cmd.id;
         let (admit, admitted) = oneshot::channel();
         let mut state = lock(&self.inner.state);
         if let Some(hand) = state.in_hand.get(&id) {
-            let written = hand.written || hand.transport_only;
+            let written = hand.written;
             drop(state);
             if written {
                 self.send(CmdAck { id });
@@ -473,7 +470,6 @@ impl CommandServer {
             }) => (cmd, true, false),
             None => (cmd, false, false),
         };
-        let transport_only = is_transport_rebind(&cmd.kind, &cmd.body);
         let cancel = CancellationToken::new();
         if state.cancelled_before_arrival.contains(&id) {
             cancel.cancel();
@@ -484,7 +480,6 @@ impl CommandServer {
                 cancel,
                 queued_under: if interrupted { None } else { cmd.key.clone() },
                 written,
-                transport_only,
                 accepted: Instant::now(),
                 finishing: false,
                 finalizer: None,
@@ -539,7 +534,7 @@ impl CommandServer {
         drop(state);
         let keyed = cmd.key.is_some();
         let server = self.clone();
-        if written || transport_only {
+        if written {
             self.send(CmdAck { id });
             if keyed {
                 let _ = admit.send(true);
@@ -759,7 +754,7 @@ impl CommandServer {
             return Err(too_late());
         }
         let id = cmd.id;
-        if !is_transport_rebind(&cmd.kind, &cmd.body) && self.write_started(id).await.is_err() {
+        if self.write_started(id).await.is_err() {
             return Err(CommandError::new(
                 ErrorCode::Internal,
                 "the journal cannot be written",
@@ -791,40 +786,24 @@ impl CommandServer {
         outcome: Result<Json, CommandError>,
         hold: Option<CompletionHold>,
     ) {
-        let (owned, transport_only) = {
+        let owned = {
             let mut state = lock(&self.inner.state);
-            // A live call already retired has no journal result to finalize again.
-            if !state.in_hand.contains_key(&id) && self.entry(id).is_none() {
-                return;
-            }
             let hand = state.in_hand.entry(id).or_insert_with(|| InHand {
                 cancel: CancellationToken::new(),
                 queued_under: None,
                 written: true,
-                transport_only: false,
                 accepted: Instant::now(),
                 finishing: false,
                 finalizer: None,
             });
             if hand.finishing {
-                (false, hand.transport_only)
+                false
             } else {
                 hand.finishing = true;
-                (true, hand.transport_only)
+                true
             }
         };
         if !owned {
-            return;
-        }
-        if transport_only {
-            self.send(CmdRes { id, outcome });
-            drop(hold);
-            {
-                let mut state = lock(&self.inner.state);
-                state.in_hand.remove(&id);
-                state.cancelled_before_arrival.remove(&id);
-            }
-            self.inner.changed.notify_waiters();
             return;
         }
         let started = Instant::now();
@@ -916,7 +895,7 @@ impl CommandServer {
                 return;
             };
             hand.cancel.cancel();
-            let written = hand.written || hand.transport_only;
+            let written = hand.written;
             let queued_under = hand.queued_under.clone();
             if let Some(key) = queued_under {
                 if let Some(queue) = state.queues.get_mut(&key) {
@@ -1003,7 +982,7 @@ pub enum Progress {
     Queued,
     /// Handed to the gateway.
     Sent,
-    /// The machine accepted it; a live transport rebind is held only in memory.
+    /// The machine wrote it down.
     Accepted,
     /// It ended well.
     Succeeded(Json),

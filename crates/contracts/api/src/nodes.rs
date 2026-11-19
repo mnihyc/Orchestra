@@ -111,31 +111,6 @@ pub struct OrgOverviewGetQuery {
     pub usage_by: Option<crate::usage::UsageDimension>,
 }
 
-/// A project or topic's visible initial facts, with independently admitted native sections.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct NodeOverview {
-    /// The same node projection as its ordinary native reader.
-    pub node: Node,
-    /// Native usage for the requested span, with the same breakdown bounds.
-    pub usage: OverviewPart<crate::usage::UsageAnalytics>,
-    /// The first native page of wider admissions, only for its current administrator.
-    pub outside_openings: OverviewPart<Page<crate::ports::PortOpening>>,
-}
-
-/// Initial usage controls; the subject always comes from this operation's node.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NodeOverviewGetQuery {
-    /// First day, UTC; absent means this week's Monday.
-    pub from: Option<String>,
-    /// Last day, UTC; absent means today.
-    pub to: Option<String>,
-    /// The native comma-separated breakdown dimensions; empty requests totals alone.
-    pub breakdowns: Option<String>,
-    /// Native rows per breakdown, under the usage reader's existing maximum.
-    pub limit: Option<u32>,
-}
-
 /// What kind of node something is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -314,11 +289,13 @@ pub struct NodeBase<K> {
     pub owners: i64,
     /// Who maintains the title.
     pub title_source: FieldSource,
+    /// Who maintains the description.
+    pub description_source: FieldSource,
     /// Tags assigned to this place, regardless of its kind.
     pub tags: Vec<Tag>,
     /// Who maintains its assigned tags.
     pub tags_source: FieldSource,
-    /// When automation last wrote the title or tags.
+    /// When automation last wrote the title or the description.
     pub auto_updated_at: Option<Time>,
     /// How its permission page stands against the defaults.
     pub page: PageState,
@@ -464,14 +441,14 @@ pub struct Topic {
     pub status: TopicStatus,
     /// When it was marked done.
     pub done_at: Option<Time>,
-    /// How many main threads this reader may view; side threads do not count.
+    /// How many threads it holds.
     pub thread_count: i64,
-    /// Running, approval and blocked counts among those readable main threads.
+    /// How many of them need a look.
     pub attention: TopicAttention,
     /// Work flags are separate from running, approval and blocked counts.
     #[serde(default)]
     pub work_attention: TopicWorkAttention,
-    /// Latest activity among those readable main threads; null when none is readable.
+    /// When something last happened in it.
     pub last_activity_at: Option<Time>,
     /// The sequence of the topic's feed (`topic:<id>`): how far a reader of that feed has come.
     pub seq: Seq,
@@ -571,9 +548,6 @@ pub struct TreeNode {
     pub chat: TreeChat,
     /// Live documents beside it that follow its documents rows; private ones are listed separately.
     pub docs: i64,
-    /// The native document-directory membership stamp, independent of this node's name or activity.
-    #[serde(default)]
-    pub docs_seq: Seq,
 }
 
 /// What a tree view says of a topic.
@@ -1028,6 +1002,8 @@ pub enum NewNodeAccess {
 pub enum AutoField {
     /// The title.
     Title,
+    /// The description.
+    Description,
     /// The tags.
     Tags,
 }
@@ -1102,30 +1078,11 @@ pub struct AgentAccessAvailability {
     pub choices: Vec<AgentAccessChoice>,
 }
 
-/// An interactive control-plane program, independent of a native agent profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateThreadProgram {
-    /// The genuine built-in declaration.
-    pub id: crate::threads::BuiltinThreadProgramId,
-    /// Saved API model preference; absent follows the governing root's current default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<crate::ask::AskModel>,
-}
-
 /// Everything that makes a thread, all of it optional: where the topic has
 /// defaults, `{}` makes a thread that is ready, and `first_input` starts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateThread {
-    /// Direct thread creation may choose an interactive built-in program without an environment.
-    /// Native binding, workspace and initial agent-contribution fields do not apply to this choice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub program: Option<CreateThreadProgram>,
-    /// Give the prospective thread's viewers the environment's View doors in the same birth.
-    /// Refusal leaves no new thread or gift. Omission preserves the environment's page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub let_into_environment: Option<bool>,
     /// Its name; `New thread` until renamed, with its title kept by automation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1418,31 +1375,6 @@ pub struct AdoptPlan {
     pub history_missing: Option<crate::threads::AdoptHistoryMissing>,
     /// The thread that took the session in already, when one did: adopting it again is refused.
     pub adopted_thread_id: Option<Id>,
-}
-
-/// Generated outcome of an adopted native session without existing Thread content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ThreadAdoptReceipt {
-    /// This shape contains the accepted identity/outcome only.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual born Thread.
-    pub thread_id: Id,
-    /// Its actual Topic.
-    pub topic_id: Id,
-    /// The actual adopted segment.
-    pub segment_id: Id,
-    /// Actual newly imported historical items, excluding duplicate native references.
-    pub history_items: i64,
-}
-crate::common::full_or_receipt! {
-    /// Native Thread content or the same accepted adoption's generated outcome.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum ThreadAdoptResponse {
-        /// Existing content under this operation's own current Read.
-        Full(Thread),
-        /// Accepted identity and generated outcome without old content/names.
-        Receipt(ThreadAdoptReceipt),
-    }
 }
 
 /// How a list of topics is filtered by what is open or done.
@@ -2136,9 +2068,6 @@ crate::endpoints! {
     /// Opens the reader's organization overview through its native bounded readers.
     OrgOverviewGet: GET "/orgs/{id}/overview", Permission("node.view"), query OrgOverviewGetQuery, none, json OrgOverviewResponse, 200,
         operation Op::facets(&crate::operations::org_overview_facets());
-    /// Reads the bounded visible project/topic overview through its native sources.
-    NodeOverviewGet: GET "/nodes/{id}/overview", Permission("node.view"), query NodeOverviewGetQuery, none, json NodeOverview, 200,
-        operation Op::facets(&crate::operations::node_overview_facets());
     /// Reads the nodes of an org's tree that the caller may view, whole or since a sequence.
     OrgTreeGet: GET "/orgs/{id}/tree", User, query OrgTreeGetQuery, none, json OrgTreeGetReply, 200,
         operation Op::facets(&[
@@ -2262,7 +2191,6 @@ crate::endpoints! {
                     Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
                     Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-                    Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
                     Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
                     Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
@@ -2295,7 +2223,6 @@ crate::endpoints! {
                     Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
                     Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-                    Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
                     Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
                     Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
@@ -2311,38 +2238,44 @@ crate::endpoints! {
                     Facet::response_content(&[Object(K::Environment)], Target::ResolvedCollection("creator_environments")),
         ]));
     /// Attaches a new thread to a session that already exists in a provider's harness.
-    ThreadAdopt: POST "/topics/{id}/threads/adopt", Rule("topic.start_threads, the use of the provider and agent, and environment.use on the environment"), none, json ThreadAdoptBody, json ThreadAdoptResponse, 200,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Write, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Topic) }),
-            Facet::required(Read, &[Object(K::Provider)], Target::Resolved("native_session")),
-            Facet::required(Write, &[Object(K::Provider),Object(K::Agent),Object(K::Environment)], Target::ResolvedCollection("chosen_binding")),
-            Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_thread")),
-            Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("creator_new_environment_homes")),
-            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
-            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
-            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
-            Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
-            Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
-            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("creator_agent_threads")),
-            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
-            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
-            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
-            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
-            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
-            Facet::response_content(
-                &[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::Agent),Object(K::Provider),Object(K::Environment),Object(K::Machine)],
-                Target::ResolvedCollection("adopted_thread_content"),
+    ThreadAdopt: POST "/topics/{id}/threads/adopt", Rule("topic.start_threads, the use of the provider and agent, and environment.use on the environment"), none, json ThreadAdoptBody, json Thread, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(
+                Read,
+                &[Object(K::Provider)],
+                Target::Resolved("native_session"),
             ),
-        ]));
+            Facet::required(
+                Write,
+                &[
+                    Object(K::Provider),
+                    Object(K::Agent),
+                    Object(K::Environment),
+                ],
+                Target::Resolved("chosen_binding"),
+            ),
+            Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_thread")),
+        ]);
     /// Shows what adopting a session would do (where it would run, the model, the history it brings), before anything does.
     ThreadAdoptPreview: POST "/topics/{id}/threads/adopt/preview", Rule("the same as adopting it"), none, json ThreadAdoptBody, json AdoptPlan, 200,
         operation Op::facets(&[
-            Facet::required(Write, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Topic) }),
-            Facet::required(Read, &[Object(K::Provider)], Target::Resolved("native_session")),
-            Facet::required(Write, &[Object(K::Provider),Object(K::Agent),Object(K::Environment)], Target::ResolvedCollection("chosen_binding")),
-            Facet::required(Read, &[Object(K::Topic),Object(K::Environment)], Target::ResolvedCollection("preview_content")),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("preview_names_orgs")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(
+                Read,
+                &[Object(K::Provider)],
+                Target::Resolved("native_session"),
+            ),
+            Facet::required(
+                Write,
+                &[
+                    Object(K::Provider),
+                    Object(K::Agent),
+                    Object(K::Environment),
+                ],
+                Target::Resolved("chosen_binding"),
+            ),
+            Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_thread")),
         ]);
     /// Lists the topics of a project that the caller may view.
     TopicList: GET "/projects/{id}/topics", Permission("node.view"), query TopicListQuery, none, json Page<Listed<Topic>>, 200,
@@ -2494,6 +2427,7 @@ mod tests {
             "owner": user(),
             "owners": 1,
             "title_source": "user",
+            "description_source": "auto",
             "tags": [], "tags_source": "auto",
             "auto_updated_at": "2026-10-09T08:00:00.000Z",
             "page": "follows",
@@ -2650,29 +2584,5 @@ mod tests {
         let by_person: AuditActor =
             serde_json::from_value(json!({ "kind": "user", "user": user() })).unwrap();
         assert!(matches!(by_person, AuditActor::User { .. }));
-    }
-}
-
-#[cfg(test)]
-mod written_description_tests {
-    use super::NodeAutoBody;
-    use serde_json::json;
-
-    #[test]
-    fn descriptions_cannot_be_resumed_or_refreshed_by_automation() {
-        for action in ["resume", "refresh"] {
-            assert!(
-                serde_json::from_value::<NodeAutoBody>(
-                    json!({"field":"description","action":action})
-                )
-                .is_err()
-            );
-            for field in ["title", "tags"] {
-                assert!(
-                    serde_json::from_value::<NodeAutoBody>(json!({"field":field,"action":action}))
-                        .is_ok()
-                );
-            }
-        }
     }
 }

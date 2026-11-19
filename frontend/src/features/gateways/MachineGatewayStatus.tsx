@@ -10,7 +10,7 @@ export function MachineGatewayStatus({ machineId, online }: { machineId: string;
   const { t } = useTranslation();
   const status = useQuery(machineGatewayQuery(machineId, online));
   const catalogue = useQuery(gatewayCatalogueQuery);
-  if (status.isPending || catalogue.isPending) return <SkeletonRows reads={[status, catalogue]} rows={2} />;
+  if (status.isPending || catalogue.isPending) return <SkeletonRows rows={2} />;
   if (status.isError || catalogue.isError) return <ErrorState compact title={t('regionalGateways.statusFailed')} error={status.error ?? catalogue.error}
     onRetry={() => { void status.refetch(); void catalogue.refetch(); }} />;
   return <MachineGatewayCard status={status.data} gateways={catalogue.data.gateways} refreshing={status.isFetching || catalogue.isFetching}

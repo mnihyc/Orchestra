@@ -7,8 +7,6 @@ use orch_api_contract::operation_sources::{Binding, Cardinality, Declaration};
 use orch_api_contract::operations::{CatalogueError, TargetResolver};
 use orch_api_contract::routes::Route;
 
-pub mod common;
-
 /// Actual native source facts supplied before any response serialization or effect.
 #[derive(Clone)]
 pub struct Facts<S> {

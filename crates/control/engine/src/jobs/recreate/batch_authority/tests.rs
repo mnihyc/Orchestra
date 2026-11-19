@@ -918,7 +918,7 @@ async fn committed_notice_keeps_only_its_exact_steer_intent_after_consumer_revoc
     );
     assert!(current(&mut tx, &owner, Time::new(s.world.clock.now())).await?);
     changes::notice(&mut tx, thread, message, s.world.clock.now()).await?;
-    retain_notice(&mut tx, &owner, &command, s.world.clock.as_ref()).await?;
+    retain_notice(&mut tx, &owner, &command, Time::new(s.world.clock.now())).await?;
     tx.commit().await?;
     let mut conn = s.world.pool.acquire().await?;
     assert!(

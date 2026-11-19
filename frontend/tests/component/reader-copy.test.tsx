@@ -1,5 +1,4 @@
 /** Work screens have useful words, visible select values and one account/connection explanation. */
-import type * as AdmissionModule from '@/shell/admission';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -53,7 +52,7 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>()
   metaQuery: { queryKey: ['reader-meta'], queryFn: () => Promise.resolve(meta({ name: 'Workshop' })) },
 }));
 vi.mock('@/shell/admission', async (original) => ({
-  ...await original<typeof AdmissionModule>(),
+  ...await original<typeof import('@/shell/admission')>(),
   admissionMetaQuery: (await import('@/api/auth')).metaQuery,
 }));
 
@@ -82,7 +81,7 @@ vi.mock('@/shell/Page', async (original) => ({ ...await original<typeof PageModu
   Section: ({ title, lead, children }: { title: string; lead?: ReactNode; children: ReactNode }) => <section><h2>{title}</h2>{lead}{children}</section>,
 }));
 vi.mock('@/ui/Table', () => ({ Table: <Row extends { id: string },>({ rows, columns }: { rows: Row[]; columns: Column<Row>[] }) => <ul>{rows.map((row) => <li key={row.id}>{columns.map((column) => <div key={column.id}>{column.cell(row, new Set(columns.map((one) => one.id)))}</div>)}</li>)}</ul> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null, useKnownPlaces: () => new Map(), useNameTrees: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null, useKnownPlaces: () => new Map() }));
 vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
 vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
 vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));

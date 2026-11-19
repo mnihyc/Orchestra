@@ -7,7 +7,6 @@ import { client } from '@/api/client';
 import type * as Imports from '@/api/imports';
 import { YourImports } from '@/features/people/YourImports';
 import type { ImportLine } from '@/generated/api-types';
-import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ list: vi.fn(), files: vi.fn(), open: vi.fn(), report: vi.fn(), job: vi.fn() }));
@@ -34,21 +33,18 @@ beforeEach(() => {
   client.session.setState({ ...previousSession, userId: 'first', readerVersion: 1, status: 'signed_in' });
   calls.list.mockReset(); calls.files.mockReset(); calls.open.mockReset(); calls.report.mockReset(); calls.job.mockReset();
 });
-afterEach(async () => { client.session.setState(previousSession); await setLocale('en'); });
+afterEach(() => { client.session.setState(previousSession); });
 
-it.each(['en', 'zh-CN'] as const)('offers a new import and exports navigation from an empty history in %s', async (locale) => {
-  await setLocale(locale);
+it('offers a new import from an empty history', async () => {
   calls.list.mockResolvedValue({ items: [], next_cursor: null });
   const user = userEvent.setup();
   show(<YourImports />);
-  expect(await screen.findByText(i18n.t('importWizard.mine.empty'))).toBeVisible();
-  expect(screen.getByRole('link', { name: i18n.t('importWizard.mine.exports') })).toHaveAttribute('href', '/settings/exports');
-  await user.click(screen.getByRole('button', { name: i18n.t('importWizard.mine.import') }));
+  expect(await screen.findByText('No imports yet')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'Import…' }));
   expect(calls.open).toHaveBeenCalledOnce();
 });
 
-it.each(['en', 'zh-CN'] as const)('opens a retained report and shows the remaining source names in %s', async (locale) => {
-  await setLocale(locale);
+it('opens a retained report and shows the remaining source names', async () => {
   calls.list.mockResolvedValue({ items: [row], next_cursor: null });
   calls.files.mockResolvedValue({ items: ['Notes/one.md', 'Notes/two.md'], next_cursor: null });
   const user = userEvent.setup();
@@ -58,7 +54,7 @@ it.each(['en', 'zh-CN'] as const)('opens a retained report and shows the remaini
   expect(await screen.findByText('Notes/two.md')).toBeVisible();
   expect(calls.files).toHaveBeenCalledExactlyOnceWith('import');
   await user.keyboard('{Escape}');
-  await user.click(screen.getByRole('button', { name: i18n.t('importWizard.mine.reportFor', { name: 'Web' }) }));
+  await user.click(screen.getByRole('button', { name: 'Report for Web' }));
   expect(calls.report).toHaveBeenCalledExactlyOnceWith('import');
 });
 

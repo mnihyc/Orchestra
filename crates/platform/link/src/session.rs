@@ -563,8 +563,6 @@ pub enum HandshakeError {
 /// A session that was established.
 #[derive(Debug)]
 pub struct Established {
-    /// Features proved by the gateway hello, independent of the client's own declaration.
-    pub capabilities: Vec<String>,
     /// The logical gateway proved by the connection and its hello.
     pub gateway_id: String,
     /// The gateway's word that the session stands.
@@ -683,12 +681,9 @@ pub async fn connect(
     let auth = Auth {
         purpose: identity.purpose,
         capabilities: if identity.purpose.is_primary() {
-            vec![
-                orch_link_contract::gateways::TUNNEL_CAPABILITY.to_owned(),
-                orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY.to_owned(),
-            ]
+            vec![orch_link_contract::gateways::TUNNEL_CAPABILITY.to_owned()]
         } else {
-            vec![orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY.to_owned()]
+            Vec::new()
         },
         endpoints: identity.endpoints.clone(),
         hosted_endpoints: identity.hosted_endpoints.clone(),
@@ -714,7 +709,6 @@ pub async fn connect(
             let offset = clock.time().unix_millis() - hello.server_time.unix_millis();
             let (sender, inbox) = start(connection, limits, timing, LinkMeter::new());
             Ok(Established {
-                capabilities: hello.capabilities,
                 gateway_id: hello.gateway_id,
                 ready,
                 protocol_version,
@@ -876,10 +870,7 @@ pub async fn accept(
         TlsMode::Server
     };
     let hello = Hello {
-        capabilities: vec![
-            orch_link_contract::gateways::TUNNEL_CAPABILITY.to_owned(),
-            orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY.to_owned(),
-        ],
+        capabilities: vec![orch_link_contract::gateways::TUNNEL_CAPABILITY.to_owned()],
         protocol: ProtocolRange::SUPPORTED,
         nonce: nonce.clone(),
         server_time: clock.time(),

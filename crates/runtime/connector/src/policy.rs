@@ -782,22 +782,11 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                 ));
             }
         }
-        Command::McpStart(McpStart::Given(given)) => {
-            if given.preset {
-                if given.server_id.is_none() {
-                    return Err(CommandError::new(
-                        ErrorCode::Unsupported,
-                        "a preset names its registered server",
-                    ));
-                }
-            } else {
-                check(
-                    policy.check_mcp_add(),
-                    "mcp.add",
-                    "this machine lets no tool server be written from outside",
-                )?;
-            }
-        }
+        Command::McpStart(McpStart::Given(_)) => check(
+            policy.check_mcp_add(),
+            "mcp.add",
+            "this machine lets no tool server be written from outside",
+        )?,
         Command::McpImport(_) => check(
             policy.check_mcp_import(),
             "mcp.import",
@@ -1533,7 +1522,6 @@ mod tests {
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
-            native_model: None,
             transport_only: false,
             turn_changes_require_restart: false,
             agent_id: new_id(),
@@ -1557,9 +1545,7 @@ mod tests {
             instructions: String::new(),
             available_models: vec!["fake-large".to_owned()],
             subagent_limits: Default::default(),
-            prompt_cache_ttl: None,
             background_wake: true,
-            image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,
             provider: SessionOpenProvider::Native {
@@ -1828,7 +1814,6 @@ mod tests {
             "a harness's reviewer is not the mode that never asks"
         );
         let turn = TurnStart {
-            native_model: None,
             native_wake: None,
             plan: false,
             thread_id: new_id(),
@@ -2049,27 +2034,6 @@ mod tests {
         assert_eq!(
             code(gate(&policy, exec("orch-exec")).unwrap_err()),
             "policy.exec_not_offered"
-        );
-    }
-
-    #[test]
-    fn a_registered_preset_does_not_take_the_gate_for_an_environment_owned_definition() {
-        let policy = here();
-        assert!(!policy.mcp_add);
-        let given = |preset, server| {
-            Command::McpStart(McpStart::Given(serde_json::from_value(json!({
-            "preset":preset,"server_id":server,"environment_id":new_id(),"name":"registered-tool",
-            "spec":{"transport":"stdio","command":["tool-server"]},"secrets":{}
-        })).unwrap()))
-        };
-        assert!(gate(&policy, given(true, Some(new_id()))).is_ok());
-        assert_eq!(
-            code(gate(&policy, given(false, Some(new_id()))).unwrap_err()),
-            "policy.mcp_add_disabled"
-        );
-        assert_eq!(
-            code(gate(&policy, given(true, None)).unwrap_err()),
-            "unsupported"
         );
     }
 

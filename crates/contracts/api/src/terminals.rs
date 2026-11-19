@@ -165,9 +165,8 @@ pub struct TerminalCreateReceipt {
     pub terminal_id: Id,
     /// Its actual governing environment.
     pub environment_id: Id,
-    /// The actual owned shells closed by this accepted creation. Null when a
-    /// response was lost before those outcomes were reported; no count is guessed.
-    pub closed: Option<Vec<Id>>,
+    /// The actual owned shells closed by this accepted creation.
+    pub closed: Vec<Id>,
 }
 
 /// The unchanged creation result, or a successful receipt after the native effect completes.
@@ -255,17 +254,6 @@ pub enum TerminalNotAllowedReason {
     EnvironmentOffline,
 }
 
-crate::common::full_or_receipt! {
-    /// A new native shell or agent ticket, or its already accepted identity.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum TerminalTicketCreateResponse {
-        /// The unchanged first once-only credential.
-        Full(TerminalTicket),
-        /// No ticket secret is stored for another return.
-        Receipt(crate::common::TicketCreateReceipt),
-    }
-}
-
 crate::endpoints! {
     /// Lists the caller's own shells in an environment, attached or not, newest first; whoever manages the environment sees everyone's.
     EnvironmentTerminalList: GET "/environments/{id}/terminals", Permission("terminal.manage"), query EnvironmentTerminalListQuery, none, json Page<TerminalSession>, 200;
@@ -279,8 +267,8 @@ crate::endpoints! {
     TerminalAttach: GET "/ws/terminals/{terminal_id}", Public, query TerminalAttachQuery, none, raw, 101,
         operation Op::protocol();
     /// Gives a new ticket to attach to a shell again, from this browser or another.
-    TerminalTicketCreate: POST "/terminals/{terminal_id}/ticket", Rule("the opener, who still passes the gates it was opened under"), none, none, json TerminalTicketCreateResponse, 200,
-        operation Op::receipt(&Op::facets(&[
+    TerminalTicketCreate: POST "/terminals/{terminal_id}/ticket", Rule("the opener, who still passes the gates it was opened under"), none, none, json TerminalTicket, 200,
+        operation Op::facets(&[
             Facet::required(
                 Read,
                 &[Object(K::Environment)],
@@ -291,7 +279,7 @@ crate::endpoints! {
                 &[Object(K::Environment)],
                 Target::Resolved("terminal_environment"),
             ),
-        ]));
+        ]);
     /// Closes a shell.
     TerminalClose: DELETE "/terminals/{terminal_id}", Rule("the opener, or environment.manage"), none, none, json TerminalCloseResponse, 200,
         operation Op::receipt(&Op::returning(
@@ -300,8 +288,8 @@ crate::endpoints! {
             Target::Resolved("terminal_environment"),
         ));
     /// Gives a ticket for the agent's own terminal of a thread, for watching it or, with control, typing into it.
-    AgentTerminalTicketCreate: POST "/threads/{id}/agent-terminal/ticket", Rule("terminal.view on the thread's environment; a ticket with control needs terminal.manage there"), none, json AgentTerminalTicketCreateBody, json TerminalTicketCreateResponse, 200,
-        operation Op::receipt(&Op::variants(&[
+    AgentTerminalTicketCreate: POST "/threads/{id}/agent-terminal/ticket", Rule("terminal.view on the thread's environment; a ticket with control needs terminal.manage there"), none, json AgentTerminalTicketCreateBody, json TerminalTicket, 200,
+        operation Op::variants(&[
             Variant {
                 name: "view",
                 selector: "control=false",
@@ -327,7 +315,7 @@ crate::endpoints! {
                     ),
                 ],
             },
-        ]));
+        ]);
     /// Attaches a WebSocket to the agent's own terminal of a thread; input is accepted only on a ticket with control.
     AgentTerminalAttach: GET "/ws/agent-terminals/{thread_id}", Public, query TerminalAttachQuery, none, raw, 101,
         operation Op::protocol();

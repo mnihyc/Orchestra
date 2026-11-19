@@ -42,7 +42,7 @@ async fn an_admin_catalogue_refresh_reaches_a_primary_without_substituting_or_re
     let token = new_token(API_TOKEN_PREFIX);
     let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(serde_json::json!({"rules":[{"target":{"kind":"system","reach":"self"},"allow":[{"operation":"GatewayCatalogueGet","actions":["read"]},{"operation":"GatewayCatalogueUpdate","actions":["manage"]}]}]})).unwrap();
     orch_db::queries::identity::create_api_token_scoped(
-        &mut world.db.acquire().await.unwrap(),
+        &mut *world.db.acquire().await.unwrap(),
         &orch_db::queries::identity::NewApiToken {
             id: orch_types::new_id(),
             user_id: world.user,

@@ -1,6 +1,6 @@
 //! The existing Snapshot read door and its actual current credential targets.
 //! Stored copied bytes follow the Thread's current Environment; native recordings keep theirs;
-//! a threadless whole-workspace export retains its maker's custody after removal.
+//! a threadless whole-workspace export remains private to its maker even after removal.
 
 use crate::EngineError;
 use crate::commands::Outgoing;
@@ -51,40 +51,19 @@ impl Source {
 
     /// Existing callers that already loaded the object preserve their principal/load order.
     pub async fn from_row(conn: &mut Conn, row: SnapshotRow) -> Result<Option<Self>, DbError> {
-        let current = if let Some(thread) = row.thread_id.filter(|_| row.storage != "environment") {
-            environments::thread_place(conn, thread)
-                .await?
-                .and_then(|place| place.environment_id)
-        } else {
-            None
-        };
-        Ok(Self::with_current(row, current))
-    }
-
-    fn with_current(row: SnapshotRow, current: Option<Id>) -> Option<Self> {
-        let environment = if row.thread_id.is_some() && row.storage != "environment" {
-            current?
-        } else {
-            row.environment_id
-        };
-        Some(Self { row, environment })
-    }
-
-    /// The existing custody rule for rows selected under one actual current Thread binding.
-    /// Every supplied row must actually belong to that Thread; no permission is supplied here.
-    pub fn from_thread_rows(
-        thread: Id,
-        current: Option<Id>,
-        rows: Vec<SnapshotRow>,
-    ) -> Option<Vec<Self>> {
-        rows.into_iter()
-            .map(|row| {
-                if row.thread_id != Some(thread) {
-                    return None;
-                }
-                Self::with_current(row, current)
-            })
-            .collect()
+        let environment =
+            if let Some(thread) = row.thread_id.filter(|_| row.storage != "environment") {
+                let Some(environment) = environments::thread_place(conn, thread)
+                    .await?
+                    .and_then(|place| place.environment_id)
+                else {
+                    return Ok(None);
+                };
+                environment
+            } else {
+                row.environment_id
+            };
+        Ok(Some(Self { row, environment }))
     }
 
     /// The existing Files governor, as a factual identity rather than an access proof.
@@ -102,7 +81,7 @@ impl Source {
         permission: Permission,
     ) -> Result<Access, orch_authz::Error> {
         if self.row.thread_id.is_none() {
-            return Ok(if super::may_read_custody(principal, self.row.created_by) {
+            return Ok(if self.row.created_by == Some(principal.user()) {
                 Access::Allowed
             } else {
                 Access::MakerOnly

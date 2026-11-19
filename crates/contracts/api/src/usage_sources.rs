@@ -1,7 +1,7 @@
 //! Native usage subjects associated with the canonical operation facets.
 //!
 //! Usage aggregates and ledger pages belong to the native requested usage scope:
-//! the system, an organization, project, topic/thread, provider, or the caller's own Account.
+//! an organization, project, topic/thread, provider, or the caller's own Account.
 //! Its Read admits that subject's native aggregate rows; individual ledger threads
 //! are not additional key targets. The native reader's current depth, row visibility,
 //! redacted references and withheld turn links still decide disclosure.

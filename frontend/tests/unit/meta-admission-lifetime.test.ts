@@ -87,7 +87,7 @@ beforeEach(() => {
     if (path === '/api/v1/meta') {
       const next = { request, reply: deferred<Response>() }; reads.push(next); waiting.get(reads.length)?.resolve(next); return next.reply.promise;
     }
-    if (path === '/api/v1/auth/session') { restoreStarted.resolve(undefined); return restoreReply.promise; }
+    if (path === '/api/v1/auth/refresh') { restoreStarted.resolve(undefined); return restoreReply.promise; }
     if (path === '/api/v1/auth/logout') return Promise.resolve(new Response(null, { status: 204 }));
     throw new Error(`Unexpected native request ${path}`);
   });
@@ -128,7 +128,7 @@ it.each(['restore first', 'Meta first'] as const)('retains actual admission acro
   expect(observers()).toBe(1); shell(); expect(observers()).toBe(0);
   await admit(visit); client.adopt(grant(first)); await admit(visit);
   expect(reads).toHaveLength(2); // Cached admission and same-reader renewal never poll Meta.
-  expect(transport.send.mock.calls.filter(([request]) => new URL(request.url).pathname.endsWith('/auth/session'))).toHaveLength(1);
+  expect(transport.send.mock.calls.filter(([request]) => new URL(request.url).pathname.endsWith('/auth/refresh'))).toHaveLength(1);
 });
 
 it('suppresses a late former caller permission and lets only the current identity refresh it', async () => {

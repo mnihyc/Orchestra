@@ -554,8 +554,6 @@ words! {
         Session = "session",
         /// An API token, which acts as its user within its scopes.
         Token = "token",
-        /// A currently admitted owner-only native read, with no browser or key credential.
-        OwnerRead = "owner_read",
     }
 }
 

@@ -1,5 +1,4 @@
 /** Setup consumes the observed scoped status; an unsupplied status retains its native reader. */
-import type * as AwayApi from '@/api/away';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { screen, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
@@ -10,7 +9,7 @@ import { ACME } from '../doubles/fixtures';
 import { show } from './support';
 
 const observed = vi.hoisted(() => ({ native: vi.fn<() => Promise<OutsideStatus>>() }));
-vi.mock('@/api/away', async (original) => ({ ...await original<typeof AwayApi>(), outsideStatusQuery: (nodeId: string) => ({ queryKey: ['setup-outside', nodeId], queryFn: observed.native, retry: false }) }));
+vi.mock('@/api/away', async (original) => ({ ...await original<typeof import('@/api/away')>(), outsideStatusQuery: (nodeId: string) => ({ queryKey: ['setup-outside', nodeId], queryFn: observed.native, retry: false }) }));
 
 it('uses the supplied scoped pause and keeps the native fallback for an unsupplied observation', async () => {
   const outside: OutsideStatus = { scope: { id: ACME.org, kind: 'org', name: 'Acme', redacted: false }, pause_until: '2027-01-01T00:00:00Z', ways: [] };

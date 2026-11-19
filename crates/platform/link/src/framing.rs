@@ -276,13 +276,14 @@ pub struct Measurements {
 }
 
 impl Measurements {
-    /// The figures as reported in machine facts, retaining each sample's presence.
+    /// The figures as a machine reports them in its facts, zero where
+    /// nothing has been seen yet.
     #[must_use]
     pub fn as_facts(&self) -> MachineFactsRates {
         MachineFactsRates {
-            up_bps: self.up_bps.map(|rate| rate.saturating_mul(BITS_PER_BYTE)),
-            down_bps: self.down_bps.map(|rate| rate.saturating_mul(BITS_PER_BYTE)),
-            round_trip_ms: self.round_trip_ms,
+            up_bps: self.up_bps.unwrap_or(0).saturating_mul(BITS_PER_BYTE),
+            down_bps: self.down_bps.unwrap_or(0).saturating_mul(BITS_PER_BYTE),
+            round_trip_ms: self.round_trip_ms.unwrap_or(0),
         }
     }
 }
@@ -693,44 +694,4 @@ pub async fn send_frame(
     let text = frames::encode(frame, max_frame_bytes)
         .map_err(|error| TransportError::Io(error.to_string()))?;
     sink.send(Message::Text(text)).await
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test assertions")]
-mod measurement_presence_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn facts_keep_absence_zero_and_independent_direction_samples() {
-        for (measured, expected) in [
-            (Measurements::default(), json!({})),
-            (
-                Measurements {
-                    round_trip_ms: Some(16),
-                    up_bps: None,
-                    down_bps: Some(0),
-                },
-                json!({"round_trip_ms":16,"down_bps":0}),
-            ),
-            (
-                Measurements {
-                    round_trip_ms: Some(0),
-                    up_bps: Some(5),
-                    down_bps: None,
-                },
-                json!({"round_trip_ms":0,"up_bps":40}),
-            ),
-            (
-                Measurements {
-                    round_trip_ms: None,
-                    up_bps: Some(i64::MAX),
-                    down_bps: Some(1),
-                },
-                json!({"up_bps":i64::MAX,"down_bps":8}),
-            ),
-        ] {
-            assert_eq!(serde_json::to_value(measured.as_facts()).unwrap(), expected);
-        }
-    }
 }

@@ -47,13 +47,8 @@ export function applyCollection(cache: QueryClient, change: CollectionChange['co
     const items=change.field===undefined ? held : record(held) ? held[change.field] : undefined;
     if (!Array.isArray(items)) return held;
     const rows = items as unknown[];
-    const acceptedIdentity = record(change.data) ? change.data[change.identity] : undefined;
-    let found = false;
-    const next: unknown[] = [];
-    for (const one of rows) {
-      if (!record(one) || one[change.identity] !== change.id && (acceptedIdentity === undefined || one[change.identity] !== acceptedIdentity)) { next.push(one); continue; }
-      if (!found && change.data !== null) { found = true; next.push(change.data); }
-    }
+    const found = rows.some((one) => record(one) && one[change.identity] === change.id);
+    const next = rows.flatMap((one) => record(one) && one[change.identity] === change.id ? change.data === null ? [] : [change.data] : [one]);
     const updated=found || change.data === null ? next : [...next, change.data];
     return change.field!==undefined && record(held) ? {...held,[change.field]:updated} : updated;
   });
@@ -106,7 +101,6 @@ const LISTS: Readonly<Record<string, readonly string[]>> = {
   approval: ['approvals', 'port-requests'], notification_channel: ['notification-channels'],
   export: ['exports'], job: [], thread: ['thread-sides', 'provider-threads'],
   api_token: ['tokens','org-tokens'], browser: ['environment-browsers'], display: ['environment-displays'],
-  port_opening: ['outside-port-openings'],
 };
 const DETAILS: Readonly<Record<string, string>> = { mcp_server: 'mcp-server', notification_channel: 'notification-channel' };
 /** These are stored facts or user-written JSON, never live entity-reference projections. */
@@ -145,13 +139,9 @@ function inventoryState(kind: string, row: Record<string, unknown>): unknown {
 function replace(before: unknown, change: RowChange['row'], thread?: Thread): unknown {
   if (Array.isArray(before)) {
     const next = before.flatMap((item: unknown) => record(item) && item.id === change.id && change.value === null ? [] : [replace(item, change, thread)]);
-    const same = next.length === before.length && next.every((item, at) => item === before[at]);
     // ResourceRows keeps private names as a non-index property of its readable array.
-    if ('privateRows' in before && Array.isArray(before.privateRows)) {
-      const privateRows = replace(before.privateRows, change, thread);
-      return same && privateRows === before.privateRows ? before : Object.assign(next, { privateRows });
-    }
-    return same ? before : next;
+    if ('privateRows' in before && Array.isArray(before.privateRows)) return Object.assign(next, { privateRows: replace(before.privateRows, change, thread) });
+    return next;
   }
   if (!record(before)) return before;
   let next = before;
@@ -170,32 +160,25 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
     } else next = before.kind === 'thread' && record(before.access)
       ? thread === undefined ? threadMetadata(before, change.value) : { ...thread }
       : complete ? {...change.value} : overlay(before, change.value);
-    // References and inventory rows name the object kind; a rich provider/template DTO names its subtype.
-    if (typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
+    // Inventory kind names the object; a provider/template DTO's kind names its subtype.
+    if ('my_access' in before && 'path' in before && typeof before.kind === 'string') next.kind = before.kind;
     // Everything wraps the native DTO in a tagged resource, with its own name/state columns.
     if (record(before.resource) && before.resource.kind === change.kind && change.partial !== true) {
       next = { ...next, resource: { ...before.resource, value: change.value } };
       if ('state' in before) next.state = inventoryState(change.kind, change.value) ?? before.state;
     }
   }
-  let result = next;
+  const result = { ...next };
   for (const [key, value] of Object.entries(next)) {
     if (key === 'resource' && before.id === change.id && record(value) && value.kind === change.kind) continue;
     if(OPAQUE_MEMBERS.has(key) || key==='value' && !(typeof next.kind==='string' && next.kind in LISTS)) continue;
-    if (Array.isArray(value) || record(value)) {
-      const replaced = replace(value, change, thread);
-      if (replaced !== value) {
-        if (result === next) result = { ...next };
-        result[key] = replaced;
-      }
-    }
+    if (Array.isArray(value) || record(value)) result[key] = replace(value, change, thread);
   }
   return result;
 }
 
 /** Whether a row still meets the loaded resource list's explicit filters. Unknown facts never grant entry. */
 function matches(key: QueryKey, kind: string, row: Record<string, unknown>, known: boolean): boolean {
-  if (kind === 'port_opening' && key[0] === 'outside-port-openings') return known && row.state !== 'closed';
   if (kind === 'group' && (key[0] === 'groups' || key[0] === 'org-groups')) return key[1] === row.org_id || known;
   if (key[0] === 'hosts' && key.length === 2 && typeof key[1] === 'string' && row.org_id !== key[1]) return false;
   if (key[0] === 'orgs' && (row.kind !== 'org' || row.parent_id !== null)) return false;
@@ -293,8 +276,7 @@ export function missingInventoryProjection(cache:QueryClient,change:RowChange['r
 }
 
 function contains(value: unknown, id: string): boolean {
-  if (Array.isArray(value)) return value.some((one: unknown) => contains(one, id))
-    || ('privateRows' in value && contains(value.privateRows, id));
+  if (Array.isArray(value)) return value.some((one: unknown) => contains(one, id));
   return record(value) && (value.id === id || Object.values(value).some((one) => (Array.isArray(one) || record(one)) && contains(one, id)));
 }
 
@@ -304,8 +286,6 @@ function listChange(before: unknown, key: QueryKey, change: RowChange['row'], th
   const isList = isInventory || (typeof head === 'string' && (LISTS[change.kind] ?? []).includes(head));
   if (!isList) return replace(before, change, thread);
   const known = contains(before, change.id);
-  // An unrelated update cannot change membership without an explicit insertion.
-  if (!known && (change.insert !== true || change.value === null)) return before;
   const accepted = change.value !== null && !(change.kind === 'environment' && change.value.status === 'removed') && matches(key, change.kind, change.value, known);
   const next = replace(before, accepted ? change : { ...change, value: null }, thread);
   if (known || !accepted || change.insert !== true || change.value === null) return next;
@@ -383,8 +363,7 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
     } else if (query.state.data !== undefined) {
       const relatedList = typeof key[0] === 'string' && (LISTS[change.kind] ?? []).includes(key[0]) || key[2] === 'resources';
       if (!relatedList && !contains(query.state.data, change.id)) continue;
-      const next = listChange(query.state.data, key, change, thread);
-      if (next !== query.state.data) cache.setQueryData(key, next);
+      cache.setQueryData(key, listChange(query.state.data, key, change, thread));
     }
   }
   if (thread !== undefined) cache.setQueryData(['node', thread.id], thread);

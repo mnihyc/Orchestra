@@ -1,7 +1,7 @@
 //! Native notification subject declarations, shared by context and effect producers.
 
 use crate::operation_sources::{Binding, Cardinality, Declaration};
-use crate::operations::{FacetSpec, FacetUsage, TargetResolver};
+use crate::operations::{FacetUsage, TargetResolver};
 use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
 use orch_access_contract::permissions::ObjectKind;
 
@@ -31,10 +31,6 @@ pub const SUBJECT_KINDS: &[KeyTargetKind] = &[
 pub enum Source {
     /// The actual node, document, chat or resource selected by the native producer.
     Subject,
-    /// Optional node and ancestor names actually copied into a native outgoing notice.
-    NoticePlaceNames,
-    /// The actual Chat copied only when a person grant requests a notice.
-    NoticeChats,
     /// The actual document governing the selected owned notice jobs.
     NoticeDocument,
     /// Actual machine names reported by the native job preparation.
@@ -57,16 +53,7 @@ pub enum Source {
     AvailableChannelOwners,
     /// The caller's actual private route/recipient state, only when selected for output.
     ChannelCallerRoutes,
-    /// The native route's actual owning account.
-    RouteAccount,
 }
-
-const NOTICE_NAMES: Binding<Source> = Binding {
-    source: Source::NoticePlaceNames,
-    target: TargetResolver::ResolvedCollection("notice_place_names"),
-    usage: FacetUsage::ResponseContent,
-    cardinality: Cardinality::Collection,
-};
 
 /// A context read is bound to the same actual subject as its native capability projection.
 pub const PERSON_CONTEXT: Declaration<Source> = Declaration {
@@ -78,72 +65,6 @@ pub const PERSON_CONTEXT: Declaration<Source> = Declaration {
         cardinality: Cardinality::One,
     }],
 };
-
-/// An explicit notice copies an existing subject and performs its own notification act.
-pub const PERSON_CREATE: Declaration<Source> = Declaration {
-    operation: "PersonNotifyCreate",
-    bindings: &[PERSON_CONTEXT.bindings[0], NOTICE_NAMES],
-};
-
-const NOTICE_NAME_FACET: FacetSpec = FacetSpec::response_content(
-    &[
-        KeyTargetKind::Object(ObjectKind::Org),
-        KeyTargetKind::Object(ObjectKind::Project),
-        KeyTargetKind::Object(ObjectKind::Topic),
-        KeyTargetKind::Object(ObjectKind::Thread),
-    ],
-    TargetResolver::ResolvedCollection("notice_place_names"),
-);
-
-/// The notice copies its own subject; optional native place labels have separate sources.
-pub const PERSON_CREATE_FACETS: &[FacetSpec] = &[
-    FacetSpec::required(
-        orch_access_contract::key_scope::KeyAction::Read,
-        SUBJECT_KINDS,
-        TargetResolver::Resolved("subject"),
-    ),
-    FacetSpec::required(
-        orch_access_contract::key_scope::KeyAction::Write,
-        SUBJECT_KINDS,
-        TargetResolver::Resolved("subject"),
-    ),
-    NOTICE_NAME_FACET,
-];
-
-/// A person grant manages its Chat; a requested notice copies that same existing Chat.
-pub const CHAT_GRANT: Declaration<Source> = Declaration {
-    operation: "ChatPersonGrant",
-    bindings: &[
-        Binding {
-            source: Source::Subject,
-            target: TargetResolver::Path("id"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::NoticeChats,
-            target: TargetResolver::ResolvedCollection("notice_chats"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        NOTICE_NAMES,
-    ],
-};
-
-/// No notice means a genuinely empty copy source, never Read implied by Manage.
-pub const CHAT_GRANT_FACETS: &[FacetSpec] = &[
-    FacetSpec::required(
-        orch_access_contract::key_scope::KeyAction::Manage,
-        &[KeyTargetKind::Identity(KeyIdentityKind::Chat)],
-        TargetResolver::Path("id"),
-    ),
-    FacetSpec::required(
-        orch_access_contract::key_scope::KeyAction::Read,
-        &[KeyTargetKind::Identity(KeyIdentityKind::Chat)],
-        TargetResolver::ResolvedCollection("notice_chats"),
-    ),
-    NOTICE_NAME_FACET,
-];
 
 /// Document notice progress is bound to its document, with optional native waiting names.
 pub const DOCUMENT_JOBS: Declaration<Source> = Declaration {
@@ -265,78 +186,6 @@ pub const CHANNEL_LIST_MANAGE: Declaration<Source> = Declaration {
     ],
 };
 
-/// Actual native creation owner and separately bounded current-account route data.
-pub const CHANNEL_CREATE_SYSTEM: Declaration<Source> = Declaration {
-    operation: "AdminNotificationChannelCreate",
-    bindings: &[
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::System,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::System,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelCallerRoutes,
-            target: TargetResolver::ResolvedCollection("channel_caller_routes"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-/// Actual native creation owner and separately bounded current-account route data.
-pub const CHANNEL_CREATE_ORG: Declaration<Source> = Declaration {
-    operation: "OrgNotificationChannelCreate",
-    bindings: &[
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelCallerRoutes,
-            target: TargetResolver::ResolvedCollection("channel_caller_routes"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-/// Actual native creation owner and separately bounded current-account route data.
-pub const CHANNEL_CREATE_OWN: Declaration<Source> = Declaration {
-    operation: "MeNotificationChannelCreate",
-    bindings: &[
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelCallerRoutes,
-            target: TargetResolver::ResolvedCollection("channel_caller_routes"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
 /// Native update owner, independent stored-channel Read and optional own-route content.
 pub const CHANNEL_UPDATE: Declaration<Source> = Declaration {
     operation: "NotificationChannelUpdate",
@@ -358,25 +207,6 @@ pub const CHANNEL_UPDATE: Declaration<Source> = Declaration {
             target: TargetResolver::ResolvedCollection("channel_caller_routes"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// A bot-link generation is created/read only in its native account namespace.
-pub const ROUTE_LINK_CREATE: Declaration<Source> = Declaration {
-    operation: "MeNotificationRouteLinkCreate",
-    bindings: &[
-        Binding {
-            source: Source::RouteAccount,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::RouteAccount,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
         },
     ],
 };

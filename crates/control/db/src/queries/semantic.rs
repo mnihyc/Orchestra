@@ -581,7 +581,7 @@ pub async fn changed_sources(
            SELECT 'conversation', t.node_id, t.next_seq, COALESCE(t.last_activity_at, n.updated_at), n.name
              FROM threads t JOIN nodes n ON n.id = t.node_id
              LEFT JOIN search_sources s ON s.kind = 'conversation' AND s.source_id = t.node_id AND s.generation_id = $3
-            WHERE n.org_id = $1 AND NOT n.unlisted AND t.side_of IS NULL AND t.state NOT IN ('starting','running','waiting_approval')
+            WHERE n.org_id = $1 AND t.side_of IS NULL AND t.state NOT IN ('starting','running','waiting_approval')
               AND (s.source_id IS NULL OR t.next_seq <> s.marker OR n.name <> s.title)
               AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
            UNION ALL
@@ -726,7 +726,7 @@ pub async fn save_cut(
     stored: i64,
 ) -> Result<Vec<ChunkRow>, DbError> {
     let node: Option<Id>=sqlx::query_scalar("SELECT CASE $1::text WHEN 'document' THEN (SELECT node_id FROM documents WHERE id=$2)
-       WHEN 'conversation' THEN $2::uuid ELSE (SELECT COALESCE(node_id,home_id,org_id) FROM chats WHERE id=$2) END")
+       WHEN 'conversation' THEN $2::uuid ELSE (SELECT COALESCE(node_id,org_id) FROM chats WHERE id=$2) END")
        .bind(&source.kind).bind(source.id).fetch_one(&mut *conn).await?;
     let node = node.unwrap_or(org);
     let tokens: i64 = pieces.iter().map(|piece| i64::from(piece.tokens)).sum();

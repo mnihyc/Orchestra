@@ -44,59 +44,7 @@ fn restricted(row: &jobs::JobRow) -> bool {
             == Some(true)
             || row.plan.get("approval_origin").is_some()
             || row.plan.get("approval_binding").is_some()
-            || row.plan.get("revocation_origin").is_some()
-            || row
-                .plan
-                .get("revocation_origin_required")
-                .and_then(Json::as_bool)
-                == Some(true)
             || row.plan.get(JOURNAL).is_some())
-}
-
-pub(super) fn has_origin(plan: &Plan) -> bool {
-    plan.approval_origin.is_some()
-        || plan.approval_origin_required
-        || plan.revocation_origin.is_some()
-        || plan.revocation_origin_required
-}
-
-fn retained_origin(plan: &Plan) -> Option<&orch_authz::CapturedOperation> {
-    plan.revocation_origin
-        .as_ref()
-        .or(plan.approval_origin.as_ref())
-}
-
-/// A removed desired capability admits only its exact reducing native reconciliation.
-/// This does not turn the retained actor/key into authority for a fresh grant.
-fn valid_origin(plan: &Plan) -> bool {
-    if plan.revocation_origin_required || plan.revocation_origin.is_some() {
-        let Some(origin) = &plan.revocation_origin else {
-            return false;
-        };
-        let mut removed = plan.before.clone();
-        removed.granted.retain(|key| key != &plan.capability);
-        return origin.operation() == "EnvironmentCapabilityRevoke"
-            && Some(origin.user()) == plan.decided_by
-            && plan.revocation_origin_required
-            && !plan.grant
-            && plan.requester.is_none()
-            && plan.approval.is_none()
-            && plan.approval_origin.is_none()
-            && !plan.approval_origin_required
-            && plan
-                .before
-                .granted
-                .iter()
-                .any(|key| key == &plan.capability)
-            && plan.after == removed;
-    }
-    plan.approval_origin.as_ref().is_some_and(|origin| {
-        origin.operation() == "ApprovalDecide.capability"
-            && Some(origin.user()) == plan.decided_by
-            && plan.approval_origin_required
-            && plan.approval.is_some()
-            && plan.grant
-    })
 }
 fn refused() -> Stop {
     Failure::new(
@@ -122,15 +70,19 @@ pub(crate) async fn bind(
     environment: Id,
     plan: &mut Plan,
 ) -> Result<(), EngineError> {
-    if !has_origin(plan) {
+    if plan.approval_origin.is_none() && !plan.approval_origin_required {
         return Ok(());
     }
-    if retained_origin(plan).is_none() {
-        return Err(EngineError::unreadable(
-            "the known live capability origin is missing",
-        ));
-    }
-    if !valid_origin(plan) || plan.approval_binding.is_some() {
+    let origin = plan
+        .approval_origin
+        .as_ref()
+        .ok_or_else(|| EngineError::unreadable("the known live capability origin is missing"))?;
+    if origin.operation() != "ApprovalDecide.capability"
+        || Some(origin.user()) != plan.decided_by
+        || plan.approval.is_none()
+        || !plan.grant
+        || plan.approval_binding.is_some()
+    {
         return Err(EngineError::unreadable(
             "the live capability's accepted origin changed",
         ));
@@ -163,14 +115,18 @@ fn structural(row: &jobs::JobRow) -> Result<Option<Plan>, EngineError> {
     let Some(binding) = plan.approval_binding.as_ref() else {
         return Ok(None);
     };
-    let Some(origin) = retained_origin(&plan) else {
+    let Some(origin) = plan.approval_origin.as_ref() else {
         return Ok(None);
     };
     if row.kind != KIND
         || row.environment_id != Some(binding.environment)
         || plan.runtime != binding.runtime
+        || origin.operation() != "ApprovalDecide.capability"
         || row.created_by != Some(origin.user())
-        || !valid_origin(&plan)
+        || plan.decided_by != Some(origin.user())
+        || !plan.approval_origin_required
+        || plan.approval.is_none()
+        || !plan.grant
         || recipe(binding.environment, &plan)? != binding.recipe
     {
         return Ok(None);
@@ -417,52 +373,6 @@ async fn current_origin(
     }
     Ok(Some(caller))
 }
-
-/// Physical removal completes the already committed revocation, even if its key later closes.
-/// A new desired grant must never be overwritten by an older retained removal body.
-async fn removal_current(
-    conn: &mut Conn,
-    row: &jobs::JobRow,
-    plan: &Plan,
-) -> Result<bool, EngineError> {
-    if plan.grant || !valid_origin(plan) || !target_current(conn, row, plan).await? {
-        return Ok(false);
-    }
-    let Some(environment) = row.environment_id else {
-        return Ok(false);
-    };
-    let Some(facts) = caps::environment_facts(conn, environment).await? else {
-        return Ok(false);
-    };
-    let Some(definition) = jobs::changes::definition(conn, plan.runtime).await? else {
-        return Ok(false);
-    };
-    let Some(value) = definition.get("capabilities") else {
-        return Ok(false);
-    };
-    let mut recorded: orch_driver_contract::capabilities::CapabilityState =
-        serde_json::from_value(value.clone())?;
-    // Desired grants have their own current check below; every other native input
-    // remains the actual runtime definition from this accepted removal's recipe.
-    recorded.granted.clone_from(&plan.before.granted);
-    if recorded != plan.before {
-        return Ok(false);
-    }
-    let current = facts
-        .granted_capabilities
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    let desired = plan
-        .after
-        .granted
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    Ok(current == desired
-        && !facts
-            .granted_capabilities
-            .iter()
-            .any(|key| key == &plan.capability))
-}
 /// The final job issue hook. NodeCapabilitiesApply has no WorkReport/retry-Busy transform;
 /// it is called after the existing runner's other canonicalization/active metadata writes.
 pub(crate) async fn before_issue(
@@ -515,12 +425,7 @@ async fn remember(job: &Job, command: &Outgoing, undo: bool) -> Result<(), Stop>
     if !undo && (row.cancel_requested() || abort_reason(&row)?.is_some()) {
         return Err(Stop::Cancelled);
     }
-    let caller = if !plan.grant {
-        if !removal_current(&mut tx, &row, &plan).await? {
-            return Err(refused());
-        }
-        None
-    } else if undo {
+    let caller = if undo {
         if !target_current(&mut tx, &row, &plan).await? {
             return Err(refused());
         }
@@ -588,28 +493,17 @@ fn claim_deadline(row: &jobs::JobRow) -> Option<Time> {
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
 }
-struct CommandRef<'a> {
-    id: Id,
-    machine: Id,
-    key: Option<&'a str>,
-    kind: &'a str,
-    body: &'a Json,
-}
-
 async fn command_callers_for_row(
     conn: &mut Conn,
     row: &jobs::JobRow,
-    command: CommandRef<'_>,
+    id: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
     expected_undo: Option<bool>,
     clock: &dyn Clock,
 ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
-    let CommandRef {
-        id,
-        machine,
-        key,
-        kind,
-        body,
-    } = command;
     let Some(plan) = structural(row)? else {
         return Ok(None);
     };
@@ -652,11 +546,6 @@ async fn command_callers_for_row(
     {
         return Ok(None);
     }
-    if !plan.grant {
-        return Ok(removal_current(conn, row, &plan)
-            .await?
-            .then(|| vec![(None, Some(lease))]));
-    }
     if undo {
         return Ok(target_current(conn, row, &plan)
             .await?
@@ -689,20 +578,7 @@ pub async fn command_current_callers(
     let Some(row) = jobs::job(conn, owners[0]).await? else {
         return Ok(None);
     };
-    command_callers_for_row(
-        conn,
-        &row,
-        CommandRef {
-            id,
-            machine,
-            key,
-            kind,
-            body,
-        },
-        None,
-        clock,
-    )
-    .await
+    command_callers_for_row(conn, &row, id, machine, key, kind, body, None, clock).await
 }
 /// Private command evidence contains association only. It grants nothing and cannot be
 /// deserialized as a key claim or emitted in a node's wire body.
@@ -728,13 +604,11 @@ impl CapabilityChangeAuthority {
         command_callers_for_row(
             conn,
             &row,
-            CommandRef {
-                id: command.id,
-                machine: command.machine_id,
-                key: command.serial_key(),
-                kind: &command.kind,
-                body: &command.body,
-            },
+            command.id,
+            command.machine_id,
+            command.serial_key(),
+            &command.kind,
+            &command.body,
             Some(self.undo),
             clock,
         )

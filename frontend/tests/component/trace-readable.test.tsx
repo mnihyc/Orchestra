@@ -16,9 +16,7 @@ import type { AuditEntry, AuditEntryPage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 const route = vi.hoisted(() => { const search: Record<string, unknown> = {}; return { replace: vi.fn(), search }; });
 vi.mock('@tanstack/react-router', async (original) => {

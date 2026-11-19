@@ -61,7 +61,7 @@
   outline-offset: 2px;
 }
 .choice-option:disabled,
-.choice-radio:is(:disabled, [aria-disabled='true']),
+.choice-radio:disabled,
 .choice-toggle:disabled,
 .choice-switch:is(:disabled, [aria-disabled='true']) {
   cursor: not-allowed;

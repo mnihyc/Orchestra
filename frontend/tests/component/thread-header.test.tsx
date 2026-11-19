@@ -7,12 +7,11 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThreadHeader } from '@/features/thread/Header';
 import type * as NodesApi from '@/api/nodes';
-import type * as ApprovalsApi from '@/api/approvals';
 import type * as ThreadsApi from '@/api/threads';
 import type * as ThreadStore from '@/realtime/stores/thread';
 import type * as RunningUi from '@/features/running/Running';
 import { approvalKey } from '@/api/approvals';
-import type { Approval, HarnessRequest, Item, Segment, Thread, ThreadBackground, ThreadGoal } from '@/generated/api-types';
+import type { HarnessRequest, Item, Segment, Thread, ThreadBackground, ThreadGoal } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import { actionName } from '@/ui/actions';
@@ -25,13 +24,7 @@ import { snapshot } from '../unit/continuation-fixtures';
 import { ALLOW_DENY, approvalItem, harnessApproval } from '../doubles/thread-rows';
 import { me, memberAccess, userRef } from '../doubles/fixtures';
 
-const calls = vi.hoisted(() => ({ approval: vi.fn<(id: string) => Promise<Approval>>(), settings: vi.fn(), detail: vi.fn(), review: vi.fn(), share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[], background: null as ThreadBackground | null, backgroundClosed: false }));
-vi.mock('@/api/approvals', async (original) => {
-  const actual = await original<typeof ApprovalsApi>();
-  return { ...actual, approvalQuery: (id: string) => ({ ...actual.approvalQuery(id), queryFn: () => calls.approval(id) }) };
-});
-const changesView = vi.hoisted(() => vi.fn());
-vi.mock('@/features/inspector/reviewTarget', () => ({ openThreadChanges: changesView }));
+const calls = vi.hoisted(() => ({ settings: vi.fn(), review: vi.fn(), share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[], background: null as ThreadBackground | null, backgroundClosed: false }));
 vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: (props: { target: unknown; only?: readonly string[]; scope: string }) => { calls.settings(props); return <div>One scoped setting</div>; } }));
 vi.mock('@/features/goal/editor', () => ({ openGoalEditor: calls.goal }));
 vi.mock('@/api/nodes', async (importOriginal) => ({ ...await importOriginal<typeof NodesApi>(), updateNode: calls.update }));
@@ -57,7 +50,7 @@ vi.mock('@/features/timeline/FindInConversation', () => ({ openFind: calls.find 
 vi.mock('@/features/inbox/away/Catchup', () => ({ CatchupRequest: () => null }));
 vi.mock('@/features/running/Running', async (importOriginal) => ({ ...await importOriginal<typeof RunningUi>(), RunningDialog: ({ thread, close, endTarget }: { thread: string; close: () => void; endTarget?: unknown }) => { calls.review(endTarget); return <div role="dialog" aria-label={i18n.t('running.title')} data-running-thread={thread}><button onClick={close}>{i18n.t('common.close')}</button></div>; } }));
 vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: calls.background, closed: calls.backgroundClosed, error: null }) }));
-vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: calls.detail, setHideHistory: vi.fn() }) }));
+vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: vi.fn(), setHideHistory: vi.fn() }) }));
 vi.mock('@/realtime/stores/thread', async (importOriginal) => {
   const actual = await importOriginal<typeof ThreadStore>();
   return { ...actual, runningTurn: () => null,
@@ -76,16 +69,15 @@ const path: Thread['path'] = [
 const approvalRequest: HarnessRequest = { request_kind: 'command', options: ALLOW_DENY, detail: { command: 'check redirect', cwd: '/workspace', reason: null } };
 
 const background = (more: Partial<ThreadBackground> = {}): ThreadBackground => ({ supported: true, state: 'live', total: 0, items: [], next_cursor: null, list_ref: null, expires_at: null, as_of: null, can_end: true, reason: null, ...more });
-beforeEach(() => { vi.clearAllMocks(); calls.approval.mockReset().mockRejectedValue(new Error('No approval fixture was supplied')); calls.starred = false; calls.items.clear(); calls.segments = []; calls.background = background(); calls.backgroundClosed = false; });
+beforeEach(() => { vi.clearAllMocks(); calls.starred = false; calls.items.clear(); calls.segments = []; calls.background = background(); calls.backgroundClosed = false; });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
-  const native = snapshot().thread;
-  const thread: Thread = { ...native, id: 'thread-1', kind: 'thread', name: 'Repair login', revision: 4, description: '', title_source: 'user', auto_updated_at: null,
+  const thread = { id: 'thread-1', kind: 'thread', name: 'Repair login', revision: 4, description: '', title_source: 'user', description_source: 'user', auto_updated_at: null,
     org_id: 'org-1', parent_id: 'topic-1', topic_id: 'topic-1', path,
-    display: executionDisplay(more.state ?? 'idle'), state: 'idle', lock: null, blocked: null, archived: false, side_of: null, sides: { open: 0, allowed: true, max: 2, mode: 'read_only', reason: null }, pending_approvals: 0,
-    owner: { ...native.owner, id: 'ada', display_name: 'Ada' }, access: { ...native.access, permissions: ['thread.view', 'thread.interact', 'thread.manage'] }, can: { ...native.can, fork: true, place: true, archive: true },
-    ...more };
+    display: executionDisplay(more.state ?? 'idle'), state: 'idle', lock: null, blocked: null, archived: false, page: 'default', side_of: null, sides: { open: 0, allowed: true, max: 2, mode: 'read_only', reason: null }, pending_approvals: 0,
+    owner: { id: 'ada', display_name: 'Ada' }, access: { permissions: ['thread.view', 'thread.interact', 'thread.manage'] }, can: { fork: true, place: true, archive: true },
+    ...more } as unknown as Thread;
   const content = <ThreadHeader thread={thread} />;
   const drawn = show(cache === undefined ? content : <QueryClientProvider client={cache}>{content}</QueryClientProvider>);
   return { thread, header: screen.getByRole('banner'), ...drawn };
@@ -94,34 +86,11 @@ function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
 async function confirmFork(user: ReturnType<typeof userEvent.setup>) {
   const dialog = await screen.findByRole('dialog', { name: i18n.t('agentAccess.forkTitle', { name: 'Repair login' }) });
   expect(calls.fork).not.toHaveBeenCalled();
-  const confirm = () => within(dialog).getByRole('button', { name: i18n.t('change.menu.forkNow') });
-  await waitFor(() => expect(confirm()).toBeEnabled());
-  await user.click(confirm());
+  const confirm = within(dialog).getByRole('button', { name: i18n.t('change.menu.forkNow') });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await user.click(confirm);
   expect(calls.fork).toHaveBeenCalledExactlyOnceWith(undefined, { where: 'nothing', parts: {} });
 }
-
-it.each([
-  ['en', 'Move to another org', 'Moves with its main thread · Keep it to move it alone'],
-  ['zh-CN', '移到其他组织', '随主会话一起移动 · 保留后可单独移动'],
-] as const)('keeps an open side Move disabled with only its short tooltip in %s', async (locale, label, reason) => {
-  await setLocale(locale);
-  const user = userEvent.setup();
-  const { thread, header } = draw({ side_of: { id: 'main-thread', kind: 'thread', name: 'Main thread', redacted: false } });
-  await user.click(within(header).getByRole('button', { name: actionName('actions', thread.name) }));
-  const move = screen.getByRole('menuitem', { name: label });
-  expect(move).toHaveAttribute('aria-disabled', 'true');
-  expect(move).toHaveTextContent(label);
-  expect(within(move).queryByText(reason)).not.toBeInTheDocument();
-  await user.hover(move);
-  expect(await screen.findByRole('tooltip')).toHaveTextContent(reason);
-  await user.click(move);
-  act(() => move.focus());
-  await user.keyboard('{Enter}');
-  expect(calls.change).not.toHaveBeenCalled();
-  expect(calls.fork).not.toHaveBeenCalled();
-  expect(calls.ask).not.toHaveBeenCalled();
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-});
 
 it.each(['en', 'zh-CN'] as const)('shows native work from an earlier turn beside Idle in the actual header (%s)', async (locale) => {
   await setLocale(locale);
@@ -131,30 +100,6 @@ it.each(['en', 'zh-CN'] as const)('shows native work from an earlier turn beside
   const count = within(header).getByRole('button', { name: i18n.t('running.count', { count: 2 }) });
   expect(count).toBeVisible();
   expect(count.closest('[data-thread-title-row]')).not.toBeNull();
-});
-
-it.each(['en', 'zh-CN'] as const)('opens the exact thread Changes from the header View menu in %s', async (locale) => {
-  await setLocale(locale);
-  const thread = { ...snapshot().thread, environment_permissions: ['files.view'] };
-  show(<ThreadHeader thread={thread} />);
-  const user = userEvent.setup();
-  await user.click(screen.getByRole('button', { name: actionName('actions', thread.name) }));
-  const view = screen.getByRole('menuitem', { name: i18n.t('thread.header.view') });
-  act(() => view.focus()); await user.keyboard('{ArrowRight}');
-  await user.click(await screen.findByRole('menuitem', { name: i18n.t('views.changes.title') }));
-  expect(changesView).toHaveBeenCalledExactlyOnceWith(thread.id, thread.current_turn_id ?? undefined);
-});
-
-it.each(['en', 'zh-CN'] as const)('keeps every existing depth reachable through the same header writer in %s', async (locale) => {
-  await setLocale(locale);
-  const { thread } = draw(); const user = userEvent.setup();
-  for (const depth of ['everything', 'summary', 'steps'] as const) {
-    await user.click(screen.getByRole('button', { name: actionName('actions', thread.name) }));
-    await user.click(screen.getByRole('menuitem', { name: i18n.t('thread.header.view') }));
-    await user.click(screen.getByRole('menuitemradio', { name: i18n.t(`choiceCatalog.workDetail.${depth}.name`) }));
-    expect(calls.detail).toHaveBeenLastCalledWith(depth);
-  }
-  expect(calls.detail).toHaveBeenCalledTimes(3);
 });
 
 async function openRunningFromView(user: ReturnType<typeof userEvent.setup>, thread: Thread) {
@@ -275,19 +220,6 @@ describe('a thread header', () => {
     expect(calls.goal).toHaveBeenCalledExactlyOnceWith('thread-1');
   });
 
-  it.each(['en', 'zh-CN'] as const)('retains archived and side-thread goal actions with the slash command reason in %s', async (locale) => {
-    await setLocale(locale);
-    for (const state of ['archived', 'side'] as const) {
-      const view = draw({ archived: state === 'archived', side_of: state === 'side' ? { id: 'main-thread', kind: 'thread', name: 'Main thread', redacted: false } : null, goal: null });
-      await userEvent.click(within(view.header).getByRole('button', { name: actionName('actions', view.thread.name) }));
-      const goal = screen.getByRole('menuitem', { name: i18n.t('goals.menu.set') });
-      expect(goal).toHaveAttribute('aria-disabled', 'true');
-      expect(goal).toHaveTextContent(i18n.t(state === 'archived' ? 'goals.act.archived' : 'goals.act.sideThread'));
-      await userEvent.click(goal); expect(calls.goal).not.toHaveBeenCalled();
-      view.unmount();
-    }
-  });
-
   it('keeps goal editing disabled for a reader who cannot drive', async () => {
     draw({ goal: { status: 'paused' } as ThreadGoal, access: { ...memberAccess, permissions: ['thread.view'] } });
     await userEvent.click(screen.getByRole('button', { name: 'Actions for Repair login' }));
@@ -305,7 +237,7 @@ describe('a thread header', () => {
     expect(head.getByRole('button', { name: 'Star' })).toBeVisible();
     expect(head.getByRole('button', { name: 'Notifications' })).toBeVisible();
     const frequent = head.getByRole('group', { name: 'Thread actions' });
-    for (const name of ['Duplicate', 'Duplicate to…', 'Switch provider or agent…', 'Side thread…', 'Find in the conversation']) {
+    for (const name of ['Fork', 'Fork to…', 'Switch provider or agent…', 'Ask on the side…', 'Find in the conversation']) {
       const button = within(frequent).getByRole('button', { name });
       expect(button).toBeVisible();
       expect(button.textContent).toBe('');
@@ -313,11 +245,11 @@ describe('a thread header', () => {
       expect(button).toHaveClass('size-(--control-sm)');
     }
     expect(within(frequent).getAllByRole('button')).toHaveLength(5);
-    expect(frequent.closest('[data-thread-actions-row]')).toContainElement(head.getByRole('button', { name: i18n.t('thread.header.shareThread') }));
+    expect(frequent.closest('[data-thread-actions-row]')).toContainElement(head.getByRole('button', { name: 'Share' }));
     expect(head.queryByText('Add a description')).not.toBeInTheDocument();
     expect(head.queryByRole('button', { name: /Model and effort|Approval mode|Context|Edit links|Details/ })).not.toBeInTheDocument();
     expect(head.queryByText(/Run with provider|Separated|not_a_repository/)).not.toBeInTheDocument();
-    await userEvent.click(head.getByRole('button', { name: i18n.t('thread.header.shareThread') }));
+    await userEvent.click(head.getByRole('button', { name: 'Share' }));
     expect(calls.share).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name });
   });
 
@@ -326,7 +258,7 @@ describe('a thread header', () => {
     const { header } = draw();
     await user.click(within(header).getByRole('button', { name: /Actions/ }));
     for (const name of ['Export', 'Archive', 'Delete']) expect(screen.getByRole('menuitem', { name })).toBeVisible();
-    for (const name of ['Duplicate', 'Duplicate to…', 'Switch provider or agent…', 'Side thread…', 'Find in the conversation', 'Star']) expect(screen.queryByRole('menuitem', { name })).not.toBeInTheDocument();
+    for (const name of ['Fork', 'Fork to…', 'Switch provider or agent…', 'Ask on the side…', 'Find in the conversation', 'Star']) expect(screen.queryByRole('menuitem', { name })).not.toBeInTheDocument();
     expect(within(screen.getByRole('menu')).getAllByRole('menuitem').length).toBeLessThanOrEqual(10);
     expect(screen.getByRole('menuitem', { name: 'Organize' })).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'View' })).toBeVisible();
@@ -341,10 +273,10 @@ describe('a thread header', () => {
     const user = userEvent.setup();
     const { header, thread } = draw();
     const actions = within(header).getByRole('group', { name: t('thread.header.quickActions') });
-    await user.click(within(actions).getByRole('button', { name: t('duplicate.now') }));
+    await user.click(within(actions).getByRole('button', { name: t('change.menu.forkNow') }));
     await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
-    await user.click(within(actions).getByRole('button', { name: t('duplicate.to') }));
+    await user.click(within(actions).getByRole('button', { name: t('change.menu.fork') }));
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'fork' });
     await user.click(within(actions).getByRole('button', { name: t('change.menu.switch') }));
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'provider' });
@@ -367,12 +299,12 @@ describe('a thread header', () => {
 
   it('repeats the visible Fork action by name with the same handler in the menu', async () => {
     const { header } = draw();
-    expect(within(header).getByRole('button', { name: /^Duplicate$/ })).toBeDefined();
+    expect(within(header).getByRole('button', { name: /^Fork$/ })).toBeDefined();
     await userEvent.click(within(header).getByRole('button', { name: /Actions/ }));
     const submenu = screen.getByRole('menuitem', { name: 'Agent and environment' });
     act(() => submenu.focus());
     await userEvent.keyboard('{ArrowRight}');
-    const fork = await screen.findByRole('menuitem', { name: /^Duplicate$/ });
+    const fork = await screen.findByRole('menuitem', { name: /^Fork$/ });
     act(() => fork.focus()); await userEvent.keyboard('{Enter}');
     await confirmFork(userEvent.setup());
     expect(calls.fork).toHaveBeenCalledOnce();
@@ -394,8 +326,8 @@ describe('a thread header', () => {
     rerender(<ThreadHeader thread={thread} />);
     expect(within(header).getByRole('heading', { name: 'Repair login' })).toBeVisible();
     expect(within(header).getByRole('button', { name: 'Find in the conversation' })).toBeVisible();
-    expect(within(header).queryByRole('button', { name: 'Duplicate' })).not.toBeInTheDocument();
-    expect(within(header).queryByRole('button', { name: 'Duplicate to…' })).not.toBeInTheDocument();
+    expect(within(header).queryByRole('button', { name: 'Fork' })).not.toBeInTheDocument();
+    expect(within(header).queryByRole('button', { name: 'Fork to…' })).not.toBeInTheDocument();
     expect(calls.fork).not.toHaveBeenCalled();
   });
 
@@ -411,7 +343,7 @@ describe('a thread header', () => {
 
   it('does not assume an unknown question is answerable and leaves renaming on the title', async () => {
     const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 });
-    expect(within(header).getByText('Waiting on an approval', { exact: true })).toBeVisible();
+    expect(within(header).getByText('Waiting for an answer', { exact: true })).toBeVisible();
     await userEvent.click(within(header).getByRole('button', { name: /Rename/ }));
     expect(within(header).getByRole('textbox')).toHaveValue('Repair login');
   });
@@ -422,8 +354,8 @@ describe('a thread header', () => {
     const { header } = draw({ sides: { open: 0, allowed: true, max: 2, mode: null, reason: 'The adapter cannot restrict this aside safely.' } });
     const actions = within(header).getByRole('group', { name: t('thread.header.quickActions') });
     const buttons = within(actions).getAllByRole('button');
-    expect(buttons[0]).toHaveAccessibleName(t('duplicate.now'));
-    expect(buttons[1]).toHaveAccessibleName(t('duplicate.to'));
+    expect(buttons[0]).toHaveAccessibleName(t('change.menu.forkNow'));
+    expect(buttons[1]).toHaveAccessibleName(t('change.menu.fork'));
     expect(within(actions).queryByRole('button', { name: t('side.menu.ask') })).not.toBeInTheDocument();
     expect(calls.ask).not.toHaveBeenCalled();
     if (via === 'pointer') await user.click(buttons[0]!);
@@ -434,7 +366,7 @@ describe('a thread header', () => {
     else { act(() => buttons[1]!.focus()); await user.keyboard('{Enter}'); }
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: 'thread-1', name: 'Repair login' }, { kind: 'fork' });
     await user.click(within(header).getByRole('button', { name: /Actions|操作/ }));
-    expect(screen.queryByRole('menuitem', { name: t('duplicate.to') })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: t('change.menu.fork') })).not.toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: t('side.menu.ask') })).not.toBeInTheDocument();
   });
 
@@ -448,44 +380,15 @@ describe('a thread header', () => {
     expect(within(header).queryByText(canDecide ? 'Waiting for an answer' : 'Waiting for you', { exact: true })).not.toBeInTheDocument();
   });
 
-  for (const locale of ['en', 'zh-CN'] as const) it.each([true, false])(`reads a missing approval before naming its decider in ${locale} (can decide: %s)`, async (canDecide) => {
-    await setLocale(locale);
-    const request = harnessApproval('unloaded-question', { threadId: 'thread-1', itemId: 'unloaded-item', title: 'Continue?', request: approvalRequest, requester: userRef(me(1, 'ada', 'Ada')), canDecide });
-    const item = approvalItem('unloaded-item', request.id);
-    calls.items.set(item.id, item);
-    let answer: (approval: Approval) => void = () => { throw new Error('The approval read must start first'); };
-    calls.approval.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
-    const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 });
-    expect(within(header).getByText(i18n.t('thread.header.waitingOnApproval'), { exact: true })).toBeVisible();
-    expect(within(header).queryByText(i18n.t('composer.row.waitingForYou'), { exact: true })).not.toBeInTheDocument();
-    expect(within(header).queryByText(i18n.t('thread.header.waitingForAnswer'), { exact: true })).not.toBeInTheDocument();
-    await waitFor(() => expect(calls.approval).toHaveBeenCalledExactlyOnceWith(request.id));
-    await act(async () => { answer(request); await Promise.resolve(); });
-    expect(await within(header).findByText(i18n.t(canDecide ? 'composer.row.waitingForYou' : 'thread.header.waitingForAnswer'), { exact: true })).toBeVisible();
-    expect(within(header).queryByText(i18n.t('thread.header.waitingOnApproval'), { exact: true })).not.toBeInTheDocument();
-  });
-
-  it.each(['en', 'zh-CN'] as const)('keeps the neutral approval label after a failed read in %s', async (locale) => {
-    await setLocale(locale);
-    const item = approvalItem('unavailable-item', 'unavailable-question');
-    calls.items.set(item.id, item);
-    const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 });
-    await waitFor(() => expect(calls.approval).toHaveBeenCalledExactlyOnceWith('unavailable-question'));
-    expect(within(header).getByText(i18n.t('thread.header.waitingOnApproval'), { exact: true })).toBeVisible();
-    expect(within(header).queryByText(i18n.t('thread.header.waitingForAnswer'), { exact: true })).not.toBeInTheDocument();
-  });
-
-  it('refreshes an older card’s loaded authority and follows its confirmed changes', async () => {
+  it('follows an older card’s already loaded authority without another approval request', async () => {
     const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const request = harnessApproval('cached-question', { threadId: 'thread-1', itemId: 'cached-item', title: 'Continue?', request: approvalRequest, requester: userRef(me(1, 'ada', 'Ada')) });
     const base = approvalItem('cached-item', request.id);
     calls.items.set(base.id, base);
     cache.setQueryData(approvalKey(request.id), request);
-    calls.approval.mockResolvedValue(request);
     const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 }, cache);
     expect(within(header).getByText('Waiting for you', { exact: true })).toBeVisible();
-    await waitFor(() => expect(calls.approval).toHaveBeenCalledExactlyOnceWith(request.id));
-    await waitFor(() => expect(cache.isFetching({ queryKey: approvalKey(request.id) })).toBe(0));
+    expect(cache.isFetching({ queryKey: approvalKey(request.id) })).toBe(0);
     act(() => { cache.setQueryData(approvalKey(request.id), { ...request, can_decide: false }); });
     await waitFor(() => expect(within(header).getByText('Waiting for an answer', { exact: true })).toBeVisible());
     expect(cache.isFetching({ queryKey: approvalKey(request.id) })).toBe(0);
@@ -517,7 +420,7 @@ describe('a thread header', () => {
     expect(screen.getByRole('menuitemradio', { name: 'Steps' })).toHaveAttribute('aria-checked', 'true');
     expect(screen.getByRole('menuitemcheckbox')).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'Resume the automatic title' })).toBeVisible();
-    expect(screen.queryByRole('menuitem', { name: 'Resume the automatic description' })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Resume the automatic description' })).toBeVisible();
   });
 
   it('offers reading a present description to a viewer without an edit action', async () => {

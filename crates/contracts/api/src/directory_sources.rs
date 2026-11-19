@@ -41,25 +41,6 @@ const TAG_REQUIRED: Binding<Source> = Binding {
     cardinality: Cardinality::One,
 };
 
-/// Creation and its current content use the real defining node, never a fabricated Tag scope kind.
-pub const TAG_CREATE: Declaration<Source> = Declaration {
-    operation: "NodeTagCreate",
-    bindings: &[
-        Binding {
-            source: Source::TagNode,
-            target: Target::Path("id"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::TagNode,
-            target: Target::Path("id"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-    ],
-};
-
 /// A tag update and its optional same-operation content share its actual keeper.
 pub const TAG_UPDATE: Declaration<Source> = Declaration {
     operation: "TagUpdate",

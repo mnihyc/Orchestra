@@ -18,8 +18,6 @@ pub enum Frame {
     Bytes(Bytes),
     /// Wait before the next frame.
     Wait(Duration),
-    /// Wait before the next frame until the test releases the hold of this name.
-    Hold(String),
     /// Abort the connection: nothing more is sent, and the client sees the body break off.
     Abort,
 }
@@ -184,11 +182,6 @@ impl Wire {
         if !duration.is_zero() {
             self.frames.push(Frame::Wait(duration));
         }
-    }
-
-    /// Waits before what follows until the hold of this name is released.
-    pub fn hold(&mut self, name: &str) {
-        self.frames.push(Frame::Hold(name.to_owned()));
     }
 
     /// Aborts the connection here.

@@ -12,15 +12,12 @@ use orch_access_contract::key_scope::{
     KeyAction, KeyFacet, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
 };
 use orch_access_contract::permissions::ObjectKind;
-use orch_api_contract::{
-    operations::TargetResolver,
-    source::{RepositorySource, SourceDestination},
-};
+use orch_api_contract::source::{RepositorySource, SourceDestination};
 use orch_authz::{Caller, CapturedOperation, TokenGrant};
 use orch_db::queries::{identity, jobs, threads};
 use orch_engine::{
     jobs::source::{self, Action, Plan},
-    operation_scope::{Prepared, creator_files, targets},
+    operation_scope::{creator_files, targets},
 };
 use orch_link_contract::commands::{FsStat, SerialKey};
 use orch_types::{Hash, Id, Json, Time, new_id};
@@ -491,46 +488,4 @@ async fn a_worktree_source_read_is_not_granted_by_the_creator_environment_manage
         .is_none(),
         "the original Manage selection does not contain independent source Read"
     );
-}
-
-#[tokio::test]
-async fn adopted_existing_directory_binds_known_empty_files_without_admitting_a_creator_or_preview()
-{
-    let world = World::observed().await;
-    world.engine().stop();
-    let mut conn = world.pool.acquire().await.unwrap();
-    let mut plan = Prepared::for_selection("ThreadAdopt").unwrap();
-    creator_files::bind(&mut conn, &mut plan, world.environment, false, false)
-        .await
-        .unwrap();
-    for role in ["creator_file_environments", "creator_file_sources"] {
-        let slot = plan
-            .variant()
-            .facets
-            .iter()
-            .position(|facet| facet.target == TargetResolver::ResolvedCollection(role))
-            .unwrap();
-        assert!(
-            plan.bind_empty(slot).is_err(),
-            "the actual absence was already bound for {role}"
-        );
-    }
-    assert!(plan.known_required_facets().is_empty());
-    assert!(
-        plan.required_facets().is_err(),
-        "other creator sources remain unresolved"
-    );
-    assert!(
-        plan.admit(&Caller::session(world.ada), false).is_err(),
-        "an empty file footprint grants no complete creator operation"
-    );
-    let mut preview = Prepared::for_selection("ThreadAdoptPreview").unwrap();
-    assert!(
-        creator_files::bind(&mut conn, &mut preview, world.environment, false, false)
-            .await
-            .is_err(),
-        "the read-only preview cannot borrow creator file roles"
-    );
-    drop(conn);
-    world.shutdown().await;
 }

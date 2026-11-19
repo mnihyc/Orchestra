@@ -1,4 +1,3 @@
-import { useSelectedOrg } from '@/shell/org';
 /** Streamed search follows server order through independent arrivals, reading, settling, continuation and typing. */
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode, useState } from 'react';
@@ -38,24 +37,19 @@ async function send(...events: Event[]) {await act(async () => {for (const event
 const list = () => within(screen.getByRole('region', {name: i18n.t('search.results')})).getByRole('list');
 const rows = () => within(list()).getAllByRole('button').map((button) => button.textContent);
 const originalSession = client.session.getState();
-const selectedOrgBefore = useSelectedOrg.getState();
-beforeEach(() => useSelectedOrg.setState({ orgId: '00000000-0000-4000-8000-000000000001' }));
-afterEach(() => useSelectedOrg.setState(selectedOrgBefore));
 beforeEach(() => {calls.requests.length = 0; calls.failures.length = 0; calls.personFailure = null; calls.abortAware = false;});
 afterEach(() => {cleanup(); vi.useRealTimers(); client.session.setState(originalSession);});
-/** The seconds the server holds the first screen's order open: long enough that a pause of the machine cannot end it during a case. */
-const OPEN_WINDOW_SECS = 3600;
-async function start(initial?: SearchParams, pageSize = 2, windowSecs = OPEN_WINDOW_SECS) {
+async function start(initial?: SearchParams, pageSize = 2) {
   const view = show(<Page {...(initial === undefined ? {} : {initial})} />);
   await waitFor(() => expect(calls.requests).toHaveLength(1));
-  await send({type: 'options', page_size: pageSize, reorder_window_secs: windowSecs, meaning_pause_ms: 800}, source('words', 'running'), source('meaning', 'running'));
+  await send({type: 'options', page_size: pageSize, reorder_window_secs: 5, meaning_pause_ms: 800}, source('words', 'running'), source('meaning', 'running'));
   return view;
 }
 it('starts a linked search through strict-mode remounts and cancels it when the view closes', async () => {
   const view = show(<StrictMode><Page /></StrictMode>);
   await waitFor(() => expect(calls.requests.length).toBeGreaterThan(0));
   await waitFor(() => expect(calls.requests.at(-1)?.signal.aborted).toBe(false));
-  await send({type: 'options', page_size: 20, reorder_window_secs: OPEN_WINDOW_SECS, meaning_pause_ms: 800}, hit('words'), order('words'), source('words'), source('meaning'));
+  await send({type: 'options', page_size: 20, reorder_window_secs: 5, meaning_pause_ms: 800}, hit('words'), order('words'), source('words'), source('meaning'));
   expect(rows()).toEqual(['words']);
   const signal = calls.requests.at(-1)?.signal;
   view.unmount();
@@ -65,43 +59,15 @@ it('restarts an interrupted search when its view reopens with the same query', a
   calls.abortAware = true;
   const view = show(<Page />);
   await waitFor(() => expect(calls.requests).toHaveLength(1));
-  await send({type:'options',page_size:20,reorder_window_secs:OPEN_WINDOW_SECS,meaning_pause_ms:800}, hit('partial'), order('partial'));
+  await send({type:'options',page_size:20,reorder_window_secs:5,meaning_pause_ms:800}, hit('partial'), order('partial'));
   expect(rows()).toEqual(['partial']);
   const first = calls.requests[0]?.signal;
   view.rerender(<div />);
   await waitFor(() => expect(first?.aborted).toBe(true));
   view.rerender(<Page />);
   await waitFor(() => expect(calls.requests).toHaveLength(2));
-  await send({type:'options',page_size:20,reorder_window_secs:OPEN_WINDOW_SECS,meaning_pause_ms:800}, hit('words'), order('words'), source('words'), source('meaning'));
+  await send({type:'options',page_size:20,reorder_window_secs:5,meaning_pause_ms:800}, hit('words'), order('words'), source('words'), source('meaning'));
   expect(rows()).toEqual(['words']);
-});
-it.each(['en', 'zh-CN'] as const)('starts a fresh stream when a filter returns to its cached selection in %s', async (locale) => {
-  const previous = currentLocale();
-  await setLocale(locale);
-  try {
-    calls.abortAware = true;
-    client.session.setState({userId: `search-filter-return-${locale}`});
-    const initial: SearchParams = {q: 'release', sort: 'newest'};
-    const view = show(<SearchPage params={initial} onParams={vi.fn()} />);
-    await waitFor(() => expect(calls.requests).toHaveLength(1));
-    await send({type:'options',page_size:20,reorder_window_secs:0,meaning_pause_ms:0}, hit('original'), order('original'), source('words'), source('meaning'), {type:'cursor',cursor:null});
-    expect(rows()).toEqual(['original']);
-
-    view.rerender(<SearchPage params={{...initial,with_file:'true'}} onParams={vi.fn()} />);
-    await waitFor(() => expect(calls.requests).toHaveLength(2));
-    await waitFor(() => expect(calls.requests[0]?.signal.aborted).toBe(true));
-    await send({type:'options',page_size:20,reorder_window_secs:0,meaning_pause_ms:0}, hit('filtered'), order('filtered'), source('words'), source('meaning'), {type:'cursor',cursor:null});
-    expect(rows()).toEqual(['filtered']);
-
-    view.rerender(<SearchPage params={initial} onParams={vi.fn()} />);
-    await waitFor(() => expect(calls.requests).toHaveLength(3));
-    expect(calls.requests[2]?.filters.with_file).toBeUndefined();
-    await waitFor(() => expect(calls.requests[1]?.signal.aborted).toBe(true));
-    expect(screen.queryByRole('button', {name:'original'})).toBeNull();
-    await send({type:'options',page_size:20,reorder_window_secs:0,meaning_pause_ms:0}, hit('returned'), order('returned'), source('words'), source('meaning'), {type:'cursor',cursor:null});
-    expect(rows()).toEqual(['returned']);
-    expect(calls.requests).toHaveLength(3);
-  } finally { cleanup(); await setLocale(previous); }
 });
 it('resumes sort and filters on this device without restoring the words typed earlier', async () => {
   client.session.setState({userId: 'search-return-reader'});
@@ -150,7 +116,7 @@ it.each(['not json', '[]', '{"sort":"gone","scope":"removed","q":"old text"}'])(
   writeViewChoice(`search-invalid-${saved}`, 'search', 'filters', saved);
   await start({q: 'release'});
   expect(calls.requests[0]?.filters.sort).toBeUndefined();
-  expect(calls.requests[0]?.filters.scope).toBe('00000000-0000-4000-8000-000000000001');
+  expect(calls.requests[0]?.filters.scope).toBeUndefined();
   expect(screen.getByRole('textbox', {name: i18n.t('search.field.label')})).toHaveValue('release');
 });
 it.each([403, 404])('uses the default when the server refuses a restored scope (%s), preserving the new words', async (status) => {
@@ -162,7 +128,7 @@ it.each([403, 404])('uses the default when the server refuses a restored scope (
   await waitFor(() => expect(calls.requests).toHaveLength(2));
   expect(calls.requests[0]?.filters.scope).toBe(scope);
   expect(calls.requests[1]?.filters).toMatchObject({q: 'new words'});
-  expect(calls.requests[1]?.filters.scope).toBe('00000000-0000-4000-8000-000000000001');
+  expect(calls.requests[1]?.filters.scope).toBeUndefined();
   expect(calls.requests[1]?.filters.sort).toBeUndefined();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(readViewChoice(`search-gone-scope-${status}`, 'search', 'filters', '')).toBe('{}');
@@ -279,7 +245,7 @@ it('fixes rows after scrolling past the first screen and appends meaning under a
 });
 it('fixes the first screen when the configured reorder window ends', async () => {
   vi.useFakeTimers({shouldAdvanceTime: true});
-  await start(undefined, 2, 5); await send(hit('words'), order('words'));
+  await start(); await send(hit('words'), order('words'));
  await act(async () => {vi.advanceTimersByTime(5001);await Promise.resolve();});
   await send(hit('meaning', 'meaning'), order('meaning', 'words')); expect(rows()).toEqual(['words', 'meaning']);
 });
@@ -300,7 +266,7 @@ it('aborts the old search on a keystroke, debounces words, and asks meaning afte
   fireEvent.submit(screen.getByRole('search')); await waitFor(() => expect(calls.requests.at(-1)?.immediate).toBe(true));
 });
 it('sends every filter in the one search request', async () => {
-  await start({q: 'release', org: 'all', sort: 'relevance', author: 'person', scope: 'scope', chat_id: 'chat', from: '2026-01-01', to: '2026-02-01', mentions_me: 'true', with_file: 'true'});
+  await start({q: 'release', sort: 'relevance', author: 'person', scope: 'scope', chat_id: 'chat', from: '2026-01-01', to: '2026-02-01', mentions_me: 'true', with_file: 'true'});
   expect(calls.requests[0]?.filters).toEqual(expect.objectContaining({author: 'person', scope: 'scope', chat_id: 'chat', mentions_me: true, with_file: true, from: '2026-01-01', to: '2026-02-01'}));
 });
 it.each([['newest', 'newest'], ['relevance', 'phrase']] as const)('says why %s uses words alone (%s)', async (sort, reason) => {

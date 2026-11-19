@@ -18,9 +18,6 @@ use orch_authz::{Caller, ResolvedFacetRole};
 /// The same factual declaration binder for HTTP and native continuing work.
 pub mod sources;
 
-#[cfg(test)]
-mod response_read_tests;
-
 /// Bad server declarations remain distinguishable from a credential restriction refusal.
 #[derive(Debug, thiserror::Error)]
 pub enum BindingError {
@@ -44,9 +41,6 @@ pub struct Prepared {
 /// Preserve legacy endpoint admission in addition to the caller's complete policy ceiling.
 #[must_use]
 pub fn compatible_selection(caller: &Caller, variant: &OperationVariant) -> bool {
-    if caller.native_machine().is_some() {
-        return !caller.as_admin() && caller.permits_operation(&variant.operation);
-    }
     !caller
         .grant()
         .is_some_and(|grant| grant.requires_legacy_compatibility() && !variant.legacy_tokens)
@@ -231,18 +225,6 @@ impl Prepared {
         self.selected_facets(|metadata| metadata.usage == FacetUsage::Required)
     }
 
-    /// Actual required facts of a declared native preparation phase. Unresolved later
-    /// roles remain unresolved and cannot become complete business-effect admission.
-    pub fn known_required_facets(&self) -> Vec<KeyFacet> {
-        self.variant
-            .facets
-            .iter()
-            .zip(&self.facts)
-            .filter(|(metadata, _)| metadata.usage == FacetUsage::Required)
-            .flat_map(|(_, facts)| facts.iter().flatten().cloned())
-            .collect()
-    }
-
     fn required_roles(&self) -> Result<Vec<ResolvedFacetRole>, BindingError> {
         self.variant
             .facets
@@ -267,28 +249,6 @@ impl Prepared {
     /// Only actual response roles of one typed native refusal shape. Unproduced success
     /// subjects remain unresolved; this supplies no complete operation/effect admission.
     pub fn response_facets_for(&self, indices: &[usize]) -> Result<Vec<KeyFacet>, BindingError> {
-        self.read_facets_for(indices, FacetUsage::ResponseContent, false)
-    }
-
-    /// Explicit native completed-response reads may also retain protected names whose
-    /// canonical role is Required for first-effect notices. This does not admit the
-    /// operation's other required inputs, or change their canonical usage.
-    pub fn response_read_facets_for(
-        &self,
-        response: &[usize],
-        required_reads: &[usize],
-    ) -> Result<Vec<KeyFacet>, BindingError> {
-        let mut result = self.response_facets_for(response)?;
-        result.extend(self.read_facets_for(required_reads, FacetUsage::Required, true)?);
-        Ok(result)
-    }
-
-    fn read_facets_for(
-        &self,
-        indices: &[usize],
-        usage: FacetUsage,
-        empty_allowed: bool,
-    ) -> Result<Vec<KeyFacet>, BindingError> {
         let mut seen = std::collections::BTreeSet::new();
         let mut result = Vec::new();
         for index in indices {
@@ -297,7 +257,9 @@ impl Prepared {
                 .facets
                 .get(*index)
                 .ok_or(BindingError::Refused)?;
-            if !seen.insert(*index) || metadata.usage != usage || metadata.action != KeyAction::Read
+            if !seen.insert(*index)
+                || metadata.usage != FacetUsage::ResponseContent
+                || metadata.action != KeyAction::Read
             {
                 return Err(BindingError::Refused);
             }
@@ -310,59 +272,26 @@ impl Prepared {
                     .cloned(),
             );
         }
-        if seen.is_empty() && !empty_allowed {
+        if seen.is_empty() {
             return Err(BindingError::Refused);
         }
         Ok(result)
     }
 
-    /// Complete required admission plus only the actual optional Read sources selected by
-    /// a native result producer. Unselected optional roles stay unresolved. The resulting
-    /// caller keeps the exact required-role/cardinality proof as well as these Read facts.
-    pub fn admit_response_sources(
-        &self,
-        caller: &Caller,
-        indices: &[usize],
-    ) -> Result<Caller, BindingError> {
-        let caller = self.admit(caller, false)?;
-        let roles = self.required_roles()?;
-        let mut facts = self.required_facets()?;
-        facts.extend(self.response_facets_for(indices)?);
-        caller
-            .admit_resolved_operation(&self.variant.operation, &roles, &facts)
-            .map(|admitted| admitted.into_caller())
-            .map_err(|_| BindingError::Refused)
-    }
-
     /// A refusal body keeps the exact same canonical response shape and original actual
     /// sources. Unknown/unperformed required effects are never inferred from this proof.
     pub fn covers_response_sources(&self, earlier: &Self, indices: &[usize]) -> bool {
-        self.covers_response_read_sources(earlier, indices, &[])
-    }
-
-    /// Current native response and explicitly selected Required Read roles must preserve
-    /// the real identities that produced the body, with freshly admitted current ancestry.
-    pub fn covers_response_read_sources(
-        &self,
-        earlier: &Self,
-        response: &[usize],
-        required_reads: &[usize],
-    ) -> bool {
         if self.variant.operation != earlier.variant.operation
             || self.variant.facets != earlier.variant.facets
         {
             return false;
         }
-        if self
-            .response_read_facets_for(response, required_reads)
-            .is_err()
-            || earlier
-                .response_read_facets_for(response, required_reads)
-                .is_err()
+        if self.response_facets_for(indices).is_err()
+            || earlier.response_facets_for(indices).is_err()
         {
             return false;
         }
-        response.iter().chain(required_reads).all(|index| {
+        indices.iter().all(|index| {
             let (Some(fresh), Some(old)) = (&self.facts[*index], &earlier.facts[*index]) else {
                 return false;
             };
@@ -497,10 +426,7 @@ impl Prepared {
         (!pending).then_some(true)
     }
 
-    /// Declared required collections that this native preparation explicitly bound empty.
-    /// An unresolved source or a singleton never supplies this proof.
-    #[must_use]
-    pub fn empty_requirements(&self) -> Option<Vec<KeyEmptyFacet>> {
+    fn empty_requirements(&self) -> Option<Vec<KeyEmptyFacet>> {
         let mut required = Vec::new();
         for (metadata, facts) in self.variant.facets.iter().zip(&self.facts) {
             if metadata.usage != FacetUsage::Required {
@@ -566,17 +492,19 @@ impl Prepared {
     /// admission still requires every slot, so this caller must never commit business effects.
     pub fn preparation_caller(&self, caller: &Caller) -> Result<Caller, BindingError> {
         self.compatible(caller)?;
-        let known = self.known_required_facets();
+        let known: Vec<_> = self
+            .variant
+            .facets
+            .iter()
+            .zip(&self.facts)
+            .filter(|(metadata, _)| metadata.usage == FacetUsage::Required)
+            .flat_map(|(_, facts)| facts.iter().flatten().cloned())
+            .collect();
         if let Ok(roles) = self.required_roles() {
             caller
                 .admit_resolved_operation(&self.variant.operation, &roles, &known)
                 .map(|admitted| admitted.into_caller())
                 .map_err(|_| BindingError::Refused)
-        } else if known.is_empty() {
-            // Discovery has not selected a source yet. This is neither an actually
-            // empty operation nor a reusable exact admission; the native selector
-            // still checks each candidate and complete admission needs every slot.
-            Ok(caller.prepare_unresolved())
         } else {
             self.admit_facts(caller, &known)
         }
@@ -741,94 +669,6 @@ mod collection_tests {
             plan.admit(&caller("MixedCollectionControl", "read", true), false)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn unresolved_discovery_keeps_credential_limits_without_admitting_an_empty_business_operation()
-    {
-        let scope: KeyScope = serde_json::from_value(serde_json::json!({"rules":[{
-            "target":{"kind":"topic","id":Id::from_u128(1),"reach":"self"},
-            "allow":[{"operation":"MixedCollectionControl","actions":["read"]}]
-        }]}))
-        .unwrap();
-        let original = Caller::token(
-            Id::from_u128(9),
-            orch_authz::TokenGrant::from_stored_scope(&[], None, Some(scope), None).unwrap(),
-        );
-        let mut unknown = plan(true);
-        let preparation = unknown.preparation_caller(&original).unwrap();
-        assert_eq!(preparation.grant(), original.grant());
-        assert_eq!(preparation.as_admin(), original.as_admin());
-        assert!(preparation.admitted_operation().is_none());
-        assert!(preparation.admitted_required_roles().is_none());
-        assert!(preparation.admitted_empty_facets().is_none());
-        assert!(!checked_empty_for(&unknown.route, &preparation).unwrap());
-        assert!(orch_authz::CapturedOperation::capture(&preparation).is_err());
-        assert!(preparation.narrow_source_admission(&preparation).is_err());
-        assert!(unknown.required_facets().is_err());
-        assert!(unknown.admit(&preparation, false).is_err());
-        assert!(
-            unknown
-                .permits_binding(&preparation, 0, TOPIC, &[target(TOPIC, 1)])
-                .unwrap()
-        );
-        assert!(
-            !unknown
-                .permits_binding(&preparation, 0, TOPIC, &[target(TOPIC, 2)])
-                .unwrap()
-        );
-        unknown.bind_empty(0).unwrap();
-        let empty = unknown.preparation_caller(&original).unwrap();
-        assert!(checked_empty_for(&unknown.route, &empty).unwrap());
-        assert_eq!(empty.admitted_operation(), Some("MixedCollectionControl"));
-    }
-
-    #[test]
-    fn unresolved_native_discovery_stays_refused_until_the_actual_collection_is_selected_empty() {
-        use orch_api_contract::{chat_sources, chats::OrgChatsRead, routes::Endpoint};
-        let scope: KeyScope = serde_json::from_value(serde_json::json!({"rules":[{
-            "target":{"kind":"org","id":Id::from_u128(1),"reach":"self"},
-            "resources":["chat"],
-            "allow":[{"operation":"OrgChatsRead","actions":["write"]}]
-        }]}))
-        .unwrap();
-        let key = Caller::token(
-            Id::from_u128(9),
-            orch_authz::TokenGrant::from_stored_scope(&[], None, Some(scope), None).unwrap(),
-        );
-        let unknown =
-            sources::bind_known(OrgChatsRead::ROUTE, &chat_sources::READ_ALL, &[]).unwrap();
-        let discovery = unknown
-            .preparation_caller(&key)
-            .unwrap()
-            .with_kept_out(Vec::new());
-        assert!(discovery.admitted_operation().is_none());
-        assert!(discovery.admitted_required_roles().is_none());
-        assert!(discovery.admitted_empty_facets().is_none());
-        assert!(!checked_empty_for(&OrgChatsRead::ROUTE, &discovery).unwrap());
-        assert!(unknown.required_facets().is_err());
-        assert!(
-            unknown.admit(&discovery, false).is_err(),
-            "refresh cannot manufacture missing source facts"
-        );
-        assert!(orch_authz::CapturedOperation::capture(&discovery).is_err());
-        assert!(discovery.narrow_source_admission(&discovery).is_err());
-        let empty = sources::bind_required(
-            OrgChatsRead::ROUTE,
-            &chat_sources::READ_ALL,
-            &[sources::Facts::collection(
-                chat_sources::Source::AllReadChats,
-                Vec::new(),
-            )],
-        )
-        .unwrap();
-        let selected = empty
-            .preparation_caller(&key)
-            .unwrap()
-            .with_kept_out(Vec::new());
-        assert_eq!(selected.admitted_operation(), Some("OrgChatsRead"));
-        assert!(checked_empty_for(&OrgChatsRead::ROUTE, &selected).unwrap());
-        assert!(empty.admit(&selected, false).is_ok());
     }
 
     #[test]

@@ -1,5 +1,3 @@
-import { homeMoveEntries } from '@/features/duplicate/move';
-import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** Mount overview, where it appears, whether its data may be written, used-by and sharing.
  * Locations and uses are read separately; a failed read never becomes an empty list.
  */
@@ -11,7 +9,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { deleteMount, mountQuery, mountUsesQuery } from '@/api/resource-tools';
-import { copyLinkAct, entriesOf, managedAct, shareAct } from '@/features/resources/acts';
+import { entriesOf, shareAct } from '@/features/resources/acts';
 import { useResourceCleanup } from '@/features/storage/acts';
 import { DetailPages, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { placePath } from '@/features/navigation/places';
@@ -36,7 +34,7 @@ import { MountWhere } from './Where';
 function Uses({ id }: { id: string }) {
   const { t } = useTranslation();
   const query = useQuery(mountUsesQuery(id));
-  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={3} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={3} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const { scopes, environments, hidden } = query.data;
   return <Section id="mount-uses" title={t('resourceDetails.mount.uses')}>
     {scopes.length === 0 && environments.length === 0 && hidden === 0 && <EmptyState compact title={t('resourceDetails.mount.unused')} />}
@@ -62,13 +60,13 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
   const [removing, setRemoving] = useState(false);
   const [localTab, setLocalTab] = useState<MountTab>('overview');
   const remove = useMutation({ mutationFn: () => deleteMount(id), onSuccess: () => { void navigate({ to: '/resources/mounts' }); } });
-  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const mount = query.data;
   const manage = holds(mount.access, 'mount.manage');
   const target = { kind: 'mount' as const, id, name: mount.name };
   const shown = tab ?? localTab;
-  const edit = managedAct({ id: 'edit', label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(true) }, manage, t('resources.act.manageRequired'));
-  const menu = [...homeMoveEntries(t, 'mount', mount), ...resourceDuplicateEntries(t, 'mount', mount), ...entriesOf([copyLinkAct(t, { kind: 'mount', id }), shareAct(t, target, mount.access)], [managedAct({ id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) }, manage, t('resources.act.manageRequired'))], [cleanup.act({ kind: 'mount', id }, manage)])];
+  const edit = manage ? { id: 'edit', label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(true) } : null;
+  const menu = entriesOf([shareAct(t, target, mount.access)], [manage ? { id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) } : null], [cleanup.act({ kind: 'mount', id }, manage)]);
   const overview = <><Section id="mount-about" title={t('resourceDetails.overview')}><Facts compact label={t('resourceDetails.overview')} rows={[
       { name: t('resources.home.label'), value: mount.home?.name ?? t('resourceDetails.system') },
       { name: t('resourceDetails.mount.target'), value: <code>{mount.target}</code> },
@@ -87,7 +85,7 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
       { value: 'uses', label: t('resourceDetails.mount.uses'), panel: <Uses id={id} /> },
       { value: 'settings', label: t('resourceDetails.layout.settings'), panel: <ul aria-label={t('resourceDetails.layout.configuration')} className="divide-y divide-border rounded-lg border border-border">
         <SettingRow name={t('resourceDetails.layout.configuration')} value={mount.target} readOnly={!manage}
-          actions={edit === null ? undefined : <Button size="sm" blocked={typeof edit.disabled === 'string'} reason={typeof edit.disabled === 'string' ? edit.disabled : undefined} onClick={edit.run}>{t('resources.act.editButton')}</Button>} />
+          actions={edit === null ? undefined : <Button size="sm" onClick={edit.run}>{t('resources.act.editButton')}</Button>} />
       </ul> },
       { value: 'access', label: t('agents.tabs.access'), panel: <ResourceAccess access={mount.access} target={target} /> },
     ]} />

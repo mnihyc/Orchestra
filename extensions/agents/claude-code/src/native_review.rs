@@ -37,14 +37,21 @@ fn signature(protocol: &str, stage: u8) -> NativeRequestPattern {
         matches!((protocol, stage), ("severity", 1 | 2) | ("block", 1)),
         "unknown classifier protocol/stage is not a recipe"
     );
-    let mut absent = vec!["/tools".into(), "/stream".into()];
-    let mut equals = BTreeMap::from([("/thinking/type".into(), json!("disabled"))]);
-    let mut system = vec![MONITOR.into()];
-    let mut messages = vec!["<transcript>".into(), "</transcript>".into()];
-    let mut excludes = BTreeMap::new();
+    let mut pattern = NativeRequestPattern::default();
+    pattern.absent = vec!["/tools".into(), "/stream".into()];
+    pattern
+        .equals
+        .insert("/thinking/type".into(), json!("disabled"));
+    pattern
+        .contains
+        .insert("/system".into(), vec![MONITOR.into()]);
+    pattern.contains.insert(
+        "/messages".into(),
+        vec!["<transcript>".into(), "</transcript>".into()],
+    );
     if stage == 1 {
-        equals.insert("/max_tokens".into(), json!(64));
-        equals.insert(
+        pattern.equals.insert("/max_tokens".into(), json!(64));
+        pattern.equals.insert(
             "/stop_sequences".into(),
             json!([if protocol == "severity" {
                 "</severity>"
@@ -52,29 +59,53 @@ fn signature(protocol: &str, stage: u8) -> NativeRequestPattern {
                 "</block>"
             }]),
         );
-        messages.push(STAGE_ONE.into());
+        pattern
+            .contains
+            .get_mut("/messages")
+            .expect("inserted above")
+            .push(STAGE_ONE.into());
         if protocol == "severity" {
-            system.push("Output <severity>N</severity>".into());
-            messages.push("Respond with <severity>N</severity> ONLY".into());
+            pattern
+                .contains
+                .get_mut("/system")
+                .expect("inserted above")
+                .push("Output <severity>N</severity>".into());
+            pattern
+                .contains
+                .get_mut("/messages")
+                .expect("inserted above")
+                .push("Respond with <severity>N</severity> ONLY".into());
         } else {
-            system.push("<block>no</block>".into());
-            messages.push("Your ENTIRE response MUST begin with <block>".into());
+            pattern
+                .contains
+                .get_mut("/system")
+                .expect("inserted above")
+                .push("<block>no</block>".into());
+            pattern
+                .contains
+                .get_mut("/messages")
+                .expect("inserted above")
+                .push("Your ENTIRE response MUST begin with <block>".into());
         }
     } else {
         // Only severity Stage2 has actual successful native evidence. Basic Stage2 is not guessed.
-        equals.insert("/max_tokens".into(), json!(8192));
-        absent.push("/stop_sequences".into());
-        system.push("Output <severity>N</severity>".into());
-        messages.push(SEVERITY_TWO.into());
-        excludes.insert("/messages".into(), vec![STAGE_ONE.into()]);
+        pattern.equals.insert("/max_tokens".into(), json!(8192));
+        pattern.absent.push("/stop_sequences".into());
+        pattern
+            .contains
+            .get_mut("/system")
+            .expect("inserted above")
+            .push("Output <severity>N</severity>".into());
+        pattern
+            .contains
+            .get_mut("/messages")
+            .expect("inserted above")
+            .push(SEVERITY_TWO.into());
+        pattern
+            .excludes
+            .insert("/messages".into(), vec![STAGE_ONE.into()]);
     }
-    NativeRequestPattern {
-        absent,
-        equals,
-        contains: BTreeMap::from([("/system".into(), system), ("/messages".into(), messages)]),
-        excludes,
-        ..NativeRequestPattern::default()
-    }
+    pattern
 }
 fn stage(
     model: &str,

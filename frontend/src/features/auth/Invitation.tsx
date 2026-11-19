@@ -15,7 +15,6 @@ import { meQuery, signOut } from '@/api/auth';
 import { ApiError, client, invitationIssuerAuthorityLost } from '@/api/client';
 import { acceptInvitation, invitationQuery } from '@/api/users';
 import { AuthCard } from '@/features/auth/Frame';
-import { InvitationTermsChoice, termsRefused, useInvitationTerms } from '@/features/auth/Terms';
 import { acceptedDestination } from '@/features/auth/accepted';
 import { usePlaceLabels } from '@/features/navigation/placeLabels';
 import type { InvitationPreview } from '@/generated/api-types';
@@ -26,7 +25,7 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { linkButtonClasses, linkClasses } from '@/ui/link';
-import { Skeleton, SkeletonGroup, type SkeletonReads } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 
 /** Whether a lookup failed because the invitation ended, was used up or was withdrawn: the answer says no more than that. */
 export function isSpent(error: unknown): boolean {
@@ -91,9 +90,9 @@ export function InvitationSpent() {
   return <EmptyState compact icon={<MailX aria-hidden />} title={t('auth.invite.spent')} action={<Button asChild><Link to="/login">{t('auth.links.backToSignIn')}</Link></Button>} />;
 }
 
-export function InvitationSkeleton(props: SkeletonReads) {
+export function InvitationSkeleton() {
   return (
-    <SkeletonGroup {...props} className="flex items-start gap-3 rounded-lg border border-border bg-bg-subtle p-3">
+    <SkeletonGroup className="flex items-start gap-3 rounded-lg border border-border bg-bg-subtle p-3">
       <Skeleton className="size-8 rounded-full" />
       <div className="flex flex-1 flex-col gap-2 py-1">
         <Skeleton className="h-4 w-4/5" />
@@ -109,12 +108,10 @@ export function Invitation({ token, system }: { token: string; system: string })
   const signedIn = useStore(client.session, (state) => state.status === 'signed_in');
   const preview = useQuery(invitationQuery(token));
   const me = useQuery({ ...meQuery, enabled: signedIn });
-  const terms = useInvitationTerms(token, preview.data);
 
   const accept = useMutation({
-    mutationFn: (asked: { token: string; hash?: string; reader: number }) => asked.hash === undefined ? acceptInvitation(asked.token) : acceptInvitation(asked.token, asked.hash),
-    onError: (error, asked) => { if (asked.token === token && asked.reader === (client.session.getState().readerVersion ?? 0)) terms.handleError(error); },
-    onSuccess: (reply, asked) => { if (asked.token === token && asked.reader === (client.session.getState().readerVersion ?? 0)) return router.navigate({...acceptedDestination(reply),replace:true}); },
+    mutationFn: () => acceptInvitation(token),
+    onSuccess: (reply) => router.navigate({...acceptedDestination(reply),replace:true}),
   });
   const leave = useMutation({ mutationFn: signOut });
 
@@ -136,7 +133,7 @@ export function Invitation({ token, system }: { token: string; system: string })
       }
     >
       {preview.isPending ? (
-        <InvitationSkeleton read={preview} />
+        <InvitationSkeleton />
       ) : preview.isError ? (
         isSpent(preview.error) ? (
           <InvitationSpent />
@@ -151,24 +148,23 @@ export function Invitation({ token, system }: { token: string; system: string })
       ) : (
         <div className="flex flex-col gap-4">
           <InvitationSummary preview={preview.data} system={system} />
-          <InvitationTermsChoice terms={terms.terms} org={preview.data.org?.name ?? system} checked={terms.checked} onCheckedChange={terms.setChecked} disabled={accept.isPending || leave.isPending} />
           {accept.error !== null &&
-            (isSpent(accept.error) ? <InvitationSpent /> : <ErrorAlert error={accept.error} message={termsRefused(accept.error) ? t('orgTerms.changed') : undefined} />)}
+            (isSpent(accept.error) ? <InvitationSpent /> : <ErrorAlert error={accept.error} />)}
           {isSpent(accept.error) ? null : signedIn ? (
             <Button
               variant="primary"
               block
               icon={<MailCheck aria-hidden />}
               pending={accept.isPending}
-              disabled={leave.isPending || !terms.ready}
-              onClick={() => { if (terms.ready) accept.mutate({ token, hash: terms.hash, reader: client.session.getState().readerVersion ?? 0 }); }}
+              disabled={leave.isPending}
+              onClick={() => accept.mutate()}
             >
               {t('auth.invite.accept')}
             </Button>
           ) : (
             <div className="flex flex-col gap-3">
-              <Button variant="primary" block asChild disabled={!terms.ready}>
-                <Link to="/register" search={{ invitation: token, accepted_terms_hash: terms.hash }}>
+              <Button variant="primary" block asChild>
+                <Link to="/register" search={{ invitation: token }}>
                   {t('auth.invite.register')}
                 </Link>
               </Button>

@@ -16,9 +16,8 @@ const tabs = (kind: string, resource: string, names: readonly string[]) => names
 
 export const MCP_ID = id(0x31, 1);
 export const MOUNT_ID = id(0x32, 1);
-export const ADMIN_MESSAGE_ID = '00000000-0000-4000-8000-000000000321';
-export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'roles', 'defaults', 'tags', 'service-accounts', 'audit', 'everything', 'channels', 'destinations'];
-export const ADMIN_SECTIONS = ['overview', 'users', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'gateways', 'runtimes', 'templates', 'mcp', 'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search', 'system', 'pki', 'audit', 'tokens'];
+export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'roles', 'policies', 'tags', 'service-accounts', 'audit', 'everything', 'channels', 'destinations'];
+export const ADMIN_SECTIONS = ['overview', 'users', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'gateways', 'runtimes', 'templates', 'mcp', 'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search', 'system', 'pki', 'audit'];
 
 /** State coverage is shared by layout, request budgets and accessibility. */
 export const SCREEN_GATE_ROUTES: LayoutRoute[] = [
@@ -37,13 +36,12 @@ export const SIGNED_IN_ROUTES: LayoutRoute[] = [
   route('/'), route('/admin'), route('/resources'), route('/settings'), route('/workbench'), route('/storage'),
   route('/org/$slug', '/org/acme'), route('/org/$slug', '/org/acme.research'), route('/org/$slug', '/org/ada'),
   route('/org/$slug/messages', '/org/acme/messages'),
-  route('/messages/$id', `/messages/${ADMIN_MESSAGE_ID}`),
   route('/chat/$chatId', `/chat/${id(9, 1)}`), route('/place-chat/$nodeId', `/place-chat/${ACME.org}`),
   ...sections('/org/$slug/settings/$section', '/org/acme/settings/', ORG_SECTIONS),
   route('/project/$projectId', `/project/${ACME.web}`), route('/project/$projectId', `/project/${ACME.web}?view=board`),
-  ...['general', 'defaults', 'tags', 'audit', 'destinations'].map((section) => route('/project/$projectId/settings', `/project/${ACME.web}/settings?section=${section}`)),
+  ...['general', 'policies', 'tags', 'audit', 'destinations'].map((section) => route('/project/$projectId/settings', `/project/${ACME.web}/settings?section=${section}`)),
   route('/topic/$topicId', `/topic/${ACME.fixLogin}`),
-  ...['general', 'defaults', 'audit', 'destinations'].map((section) => route('/topic/$topicId', `/topic/${ACME.fixLogin}?tab=settings&section=${section}`)),
+  ...['general', 'policies', 'audit', 'destinations'].map((section) => route('/topic/$topicId', `/topic/${ACME.fixLogin}?tab=settings&section=${section}`)),
   route('/thread/$threadId', `/thread/${ACME.mainThread}`),
   route('/doc/$documentId', `/doc/${id(7, 1)}`),
   route('/documents/$nodeId', `/documents/${ACME.web}`),

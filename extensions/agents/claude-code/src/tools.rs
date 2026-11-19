@@ -151,10 +151,8 @@ fn exec_family(tool: &str) -> Family {
 /// and the structured form the harness also reports for some tools.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolOutcome {
-    /// The result's text, kept separately from its image content.
+    /// The result as text; image blocks are named, not included.
     pub text: String,
-    /// Native image parts, kept for the existing image/blob producer.
-    pub images: Vec<Json>,
     /// Whether the harness marked the result as an error.
     pub is_error: bool,
     /// The structured result (`tool_use_result`), where the harness gave one.
@@ -169,16 +167,20 @@ impl ToolOutcome {
             Some(Json::String(text)) => text.clone(),
             Some(Json::Array(parts)) => parts
                 .iter()
-                .filter_map(|part| match part.get("type").and_then(Json::as_str) {
-                    Some("text") => Some(
-                        part.get("text")
+                .map(|part| match part.get("type").and_then(Json::as_str) {
+                    Some("text") => part
+                        .get("text")
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    Some("image") => format!(
+                        "[image: {}]",
+                        part.pointer("/source/media_type")
                             .and_then(Json::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
+                            .unwrap_or("unknown type")
                     ),
-                    Some("image") => None,
-                    Some(other) => Some(format!("[{other}]")),
-                    None => None,
+                    Some(other) => format!("[{other}]"),
+                    None => String::new(),
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -186,14 +188,6 @@ impl ToolOutcome {
         };
         Self {
             text,
-            images: block
-                .get("content")
-                .and_then(Json::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|part| part.get("type").and_then(Json::as_str) == Some("image"))
-                .cloned()
-                .collect(),
             is_error: block
                 .get("is_error")
                 .and_then(Json::as_bool)
@@ -376,8 +370,6 @@ fn change_of(path: &str, kind: FileChangeKind, diff: Option<String>, binary: boo
         None => (None, 0, 0, false),
     };
     FileChange {
-        before: None,
-        after: None,
         path: path.to_owned(),
         change: kind,
         old_path: None,
@@ -514,63 +506,6 @@ fn search_matches(
     (found, total, truncated)
 }
 
-/// Keep only complete material the harness actually returned, before the displayed diff is cut.
-fn retain_file_images(
-    family: &Family,
-    input: &Json,
-    outcome: Option<&ToolOutcome>,
-    changes: &mut [FileChange],
-) {
-    use orch_agent_contract::events::FileChangeImage;
-    let Some(outcome) = outcome.filter(|outcome| !outcome.is_error) else {
-        return;
-    };
-    let structured = outcome.structured.as_ref();
-    for change in changes {
-        match family {
-            Family::Write => {
-                change.before = match structured
-                    .and_then(|result| result.get("type"))
-                    .and_then(Json::as_str)
-                {
-                    Some("create") => Some(FileChangeImage::Absent),
-                    Some("update") => structured
-                        .and_then(|result| result.get("originalFile"))
-                        .and_then(Json::as_str)
-                        .map(|text| FileChangeImage::Text { text: text.into() }),
-                    _ => None,
-                };
-                change.after = text_of(input, "content")
-                    .map(|text| FileChangeImage::Text { text: text.into() });
-            }
-            Family::Edit => {
-                if let Some(original) = structured
-                    .and_then(|result| result.get("originalFile"))
-                    .and_then(Json::as_str)
-                {
-                    change.before = Some(FileChangeImage::Text {
-                        text: original.into(),
-                    });
-                    if let (Some(old), Some(new)) =
-                        (text_of(input, "old_string"), text_of(input, "new_string"))
-                        && !old.is_empty()
-                        && original.contains(old)
-                    {
-                        let text = if input.get("replace_all").and_then(Json::as_bool) == Some(true)
-                        {
-                            original.replace(old, new)
-                        } else {
-                            original.replacen(old, new, 1)
-                        };
-                        change.after = Some(FileChangeImage::Text { text });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // The payload
 
@@ -617,11 +552,9 @@ pub fn tool_payload(
                 .unwrap_or(false),
             actions: Vec::new(),
         },
-        Family::Edit | Family::Write | Family::NotebookEdit => {
-            let mut changes = file_changes(family, input, outcome, ctx);
-            retain_file_images(family, input, outcome, &mut changes);
-            ToolPayload::FileChange { changes }
-        }
+        Family::Edit | Family::Write | Family::NotebookEdit => ToolPayload::FileChange {
+            changes: file_changes(family, input, outcome, ctx),
+        },
         Family::Read => {
             let path = text_of(input, "file_path").unwrap_or_default();
             let file = outcome
@@ -712,7 +645,6 @@ pub fn tool_payload(
                 }
             }
             ToolPayload::WebSearch {
-                action: None,
                 query: text_of(input, "query").unwrap_or_default().to_owned(),
                 results,
             }
@@ -802,7 +734,6 @@ pub fn raw_call(name: &str, input: &Json, outcome: Option<&ToolOutcome>) -> RawC
 /// admitted recipient authority, and a remote or push trigger leaves the machine. Entering plan mode is a person's
 /// switch, never the agent's, and worktrees change what the harness is allowed to do in ways the approval
 /// and sandbox modes of Orch do not know. Leaving plan mode is offered: it is how a plan is proposed.
-// Future work is managed by Orch's schedule tool and ordinary scheduled-input queue.
 pub const NEVER_OFFERED: [&str; 13] = [
     "CronCreate",
     "CronDelete",
@@ -819,8 +750,9 @@ pub const NEVER_OFFERED: [&str; 13] = [
     "ExitWorktree",
 ];
 
-/// Built-in tools that need no environment filesystem or shell. Native page fetching runs on the provider
-/// runtime; sub-agents, questions, plans and task lists stay in the program. These remain with an executor.
+/// The built-in tools that act on no machine: starting a sub-agent, asking a person, proposing a plan, the
+/// list of things to do. These stay when the harness works through Orch's executor, because they need
+/// nothing of the machine the harness is on.
 pub const MACHINE_FREE: [&str; 10] = [
     "WebFetch",
     AGENT_TOOL,
@@ -836,15 +768,11 @@ pub const MACHINE_FREE: [&str; 10] = [
 
 /// The arguments that give a session its tools. With the harness in the environment it keeps all its own
 /// except [`NEVER_OFFERED`]. With the harness in its provider's runtime only [`MACHINE_FREE`] stay, so that
-/// everything that touches a machine goes through the executor's `exec` server. Native search and page
-/// fetching each follow their own resolved switch.
+/// everything that touches a machine goes through the executor's `exec` server.
 #[must_use]
-pub fn tool_arguments(through_executor: bool, web_search: bool, page_fetch: bool) -> Vec<String> {
+pub fn tool_arguments(through_executor: bool, web_search: bool) -> Vec<String> {
     if through_executor {
-        let mut tools: Vec<_> = MACHINE_FREE
-            .into_iter()
-            .filter(|tool| page_fetch || *tool != "WebFetch")
-            .collect();
+        let mut tools = MACHINE_FREE.to_vec();
         if web_search {
             tools.push("WebSearch");
         }
@@ -854,9 +782,6 @@ pub fn tool_arguments(through_executor: bool, web_search: bool, page_fetch: bool
         arguments.extend(NEVER_OFFERED.iter().map(|tool| (*tool).to_owned()));
         if !web_search {
             arguments.push("WebSearch".to_owned());
-        }
-        if !page_fetch {
-            arguments.push("WebFetch".to_owned());
         }
         arguments
     }
@@ -914,7 +839,6 @@ mod tests {
     #[test]
     fn a_command_that_failed_has_its_exit_status_from_the_first_line_of_what_came_back() {
         let failed = ToolOutcome {
-            images: Vec::new(),
             text: "Exit code 3\nout-line\nerr-line".into(),
             is_error: true,
             structured: None,
@@ -941,7 +865,6 @@ mod tests {
         assert_eq!(output.inline, "out-line\nerr-line");
         assert_eq!(cwd, "/workspace/web/api");
         let fine = ToolOutcome {
-            images: Vec::new(),
             text: "ok".into(),
             ..ToolOutcome::default()
         };
@@ -951,7 +874,6 @@ mod tests {
     #[test]
     fn an_edit_is_shown_as_the_difference_the_harness_reports() {
         let outcome = ToolOutcome {
-            images: Vec::new(),
             text: "The file has been updated successfully.".into(),
             is_error: false,
             structured: Some(json!({
@@ -991,7 +913,6 @@ mod tests {
             "t1",
             &json!({ "file_path": "/workspace/web/new.txt", "content": "alpha\nbeta\n" }),
             Some(&ToolOutcome {
-                images: Vec::new(),
                 text: "created".into(),
                 is_error: false,
                 structured: Some(json!({ "type": "create", "originalFile": null })),
@@ -1017,7 +938,6 @@ mod tests {
             "t1",
             &json!({ "file_path": "/workspace/web/a.txt", "content": "one\nTWO\n" }),
             Some(&ToolOutcome {
-                images: Vec::new(),
                 text: "updated".into(),
                 is_error: false,
                 structured: Some(json!({ "type": "update", "originalFile": "one\ntwo\n" })),
@@ -1059,7 +979,6 @@ mod tests {
             "t1",
             &json!({ "file_path": "/workspace/web/src/main.rs", "offset": 10, "limit": 5 }),
             Some(&ToolOutcome {
-                images: Vec::new(),
                 text: "10\tfn main() {}".into(),
                 is_error: false,
                 structured: Some(json!({ "type": "text", "file": {
@@ -1097,7 +1016,6 @@ mod tests {
             "t1",
             &json!({ "title": "x" }),
             Some(&ToolOutcome {
-                images: Vec::new(),
                 text: r#"{"number":7}"#.into(),
                 ..ToolOutcome::default()
             }),
@@ -1112,7 +1030,6 @@ mod tests {
             "t1",
             &json!({}),
             Some(&ToolOutcome {
-                images: Vec::new(),
                 text: "denied".into(),
                 is_error: true,
                 structured: None,
@@ -1130,7 +1047,6 @@ mod tests {
             "Bash",
             &json!({ "command": "ls" }),
             Some(&ToolOutcome {
-                images: Vec::new(),
                 text: "a\nb".into(),
                 is_error: false,
                 structured: None,
@@ -1145,42 +1061,16 @@ mod tests {
     #[test]
     fn a_session_in_the_environment_keeps_its_tools_less_those_that_start_turns_and_one_with_its_provider_keeps_only_those_that_touch_no_machine()
      {
-        let own = tool_arguments(false, false, true);
+        let own = tool_arguments(false, false);
         assert_eq!(own[0], "--disallowed-tools");
         assert!(
             own.contains(&"CronCreate".to_owned()) && own.contains(&"ScheduleWakeup".to_owned())
         );
         assert!(!own.contains(&"Bash".to_owned()));
-        let through = tool_arguments(true, false, true);
+        let through = tool_arguments(true, false);
         assert_eq!(through[0], "--tools");
         let kept: Vec<&str> = through[1].split(',').collect();
         assert!(kept.contains(&"Agent") && !kept.contains(&"Bash") && !kept.contains(&"Write"));
-    }
-
-    #[test]
-    fn native_page_fetch_is_independent_of_native_search_in_both_arrangements() {
-        for through_executor in [false, true] {
-            for web_search in [false, true] {
-                for page_fetch in [false, true] {
-                    let args = tool_arguments(through_executor, web_search, page_fetch);
-                    let offered = |name: &str| {
-                        if through_executor {
-                            args[1].split(',').any(|tool| tool == name)
-                        } else {
-                            !args.iter().skip(1).any(|tool| tool == name)
-                        }
-                    };
-                    assert_eq!(offered("WebFetch"), page_fetch);
-                    assert_eq!(offered("WebSearch"), web_search);
-                    for tool in MACHINE_FREE.into_iter().filter(|tool| *tool != "WebFetch") {
-                        assert!(offered(tool), "page selection must preserve {tool}");
-                    }
-                    for tool in NEVER_OFFERED {
-                        assert!(!offered(tool), "page selection cannot restore {tool}");
-                    }
-                }
-            }
-        }
     }
 
     #[test]

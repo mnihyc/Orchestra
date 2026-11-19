@@ -207,9 +207,6 @@ impl NameKind {
 /// A thing found by its name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NameHit {
-    /// Group keys for a resource choice; absent for names of other kinds.
-    #[serde(default, flatten)]
-    pub grouping: Option<crate::resource_groups::ResourceGrouping>,
     /// A readable thread's icon and safe particulars; absent for other kinds or without thread View.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_display: Option<crate::threads::ThreadDisplay>,
@@ -678,7 +675,7 @@ crate::endpoints! {
                 Identity(I::Group),
             ],
             Target::ResolvedCollection("results"),
-        ), crate::operations::FacetSpec::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("search_names")), crate::operations::FacetSpec::response_content(&[Object(K::Machine)],Target::ResolvedCollection("search_resource_origins"))]);
+        ), crate::operations::FacetSpec::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("search_names"))]);
 }
 
 #[cfg(test)]
@@ -732,7 +729,7 @@ mod tests {
             "kind": "document",
             "document": {
                 "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b01", "title": "Handbook", "node": node("project", 2, "Docs"),
-                "description": "", "description_line": "How we ship",
+                "description": "", "description_source": "auto", "description_line": "How we ship",
                 "owner": user(), "owners": 1, "created_by": user(), "page": "follows", "seq": 12,
                 "block_count": 40, "bytes": 9000, "files_bytes": 0, "version": 3, "open_discussions": 0,
                 "updated_at": "2026-10-08T17:04:05.123Z", "updated_by": null, "seen_seq": null,
@@ -832,7 +829,7 @@ mod tests {
             "kind": "document",
             "document": {
                 "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b01", "title": "Handbook", "node": node("project", 2, "Docs"),
-                "description": "", "description_line": "How we ship",
+                "description": "", "description_source": "auto", "description_line": "How we ship",
                 "owner": user(), "owners": 1, "created_by": user(), "page": "restricted", "seq": 12,
                 "block_count": 40, "bytes": 9000, "files_bytes": 0, "version": 3, "open_discussions": 0,
                 "updated_at": "2026-10-08T17:04:05.123Z", "updated_by": null, "seen_seq": 7,

@@ -8,12 +8,6 @@ use orch_access_contract::permissions::ObjectKind;
 /// The native owner namespace of a private upload release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// The current account's actual upload-custody namespace.
-    InventoryNamespace,
-    /// Independently readable names of that same account.
-    InventoryNames,
-    /// The actual completed row held in the system's blob store.
-    AdminBlob,
     /// The actual account whose private custody rows the operation can release.
     CustodyAccount,
     /// The actual unfinished upload session and its stored owner.
@@ -44,17 +38,6 @@ pub const RELEASE: Declaration<Source> = Declaration {
 /// Cancelling a session acts on its stored identity, independently of any bytes it holds.
 pub const SESSION_DELETE: Declaration<Source> = Declaration {
     operation: "UploadSessionDelete",
-    bindings: &[Binding {
-        source: Source::Session,
-        target: TargetResolver::Path("upload_id"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    }],
-};
-
-/// Appending newly supplied bytes acts on this exact unfinished session's identity.
-pub const SESSION_PUT: Declaration<Source> = Declaration {
-    operation: "UploadSessionPut",
     bindings: &[Binding {
         source: Source::Session,
         target: TargetResolver::Path("upload_id"),
@@ -143,44 +126,3 @@ pub const fn blob_read_facets() -> [FacetSpec; 5] {
         ),
     ]
 }
-
-/// Personal custody has one owner namespace; names require their own current Read.
-pub const OWN_LIST_FACETS: [FacetSpec; 2] = [
-    FacetSpec::required(
-        KeyAction::Read,
-        &[KeyTargetKind::Identity(KeyIdentityKind::Upload)],
-        TargetResolver::Resolved("upload_namespace"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Identity(KeyIdentityKind::Account)],
-        TargetResolver::ResolvedCollection("upload_owner_names"),
-    ),
-];
-/// The personal list's existing native namespace and independently disclosed uploader name.
-pub const OWN_LIST: Declaration<Source> = Declaration {
-    operation: "MeUploadList",
-    bindings: &[
-        Binding {
-            source: Source::InventoryNamespace,
-            target: TargetResolver::Resolved("upload_namespace"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::InventoryNames,
-            target: TargetResolver::ResolvedCollection("upload_owner_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-/// Administrative content opens the actual stored row under the system governor.
-pub const ADMIN_OPEN: Declaration<Source> = Declaration {
-    operation: "AdminUploadContentGet",
-    bindings: &[Binding {
-        source: Source::AdminBlob,
-        target: TargetResolver::Resolved("upload_storage"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    }],
-};

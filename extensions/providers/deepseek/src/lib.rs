@@ -8,8 +8,6 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 use url::Url;
 
-pub mod capabilities;
-pub mod native_search;
 pub mod source;
 pub use source::{DeepSeek, builtin};
 

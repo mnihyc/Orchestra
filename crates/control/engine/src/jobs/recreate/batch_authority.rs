@@ -1,5 +1,4 @@
 //! Provider replacement owner eligibility, scoped requester bounds and native identity.
-use super::environment_authority as global;
 use super::*;
 use crate::jobs::command_identity::{self, canonical, hash};
 use crate::operation_scope::{BindingError, Prepared, targets};
@@ -10,14 +9,6 @@ use orch_api_contract::operations::{FacetUsage, TargetResolver};
 use orch_authz::{CapturedOperation, Policy, Principal, resources};
 use orch_types::{Hash, Time};
 use serde::{Deserialize, Serialize};
-
-pub mod environment;
-
-fn lifecycle_provider(row: &jobs::JobRow) -> bool {
-    row.provider_id.is_some()
-        && row.environment_id.is_none()
-        && crate::jobs::lifecycle_commands::environment::present(row)
-}
 
 const ORIGINS: &str = "provider_update_origins";
 const BINDING: &str = "provider_update_binding";
@@ -70,22 +61,11 @@ fn origins_valid(origins: &[CapturedOperation], actor: Id) -> bool {
         })
 }
 pub(crate) fn is_restricted(row: &jobs::JobRow) -> bool {
-    global::is_restricted(row)
-        || environment::present(row)
-        || [ORIGINS, BINDING, COMMANDS, NOTICES]
-            .iter()
-            .any(|field| row.plan.get(*field).is_some())
+    [ORIGINS, BINDING, COMMANDS, NOTICES]
+        .iter()
+        .any(|field| row.plan.get(*field).is_some())
 }
 fn command_log(row: &jobs::JobRow) -> &'static str {
-    if lifecycle_provider(row) {
-        return crate::jobs::lifecycle_commands::JOURNAL;
-    }
-    if global::is_restricted(row) {
-        return global::COMMANDS;
-    }
-    if environment::present(row) {
-        return environment::COMMANDS;
-    }
     if is_restricted(row) {
         COMMANDS
     } else {
@@ -93,12 +73,6 @@ fn command_log(row: &jobs::JobRow) -> &'static str {
     }
 }
 fn notice_log(row: &jobs::JobRow) -> &'static str {
-    if global::is_restricted(row) {
-        return global::NOTICES;
-    }
-    if environment::present(row) {
-        return environment::NOTICES;
-    }
     if is_restricted(row) {
         NOTICES
     } else {
@@ -435,8 +409,7 @@ fn is_provider_recreate(row: &jobs::JobRow) -> bool {
 /// Only recorded ordinary frames gain the new identity proof; pre-existing
 /// ordinary received frames without a journal keep their original replay path.
 pub(crate) fn has_receipt_identity(row: &jobs::JobRow, command: Id) -> bool {
-    lifecycle_provider(row)
-        || is_restricted(row)
+    is_restricted(row)
         || row
             .plan
             .get(OWNER_COMMANDS)
@@ -446,8 +419,7 @@ pub(crate) fn has_receipt_identity(row: &jobs::JobRow, command: Id) -> bool {
 
 /// These are the existing provider replacement jobs, not environment/creation jobs.
 pub(crate) fn applies(row: &jobs::JobRow) -> bool {
-    lifecycle_provider(row)
-        || is_restricted(row)
+    is_restricted(row)
         || is_provider_recreate(row)
         || row.plan.get(OWNER_COMMANDS).is_some()
         || row.plan.get(OWNER_NOTICES).is_some()
@@ -457,12 +429,6 @@ async fn command_structure(
     conn: &mut Conn,
     row: &jobs::JobRow,
 ) -> Result<Option<(Recipe, envs::RuntimeFull, Option<envs::RuntimeFull>)>, EngineError> {
-    if global::is_restricted(row) {
-        return global::structure(conn, row, true).await;
-    }
-    if environment::present(row) {
-        return environment::structure(conn, row).await;
-    }
     if is_restricted(row) {
         return Ok(structure(conn, row)
             .await?
@@ -480,29 +446,6 @@ async fn command_structure(
 /// The actual provider's owner remains eligible at the selected destination.
 /// Scoped members additionally restore their own original operations independently.
 pub async fn current(conn: &mut Conn, row: &jobs::JobRow, now: Time) -> Result<bool, EngineError> {
-    // A sampled timestamp cannot replace the real raw-HTTP/current-source checkpoint.
-    if lifecycle_provider(row) {
-        return Ok(false);
-    }
-    if global::is_restricted(row)
-        || jobs::job(conn, row.id)
-            .await?
-            .as_ref()
-            .is_some_and(global::is_restricted)
-    {
-        return Ok(false);
-    }
-    if jobs::job(conn, row.id)
-        .await?
-        .is_some_and(|actual| environment::present(&actual))
-    {
-        return Ok(false);
-    }
-    // The new native source requires its real clock and raw credential. A sampled time
-    // remains the compatibility interface for the existing provider-only callers.
-    if environment::present(row) {
-        return Ok(false);
-    }
     if !applies(row) {
         return Ok(true);
     }
@@ -538,138 +481,7 @@ pub async fn current(conn: &mut Conn, row: &jobs::JobRow, now: Time) -> Result<b
     crate::updates::provider_owner_host_usable(conn, recipe.target.id(), destination, now).await
 }
 
-/// Actual-clock replacement boundaries, including the Environment's real raw request source.
-pub async fn current_with_clock(
-    conn: &mut Conn,
-    row: &jobs::JobRow,
-    clock: &dyn orch_types::Clock,
-) -> Result<bool, EngineError> {
-    if global::is_restricted(row) {
-        let Some(actual) = jobs::job(conn, row.id).await?.filter(global::is_restricted) else {
-            return Ok(false);
-        };
-        return Ok(global::current(conn, &actual, clock).await?.is_some());
-    }
-    let actual = jobs::job(conn, row.id).await?;
-    if lifecycle_provider(row) || actual.as_ref().is_some_and(lifecycle_provider) {
-        let Some(actual) = actual.filter(lifecycle_provider) else {
-            return Ok(false);
-        };
-        return match crate::jobs::lifecycle_commands::environment::provider_current(
-            conn, &actual, clock,
-        )
-        .await
-        {
-            Ok(checked) => {
-                checked.check(clock)?;
-                Ok(true)
-            }
-            Err(EngineError::BeforeEffect(_)) => Ok(false),
-            Err(error) => Err(error),
-        };
-    }
-    if environment::present(row) || actual.as_ref().is_some_and(environment::present) {
-        match actual {
-            Some(actual) if environment::present(&actual) => {
-                environment::current(conn, &actual, clock).await
-            }
-            _ => Ok(false),
-        }
-    } else {
-        current(conn, row, clock.time()).await
-    }
-}
-async fn forward_current(
-    conn: &mut Conn,
-    row: &jobs::JobRow,
-    now: Time,
-    clock: Option<&dyn orch_types::Clock>,
-) -> Result<bool, EngineError> {
-    match clock {
-        Some(clock) => current_with_clock(conn, row, clock).await,
-        None => current(conn, row, now).await,
-    }
-}
-
-pub(crate) async fn seal_command(job: &Job, command: &mut Outgoing) -> Result<(), Stop> {
-    environment::seal(job, command).await
-}
-
-pub(crate) async fn deadline_in(conn: &mut Conn, job: &Job) -> Result<(), Stop> {
-    let row = jobs::job(conn, job.id()).await?.ok_or(Stop::Lost)?;
-    if lifecycle_provider(&row) {
-        crate::jobs::lifecycle_commands::environment::check_deadline(
-            conn,
-            &row,
-            job.engine().inner.clock.as_ref(),
-        )
-        .await?;
-        return Ok(());
-    }
-    if global::is_restricted(&row) {
-        global::deadline(conn, &row, job.engine().inner.clock.as_ref()).await?;
-    }
-    if environment::present(&row) {
-        match environment::deadline(conn, &row, job.engine().inner.clock.as_ref()).await {
-            Ok(()) => {}
-            Err(EngineError::BeforeEffect(error))
-                if error.is::<crate::updates::operation::Ended>()
-                    || error.is::<crate::updates::operation::Denied>() =>
-            {
-                return Err(refused());
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn thread_matches(owner: &jobs::JobRow, thread: &threads::ThreadRow) -> bool {
-    if global::is_restricted(owner) || environment::present(owner) {
-        thread.environment_id == owner.environment_id
-    } else {
-        thread.provider_id == owner.provider_id
-    }
-}
-
 pub(crate) async fn guard_in(conn: &mut Conn, job: &Job) -> Result<(), Stop> {
-    let initial = job.row().await?;
-    if lifecycle_provider(&initial) {
-        crate::jobs::lifecycle_commands::environment::lock_source(conn, &initial).await?;
-        let row = job.lock_owned(conn).await?.ok_or(Stop::Lost)?;
-        let checked = crate::jobs::lifecycle_commands::environment::current(
-            conn,
-            &row,
-            job.engine().inner.clock.as_ref(),
-            job.engine().inner.access.as_ref(),
-            None,
-        )
-        .await?;
-        checked.check(job.engine().inner.clock.as_ref())?;
-        return Ok(());
-    }
-    if global::is_restricted(&job.row().await?) {
-        let owner = job.lock_owned(conn).await?.ok_or(Stop::Lost)?;
-        if owner.cancel_requested() {
-            return Err(Stop::Cancelled);
-        }
-        if let Some(reason) = crate::jobs::runner::abort_reason(&owner)? {
-            return Err(reason);
-        }
-        if global::current(conn, &owner, job.engine().inner.clock.as_ref())
-            .await?
-            .is_none()
-        {
-            return Err(refused());
-        }
-        return Ok(());
-    }
-    if jobs::job(conn, job.id())
-        .await?
-        .is_some_and(|row| environment::present(&row))
-    {
-        return environment::guard_in(conn, job).await;
-    }
     if jobs::job(conn, job.id())
         .await?
         .is_none_or(|row| !applies(&row))
@@ -694,7 +506,7 @@ async fn held_thread(conn: &mut Conn, row: &jobs::JobRow, thread: Id) -> Result<
     Ok(recipe.threads.contains(&thread)
         && threads::lock(conn, thread)
             .await?
-            .is_some_and(|thread| thread_matches(row, &thread))
+            .is_some_and(|thread| thread.provider_id == row.provider_id)
         && rows::thread_hold(conn, thread)
             .await?
             .is_some_and(|held| held.id == row.id))
@@ -714,7 +526,6 @@ pub(crate) async fn cancel_approvals(job: &Job, thread: Id) -> Result<(), Stop> 
     let mut unit = Unit::new(&mut tx, job.now());
     crate::locks::cancel_pending_approvals_in(&mut unit, thread).await?;
     let finished = unit.finish().await?;
-    deadline_in(&mut tx, job).await?;
     job.engine().commit(tx, finished).await?;
     Ok(())
 }
@@ -744,7 +555,6 @@ pub(crate) async fn interrupt(
     let mut unit = Unit::new(&mut tx, job.now());
     super::super::fork::interrupt_for_change_in(&mut unit, thread, &actual_turn, by).await?;
     let finished = unit.finish().await?;
-    deadline_in(&mut tx, job).await?;
     job.engine().commit(tx, finished).await?;
     // This is the existing system completion of the exact decision accepted above.
     job.engine().drive_interrupt(thread).await?;
@@ -757,7 +567,6 @@ pub(crate) async fn guard(job: &Job) -> Result<(), Stop> {
     let mut tx = job.engine().db().begin().await?;
     orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
     guard_in(&mut tx, job).await?;
-    deadline_in(&mut tx, job).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
@@ -765,25 +574,6 @@ pub(crate) async fn guard(job: &Job) -> Result<(), Stop> {
 /// Compensation keeps ownership evidence, not withdrawn forward permissions. Never remove
 /// a published/foreign unit merely because a stale phase retained its identifier.
 pub(crate) async fn cleanup_guard(job: &Job) -> Result<(), Stop> {
-    let row = job.row().await?;
-    if lifecycle_provider(&row) {
-        let mut tx = job.engine().db().begin().await?;
-        let row = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-        if !crate::jobs::lifecycle_commands::environment::owns_recipe(&row)?
-            || !crate::jobs::lifecycle_commands::environment::owns_provider_candidate(&mut tx, &row)
-                .await?
-        {
-            return Err(refused());
-        }
-        tx.commit().await.map_err(DbError::from)?;
-        return Ok(());
-    }
-    if global::is_restricted(&job.row().await?) {
-        return global::cleanup(job).await;
-    }
-    if environment::present(&job.row().await?) {
-        return environment::cleanup_guard(job).await;
-    }
     if !is_restricted(&job.row().await?) {
         return Ok(());
     }
@@ -857,11 +647,7 @@ fn recorded_command_matches(
     kind: &str,
     body: &Json,
 ) -> Result<bool, EngineError> {
-    if !is_provider_recreate(row)
-        && !environment::present(row)
-        && !global::is_restricted(row)
-        && !lifecycle_provider(row)
-    {
+    if !is_provider_recreate(row) {
         return Ok(false);
     }
     command_identity::recorded_matches(row, command_log(row), id, machine, key, kind, body)
@@ -871,11 +657,7 @@ fn retained_command_matches(
     command: &Outgoing,
     retained: &crate::commands::RetainedCommand,
 ) -> Result<bool, EngineError> {
-    if !is_provider_recreate(row)
-        && !environment::present(row)
-        && !global::is_restricted(row)
-        && !lifecycle_provider(row)
-    {
+    if !is_provider_recreate(row) {
         return Ok(false);
     }
     command_identity::retained_matches(row, command_log(row), command, retained)
@@ -969,7 +751,7 @@ async fn notice_bound(
     }
     let Some(actual) = threads::lock(conn, thread)
         .await?
-        .filter(|thread| thread_matches(row, thread))
+        .filter(|thread| thread.provider_id == row.provider_id)
     else {
         return Ok(false);
     };
@@ -979,15 +761,8 @@ async fn notice_bound(
     {
         return Ok(false);
     }
-    let provider_id = match recipe.target {
-        Target::Provider(provider) => Some(provider),
-        Target::Environment(_) => actual.provider_id,
-    };
-    let Some(provider_id) = provider_id else {
-        return Ok(false);
-    };
     let Some(provider) =
-        orch_db::queries::resources::thread_engine::provider(conn, provider_id).await?
+        orch_db::queries::resources::thread_engine::provider(conn, recipe.target.id()).await?
     else {
         return Ok(false);
     };
@@ -1013,13 +788,12 @@ pub(crate) async fn retain_notice(
     conn: &mut Conn,
     row: &jobs::JobRow,
     command: &Outgoing,
-    clock: &dyn orch_types::Clock,
+    now: Time,
 ) -> Result<(), EngineError> {
-    let now = clock.time();
     if !applies(row) {
         return Ok(());
     }
-    if !current_with_clock(conn, row, clock).await?
+    if !current(conn, row, now).await?
         || !notice_bound(
             conn,
             row,
@@ -1061,27 +835,11 @@ async fn accepted_notice(
 async fn command_bound(
     conn: &mut Conn,
     row: &jobs::JobRow,
-    id: Id,
     machine: Id,
     key: Option<&str>,
     kind: &str,
     body: &Json,
 ) -> Result<bool, EngineError> {
-    if global::is_restricted(row) {
-        let Some(native) = global::structure(conn, row, true).await? else {
-            return Ok(false);
-        };
-        return environment::command_bound_native(
-            conn,
-            row,
-            native,
-            (id, machine, key, kind, body),
-        )
-        .await;
-    }
-    if environment::present(row) {
-        return environment::command_bound(conn, row, id, machine, key, kind, body).await;
-    }
     if let Some(work) = body.get("work").filter(|work| !work.is_null()) {
         let work: orch_link_contract::commands::WorkReport = serde_json::from_value(work.clone())?;
         if work.job_id != row.id {
@@ -1243,32 +1001,10 @@ async fn command_bound(
     })
 }
 
-/// Keep the existing replacement's typed operands at the sole lifecycle proposal handoff.
-/// This factual check grants no principal, scope, command or receipt authority.
-pub(crate) async fn native_child_proposal(
-    conn: &mut Conn,
-    row: &jobs::JobRow,
-    id: Id,
-    machine: Id,
-    key: Option<&str>,
-    kind: &str,
-    body: &Json,
-) -> Result<bool, EngineError> {
-    if lifecycle_provider(row) && is_provider_recreate(row) {
-        return Ok(
-            accepted_notice(conn, row, id, machine, key, kind, body).await?
-                || command_bound(conn, row, id, machine, key, kind, body).await?,
-        );
-    }
-    Ok(true)
-}
-
 /// Reuses the runner's canonical post-augmentation point and existing receipt shortcut.
 pub async fn remember_command(job: &Job, command: &Outgoing) -> Result<(), Stop> {
     let initial = job.row().await?;
-    if !applies(&initial) || lifecycle_provider(&initial) {
-        // The final native lifecycle handoff records this exact proposal once.
-        // Its Provider replacement operand guard remains an independent data check there.
+    if !applies(&initial) {
         return Ok(());
     }
     let originally_scoped = is_restricted(&initial);
@@ -1284,21 +1020,6 @@ pub async fn remember_command(job: &Job, command: &Outgoing) -> Result<(), Stop>
         .map_err(EngineError::from)?;
     let mut tx = job.engine().db().begin().await?;
     orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-    if environment::present(&initial)
-        && !environment::current(&mut tx, &initial, job.engine().inner.clock.as_ref()).await?
-        && !accepted_notice(
-            &mut tx,
-            &initial,
-            command.id,
-            command.machine,
-            command.key.wire().as_deref(),
-            command.kind.as_str(),
-            &command.body,
-        )
-        .await?
-    {
-        return Err(refused());
-    }
     let row = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
     if row.cancel_requested() {
         return Err(Stop::Cancelled);
@@ -1340,28 +1061,18 @@ pub async fn remember_command(job: &Job, command: &Outgoing) -> Result<(), Stop>
     )
     .await?;
     if !notice
-        && (!current_with_clock(&mut tx, &row, job.engine().inner.clock.as_ref()).await?
+        && (!current(&mut tx, &row, Time::new(job.now())).await?
             || !command_bound(
                 &mut tx,
                 &row,
-                actual.id,
                 actual.machine,
                 actual.key.wire().as_deref(),
                 actual.kind.as_str(),
                 &actual.body,
             )
-            .await?
-                && !(environment::present(&row) && environment::composed(&actual, row.id)))
+            .await?)
     {
         return Err(refused());
-    }
-    if environment::present(&row) && !notice {
-        if !environment::accept(&mut tx, &row, job.engine().inner.clock.as_ref()).await? {
-            return Err(refused());
-        }
-        if environment::composed(&actual, row.id) {
-            environment::remember_composed(&mut tx, &row, &actual, Time::new(job.now())).await?;
-        }
     }
     command_identity::remember(
         &mut tx,
@@ -1371,10 +1082,6 @@ pub async fn remember_command(job: &Job, command: &Outgoing) -> Result<(), Stop>
         Time::new(job.now()),
     )
     .await?;
-    if environment::present(&row) && !notice {
-        let fresh = jobs::job(&mut tx, row.id).await?.ok_or(Stop::Lost)?;
-        environment::deadline(&mut tx, &fresh, job.engine().inner.clock.as_ref()).await?;
-    }
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
@@ -1389,18 +1096,6 @@ pub async fn command_authorized(
     body: &Json,
     now: Time,
 ) -> Result<bool, EngineError> {
-    command_authorized_at(conn, id, machine, key, kind, body, (now, None)).await
-}
-async fn command_authorized_at(
-    conn: &mut Conn,
-    id: Id,
-    machine: Id,
-    key: Option<&str>,
-    kind: &str,
-    body: &Json,
-    when: (Time, Option<&dyn orch_types::Clock>),
-) -> Result<bool, EngineError> {
-    let (now, clock) = when;
     let owners = jobs::lock_provider_update_command_owners(conn, id).await?;
     if owners.is_empty() {
         return Ok(true);
@@ -1417,8 +1112,8 @@ async fn command_authorized_at(
     if accepted_notice(conn, &row, id, machine, key, kind, body).await? {
         return Ok(true);
     }
-    Ok(forward_current(conn, &row, now, clock).await?
-        && command_bound(conn, &row, id, machine, key, kind, body).await?)
+    Ok(current(conn, &row, now).await?
+        && command_bound(conn, &row, machine, key, kind, body).await?)
 }
 
 /// New unacknowledged forwarding retains all actual update origins to the final queue.
@@ -1432,17 +1127,7 @@ pub async fn command_current_callers(
     body: &Json,
     clock: &dyn orch_types::Clock,
 ) -> Result<Option<Vec<(Option<orch_authz::Caller>, Option<Time>)>>, EngineError> {
-    if !command_authorized_at(
-        conn,
-        id,
-        machine,
-        key,
-        kind,
-        body,
-        (clock.time(), Some(clock)),
-    )
-    .await?
-    {
+    if !command_authorized(conn, id, machine, key, kind, body, clock.time()).await? {
         return Ok(None);
     }
     let owners = jobs::lock_provider_update_command_owners(conn, id).await?;
@@ -1457,22 +1142,6 @@ pub async fn command_current_callers(
     };
     if accepted_notice(conn, &row, id, machine, key, kind, body).await? {
         return Ok(Some(Vec::new()));
-    }
-    if lifecycle_provider(&row) {
-        let checked =
-            crate::jobs::lifecycle_commands::environment::provider_current(conn, &row, clock)
-                .await?;
-        checked.check(clock)?;
-        return Ok(Some(vec![(
-            Some(checked.principal.caller().clone()),
-            checked.until,
-        )]));
-    }
-    if global::is_restricted(&row) {
-        return global::current(conn, &row, clock).await;
-    }
-    if environment::present(&row) {
-        return environment::callers(conn, &row, clock).await;
     }
     if !is_restricted(&row) {
         return Ok(Some(Vec::new()));

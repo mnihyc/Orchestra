@@ -135,18 +135,6 @@ fn render(
             "x-orch-operation": business,
             "responses": {},
         });
-        match route.idempotency {
-            crate::routes::Idempotency::Unspecified => {}
-            crate::routes::Idempotency::ClientId => {
-                operation["x-orch-idempotency"] = json!({"mode":"body_client_id"})
-            }
-            crate::routes::Idempotency::NativeHeader(reason) => {
-                operation["x-orch-idempotency"] = json!({"mode":"native_header","reason":reason})
-            }
-            crate::routes::Idempotency::NotKeyed(reason) => {
-                operation["x-orch-idempotency"] = json!({"mode":"not_keyed","reason":reason})
-            }
-        }
         if let Some(permission) = permission {
             operation["x-orch-permission"] = json!(permission);
         }
@@ -190,7 +178,6 @@ fn render(
     // The frames of the browser's socket travel no declared request, but the browser's types are
     // generated from this one document.
     let _ = generator.subschema_for::<crate::search::SearchStreamEvent>();
-    let _ = generator.subschema_for::<crate::ask::AskEvent>();
     extend_schemas(&mut generator);
     let definitions: Map<String, Value> = generator.take_definitions(true);
     let mut paths = Map::new();

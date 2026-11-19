@@ -133,9 +133,9 @@ tagged! {
         CmdRes(CmdRes) = "cmd_res",
         /// The system's wish that a command not be carried out.
         CmdCancel(CmdCancel) = "cmd_cancel",
-        /// The local machine asks the system to import or forget a server as its current owner.
-        McpImportAsk(crate::mcp_import::McpLocalAsk) = "mcp_import_ask",
-        /// The system answers that local request, including a safe refusal.
+        /// The local machine owner asks the system to file an imported MCP copy.
+        McpImportAsk(crate::mcp_import::McpImportAsk) = "mcp_import_ask",
+        /// The system answers that local import, including a safe refusal.
         McpImportAnswer(crate::mcp_import::McpImportAnswer) = "mcp_import_answer",
         /// An environment-local read/peer assertion request, never a retained command.
         PortLocalAsk(crate::local_ports::PortLocalAsk) = "port_local_ask",
@@ -541,8 +541,6 @@ mod tests {
                     "err": { "code": "timeout", "detail": "the harness did not answer", "retryable": true } }),
             json!({ "t": "cmd_cancel", "id": A }),
             json!({"t":"mcp_import_ask","request_id":A,"environment_id":B,"source":"codex","scope":"user","directory":null,"name":"files"}),
-            json!({"t":"mcp_import_ask","request_id":A,"forget":{"name":"file-tools","from":"fake"}}),
-            json!({"t":"mcp_import_ask","request_id":A,"forget":{"name":B}}),
             json!({"t":"mcp_import_answer","request_id":A,"server_id":null,"code":"policy.mcp_import_disabled","detail":"this machine permits no MCP imports"}),
         ];
         for frame in frames {

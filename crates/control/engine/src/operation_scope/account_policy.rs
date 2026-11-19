@@ -34,15 +34,3 @@ pub async fn requirement(conn: &mut Conn, user: &UserRow) -> Result<Requirement,
         .await
         .map_err(error)
 }
-
-/// The existing account/session hold, without a transport's presentation of proof methods.
-/// An API key supplies no browser session; a real browser must retain its actual proof.
-pub async fn session_hold(
-    conn: &mut Conn,
-    user: &UserRow,
-    session: Option<Id>,
-) -> Result<Option<orch_authz::suspension::SecondStepHold>, EngineError> {
-    orch_authz::http_origin::session_hold(conn, user, session)
-        .await
-        .map_err(error)
-}

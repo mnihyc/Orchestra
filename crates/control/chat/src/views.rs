@@ -22,8 +22,6 @@ use std::collections::HashMap;
 /// What the reader may know of the people and the nodes the rows name.
 #[derive(Debug, Clone, Default)]
 pub struct Lookups {
-    /// Existing reference ordinals for the exact stored messages being projected.
-    pub reference_numbers: HashMap<Id, i64>,
     /// People by identifier, as others see them.
     pub people: HashMap<Id, UserRef>,
     /// Nodes by identifier, each by name where the reader may know it.
@@ -347,11 +345,6 @@ pub fn message(row: &MessageRow, reply: Option<&MessageRow>, lookups: &Lookups) 
     };
     let deleted = row.is_deleted();
     ChatMessage {
-        reference_number: lookups
-            .reference_numbers
-            .get(&row.id)
-            .copied()
-            .filter(|number| *number > 0),
         mention_names: if deleted {
             Vec::new()
         } else {
@@ -454,8 +447,6 @@ pub fn can_of(standing: &Standing, lookups: &Lookups) -> ChatCan {
         Err(Cannot::Inspecting) => Some(ChatCanReason::Inspecting),
     };
     ChatCan {
-        join: standing.join,
-        manage: standing.manage,
         admin_place: (!standing.admin_only.is_empty())
             .then_some(standing.admin_place)
             .flatten()
@@ -538,11 +529,9 @@ pub struct Seen<'a> {
 pub fn chat_reference(row: &ChatRow, lookups: &Lookups) -> ChatRef {
     ChatRef {
         id: row.id,
-        visibility: visibility_of(row),
         kind: kind_of(row),
         org_id: row.org_id,
         node: row.node_id.map(|node| lookups.node(node, NodeKind::Org)),
-        home: (row.kind == rows::KIND_GROUP).then(|| lookups.node(row.home(), NodeKind::Org)),
         name: row.name.clone(),
     }
 }
@@ -570,11 +559,6 @@ pub fn chat(seen: &Seen<'_>, lookups: &Lookups) -> Chat {
                     .expires_at
                     .map(|end| (member.user_id, Time::new(end)))
             })
-            .collect(),
-        managers: present
-            .iter()
-            .filter(|member| member.manager)
-            .map(|member| member.user_id)
             .collect(),
         guests: if people {
             present
@@ -605,16 +589,6 @@ pub fn preview(row: &MessageRow, lookups: &Lookups) -> ChatPreview {
         author: message(row, None, lookups).author,
         text: excerpt_of(row),
         deleted: row.is_deleted(),
-    }
-}
-
-/// One visibility projection for node chats, groups and every compact reference.
-#[must_use]
-pub fn visibility_of(row: &ChatRow) -> orch_api_contract::chats::ChatVisibility {
-    if row.node_id.is_some() || row.visibility == "public" {
-        orch_api_contract::chats::ChatVisibility::Public
-    } else {
-        orch_api_contract::chats::ChatVisibility::Private
     }
 }
 

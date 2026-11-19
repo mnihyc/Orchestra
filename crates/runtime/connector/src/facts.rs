@@ -85,7 +85,6 @@ pub(crate) async fn local_sign_ins(hosting: &Hosting) -> Vec<ProviderFound> {
                     AgentStart {
                         // Discovery owns no provider or profile: these identifiers never leave the local probe.
                         provider_id: orch_types::Id::nil(),
-                        provider_kind: None,
                         agent_id: orch_types::Id::nil(),
                         harness_kind: harness.kind.clone(),
                         profile: AgentProfile::default(),
@@ -180,7 +179,6 @@ pub fn machine_facts(
     clock_offset_ms: i64,
 ) -> MachineFacts {
     MachineFacts {
-        data_directory: None,
         gateway: None,
         role_management: None,
         programs: None,
@@ -248,7 +246,11 @@ mod tests {
             &Host::detect(),
             FactsDraft::default(),
             None,
-            MachineFactsRates::default(),
+            MachineFactsRates {
+                up_bps: 0,
+                down_bps: 0,
+                round_trip_ms: 0,
+            },
             0,
         );
         assert!(facts.policy.is_none());
@@ -279,7 +281,11 @@ mod tests {
             &Host::detect(),
             draft,
             Some(LocalPolicy::default()),
-            MachineFactsRates::default(),
+            MachineFactsRates {
+                up_bps: 0,
+                down_bps: 0,
+                round_trip_ms: 0,
+            },
             0,
         );
         assert_eq!(facts.harnesses.len(), 1);

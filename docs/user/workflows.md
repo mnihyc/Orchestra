@@ -1,9 +1,7 @@
 ---
-group: work
 title: Work and collaboration
 screens: /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /workbench, /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /doc/$documentId, /inspect/$kind/$id, /shared, /approvals, /document-folder/$folderId, /documents/$nodeId
 keywords: chat, documents, share, approvals, steer, stop, fork, forward, layout, code, conflict, private
-summary: Work with people and agents through threads, chat, documents and shared workspace views.
 ---
 
 # Work and collaboration
@@ -118,11 +116,7 @@ Giving a document to an agent grants its viewers no Edit or Manage.
 
 An agent's edits and messages name that agent. Its `send_message` tool accepts
 a chat or thread target and optional files. Chat messages are visible to people;
-a thread target follows the receiving topic's delivery and fallback. To start an
-idle thread, each send must explicitly choose `wake_idle: true`, and that topic
-must allow `broadcast.wake_idle` (on as shipped). Omitting it is false. Each
-sending thread has separate rolling hourly limits: 12 announcements and 60
-individual thread messages; zero in either setting forbids that kind of send.
+a thread target delivers a note under that topic's delivery and wake policy.
 The answer says whether the message was posted, queued or delivered.
 Announcements and milestones are recorded in its conversation and sent to
 the selected audience. Reasoning from another thread is not shared as ordinary

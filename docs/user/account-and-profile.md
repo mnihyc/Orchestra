@@ -1,9 +1,7 @@
 ---
-group: access
 title: Manage your account and profile
 screens: /login, /register, /recover, /reset/$token, /verify-email/$token, /invite/$token, /settings, /settings/profile, /settings/your-page, /settings/security, /settings/tokens, /settings/exports, /settings/interface, /settings/notifications, /settings/usage, /u/$username
 keywords: account, profile, sign in, password, recovery, email, authenticator, sessions, API token, exports, interface, personal settings
-summary: Manage your profile, sign-ins, account recovery, sessions and personal choices.
 ---
 
 # Manage your account and profile

@@ -442,13 +442,7 @@ pub fn models(value: &Json, secrets: &[String]) -> Result<ReadModels, &'static s
         let value = scrub_value(value, secrets);
         let mut value = item(
             &value,
-            &[
-                "model_name",
-                "display_name",
-                "parameters",
-                "listed",
-                "origins",
-            ],
+            &["model_name", "display_name", "parameters", "listed"],
         );
         if let Some(value) = value.as_mut().and_then(Json::as_object_mut)
             && let Some(name) = value.get("model_name").cloned()
@@ -456,19 +450,6 @@ pub fn models(value: &Json, secrets: &[String]) -> Result<ReadModels, &'static s
             value.entry("display_name").or_insert(name);
             value.entry("parameters").or_insert(json!({}));
             value.entry("listed").or_insert(json!(true));
-            let origins = value
-                .remove("origins")
-                .and_then(|value| value.as_object().cloned())
-                .unwrap_or_default();
-            value.insert(
-                "origins".into(),
-                Json::Object(
-                    origins
-                        .into_iter()
-                        .filter(|(pointer, origin)| pointer.starts_with('/') && origin.is_string())
-                        .collect(),
-                ),
-            );
         }
         let Some(value) = value
             .filter(|value| required(value, "model_name") && strings(value, &["display_name"]))

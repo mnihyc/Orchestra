@@ -23,9 +23,6 @@ use serde_json::json;
 use super::runner::{Done, Failure, Job, Phase, Phased, Stop, Undone};
 use crate::{Engine, EngineError, commands::Outgoing, ids, resource_facts};
 
-pub mod operation;
-pub mod sources;
-
 /// Cleanup shares the ordinary durable job ledger.
 pub const KIND: &str = "storage_cleanup";
 /// Each item is acknowledged before the next item is admitted.
@@ -112,8 +109,8 @@ impl Cleaning {
         })
     }
 
-    async fn principal(&self, conn: &mut Conn, job: &Job, work: &Work) -> Result<Principal, Stop> {
-        operation::principal(conn, job, &work.id).await
+    async fn principal(&self, conn: &mut Conn, job: &Job) -> Result<Principal, Stop> {
+        super::retained::requester(conn, &job.row().await?, job.now()).await
     }
 
     async fn require(
@@ -145,7 +142,7 @@ impl Cleaning {
     ) -> Result<(), Stop> {
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal = self.principal(&mut tx, job, work).await?;
+        let principal = self.principal(&mut tx, job).await?;
         self.require(
             &mut tx,
             &principal,
@@ -161,21 +158,16 @@ impl Cleaning {
         tx.commit().await.map_err(DbError::from)?;
         let inventory: ResourceInventory = serde_json::from_value(
             job.command(
-                operation::command(
-                    job,
-                    work,
-                    Outgoing::new(
-                        ids::derived(
-                            "storage.cleanup.inventory",
-                            &[job.id().as_bytes(), work.id.as_bytes()],
-                        ),
-                        host_row.machine_id,
-                        SerialKey::Machine,
-                        &NodeResourcesList {},
-                    )
-                    .map_err(EngineError::from)?,
+                Outgoing::new(
+                    ids::derived(
+                        "storage.cleanup.inventory",
+                        &[job.id().as_bytes(), work.id.as_bytes()],
+                    ),
+                    host_row.machine_id,
+                    SerialKey::Machine,
+                    &NodeResourcesList {},
                 )
-                .await?,
+                .map_err(EngineError::from)?,
             )
             .await?,
         )
@@ -202,7 +194,7 @@ impl Cleaning {
         }
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal = self.principal(&mut tx, job, work).await?;
+        let principal = self.principal(&mut tx, job).await?;
         self.require(
             &mut tx,
             &principal,
@@ -212,7 +204,6 @@ impl Cleaning {
             },
         )
         .await?;
-        let checked = operation::before_mutation(&mut tx, job, &work.id).await?;
         sqlx::query("UPDATE hosts SET resource_inventory=$2 WHERE id=$1")
             .bind(host)
             .bind(json!(inventory))
@@ -250,31 +241,23 @@ impl Cleaning {
                 "a restore promise or an unknown dependency still needs this item",
             ));
         }
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         tx.commit().await.map_err(DbError::from)?;
         job.command_irreversible(
-            operation::command(
-                job,
-                work,
-                Outgoing::new(
-                    ids::derived(
-                        "storage.cleanup.remove",
-                        &[job.id().as_bytes(), work.id.as_bytes()],
-                    ),
-                    host_row.machine_id,
-                    SerialKey::Machine,
-                    &NodeResourcesRemove {
-                        kind: resource.kind,
-                        id: resource.id.clone(),
-                        stop_first: work.choice == CleanupChoice::StopAndRemove,
-                        expected_last_used_at: if fence { last_used_at } else { None },
-                    },
-                )
-                .map_err(EngineError::from)?,
+            Outgoing::new(
+                ids::derived(
+                    "storage.cleanup.remove",
+                    &[job.id().as_bytes(), work.id.as_bytes()],
+                ),
+                host_row.machine_id,
+                SerialKey::Machine,
+                &NodeResourcesRemove {
+                    kind: resource.kind,
+                    id: resource.id.clone(),
+                    stop_first: work.choice == CleanupChoice::StopAndRemove,
+                    expected_last_used_at: if fence { last_used_at } else { None },
+                },
             )
-            .await?,
+            .map_err(EngineError::from)?,
         )
         .await?;
         Ok(())
@@ -292,7 +275,7 @@ impl Cleaning {
         hosting::lock_environment(&mut tx, environment)
             .await?
             .ok_or_else(|| failed("gone", "the environment is gone"))?;
-        let principal = self.principal(&mut tx, job, work).await?;
+        let principal = self.principal(&mut tx, job).await?;
         let (manager, admin) = super::retained::authority(&mut tx, &principal, environment).await?;
         let promise = retained::removal(&mut tx, environment)
             .await?
@@ -312,7 +295,6 @@ impl Cleaning {
         let reservation = format!("cleanup_reserved_{}", work.id);
         let plan = job.plan().await?;
         if plan.get(&reservation).and_then(Json::as_bool) != Some(true) {
-            let checked = operation::before_mutation(&mut tx, job, &work.id).await?;
             if !jobs::retained::open_of_environment_except(&mut tx, environment, Some(job.id()))
                 .await?
                 .is_empty()
@@ -322,9 +304,6 @@ impl Cleaning {
                     "in_use",
                     "another lifecycle operation owns the kept files",
                 ));
-            }
-            if let Some(checked) = &checked {
-                checked.check(self.engine.inner.clock.as_ref())?;
             }
             jobs::merge_plan(&mut tx, job.id(), &json!({(reservation):true}), job.now()).await?;
         } else if promise.removal_phase.as_deref() != Some("purging") {
@@ -357,7 +336,6 @@ impl Cleaning {
         );
         // Once admitted, even a lost reply can mean removed files. Keep the original requester and
         // purge-only state for the existing reaper; cancellation stops before the next item.
-        let checked = operation::before_mutation(&mut tx, job, &work.id).await?;
         jobs::merge_plan(
             &mut tx,
             job.id(),
@@ -373,32 +351,24 @@ impl Cleaning {
             ),
             None => None,
         };
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         tx.commit().await.map_err(DbError::from)?;
         if let (Some(host), Some(volume)) = (host, refs.first()) {
             job.command_to_undo(
-                operation::command(
-                    job,
-                    work,
-                    Outgoing::new(
-                        ids::derived(
-                            "storage.cleanup.environment",
-                            &[job.id().as_bytes(), work.id.as_bytes()],
-                        ),
-                        host.machine_id,
-                        SerialKey::Runtime(volume.runtime_id),
-                        &NodeRuntimeRemove {
-                            runtime_id: volume.runtime_id,
-                            keep_volumes: false,
-                            volume_refs: serde_json::from_value(promise.retained_volumes)
-                                .map_err(EngineError::from)?,
-                        },
-                    )
-                    .map_err(EngineError::from)?,
+                Outgoing::new(
+                    ids::derived(
+                        "storage.cleanup.environment",
+                        &[job.id().as_bytes(), work.id.as_bytes()],
+                    ),
+                    host.machine_id,
+                    SerialKey::Runtime(volume.runtime_id),
+                    &NodeRuntimeRemove {
+                        runtime_id: volume.runtime_id,
+                        keep_volumes: false,
+                        volume_refs: serde_json::from_value(promise.retained_volumes)
+                            .map_err(EngineError::from)?,
+                    },
                 )
-                .await?,
+                .map_err(EngineError::from)?,
             )
             .await?;
         }
@@ -461,10 +431,10 @@ impl Cleaning {
         Ok(())
     }
 
-    async fn skill(&self, job: &Job, work: &Work, skill: Id, version: Id) -> Result<(), Stop> {
+    async fn skill(&self, job: &Job, skill: Id, version: Id) -> Result<(), Stop> {
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal = self.principal(&mut tx, job, work).await?;
+        let principal = self.principal(&mut tx, job).await?;
         self.require(
             &mut tx,
             &principal,
@@ -491,7 +461,6 @@ impl Cleaning {
         if owned.cancel_requested() {
             return Err(Stop::Cancelled);
         }
-        let checked = operation::before_mutation(&mut tx, job, &work.id).await?;
         sqlx::query("UPDATE skills SET latest_version_id=NULL WHERE id=$1 AND deleted_at IS NOT NULL AND latest_version_id=$2").bind(skill).bind(version).execute(&mut *tx).await.map_err(DbError::from)?;
         // The existing version trigger releases exactly its own archive pin.
         sqlx::query("DELETE FROM skill_versions WHERE id=$1 AND skill_id=$2")
@@ -500,33 +469,15 @@ impl Cleaning {
             .execute(&mut *tx)
             .await
             .map_err(DbError::from)?;
-        let row = jobs::job(&mut tx, job.id()).await?.ok_or(Stop::Lost)?;
-        let mut receipts = row
-            .plan
-            .get("cleanup_sql_receipts")
-            .and_then(Json::as_object)
-            .cloned()
-            .unwrap_or_default();
-        receipts.insert(work.id.clone(), json!(true));
-        jobs::merge_plan(
-            &mut tx,
-            job.id(),
-            &json!({"cleanup_sql_receipts":receipts}),
-            job.now(),
-        )
-        .await?;
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         tx.commit().await.map_err(DbError::from)?;
         Ok(())
     }
 
-    async fn mount(&self, job: &Job, work: &Work, mount: Id, kept: Id) -> Result<(), Stop> {
+    async fn mount(&self, job: &Job, mount: Id, kept: Id) -> Result<(), Stop> {
         use orch_authz::resources::{Locating, LocationAsk, LocationKind};
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal = self.principal(&mut tx, job, work).await?;
+        let principal = self.principal(&mut tx, job).await?;
         self.require(
             &mut tx,
             &principal,
@@ -575,46 +526,32 @@ impl Cleaning {
             None
         };
         tx.commit().await.map_err(DbError::from)?;
-        let removed_remotely = driver.is_some();
         if let Some(driver) = driver {
             job.command_irreversible(
-                operation::command(
-                    job,
-                    work,
-                    Outgoing::new(
-                        ids::derived(
-                            "storage.cleanup.mount",
-                            &[job.id().as_bytes(), kept.as_bytes()],
-                        ),
-                        data.machine_id,
-                        SerialKey::Volume(data.source.clone()),
-                        &orch_link_contract::commands::NodeVolumeRemove {
-                            driver,
-                            name: data.source,
-                            storage: data.storage,
-                            labels: std::collections::BTreeMap::from([(
-                                "orch.mount_id".into(),
-                                mount.to_string(),
-                            )]),
-                        },
-                    )
-                    .map_err(EngineError::from)?,
+                Outgoing::new(
+                    ids::derived(
+                        "storage.cleanup.mount",
+                        &[job.id().as_bytes(), kept.as_bytes()],
+                    ),
+                    data.machine_id,
+                    SerialKey::Volume(data.source.clone()),
+                    &orch_link_contract::commands::NodeVolumeRemove {
+                        driver,
+                        name: data.source,
+                        storage: data.storage,
+                        labels: std::collections::BTreeMap::from([(
+                            "orch.mount_id".into(),
+                            mount.to_string(),
+                        )]),
+                    },
                 )
-                .await?,
+                .map_err(EngineError::from)?,
             )
             .await?;
         }
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-        let checked = if removed_remotely {
-            None
-        } else {
-            operation::before_mutation(&mut tx, job, &work.id).await?
-        };
         orch_db::queries::resources::mounts::forget_kept(&mut tx, kept).await?;
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         tx.commit().await.map_err(DbError::from)?;
         Ok(())
     }
@@ -690,21 +627,6 @@ impl Phased for Cleaning {
             if outcomes.iter().any(|row| row.id == work.id) {
                 continue;
             }
-            if operation::reconcile(job, work).await? {
-                operation::settle_receipt(job, work).await?;
-                outcomes.push(CleanupOutcome {
-                    id: work.id.clone(),
-                    outcome: "removed".into(),
-                    reason: None,
-                });
-                job.remember(&json!({"cleanup_results":outcomes})).await?;
-                job.progress(
-                    (index + 1) as f64 / self.recipe.work.len().max(1) as f64,
-                    None,
-                )
-                .await?;
-                continue;
-            }
             job.check()?;
             let result = match work
                 .target
@@ -722,10 +644,10 @@ impl Phased for Cleaning {
                     revision,
                 }) => Some(self.environment(job, work, *environment, *revision).await),
                 Some(Target::SkillVersion { skill, version }) => {
-                    Some(self.skill(job, work, *skill, *version).await)
+                    Some(self.skill(job, *skill, *version).await)
                 }
                 Some(Target::MountData { mount, kept }) => {
-                    Some(self.mount(job, work, *mount, *kept).await)
+                    Some(self.mount(job, *mount, *kept).await)
                 }
             };
             let (outcome, reason) = match result {

@@ -14,8 +14,6 @@ import { choiceOption } from '@/i18n/choices';
 
 import { CardFrame, DecisionStatus } from '@/features/approvals/Card';
 import { useDecision } from '@/features/approvals/Decision';
-import { AccessBatch } from '@/features/approvals/AccessBatch';
-import { decisionReason } from '@/features/approvals/current';
 import { usePermissionName } from '@/features/access/names';
 import { RequestedEnd } from '@/features/access/RequestEnd';
 import type { Approval } from '@/generated/api-types';
@@ -30,6 +28,7 @@ import { Textarea } from '@/ui/Textarea';
 import { UserChip } from '@/ui/UserChip';
 import { useFormatContext } from '@/lib/appearance';
 import { formatSpan, useNow } from '@/lib/time';
+import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 
 export type AccessApproval = Extract<Approval, { kind: 'access' }>;
 
@@ -71,11 +70,11 @@ export function QuickGrant({ approval, live = true, onSettled, onOther }: { appr
   const decision = useDecision(approval.id, {onDecided:onSettled,onLost:onSettled});
   const [denying, setDenying] = useState(false);
   const [note, setNote] = useState('');
-  const durations = approval.quick_grant_durations ?? [];
+  const shipped = SETTINGS_REGISTRY.find((entry) => entry.key === 'access.quick_grant_durations')?.default;
+  const durations = approval.quick_grant_durations ?? (Array.isArray(shipped) ? shipped.filter((value):value is string=>typeof value==='string') : []);
   const user = approval.request.holder.kind === 'user' ? approval.request.holder.user : null;
   const requestedEnd = approval.request.expires_at ?? null;
   const blocked = !approval.can_decide || !live || decision.pending;
-  const reason = decisionReason(approval, live, decision.pending, t);
   return <div className="flex flex-col gap-2">
     <div className="flex flex-wrap items-center gap-1 text-sm text-text-muted"><span>{approval.request.membership?t('approvals.quick.join'):t('approvals.quick.give', { access: approval.request.permissions.map(permissionName).join(', ') })}</span>{user !== null && <UserChip user={user} size={24} />}</div>
     <div className="flex flex-wrap items-center gap-1">
@@ -83,12 +82,12 @@ export function QuickGrant({ approval, live = true, onSettled, onOther }: { appr
         const days = duration.endsWith('d') ? Number(duration.slice(0,-1)) : null;
         const label = duration === 'always' ? t('approvals.quick.always') : days !== null && Number.isFinite(days) && days > 0 ? formatSpan(days * DAY_MS, format) : null;
         if (label === null) return null;
-        return <Button key={duration} size="sm" variant={duration === 'always' && requestedEnd === null ? 'primary' : 'secondary'} disabled={blocked} reason={reason} pending={decision.pressed === duration} onClick={() => decision.decide({approve:true,quick_duration:duration},duration)}>{label}</Button>;
+        return <Button key={duration} size="sm" variant={duration === 'always' && requestedEnd === null ? 'primary' : 'secondary'} disabled={blocked} pending={decision.pressed === duration} onClick={() => decision.decide({approve:true,quick_duration:duration},duration)}>{label}</Button>;
       })}
-      {durations.length > 0 && <Button size="sm" variant="danger-ghost" disabled={blocked} reason={reason} onClick={() => setDenying((open)=>!open)}>{t('approvals.deny')}</Button>}
-      <Button size="sm" variant="ghost" disabled={blocked} reason={reason} onClick={onOther}>{t('approvals.quick.other')}</Button>
+      <Button size="sm" variant="danger-ghost" disabled={blocked} onClick={() => setDenying((open)=>!open)}>{t('approvals.deny')}</Button>
+      <Button size="sm" variant="ghost" disabled={blocked} onClick={onOther}>{t('approvals.quick.other')}</Button>
     </div>
-    {denying && <form className="flex flex-col gap-2" onSubmit={(event)=>{event.preventDefault();decision.decide({approve:false,...(note.trim()===''?{}:{note:note.trim()})},'deny');}}><Textarea label={t('approvals.note')} optional rows={2} maxLength={500} value={note} onChange={(event)=>setNote(event.target.value)} /><Button type="submit" size="sm" variant="danger-ghost" disabled={blocked} reason={reason} pending={decision.pressed==='deny'}>{t('approvals.deny')}</Button></form>}
+    {denying && <form className="flex flex-col gap-2" onSubmit={(event)=>{event.preventDefault();decision.decide({approve:false,...(note.trim()===''?{}:{note:note.trim()})},'deny');}}><Textarea label={t('approvals.note')} optional rows={2} maxLength={500} value={note} onChange={(event)=>setNote(event.target.value)} /><Button type="submit" size="sm" variant="danger-ghost" disabled={blocked} pending={decision.pressed==='deny'}>{t('approvals.deny')}</Button></form>}
     {decision.error !== null && <ErrorAlert error={decision.error} />}
   </div>;
 }
@@ -145,7 +144,6 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
   const [other, setOther] = useState(requestedEnd !== null);
   const may = approval.can_decide && live;
   const busy = decision.pending;
-  const reason = decisionReason(approval, live, busy, t);
   const requesterName = 'user' in approval.requester ? approval.requester.user.display_name : approval.requester.thread.name;
 
   const narrowed = given.size !== asked.length;
@@ -241,10 +239,10 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
       </>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button action="approve" aria-label={actionName('approve', approval.title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!may || busy || !validEnd || !request.membership && given.size === 0} reason={reason ?? (!validEnd ? t('access.request.futureDate') : !request.membership && given.size === 0 ? t('approvals.access.nothing') : undefined)} onClick={approve}>
+        <Button action="approve" aria-label={actionName('approve', approval.title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!may || busy || !validEnd || !request.membership && given.size === 0} onClick={approve}>
           {actionName('approve', requesterName)}
         </Button>
-        <Button action="deny" aria-label={actionName('deny', approval.title)} variant="danger-ghost" pending={decision.pressed === t('approvals.deny')} disabled={!may || busy} reason={reason} onClick={deny}>
+        <Button action="deny" aria-label={actionName('deny', approval.title)} variant="danger-ghost" pending={decision.pressed === t('approvals.deny')} disabled={!may || busy} onClick={deny}>
           {actionName('deny', requesterName)}
         </Button>
         {!request.membership && given.size === 0 && <span className="text-sm text-text-muted">{t('approvals.access.nothing')}</span>}
@@ -275,7 +273,6 @@ function DecidedRow({ approval }: { approval: Approval }) {
  */
 export function AccessCard({ items, settled, live, onSettled }: { items: readonly AccessApproval[]; settled: ReadonlyMap<string, Approval>; live: boolean; onSettled: (approval: Approval) => void }) {
   const { t } = useTranslation();
-  const permissionName = usePermissionName(items.some((item) => !item.request.membership));
   const first = items[0];
   if (first === undefined) return null;
   const rows = items.map((item) => settled.get(item.id) ?? item);
@@ -283,18 +280,6 @@ export function AccessCard({ items, settled, live, onSettled }: { items: readonl
   const who = 'user' in first.requester ? first.requester.user.display_name : first.requester.thread.name;
   return (
     <CardFrame approval={first} quiet={!waiting} title={items.length === 1 ? first.title : t('approvals.access.asksMany', { name: who, count: items.length })}>
-      <AccessBatch items={rows.filter((row): row is AccessApproval => row.kind === 'access')} live={live} onSettled={onSettled}
-        summary={(approval) => <>
-          <span className="flex flex-wrap items-center gap-1 text-sm text-text-muted">
-            {approval.request.holder.kind === 'user' && <UserChip user={approval.request.holder.user} size={24} />}
-            {approval.request.membership ? t('approvals.quick.join') : approval.request.permissions.map(permissionName).join(', ')}
-          </span>
-          {approval.request.holder.kind === 'node' && approval.request.holder.node.name !== null && <span className="text-sm text-text-muted">{t('approvals.access.holderNode', { place: approval.request.holder.node.name })}</span>}
-          {approval.request.holder.kind === 'agents' && approval.request.holder.node.name !== null && <span className="text-sm text-text-muted">{t('approvals.access.holderAgents', { place: approval.request.holder.node.name })}</span>}
-          {(approval.request.options?.models?.length ?? 0) > 0 && <span className="text-sm text-text-muted">{approval.request.options?.models?.join(', ')}</span>}
-          {(approval.request.options?.efforts?.length ?? 0) > 0 && <span className="text-sm text-text-muted">{approval.request.options?.efforts?.join(', ')}</span>}
-          {reachOf(approval.request.permissions).map((key) => <span key={key} className="text-sm text-warning-text">{t(key)}</span>)}
-        </>} />
       <div className="flex flex-col divide-y divide-border">
         {rows.map((row, index) =>
           row.state === 'pending' && row.kind === 'access' ? (

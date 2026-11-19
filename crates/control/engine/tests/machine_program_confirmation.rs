@@ -66,7 +66,7 @@ async fn choices(
         &binding::Facts {
             descriptor: &descriptor,
             provider: &provider,
-            environment: Some(&environment),
+            environment: &environment,
             offers: if other {
                 vec!["codex-exec-server".into(), "plain".into()]
             } else {

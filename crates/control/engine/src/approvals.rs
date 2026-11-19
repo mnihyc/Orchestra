@@ -2049,14 +2049,6 @@ pub mod access {
                 notifications::tell(&mut tx, &event, &people, sent.root).await?;
                 deciders.extend(sent.givers.nearest.iter().chain(&sent.givers.further));
             }
-            orch_db::idempotency::creation::observe_with(
-                &mut tx,
-                Some(requester),
-                "access_request_batch",
-                batch,
-                json!({"approvals":made.iter().map(|(row,_,_)|row.id).collect::<Vec<_>>()}),
-            )
-            .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
             deciders.sort_unstable();
             deciders.dedup();

@@ -6,7 +6,6 @@
  * of the browser and mark it all the same. Its menu, which a right click opens as well, marks read one row or all
  * that came from one place.
  */
-import { linkTo } from '@/lib/links';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import { useNavigate } from '@tanstack/react-router';
 import { CheckCheck, Ellipsis, ExternalLink, History, Link as LinkIcon, SquareArrowOutUpRight, TriangleAlert } from 'lucide-react';
@@ -84,7 +83,7 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
   const attention = row.kind === 'notification.route_attention';
   const Icon = attention ? TriangleAlert : look.icon;
   const unread = row.read_at === null;
-  const context = row.kind !== 'admin_message' && !generic && namedPlace !== null && foldName(namedPlace) !== foldName(title) && !(byPlace && row.group?.place?.id === where?.id) ? namedPlace : null;
+  const context = !generic && namedPlace !== null && foldName(namedPlace) !== foldName(title) && !(byPlace && row.group?.place?.id === where?.id) ? namedPlace : null;
   const body = text.body !== '' && foldName(text.body) !== foldName(title) && (event === null || foldName(text.body) !== foldName(event)) ? text.body : null;
   const catchup = byPlace ? catchupUrl(row) : null;
   const place = placeOf(row);
@@ -106,11 +105,8 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
     event.preventDefault();
     open();
   };
-  const onAuxClick = (event: MouseEvent<HTMLAnchorElement>) => {
-    if (event.button === 1) void markNotificationsRead({ ids: [row.id] });
-  };
 
-  const copyLink = () => copyText(linkTo({ href: row.url }), t('common.linkCopied'));
+  const copyLink = () => copyText(new URL(row.url, window.location.origin).toString(), t('common.linkCopied'));
 
   const entries: MenuEntry[] = [
     { id: 'open', label: t('inbox.row.open'), icon: <ExternalLink aria-hidden />, onSelect: open },
@@ -156,11 +152,11 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
 
   return (
     <ContextMenu label={t('inbox.row.menu')} entries={entries}>
-      <li data-notification-id={row.id} data-unread={unread} data-kind={row.kind} className="group relative flex items-start gap-1 px-3 py-3 text-base leading-6 transition-colors hover:bg-bg-subtle">
+      <li data-unread={unread} data-kind={row.kind} className="group relative flex items-start gap-1 px-3 py-3 text-base leading-6 transition-colors hover:bg-bg-subtle">
         <div className="flex min-w-0 flex-1 flex-col gap-2"><div className="relative flex min-w-0 flex-1 items-start gap-3 rounded-md"><a
           href={row.url}
           onClick={onClick}
-          onAuxClick={onAuxClick}
+          onAuxClick={(event) => event.button === 1 && void markNotificationsRead({ ids: [row.id] })}
           aria-label={title}
           className="focus-inset absolute inset-0 rounded-md"
         />
@@ -180,7 +176,7 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
               {context !== null && <span data-inbox-place className="text-text-subtle">{t('inbox.row.inPlace', { place: context })}</span>}
             </span>}
             {!settled && row.actor !== null && row.actor !== undefined && text.namesActor !== true && <span data-inbox-person className="flex items-center gap-1 text-sm text-text-muted"><Trans i18nKey="inbox.row.byPersonChip" components={{ person: <UserChip user={row.actor} size={24} className="pointer-events-auto relative z-10" /> }} /></span>}
-            {kept ? <span className="text-sm text-text-muted">{t('temporary.kept')}</span> : attention ? <RouteNotice row={row} onOpen={onClick} onAuxOpen={onAuxClick} /> : body !== null && <span className={cx('text-sm wrap-anywhere', unread ? 'text-text' : 'text-text-muted')}>{body}</span>}
+            {kept ? <span className="text-sm text-text-muted">{t('temporary.kept')}</span> : attention ? <span className="pointer-events-auto relative z-10"><RouteNotice row={row} /></span> : body !== null && <span className={cx('text-sm wrap-anywhere', unread ? 'text-text' : 'text-text-muted')}>{body}</span>}
             {hasRequestedEnd && <RequestedEnd at={typeof parameters.requested_expires_at === 'string' ? parameters.requested_expires_at : null} />}
             {row.waiting_for_me && <span className="text-xs font-medium text-warning-text">{t('away.inbox.waiting')}</span>}
           </span>

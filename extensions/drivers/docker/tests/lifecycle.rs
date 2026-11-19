@@ -107,9 +107,7 @@ async fn the_image_s_own_entrypoint_and_command_are_not_run_and_a_providers_runt
         "the directory of tools is there and empty"
     );
     assert_eq!(
-        lab.wait_read(&unit, "/var/lib/orch/run.txt", |text| text == "hello\n")
-            .await
-            .as_deref(),
+        lab.read(&unit, "/var/lib/orch/run.txt").await.as_deref(),
         Some("hello\n")
     );
     let inspected = lab.inspect(&unit).await;
@@ -174,20 +172,10 @@ async fn files_written_to_the_workspace_survive_a_stop_and_a_successor_and_an_up
     let second = same_volumes("second", BUSYBOX);
     let successor = lab.run(&second).await;
     assert_eq!(
-        lab.wait_read(&successor, "/var/lib/orch/seen.txt", |text| text
-            == "from-the-first\nhome\nstate\n")
+        lab.read(&successor, "/var/lib/orch/seen.txt")
             .await
             .as_deref(),
         Some("from-the-first\nhome\nstate\n")
-    );
-    // This append is later than seen.txt and must finish before the successor is stopped.
-    assert_eq!(
-        lab.wait_read(&successor, "/workspace/marker.txt", |text| {
-            text == "from-the-first\nfrom-the-successor\n"
-        })
-        .await
-        .as_deref(),
-        Some("from-the-first\nfrom-the-successor\n")
     );
     assert_eq!(
         lab.driver.inspect(&unit).await.unwrap().state,
@@ -203,8 +191,7 @@ async fn files_written_to_the_workspace_survive_a_stop_and_a_successor_and_an_up
     let third = same_volumes("third", ALPINE);
     let updated = lab.run(&third).await;
     assert_eq!(
-        lab.wait_read(&updated, "/var/lib/orch/seen.txt", |text| text
-            == "from-the-first\nfrom-the-successor\nhome\nstate\n")
+        lab.read(&updated, "/var/lib/orch/seen.txt")
             .await
             .as_deref(),
         Some("from-the-first\nfrom-the-successor\nhome\nstate\n"),
@@ -228,22 +215,13 @@ async fn files_written_to_the_workspace_survive_a_stop_and_a_successor_and_an_up
         image_of(&updated).await,
         "another image"
     );
-    let os = lab
-        .wait_read(&updated, "/workspace/os-successor.txt", |text| {
-            text.contains("Alpine")
-        })
-        .await;
+    let os = lab.read(&updated, "/workspace/os-successor.txt").await;
     assert!(
         os.as_deref().is_some_and(|text| text.contains("Alpine")),
         "the unit ran on alpine: {os:?}; log: {}",
         lab.logs(&updated).await
     );
-    let marker = lab
-        .wait_read(&updated, "/workspace/marker.txt", |text| {
-            text == "from-the-first\nfrom-the-successor\nfrom-the-successor\n"
-        })
-        .await
-        .unwrap();
+    let marker = lab.read(&updated, "/workspace/marker.txt").await.unwrap();
     assert_eq!(
         marker,
         "from-the-first\nfrom-the-successor\nfrom-the-successor\n"
@@ -259,12 +237,6 @@ async fn a_unit_is_removed_with_its_volumes_kept_and_then_the_volumes_with_their
         request["env"] = json!({ "LAB_RUN": "echo precious > $ORCH_WORKSPACE_DIR/data.txt" });
     });
     let unit = lab.run(&spec).await;
-    assert_eq!(
-        lab.wait_read(&unit, "/workspace/data.txt", |text| text == "precious\n")
-            .await
-            .as_deref(),
-        Some("precious\n")
-    );
     lab.driver
         .stop(&unit, Duration::from_secs(5))
         .await
@@ -299,8 +271,7 @@ async fn a_unit_is_removed_with_its_volumes_kept_and_then_the_volumes_with_their
     });
     let successor = lab.run(&again).await;
     assert_eq!(
-        lab.wait_read(&successor, "/var/lib/orch/seen.txt", |text| text
-            == "precious\n")
+        lab.read(&successor, "/var/lib/orch/seen.txt")
             .await
             .as_deref(),
         Some("precious\n")

@@ -145,7 +145,6 @@ fn auth_environment(
 ) -> std::collections::BTreeMap<String, String> {
     let mut env = base_environment(setup.inherited.clone());
     env.extend(setup.profile_env.clone());
-    crate::sessions::clear_provider_environment(&mut env);
     if setup.managed_home {
         env.extend(crate::sessions::managed_environment(false));
     }

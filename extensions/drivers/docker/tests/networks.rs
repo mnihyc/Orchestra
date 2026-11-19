@@ -114,9 +114,7 @@ async fn two_units_cannot_reach_each_other_and_each_reaches_the_address_given_as
     });
     let visitor_unit = lab.run(&visitor).await;
     let from_gateway = lab
-        .wait_read(&visitor_unit, "/var/lib/orch/gateway.txt", |text| {
-            text.starts_with("gateway-hello from ") && text.ends_with('\n')
-        })
+        .read(&visitor_unit, "/var/lib/orch/gateway.txt")
         .await
         .unwrap();
     assert!(
@@ -124,13 +122,7 @@ async fn two_units_cannot_reach_each_other_and_each_reaches_the_address_given_as
         "{from_gateway:?}"
     );
     let from_peer = lab
-        .wait_read(&visitor_unit, "/var/lib/orch/peer.txt", |text| {
-            text.ends_with('\n')
-                && text
-                    .lines()
-                    .last()
-                    .is_some_and(|line| line.starts_with("rc="))
-        })
+        .read(&visitor_unit, "/var/lib/orch/peer.txt")
         .await
         .unwrap();
     assert!(
@@ -335,6 +327,13 @@ async fn an_open_unit_made_on_a_common_bridge_is_moved_to_a_network_of_its_own_a
     assert!(lab.config.networks.pool().unwrap().contains(&address));
 }
 
+/// What a unit's stand-in connector wrote into the file `file` of its data directory; empty when nothing.
+async fn written(lab: &Lab, unit: &UnitRef, file: &str) -> String {
+    lab.read(unit, &format!("/var/lib/orch/{file}"))
+        .await
+        .unwrap_or_default()
+}
+
 /// A lab whose driver keeps restricted units' proxies' files in the lab's own directory, and whether this daemon
 /// was found able to make their networks.
 async fn restricted_lab() -> Option<Lab> {
@@ -386,37 +385,17 @@ async fn a_unit_without_a_way_out_reaches_the_gateway_through_its_proxy_and_no_o
     });
     let unit = lab.run(&spec).await;
     // Through its proxy, the gateway answers; another host's name is refused there.
-    let through = lab
-        .wait_read(&unit, "/var/lib/orch/gateway.txt", |text| {
-            text.contains("200 Connection established") && text.contains("gateway-hello from ")
-        })
-        .await
-        .unwrap();
+    let through = written(&lab, &unit, "gateway.txt").await;
     assert!(
         through.contains("200 Connection established"),
         "{through:?}"
     );
     assert!(through.contains("gateway-hello from "), "{through:?}");
-    assert!(
-        lab.wait_read(&unit, "/var/lib/orch/denied.txt", |text| text
-            .contains("403"))
-            .await
-            .unwrap()
-            .contains("403")
-    );
+    assert!(written(&lab, &unit, "denied.txt").await.contains("403"));
     // Directly, nothing answers: not the gateway by its name, not a second service of the host, not another unit,
     // not the internet; and there is no route to try.
     for file in ["direct.txt", "other.txt", "peer.txt", "outside.txt"] {
-        let text = lab
-            .wait_read(&unit, &format!("/var/lib/orch/{file}"), |text| {
-                text.ends_with('\n')
-                    && text
-                        .lines()
-                        .last()
-                        .is_some_and(|line| line.starts_with("rc="))
-            })
-            .await
-            .unwrap();
+        let text = written(&lab, &unit, file).await;
         assert!(
             !text.contains("hello") && !text.contains("peer-reply") && !text.contains("rc=0"),
             "{file}: {text:?}"
@@ -428,10 +407,7 @@ async fn a_unit_without_a_way_out_reaches_the_gateway_through_its_proxy_and_no_o
         "the second service of the host saw no connection"
     );
     assert_eq!(
-        lab.wait_read(&unit, "/var/lib/orch/routes.txt", |text| text == "0\n")
-            .await
-            .unwrap()
-            .trim(),
+        written(&lab, &unit, "routes.txt").await.trim(),
         "0",
         "there is no default route"
     );

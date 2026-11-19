@@ -211,10 +211,6 @@ impl From<orch_authz::Error> for BrowserFailure {
 
 /// Who requested a browser; an agent is checked against its environment, not a person's page.
 #[derive(Debug, Clone)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "the browser and display APIs share this intact caller variant, built once per native request"
-)]
 pub enum Requester {
     /// A person with the caller's token restrictions preserved.
     Person(Caller),
@@ -562,21 +558,6 @@ impl Browsers {
                     return Err(BrowserFailure::Engine(EngineError::ToolCallIdentity));
                 }
                 if row.state == "open" {
-                    if orch_db::idempotency::creation::captures(
-                        request.requester.person(),
-                        "browser_creation",
-                    ) {
-                        orch_db::idempotency::creation::observe_with_status(
-                            &mut tx,
-                            request.requester.person(),
-                            "browser_creation",
-                            row.id,
-                            serde_json::json!({"environment":row.environment_id}),
-                            201,
-                        )
-                        .await?;
-                        tx.commit().await.map_err(orch_db::DbError::from)?;
-                    }
                     return Ok(OpenedBrowser {
                         row: row.clone(),
                         started: true,
@@ -587,15 +568,6 @@ impl Browsers {
                 && let Some(row) = rows::on_profile(&mut tx, site.id, &request.profile).await?
             {
                 rows::touch(&mut tx, row.id, self.engine.inner.clock.now()).await?;
-                orch_db::idempotency::creation::observe_with_status(
-                    &mut tx,
-                    request.requester.person(),
-                    "browser_creation",
-                    row.id,
-                    serde_json::json!({"environment":row.environment_id}),
-                    200,
-                )
-                .await?;
                 tx.commit().await.map_err(orch_db::DbError::from)?;
                 return Ok(OpenedBrowser {
                     row: self.wait_open(row.id).await?,
@@ -666,15 +638,6 @@ impl Browsers {
                 )
                 .await?;
             }
-            orch_db::idempotency::creation::observe_with_status(
-                &mut tx,
-                request.requester.person(),
-                "browser_creation",
-                id,
-                serde_json::json!({"environment":site.id}),
-                201,
-            )
-            .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
             (site, preset, args, size)
         };
@@ -733,19 +696,9 @@ impl Browsers {
             }
         };
         if let Some(running) = result.running {
-            let mut tx = self.engine.inner.db.begin().await?;
-            rows::drop_opening(&mut tx, id).await?;
-            orch_db::idempotency::creation::observe_replacement(
-                &mut tx,
-                request.requester.person(),
-                "browser_creation",
-                id,
-                running,
-                serde_json::json!({"environment":site.id}),
-                200,
-            )
-            .await?;
-            tx.commit().await.map_err(orch_db::DbError::from)?;
+            let mut conn = self.engine.inner.db.acquire().await?;
+            rows::drop_opening(&mut conn, id).await?;
+            drop(conn);
             self.changed(site.id).await;
             return Ok(OpenedBrowser {
                 row: self.wait_open(running).await?,
@@ -1184,26 +1137,6 @@ impl Browsers {
         to: Option<String>,
         origin: &Origin,
     ) -> Result<BrowserProfileResult, BrowserFailure> {
-        self.profile_with_id(new_id(), environment, requester, action, name, to, origin)
-            .await
-    }
-
-    /// The native API creator supplies its actual command ID for its identity-only receipt.
-    /// Every ordinary validation, queue, history and current profile update stays here.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the public profile action keeps command identity and requester provenance separate from the native profile fields"
-    )]
-    pub async fn profile_with_id(
-        &self,
-        command: Id,
-        environment: Id,
-        requester: Requester,
-        action: BrowserProfileAction,
-        name: String,
-        to: Option<String>,
-        origin: &Origin,
-    ) -> Result<BrowserProfileResult, BrowserFailure> {
         if !valid_profile(&name) || to.as_ref().is_some_and(|n| !valid_profile(n)) {
             return Err(BrowserFailure::Invalid(
                 "profile must be a name, never a path".to_owned(),
@@ -1221,7 +1154,7 @@ impl Browsers {
         let result = self
             .ask(
                 &site,
-                command,
+                new_id(),
                 &BrowserProfileCommand {
                     environment_id: environment,
                     action,

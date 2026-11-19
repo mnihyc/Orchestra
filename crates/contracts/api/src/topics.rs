@@ -242,7 +242,7 @@ pub struct AnnouncementCreateBody {
     /// What it does where it may not reach into a running turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<AnnouncementFallback>,
-    /// Explicitly wake idle threads where broadcast.wake_idle allows it; false when omitted.
+    /// Whether it wakes a thread that is idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_idle: Option<bool>,
 }
@@ -258,41 +258,6 @@ pub struct PlaceAnnouncementCreateReply {
     pub announcements: Vec<Announcement>,
     /// How many topics were left out.
     pub topics_skipped: i64,
-}
-
-/// The native identity and generated delivery outcome of one accepted announcement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AnnouncementReceipt {
-    /// The native stored announcement.
-    pub id: Id,
-    /// The actual Topic it reached.
-    pub topic_id: Id,
-    /// What this accepted act did, without existing body or sender content.
-    pub delivered: AnnouncementDelivered,
-}
-
-/// The same accepted batch without existing announcement content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct PlaceAnnouncementCreateReceipt {
-    /// This shape carries only the accepted outcome.
-    pub projection: crate::common::ReceiptProjection,
-    /// The native group, including a genuine empty outcome.
-    pub group_id: Id,
-    /// Actual announcement identities and generated delivery results.
-    pub announcements: Vec<AnnouncementReceipt>,
-    /// Native skipped-topic outcome, without names.
-    pub topics_skipped: i64,
-}
-
-crate::common::full_or_receipt! {
-    /// Full ordinary announcement results or the same batch's content-free outcome.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum PlaceAnnouncementCreateResponse {
-        /// Existing content, gated by this operation's current Read.
-        Full(PlaceAnnouncementCreateReply),
-        /// Accepted identity/outcome without existing body or sender content.
-        Receipt(PlaceAnnouncementCreateReceipt),
-    }
 }
 
 crate::endpoints! {
@@ -325,12 +290,12 @@ crate::endpoints! {
     /// Lists announcements in the readable topics of an org, project or topic, newest first.
     NodeAnnouncementList: GET "/nodes/{id}/announcements", Permission("node.view"), query NodeAnnouncementListQuery, none, json Page<Announcement>, 200;
     /// Announces to the open topics of an org, project or topic; private branches are passed over and each topic applies its settings.
-    NodeAnnouncementCreate: POST "/nodes/{id}/announcements", Rule("node.interact; steering and interrupting reach only threads where the sender holds thread.interact"), none, json AnnouncementCreateBody, json PlaceAnnouncementCreateResponse, 201,
-        operation Op::receipt(&Op::returning(
+    NodeAnnouncementCreate: POST "/nodes/{id}/announcements", Rule("node.interact; steering and interrupting reach only threads where the sender holds thread.interact"), none, json AnnouncementCreateBody, json PlaceAnnouncementCreateReply, 201,
+        operation Op::returning(
             Write,
             &[Object(K::Topic), Object(K::Thread)],
             Target::ResolvedCollection("destinations"),
-        ));
+        );
 }
 
 #[cfg(test)]

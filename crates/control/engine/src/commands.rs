@@ -9,31 +9,14 @@
 //! issue it; and waiting for it survives nothing but the row.
 
 pub mod authority;
-mod host_probe;
-mod http_origin;
-mod receipts;
-pub use http_origin::HttpCommand;
-pub use receipts::McpImportAck;
-mod machine_controls;
 mod terminal_creation;
-pub(crate) mod workspace;
+mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
-pub use host_probe::HostPortsProbe;
-pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
-};
-pub use machine_controls::{
-    PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,
-    policy_sections, prepare_policy, validate_policy_drivers,
-};
 pub use terminal_creation::{TerminalCreationAuthority, TerminalCreationOrigin};
-pub(crate) use workspace::physical as workspace_physical;
 pub(crate) use workspace::snapshots as snapshot_origin;
 pub use workspace::{
-    FileCopyCommand, FileCopyInput, FileCopySource, FileMkdirCommand, FileMkdirInput,
-    FileMkdirSource, SnapshotCommand, SnapshotCreateSource, SnapshotMeasureInput,
-    SnapshotMeasureSource, SnapshotRequest, WorkspaceCommand,
+    FileCopyCommand, FileCopyInput, FileCopySource, SnapshotCommand, SnapshotCreateSource,
+    SnapshotMeasureInput, SnapshotMeasureSource, SnapshotRequest, WorkspaceCommand,
 };
 
 use async_trait::async_trait;
@@ -112,7 +95,7 @@ pub struct Outgoing {
     content = "value",
     rename_all = "snake_case"
 )]
-pub(crate) enum RetainedKey {
+enum RetainedKey {
     None,
     Machine,
     Thread(Id),

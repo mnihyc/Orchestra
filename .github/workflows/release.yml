@@ -29,14 +29,6 @@ on:
         required: true
         default: false
         type: boolean
-      scenarios_run_id:
-        description: Run only the deployment scenarios, against the package-x86_64 artifact of this completed release run (optional)
-        required: false
-        type: string
-      earlier_run_id:
-        description: With scenarios_run_id, the completed release run whose package-x86_64 artifact is an earlier release, for the update scenarios (optional)
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -52,8 +44,6 @@ env:
 
 jobs:
   gate:
-    # A run that only tries the deployment scenarios against an earlier run's package needs none of the jobs below.
-    if: ${{ !inputs.scenarios_run_id }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -100,7 +90,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          COMMIT: ${{ steps.gate.outputs.commit || steps.rehearsal.outputs.commit }}
         run: python3 .github/scripts/release_source.py
       - name: Refuse image publication during repackaging
         if: inputs.source_run_id && inputs.publish_images
@@ -142,7 +131,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CI_REF: ${{ needs.gate.outputs.ci_ref }}
           COMMIT: ${{ needs.gate.outputs.commit }}
-        run: python3 .github/scripts/release_ci.py --ref "$CI_REF" --commit "$COMMIT"
+        run: python3 .github/scripts/release_ci.py --ref "$CI_REF" --commit "$COMMIT" ${{ inputs.rehearsal && '--require-dispatch' || '' }}
 
   native:
     needs: gate
@@ -193,21 +182,6 @@ jobs:
       - name: Native tests, connector build and actual version command
         if: runner.os != 'Linux'
         run: python .github/scripts/release_native.py --target ${{ matrix.target }} --out .tmp/native
-      - name: Observe the candidate connector on its native platform
-        id: observe
-        if: runner.os != 'Linux' && !inputs.warm_caches
-        env:
-          COMMIT: ${{ needs.gate.outputs.commit }}
-        run: python .github/scripts/release_observe.py --target ${{ matrix.target }} --native .tmp/native --out observations
-      - name: Retain native platform observations even on failure
-        if: always() && runner.os != 'Linux' && !inputs.warm_caches
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: inv15-${{ matrix.target }}
-          path: observations/${{ matrix.target }}.json
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-${{ matrix.target }}
@@ -253,60 +227,12 @@ jobs:
           retention-days: 14
           overwrite: true
 
-  # The command-line program for the Linux packages. Its musl build compiles most of the server again and, with one
-  # rustc at a time, takes about as long as the server programs, so it is built here beside them rather than after
-  # them inside the package job's six hours.
-  cli:
-    needs: gate
-    if: ${{ !inputs.source_run_id }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.gate.outputs.package_matrix) }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 360
-    env:
-      # One rustc at a time inside the builder, as for the server programs.
-      CARGO_BUILD_JOBS: '1'
-      ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
-      ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
-      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
-      CARGO_TARGET_DIR: ${{ github.workspace }}/.tmp/release-target
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.gate.outputs.commit }}
-      - name: Prepare memory for the command-line build
-        run: bash .github/scripts/ci_memory.sh
-      - name: Prepare command-line builder cache
-        run: |
-          mkdir -p "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container"
-          ln -s "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container/cargo-home"
-      - name: Restore command-line builder dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        env:
-          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
-        with:
-          key: cli-${{ matrix.arch }}
-          workspaces: . -> .tmp/release-target/container/target
-          cache-bin: 'false'
-      - name: Build the command-line program
-        env:
-          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
-        run: python3 .github/scripts/ci_memory_watch.py cargo xtask package --cli-only --out .tmp/cli
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: cli-${{ matrix.arch }}
-          path: .tmp/cli/orchctl
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
-
   package:
-    needs: [gate, native, frontend, cli]
+    needs: [gate, native, frontend]
     if: >-
       ${{ !cancelled() && needs.gate.result == 'success' &&
-          ((needs.native.result == 'success' && needs.frontend.result == 'success' && needs.cli.result == 'success') ||
-           (inputs.source_run_id && needs.native.result == 'skipped' && needs.frontend.result == 'skipped' && needs.cli.result == 'skipped')) }}
+          ((needs.native.result == 'success' && needs.frontend.result == 'success') ||
+           (inputs.source_run_id && needs.native.result == 'skipped' && needs.frontend.result == 'skipped')) }}
     permissions:
       contents: read
       actions: read
@@ -314,13 +240,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.gate.outputs.package_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Six hours: with one build job (the control API's release build against a hosted runner's memory, D-1657) the
-    # server took 105 minutes and the static programs as long again on the fourth rehearsal; the unnesting brings it down.
-    timeout-minutes: 360
+    timeout-minutes: 180
     env:
-      # One rustc at a time inside the builder: the control API crate's release build alone takes most of a hosted
-      # runner's memory since the deep async layouts (D-1657); the musl CI job compiles the same crate with -j 1.
-      CARGO_BUILD_JOBS: '1'
       ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
       ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
       ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
@@ -329,8 +250,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.gate.outputs.commit }}
-      - name: Prepare memory for server packaging
-        run: bash .github/scripts/ci_memory.sh
       - name: Prepare server builder cache
         run: |
           mkdir -p "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container"
@@ -367,19 +286,10 @@ jobs:
         env:
           CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
         run: python3 .github/scripts/release_frontend.py --out .tmp/frontend-input
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: ${{ !inputs.source_run_id }}
-        with:
-          name: cli-${{ matrix.arch }}
-          path: .tmp/cli-input
       - name: Package and validate all connector downloads
         env:
           CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
-        # A run repackaging an older run's inputs builds the command-line program itself.
-        run: |
-          cli=()
-          if [ -f .tmp/cli-input/orchctl ]; then chmod +x .tmp/cli-input/orchctl; cli=(--cli .tmp/cli-input/orchctl); fi
-          python3 .github/scripts/ci_memory_watch.py python3 .github/scripts/release_package.py --inputs .tmp/native-inputs --frontend .tmp/frontend-input --out .tmp/package "${cli[@]}"
+        run: python3 .github/scripts/release_package.py --inputs .tmp/native-inputs --frontend .tmp/frontend-input --out .tmp/package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-${{ matrix.arch }}
@@ -387,25 +297,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           overwrite: true
-
-  # The deployment scenarios of a fresh installation, run against the package this run made for x86-64: the release is
-  # built once, here, and not again by the scenarios. The job is defined in scenarios.yml. `assemble` needs it, and
-  # `publish` needs `assemble`. A run dispatched with `scenarios_run_id` skips every other job and runs only this one,
-  # against the package of that earlier run and the scenario scripts of the dispatched ref.
-  scenarios:
-    if: >-
-      ${{ !cancelled() && !inputs.warm_caches &&
-          (inputs.scenarios_run_id ||
-           (needs.gate.result == 'success' && needs.package.result == 'success')) }}
-    needs: [gate, package]
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/scenarios.yml
-    with:
-      commit: ${{ needs.gate.outputs.commit || github.sha }}
-      package_run_id: ${{ inputs.scenarios_run_id || '' }}
-      earlier_run_id: ${{ inputs.earlier_run_id || '' }}
 
   images:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_images && !inputs.warm_caches && !inputs.rehearsal
@@ -443,7 +334,7 @@ jobs:
 
   assemble:
     if: ${{ !inputs.warm_caches }}
-    needs: [gate, package, scenarios]
+    needs: [gate, package]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

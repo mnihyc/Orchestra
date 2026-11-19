@@ -43,10 +43,6 @@ impl FileCopyInput {
     pub fn destination(&self) -> &str {
         &self.to
     }
-    /// The actual optional Thread door selected by the creating request.
-    pub fn through_thread(&self) -> Option<Id> {
-        self.thread
-    }
     /// The exact native physical recipient.
     pub fn machine(&self) -> Id {
         self.machine
@@ -97,7 +93,23 @@ impl Source for FileCopySource {
                 .current_environment(conn)
                 .await?
                 .ok_or(Error::Refused)?;
-            prepare_write(conn, &env, input.machine, input.thread).await?;
+            if let Some(thread) = input.thread {
+                let place = rows::thread_place(conn, thread)
+                    .await?
+                    .ok_or(Error::Refused)?;
+                if place.environment_id != Some(env.id) || place.side_of.is_some() {
+                    return Err(Error::Refused);
+                }
+            }
+            if orch_db::queries::jobs::changes::environment_change_hold(conn, env.id)
+                .await?
+                .is_some_and(|job| job.kind == orch_db::queries::jobs::kind::WORKSPACE_RESTORE)
+            {
+                return Err(Error::Refused);
+            }
+            if !physical(conn, &env, input.machine).await? {
+                return Err(Error::Refused);
+            }
             let target = targets::resource_identity(
                 conn,
                 ObjectRef {
@@ -123,7 +135,44 @@ impl Source for FileCopySource {
         input: &'a FileCopyInput,
         env: &'a Self::Value,
     ) -> BoxFuture<'a, Result<(), Error>> {
-        Box::pin(require_write(conn, principal, env, input.thread))
+        Box::pin(async move {
+            if !env.remote_write
+                || environment_facts::refuses(conn, env.id, "environment.remote_write").await?
+            {
+                return Err(Error::Refused);
+            }
+            if !orch_authz::resources::check(
+                conn,
+                principal,
+                ObjectRef {
+                    kind: ObjectKind::Environment,
+                    id: env.id,
+                },
+                Permission::FilesManage,
+                Policy::default(),
+            )
+            .await?
+            .is_allowed()
+            {
+                return Err(Error::Refused);
+            }
+            if let Some(thread) = input.thread {
+                if !orch_authz::nodes::check(
+                    conn,
+                    principal,
+                    thread,
+                    Permission::ThreadView,
+                    orch_authz::Act::Use,
+                    Policy::default(),
+                )
+                .await?
+                .is_allowed()
+                {
+                    return Err(Error::Refused);
+                }
+            }
+            Ok(())
+        })
     }
     fn locks<'a>(
         conn: &'a mut Conn,
@@ -131,12 +180,26 @@ impl Source for FileCopySource {
         input: &'a FileCopyInput,
         _: &'a Self::Value,
     ) -> BoxFuture<'a, Result<(), Error>> {
-        Box::pin(lock_write(
-            conn,
-            input.environment,
-            input.machine,
-            input.thread,
-        ))
+        Box::pin(async move {
+            if let Some(thread) = input.thread {
+                sqlx::query("SELECT node_id FROM threads WHERE node_id=$1 FOR SHARE")
+                    .bind(thread)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(DbError::from)?;
+            }
+            sqlx::query("SELECT id FROM environments WHERE id=$1 FOR SHARE")
+                .bind(input.environment)
+                .execute(&mut *conn)
+                .await
+                .map_err(DbError::from)?;
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+                .bind(input.machine)
+                .execute(conn)
+                .await
+                .map_err(DbError::from)?;
+            Ok(())
+        })
     }
     fn check_opened<'a>(
         _: &'a mut Conn,
@@ -221,20 +284,6 @@ impl FileCopyCommand {
                 &command.body,
             )?,
         })
-    }
-    pub(crate) fn receipt_input(&self) -> FileCopyInput {
-        self.source.clone()
-    }
-    /// Canonical receipt association only; it restores neither the session nor its Write.
-    pub(crate) fn matches_receipt(&self, command: &CommandRow) -> Result<bool, EngineError> {
-        Ok(command.kind == "fs.copy"
-            && crate::jobs::command_identity::canonical(
-                command.id,
-                command.machine_id,
-                command.serial_key(),
-                &command.kind,
-                &command.body,
-            )? == self.canonical)
     }
     pub(crate) async fn current_issue_callers(
         &self,

@@ -1,4 +1,3 @@
-import { unjudgedProvenance, unplacedGrouping } from './resource-grouping.ts';
 /** What the fake API says of resources: machines with their enrollment and policy, providers with their models and key, agent profiles, environments, hosts and templates, and the acts that register, change and remove them.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: the same shapes,
@@ -10,7 +9,6 @@ import { unjudgedProvenance, unplacedGrouping } from './resource-grouping.ts';
 import { randomUUID } from 'node:crypto';
 import { seedPlan,planReply,type PlanSeed } from './plan-usage.ts';
 import { readFileSync } from 'node:fs';
-import type { StartOptions } from '../../src/api/start';
 
 import type {
   EverythingResource,
@@ -25,6 +23,7 @@ import type {
   ArrangementType,
   BindingAgent,
   BindingEnvironment,
+  BindingOptions,
   BindingProvider,
   EnrollmentToken,
   EnrollmentProgress,
@@ -32,7 +31,6 @@ import type {
   ConnectorGatewayStatus,
   FactMember,
   Environment,
-  EnvironmentSandboxReadiness,
   EnvironmentMcp,
   Job,
   EnvironmentRef,
@@ -40,7 +38,6 @@ import type {
   Isolation,
   JobRef,
   Machine,
-  MachineDataInventory,
   MachinePolicy,
   MachinePolicySection,
   MachineProgram,
@@ -196,8 +193,6 @@ function policyDefinition(key: string): MachinePolicy['keys'][number]['definitio
 }
 
 interface MachineRecord {
-  dataDirectory?: MachineDataInventory;
-  revision?: number;
   programs?:MachineProgram[];
   dedicated?: boolean;
   id: string;
@@ -210,9 +205,6 @@ interface MachineRecord {
   connector: string;
   lastSeen: string | null;
   roundTripMs: number;
-  linkRates?: Record<string, number | null>;
-  /** A native measured sample, including absent and partial measurements. */
-  rates?: Partial<Record<'round_trip_ms' | 'up_bps' | 'down_bps', number | null>>;
   harnesses: { kind: string; path: string; version: string; daemon: boolean }[];
   discoveredHarnesses?: MachineRecord['harnesses'];
   searchedHarnessKinds?: string[];
@@ -226,13 +218,7 @@ type ModelRecord = ProviderModel;
 
 interface EnrollmentSelection { kind: 'connector' | 'node'; roles: string[]; delegate: string[]; dedicated: boolean; home?: string | null }
 
-type ProviderFactsFixture = Pick<Provider, 'name' | 'facts' | 'facts_state' | 'sources'>;
-
 interface ProviderRecord {
-  modelGroupOptions?: NonNullable<Provider['model_group_options']>;
-  serviceCatalogue?: NonNullable<Provider['service_catalogue']>;
-  serviceOfferings?: NonNullable<Provider['service_offerings']>;
-  modelGroupsMaximum?: number;
   /** Native reports are shared by HTTP reads and the resource feed. */
   harnessReports?: Provider['harnesses'];
   planUsage?:PlanSeed;
@@ -255,10 +241,6 @@ interface ProviderRecord {
   secrets: string[];
   facts: Provider['facts'];
   sources?: Provider['sources'];
-  /** Explicit source-view fixtures are shared by direct and admitted native reads. */
-  sourceFactStates?: Provider['facts_state'];
-  fixtureFactsState?: Provider['facts_state'];
-  nextFactsFixture?: ProviderFactsFixture;
   runtimeConfig?: Record<string,unknown>;
   running: number;
   /** Who may use it besides its owner, and who may manage it. */
@@ -268,13 +250,6 @@ interface ProviderRecord {
   revision: number;
   createdAt: string;
   heldBy: string | null;
-}
-
-function applyProviderFacts(record: ProviderRecord, fixture: ProviderFactsFixture): void {
-  record.name = fixture.name;
-  record.facts = fixture.facts;
-  record.sources = fixture.sources;
-  record.fixtureFactsState = fixture.facts_state;
 }
 
 function defaultProviderSource(record:ProviderRecord,element:'facts' | 'models',offers:ProviderSetup['sources']):SourceChoice {
@@ -298,7 +273,6 @@ interface AgentRecord {
 interface EnvironmentRecord {
   /** The verified unit generation after a retained-volume restoration. */
   generation?: number;
-  sandboxReadiness?: EnvironmentSandboxReadiness;
   id: string;
   name: string;
   owner: string;
@@ -490,7 +464,7 @@ export class Resources {
   readonly mcpServers = new Map<string, EnvironmentMcp>();
   /** Explicitly controlled update/reconnect phases, without a timer that can race a browser assertion. */
   private componentUpdates = new Map<string, ComponentUpdate>();
-  private driverFacts = new Map<string, Partial<Pick<Host, 'drivers' | 'storages' | 'capacity' | 'kept_layers'>>>();
+  private driverFacts = new Map<string, Pick<Host, 'drivers' | 'storages'> & Partial<Pick<Host, 'capacity'>>>();
   private templateDriversReported = true;
   /** The jobs that end later: an environment that is starting is running a moment after. */
   private timers = new Set<NodeJS.Timeout>();
@@ -1067,7 +1041,6 @@ export class Resources {
 
   private machineFacts(record: MachineRecord): unknown {
     return {
-      revision: record.revision ?? 1,
       role_management:{supported:!record.roles?.includes('node'),delegated:this.machineKeyHanded(record,'machine.roles'),enabled:record.policy['machine.roles']===true},
       programs:this.machinePrograms(null,record),
       dedicated: record.dedicated === true,
@@ -1088,7 +1061,7 @@ export class Resources {
       ],
       plugins: (record.programs ?? []).map((entry)=>({kind:entry.kind==='agent'?'adapter':'provider',name:entry.name,version:entry.version ?? '',state:entry.ready?'running':'failed',descriptor:entry.kind==='provider_source'?entry.descriptor:null})),
       policy: record.policy,
-      rates: record.rates ?? record.linkRates ?? { up_bps: 1_500_000, down_bps: 2_800_000, round_trip_ms: record.roundTripMs },
+      rates: { up_bps: 1_500_000, down_bps: 2_800_000, round_trip_ms: record.roundTripMs },
       clock_offset_ms: 0,
     };
   }
@@ -1216,9 +1189,7 @@ export class Resources {
   }
 
   private machine(record: MachineRecord): Machine {
-    return { ...unplacedGrouping(),
-      ...(record.dataDirectory === undefined ? {} : { data_directory: record.dataDirectory }),
-      revision: record.revision ?? 1,
+    return {
       role_management:{supported:!record.roles?.includes('node'),delegated:this.machineKeyHanded(record,'machine.roles'),enabled:record.policy['machine.roles']===true},
       access:{permissions:['machine.view','machine.use','machine.manage','access.own','access.manage'],admin_only:[],administers:false,admin_access:null,participating:true,through:[{kind:'owner'}]},
       installation:this.installation(record),
@@ -1304,7 +1275,7 @@ export class Resources {
     }
     const listsModels=(sources.models.descriptor?.models ?? null) !== null;
     factsState.models=record.facts.models !== null ? record.facts.models.length > 0 ? 'told' : 'empty' : listsModels && record.facts.field_times.models !== undefined ? 'empty' : listsModels ? 'not_read_yet' : 'unsupported';
-    return { ...unjudgedProvenance(),
+    return {
       runtime_support:{resource_limits:{cpu:'reported',memory:'reported',pids:'reported',disk:'reported'},data_storage:machine===undefined?undefined:{made_by_orch:'directory',existing_directory:machine.os==='linux',reason:machine.os==='linux'?null:'This platform has not verified existing harness homes.'},home:homeSource,machine_id:machine?.id,driver:null,lifecycle:machine===undefined?'unit':'attach',commands_after_start:{supported:machine?.os!=='windows',reason:machine?.os==='windows'?'This machine cannot supervise a complete command process group.':null},
         after_up:machine===undefined?null:machine.policy['environment.after_up']===true,
         sign_in:record.kind==='subscription'?{home_owned:homeOwned,policy_allowed:typeof signInPolicy==='boolean'?signInPolicy:null,allowed:homeOwned || signInPolicy===true}:null},
@@ -1324,14 +1295,6 @@ export class Resources {
       held_by: null,
       runtime_config: record.runtimeConfig ?? {},
       upstreams: record.upstreams,
-      model_group_options: record.modelGroupOptions ?? {},
-      service_offerings: record.serviceOfferings ?? {},
-      service_catalogue: (record.serviceCatalogue ?? []).map((service) => {
-        const choice = record.serviceOfferings?.[service.id];
-        return { ...service, enabled: choice?.enabled ?? false, groups: choice?.groups ?? service.declared_groups,
-          prices: { ...service.catalogue_prices, ...choice?.prices }, explicit_prices: Object.keys(choice?.prices ?? {}) };
-      }),
-      model_groups_max: record.modelGroupsMaximum ?? 8,
       secrets_set: record.secrets,
       config: {},
       subscription: record.kind === 'subscription' ? { accepted: true, shareable: true } : null,
@@ -1344,12 +1307,12 @@ export class Resources {
       status_at: LATER_AT,
       ...(withPlan && record.planUsage!==undefined ? {plan_forecasts:record.planUsage.forecasts} : {}),
       facts: record.facts,
-      facts_state: record.sourceFactStates ?? record.fixtureFactsState ?? factsState,
+      facts_state: factsState,
       sources,
       facts_overridden: [],
       last_reset: null,
-      facts_at: record.planUsage?.at ?? (record.facts.plan === null ? null : new Date(this.born - 5 * 60_000).toISOString()),
-      facts_requested_at: record.facts.plan === null ? null : record.planUsage?.at ?? new Date(this.born - 5 * 60_000).toISOString(),
+      facts_at: record.planUsage?.at ?? (record.facts.plan === null ? null : inMs(-5 * 60_000)),
+      facts_requested_at: record.facts.plan === null ? null : inMs(-5 * 60_000),
       models: record.models,
       running_threads: record.running,
       runtime: null,
@@ -1477,7 +1440,6 @@ export class Resources {
       index: record.index ?? 'full',
       index_reason: record.index === 'live' ? 'entries' : null,
       template: template === undefined ? null : { id: template.id, name: template.name, driver: template.driver },
-      sandbox_readiness: record.sandboxReadiness ?? null,
       generation: record.generation ?? 0,
       ports_exposed: this.world.ports.exposed(record.id),
       updates: Array.from({ length: record.updates }, (_, n) => ({ name: n === 0 ? 'Image' : 'Exec node', what: n === 0 ? 'image' : 'executor', from: '0.1.0', to: '0.1.1' })),
@@ -1862,7 +1824,7 @@ export class Resources {
   }
 
   private providerSetup(): ProviderSetup {
-    const field = (name: string, label: string, type: 'text' | 'choice' | 'map' | 'secret_map' | 'json', help: string | null, choices: { value: string; label: string }[] | null = null) => ({
+    const field = (name: string, label: string, type: 'text' | 'choice' | 'map' | 'secret_map', help: string | null, choices: { value: string; label: string }[] | null = null) => ({
       name,
       label,
       type,
@@ -1881,21 +1843,13 @@ export class Resources {
       field('headers', 'Headers', 'map', 'Headers sent with every request to this endpoint.'),
       field('secret_headers', 'Secret headers', 'secret_map', 'Headers whose values are secrets. They are stored like the key and never shown again.'),
       field('query', 'Query parameters', 'map', 'Parameters added to the address of every request.'),
-      field('request_options', 'Request options', 'json', 'Option declarations by interface.'),
       // An option that its descriptor gives no help for: it has no "?".
       field('organization', 'Organization', 'text', null),
     ];
     const codex = this.agentRef(this.findAgent(fixtureId(KIND.agent, 1)));
     const claude = this.agentRef(this.findAgent(fixtureId(KIND.agent, 2)));
-    return { grouping: [],
-      machines:this.machines.filter((machine)=>machine.status==='active').map((machine)=>{
-        const arrangements = machine.policy['provider.arrangements'];
-        const upstreams = machine.policy['provider.upstreams'];
-        const types: ArrangementType[] = ['separated', 'key_separated', 'credential_shared', 'handed_over'];
-        return { machine:this.machineRef(machine),directory_runtime:true,roles:['agent','provider'],harnesses:machine.harnesses.map((harness)=>harness.kind),
-          arrangements: Array.isArray(arrangements) ? types.filter((type) => arrangements.includes(type)) : null,
-          upstreams: Array.isArray(upstreams) ? upstreams.filter((url: unknown): url is string => typeof url === 'string') : null };
-      }),
+    return {
+      machines:this.machines.filter((machine)=>machine.status==='active').map((machine)=>({machine:this.machineRef(machine),directory_runtime:true,roles:['agent','provider'],harnesses:machine.harnesses.map((harness)=>harness.kind)})),
       api_arrangements: this.arrangementConsents(['separated', 'key_separated']),
       http_allowed: false,
       key_machines: this.machines.filter((machine) => machine.status === 'active' && machine.online).map((machine) => this.machineRef(machine)),
@@ -1909,7 +1863,7 @@ export class Resources {
             network:{mode:'bridge',egress:'open',dns:[]},security:{read_only_rootfs:true,no_new_privileges:true,cap_add:[],cap_drop:['ALL']},
             env:{LLAMA_ARG_MODEL:'/opt/models/embeddinggemma-2-Q8_0.gguf',LLAMA_ARG_ALIAS:'embeddinggemma-2',LLAMA_ARG_EMBEDDINGS:'true',LLAMA_ARG_POOLING:'mean',LLAMA_ARG_HOST:'127.0.0.1',LLAMA_ARG_PORT:'8090',LLAMA_ARG_CTX_SIZE:'2048',LLAMA_ARG_BATCH:'2048',LLAMA_ARG_UBATCH:'2048',LLAMA_ARG_THREADS:'4',EMBEDDINGS_START_SECS:'120'},
             mounts:[{type:'tmpfs',target:'/tmp'}],after_up:[{name:'embeddings',command:['/bin/bash','/opt/llama/serve'],timeout_secs:300}],plugins:[],host_labels:[]}}},
-        { name: 'OpenAI', note: null, docs_url: null, upstreams: [{ protocol: 'openai-responses', base_url: 'https://api.openai.com/v1', options: {} }], credential_hints: [{ prefix: 'fixture-model-', role: 'model' }, { prefix: 'fixture-admin-', role: 'admin', field: 'admin_key' }] },
+        { name: 'OpenAI', note: null, docs_url: null, upstreams: [{ protocol: 'openai-responses', base_url: 'https://api.openai.com/v1', options: {} }] },
         { name: 'Anthropic', note: null, docs_url: null, upstreams: [{ protocol: 'anthropic-messages', base_url: 'https://api.anthropic.com', options: {} }] },
         { name: 'OpenRouter', note: null, docs_url: null, upstreams: [{ protocol: 'openai-chat', base_url: 'https://openrouter.ai/api/v1', options: {} }] },
         { name: 'DeepSeek', note: 'Serves both formats on the same key.', docs_url: null, upstreams: [{ protocol: 'openai-responses', base_url: 'https://api.deepseek.com', options: {} }, { protocol: 'anthropic-messages', base_url: 'https://api.deepseek.com/anthropic', options: {} }] },
@@ -2051,12 +2005,7 @@ export class Resources {
       record.arrangements = chosen;
     }
     if (Array.isArray(body.upstreams)) record.upstreams = body.upstreams as Provider['upstreams'];
-    if (body.model_group_options !== undefined) {
-      if (!isRecord(body.model_group_options)) this.invalid('model_group_options', 'group options are an object');
-      record.modelGroupOptions = structuredClone(body.model_group_options) as NonNullable<Provider['model_group_options']>;
-    }
     if (isRecord(body.runtime_config)) record.runtimeConfig=body.runtime_config;
-    if (isRecord(body.service_offerings)) record.serviceOfferings = structuredClone(body.service_offerings) as NonNullable<Provider['service_offerings']>;
     record.revision += 1;
     return this.provider(person, record);
   }
@@ -2163,12 +2112,6 @@ export class Resources {
   }
 
   // ---------------------------------------------------------------- what a thread could be bound to, before it exists
-
-  /** Binding and placement replies share the reader's protected home path; no birth-machine report is fabricated. */
-  placementMetadata(person: Person, homeId: string | null): Pick<BindingEnvironment, 'availability' | 'home' | 'home_path' | 'origin_machine'> {
-    const path = homeId === null ? [] : this.world.places.pathFor(person, homeId);
-    return { availability: [], home: path.find((node) => node.id === homeId) ?? null, home_path: path, origin_machine: null };
-  }
 
   /**
    * The executors an environment offers a harness that runs apart from its tools, in the order it tries them: what its
@@ -2304,24 +2247,16 @@ export class Resources {
   }
 
   /** The agent profiles a provider could run, as the server lists them for the dialog: those that can be placed with what each can be placed in, and those whose harness never reported, not offered. */
-  private agentsFor(person: Person, provider: ProviderRecord, environmentId: string | null, prefer: readonly ArrangementType[], allowed: readonly ArrangementType[] | null): BindingAgent[] {
-    const mayInspect = this.held(person, 'provider', provider.owner, provider.uses, provider.manages).permissions.includes('provider.manage');
-    const reports = mayInspect ? provider.harnessReports ?? [] : [];
-    const priority = { online: 0, starting: 1, error: 2, offline: 3 } as const;
+  private agentsFor(provider: ProviderRecord, environmentId: string | null, prefer: readonly ArrangementType[], allowed: readonly ArrangementType[] | null): BindingAgent[] {
     return this.agents
       .filter((agent) => (provider.kind === 'subscription' ? agent.harness === provider.harness : agent.machine === null || agent.machine === provider.machine))
       .map((agent): BindingAgent => {
         const ref = this.agentRef(agent);
-        const metadata = { ...this.placementMetadata(person, agent.home),
-          owner: agent.owner !== null && this.held(person, 'agent', agent.owner, [], []).permissions.includes('agent.view') ? this.userOf(agent.owner) : null };
-        const report = reports.filter((report) => report.agent.id === agent.id && (provider.machine === null || report.machine.id === provider.machine))
-          .sort((one, other) => priority[one.status] - priority[other.status] || (other.last_active_at ?? '').localeCompare(one.last_active_at ?? '') || one.machine.id.localeCompare(other.machine.id))[0];
-        const program = report === undefined ? {} : { program_report: { status: report.status, detail: report.status_detail } };
-        if (agent.disabled) return { ...metadata, agent: ref, ...program, usable: false, reason: 'disabled', arrangements: [] };
-        if (Object.keys(agent.descriptor).length === 0) return { ...metadata, agent: ref, ...program, usable: false, reason: report?.status === 'error' ? 'harness_error' : 'harness_unreported', arrangements: [] };
+        if (agent.disabled) return { agent: ref, usable: false, reason: 'disabled', arrangements: [] };
+        if (Object.keys(agent.descriptor).length === 0) return { agent: ref, usable: false, reason: 'harness_unreported', arrangements: [] };
         const arrangements = this.arrangementsOf(agent.id, provider.id, environmentId, prefer, allowed);
         const usable = arrangements.some((choice) => choice.available && choice.permitted);
-        return { ...metadata, agent: ref, ...program, usable, reason: usable ? null : arrangements[0]?.reason ?? 'binding_incompatible', arrangements };
+        return { agent: ref, usable, reason: usable ? null : arrangements[0]?.reason ?? 'binding_incompatible', arrangements };
       });
   }
 
@@ -2330,7 +2265,7 @@ export class Resources {
    * and whether they may make one. `ground` is what the settings of the place say; `environmentId` the environment the arrangements are
    * judged against (the topic's default, or the one a new thread would make, where none is named).
    */
-  bindingOptions(person: Person, ground: BindingGround, environmentId: string | null, environmentNew = false): StartOptions {
+  bindingOptions(person: Person, ground: BindingGround, environmentId: string | null, environmentNew = false): BindingOptions {
     const record = environmentId === null ? null : this.findEnvironment(environmentId);
     if (record !== null) this.mustManageEnvironment(person, record);
     const topicDefault = ground.topicDefault === null ? null : (this.environments.find((candidate) => candidate.id === ground.topicDefault) ?? null);
@@ -2341,22 +2276,18 @@ export class Resources {
         return candidate.owner === person.me.username || access.includes('provider.use') || access.includes('provider.manage');
       })
       .map((candidate): BindingProvider => {
-        const access = this.held(person, 'provider', candidate.owner, candidate.uses, candidate.manages).permissions;
-        const may = access.includes('provider.use');
+        const may = this.held(person, 'provider', candidate.owner, candidate.uses, candidate.manages).permissions.includes('provider.use');
         const reason = !may ? 'no_use' : candidate.status === 'disabled' ? 'disabled' : null;
         return {
-          ...this.placementMetadata(person, candidate.home),
-          owner: access.includes('provider.view') ? this.userOf(candidate.owner) : null,
           provider: this.providerRef(candidate),
           usable: reason === null,
           reason,
           models: candidate.models.map((model): ModelOption => ({ ...MODEL_ESTIMATE, allowed: model.enabled, display_name: model.display_name, model_name: model.model_name, parameters: model.parameters, reason: model.enabled ? null : 'disabled' })),
-          agents: this.agentsFor(person, candidate, judged?.id ?? null, ground.prefer, ground.allowed),
+          agents: this.agentsFor(candidate, judged?.id ?? null, ground.prefer, ground.allowed),
         };
       });
     const mayMake = this.mayMake(person);
     return {
-      viewer_default:this.world.settings.viewerDefault(person,ground.node.id),
       defaults: { provider_id: ground.defaults.provider, agent_id: ground.defaults.agent, model_name: ground.defaults.model, effort: ground.defaults.effort, locked: ground.defaults.locked },
       providers,
       environments: this.environmentsFor(person, ground),
@@ -2392,8 +2323,6 @@ export class Resources {
         const host = this.hosts.find((candidate) => candidate.id === record.host);
         const isDefault = ground.topicDefault === record.id;
         const row: BindingEnvironment = {
-          ...this.placementMetadata(person, record.home),
-          owner: this.held(person, 'environment', record.owner, record.uses, record.manages).permissions.includes('environment.view') ? this.userOf(record.owner) : null,
           environment: this.environmentRef(record),
           host: host === undefined ? null : { id: host.id, name: host.name, address: host.home === null ? `system.${host.name}` : `acme.${host.owner ?? 'ada'}.${host.name}` },
           machine: machine === undefined ? null : this.machineRef(machine),
@@ -2458,7 +2387,7 @@ export class Resources {
     const model=modelId===null?null:provider?.models.find((model)=>model.id===modelId);
     if(modelId!==null&&model===undefined)throw new Refusal(404,'not_found','there is no such model');
     const ids=[...this.bindings].filter(([thread,binding])=>(kind==='provider'?binding.provider===id:kind==='agent'?binding.agent===id:binding.environment===id)&&((model===null||model===undefined)||binding.model===model.model_name)&&this.world.places.rowOf(thread)?.deleted!==true).map(([thread])=>thread);
-    const visible=(threads:readonly string[])=>threads.filter((thread)=>this.unseenThread?.(thread)!==true&&this.world.places.access(person,thread).permissions.includes('thread.view')).map((thread)=>({object:{kind:'thread' as const,id:thread},name:this.world.places.rowOf(thread)?.name??'',relation:'binding' as const,until:null}));
+    const visible=(threads:readonly string[])=>threads.filter((thread)=>this.world.places.access(person,thread).permissions.includes('thread.view')).map((thread)=>({object:{kind:'thread' as const,id:thread},name:this.world.places.rowOf(thread)?.name??'',relation:'binding' as const,until:null}));
     interface Work {thread:string;at:string|null}
     const running:Work[]=[],waiting:Work[]=[];
     for(const thread of ids) {
@@ -2568,8 +2497,7 @@ export class Resources {
       for(const [role,used] of [['environment',this.environments.some((entry)=>entry.machine===record.id)],['agent',this.agents.some((entry)=>entry.machine===record.id)],['provider',this.providers.some((entry)=>entry.machine===record.id)]] as const) {
         if(used && !roles.includes(role))this.invalid('roles',`Remove its registered ${role} resources before turning off this role.`);
       }
-      if(body.expected_revision!==undefined && body.expected_revision!==(record.revision ?? 1))throw new Refusal(409,'conflict.stale_revision','The machine changed.',{current:{id:record.id,revision:record.revision ?? 1}});
-      record.roles=roles;record.revision=(record.revision ?? 1)+1;
+      record.roles=roles;
       this.world.users.tellAll({what:'resources',kind:'machine',id:record.id});
       return {status:200,body:{machine_view:this.machine(record),requested_roles:roles,reconnecting:false}};
     }
@@ -2707,13 +2635,7 @@ export class Resources {
         record.status = 'needs_setup';
         this.recomputeStatus(record);
       }
-      if (found[2] === 'refresh') {
-        if (record.nextFactsFixture === undefined) record.facts.plan = record.facts.plan ?? null;
-        else {
-          applyProviderFacts(record, record.nextFactsFixture);
-          delete record.nextFactsFixture;
-        }
-      }
+      if (found[2] === 'refresh') record.facts.plan = record.facts.plan ?? null;
       record.revision += 1;
       return { status: 200, body: this.provider(person, record,true) };
     }
@@ -2748,15 +2670,11 @@ export class Resources {
       return {
         status: 200,
         body: this.settingsOf([
-          ['runtime.idle_stop_minutes', 0],
+          ['runtime.idle_stop_minutes', 1440],
           ['runtime.template_id', fixtureId(KIND.template, 2)],
           ['runtime.host_id', null],
           ['runtime.update', 'manual'],
           ['runtime.renew_days', 7],
-          ['providers.facts_idle_minutes', 60],
-          ['providers.facts_active_minutes', 5],
-          ['providers.facts_recent_minutes', 15],
-          ['providers.facts_refused_minutes', 5],
         ]),
       };
     }
@@ -3092,105 +3010,6 @@ export class Resources {
   /** The requests only the double has for resources. */
   control(path: string, body: Record<string, unknown>): Answer | null {
     switch (path) {
-      case '/environment-readiness': {
-        const environment = this.environments.find((row) => row.id === body.environment_id);
-        if (environment === undefined) return { status: 404 };
-        if (!isRecord(body.readiness) || !isRecord(body.readiness.environment) || body.readiness.environment.id !== environment.id) return { status: 400 };
-        environment.sandboxReadiness = body.readiness as unknown as EnvironmentSandboxReadiness;
-        this.world.users.tellAll({ what: 'resources', kind: 'environment', id: environment.id });
-        return { status: 204 };
-      }
-      case '/provider-services': {
-        const record = this.providers.find((row) => row.id === body.id);
-        if (record === undefined) return { status: 404 };
-        if (!Array.isArray(body.catalogue) || body.catalogue.some((row: unknown) => !isRecord(row) || typeof row.id !== 'string')) return { status: 422 };
-        // Discovery and manager choices share the native record; discovery does not opt in.
-        record.serviceCatalogue = structuredClone(body.catalogue) as NonNullable<Provider['service_catalogue']>;
-        record.revision += 1;
-        this.world.users.tellAll({ what: 'resources', kind: 'provider', id: record.id });
-        return { status: 204 };
-      }
-      case '/provider-source-view': {
-        const record = this.providers.find((row) => row.id === body.id);
-        const owner = record === undefined ? undefined : this.world.people.get(record.owner);
-        if (record === undefined || owner === undefined) return { status: 404 };
-        const view = body.view;
-        if (view !== undefined) {
-          if (!isRecord(view) || !isRecord(view.sources) || !isRecord(view.facts) || !isRecord(view.facts_state)
-            || !Array.isArray(view.secrets_set) || view.secrets_set.some((value) => typeof value !== 'string')) return { status: 422 };
-          // Presentation facts only; ownership, reach and write authority keep the native record.
-          record.sources = structuredClone(view.sources) as Provider['sources'];
-          record.facts = structuredClone(view.facts) as Provider['facts'];
-          record.sourceFactStates = structuredClone(view.facts_state) as Provider['facts_state'];
-          record.secrets = (view.secrets_set as unknown[]).filter((value): value is string => typeof value === 'string');
-          record.revision += 1;
-          this.world.users.tellAll({ what: 'resources', kind: 'provider', id: record.id });
-        }
-        return { status: 200, body: this.provider(owner, record) };
-      }
-      case '/provider-facts': {
-        const provider = this.providers.find((row) => row.id === body.provider_id);
-        if (provider === undefined || typeof body.name !== 'string' || !isRecord(body.facts)
-          || !isRecord(body.facts.field_times) || !isRecord(body.facts_state) || !isRecord(body.sources)) {
-          return { status: 400, body: { detail: 'Provider facts need a known provider and a native observation.' } };
-        }
-        const fixture = {
-          name: body.name, facts: body.facts, facts_state: body.facts_state, sources: body.sources,
-        } as unknown as ProviderFactsFixture;
-        if (body.on_refresh === true) provider.nextFactsFixture = fixture;
-        else {
-          applyProviderFacts(provider, fixture);
-          provider.revision += 1;
-        }
-        return { status: 204 };
-      }
-      case '/agent-terminal': {
-        const agent = this.agents.find((row) => row.id === body.agent_id);
-        if (agent === undefined) return { status: 404 };
-        const capabilities = isRecord(agent.descriptor.capabilities) ? agent.descriptor.capabilities : {};
-        agent.descriptor = { ...agent.descriptor, capabilities: { ...capabilities, agent_terminal: 'interactive' } };
-        agent.revision += 1;
-        this.world.users.tellAll({ what: 'resources', kind: 'agent', id: agent.id });
-        return { status: 204 };
-      }
-      case '/model-observation': {
-        const provider = this.providers.find((row) => row.id === body.provider_id);
-        if (provider === undefined || !Array.isArray(body.models)) return { status: 400 };
-        provider.facts.models = body.models as ModelSuggestion[];
-        if (typeof body.at === 'string') provider.facts.field_times.models = body.at;
-        provider.revision += 1;
-        this.world.users.tellAll({ what: 'resources', kind: 'provider', id: provider.id });
-        return { status: 204 };
-      }
-      case '/machine-link': {
-        const machine = this.machines.find((row) => row.id === body.machine_id);
-        if (machine === undefined) return { status: 404 };
-        const rates = body.rates;
-        if (!isRecord(rates) || Object.entries(rates).some(([key, value]) =>
-          !['round_trip_ms', 'up_bps', 'down_bps'].includes(key)
-          || value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0))) return { status: 422 };
-        machine.linkRates = { ...rates } as Record<string, number | null>;
-        this.world.users.tellAll({ what: 'resources', kind: 'machine', id: machine.id });
-        return { status: 204 };
-      }
-      case '/machine-data-inventory': {
-        const machine = this.machines.find((row) => row.id === asText(body.id));
-        if (machine === undefined) return { status: 404 };
-        if (!isRecord(body.inventory) || !Array.isArray(body.inventory.parts)) return { status: 400 };
-        machine.dataDirectory = body.inventory as unknown as MachineDataInventory;
-        return { status: 204 };
-      }
-      case '/machine-rates': {
-        const machine = this.machines.find((row) => row.id === asText(body.machine_id));
-        if (machine === undefined) return { status: 404 };
-        if (!isRecord(body.rates) || !Object.entries(body.rates).every(([key, value]) =>
-          ['round_trip_ms', 'up_bps', 'down_bps'].includes(key)
-          && (value === null || typeof value === 'number' && Number.isFinite(value) && value >= 0))) return { status: 422 };
-        machine.rates = { ...body.rates };
-        machine.revision = (machine.revision ?? 1) + 1;
-        this.world.users.tellAll({ what: 'resources', kind: 'machine', id: machine.id });
-        return { status: 204 };
-      }
       case '/machine-programs': {
         const machine=this.machines.find((row)=>row.id===asText(body.machine_id));
         if(machine===undefined) return {status:404};
@@ -3228,7 +3047,6 @@ export class Resources {
       case '/host-driver-facts': {
         const host = this.findHost(asText(body.id));
         this.driverFacts.set(host.id, { drivers: body.drivers as Host['drivers'], storages: body.storages as Host['storages'],
-          ...(body.kept_layers === undefined ? {} : { kept_layers: body.kept_layers as Host['kept_layers'] }),
           ...(body.capacity === undefined ? {} : { capacity: body.capacity as Host['capacity'] }) });
         return { status: 200, body: { id: host.id } };
       }
@@ -3265,18 +3083,6 @@ export class Resources {
       case '/template-hosts': {
         if (typeof body.reported === 'boolean') this.templateDriversReported = body.reported;
         if (body.state === 'none') this.hosts = [];
-        else if (body.state === 'choice-reasons') {
-          const base = this.hosts.find((host) => host.schedulable);
-          if (base === undefined) return { status: 409 };
-          const usable = { ...base, uses: ['ada'], manages: [] };
-          const otherDriver = { ...usable, id: fixtureId(KIND.host, 84), name: 'Other driver' };
-          this.hosts.push(
-            { ...usable, id: fixtureId(KIND.host, 83), name: 'Closed host', schedulable: false },
-            otherDriver,
-            { ...usable, id: fixtureId(KIND.host, 85), name: 'Read-only host', owner: 'grace', uses: [] },
-          );
-          this.driverFacts.set(otherDriver.id, { drivers: [] });
-        }
         else if (body.state === 'offline' || body.state === 'online') {
           for (const host of this.hosts) {
             host.online = body.state === 'online';
@@ -3335,13 +3141,7 @@ export class Resources {
         // The harness of a profile has said what it is (or is made to have said nothing): what an adapter does once it has started somewhere.
         const agent = this.agents.find((candidate) => candidate.id === asText(body.agent) || candidate.name === asText(body.agent));
         if (agent === undefined) return { status: 404, body: { detail: 'no such agent profile' } };
-        if (body.parameters !== undefined && (!Array.isArray(body.parameters) || !body.parameters.every((entry) => isRecord(entry) && typeof entry.key === 'string'))) return { status: 422 };
-        if (body.text !== undefined && (!isRecord(body.text) || Object.values(body.text).some((locale) => !isRecord(locale) || Object.values(locale).some((value) => typeof value !== 'string')))) return { status: 422 };
-        if (body.descriptor !== undefined && !isRecord(body.descriptor)) return { status: 422 };
         this.report(agent.id, body.reported !== false);
-        if (isRecord(body.descriptor)) agent.descriptor = { ...agent.descriptor, ...body.descriptor };
-        if (Array.isArray(body.parameters)) agent.descriptor = { ...agent.descriptor, parameters: body.parameters };
-        if (isRecord(body.text)) agent.descriptor = { ...agent.descriptor, text: structuredClone(body.text) };
         return { status: 204 };
       }
       case '/cannot-make': {

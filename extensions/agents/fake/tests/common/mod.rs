@@ -242,7 +242,6 @@ impl Fake {
         let directory = self.work_path();
         SessionSpec {
             settings: SessionSettings {
-                native_model: None,
                 agent_id: self.agent,
                 thread_id: new_id(),
                 segment_id: new_id(),
@@ -262,9 +261,7 @@ impl Fake {
                 instructions: "You are working inside Orch.".to_owned(),
                 available_models: vec!["fake-large".to_owned()],
                 subagent_limits: Default::default(),
-                prompt_cache_ttl: None,
                 background_wake: true,
-                image_generation: None,
                 memory: None,
                 arrangement: ArrangementType::Together,
                 orch_tools: vec![],
@@ -337,7 +334,6 @@ impl Fake {
     #[must_use]
     pub fn turn_of(&self, session: &Session, text: &str) -> TurnStart {
         TurnStart {
-            native_model: None,
             native_wake: None,
             plan: false,
             thread_id: session.thread,

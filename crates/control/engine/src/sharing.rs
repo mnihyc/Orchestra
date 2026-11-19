@@ -64,9 +64,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError};
 
-pub mod creation;
 pub mod current;
-mod effective;
 mod preparation;
 pub use preparation::PreparedAgentShare;
 
@@ -131,8 +129,6 @@ pub struct Found {
     pub org: Id,
     /// The node it lies at or beside; none for a direct or a group chat.
     pub node: Option<Id>,
-    /// Actual policy home; group chats keep their own permission page at this home.
-    pub policy_node: Option<Id>,
     /// For a place: `org`, `project`, `topic` or `thread`.
     pub place_kind: Option<String>,
     /// What it is called: a title, or the name of the place or chat.
@@ -185,8 +181,6 @@ pub struct ThreadShares {
 /// The ordinary agent-sharing producer examined in a transaction its caller must roll back.
 #[derive(Debug, Clone)]
 pub struct ShareTrial {
-    /// Exact effective native reads before any proposed gift or human-viewer change.
-    pub effective_before: BTreeMap<Id, orch_api_contract::share::AgentReadBefore>,
     /// Current live shares before the trial.
     pub before: Vec<Record>,
     /// Proposed live shares, never committed or announced.
@@ -201,37 +195,6 @@ pub struct ShareTrial {
     pub copies: Vec<(Id, i64, i64, bool)>,
     /// Frozen areas of an already sent copy, rather than a changed request with the same client id.
     pub copy_parts: BTreeMap<Id, ShareParts>,
-}
-
-/// A native share whose transaction still belongs to its entrypoint's confirmation.
-/// Dropping it rolls back both the entries and the queued copy delivery.
-pub struct PendingShare<T> {
-    tx: Tx,
-    finished: Finished,
-    output: T,
-}
-
-impl<T> PendingShare<T> {
-    /// The same native transaction, before the history becomes available to recipients.
-    pub fn connection(&mut self) -> &mut Conn {
-        &mut self.tx
-    }
-
-    /// Publish the ordinary native result and its original follow-up work together.
-    pub async fn publish(self, engine: &Engine) -> Result<T, ShareError> {
-        engine.commit(self.tx, self.finished).await?;
-        Ok(self.output)
-    }
-}
-
-/// One native creation over its actual recipients, still awaiting entrypoint confirmation.
-pub type PendingAgentShare = PendingShare<Vec<Record>>;
-
-impl PendingAgentShare {
-    /// An accepted replay has already published its material and needs no new confirmation.
-    pub fn is_fresh(&self) -> bool {
-        self.output.iter().any(|record| record.fresh)
-    }
 }
 
 /// Why something could not be shared, or taken back.
@@ -886,7 +849,6 @@ impl Engine {
                         object: id,
                         org: row.org_id,
                         node: Some(row.node_id),
-                        policy_node: Some(row.node_id),
                         place_kind: None,
                         name: row.title,
                         people_chat: false,
@@ -919,9 +881,6 @@ impl Engine {
                     object: row.node_id.unwrap_or(row.id),
                     org: row.org_id,
                     node: row.node_id,
-                    policy_node: row.node_id.or_else(|| {
-                        (row.kind == orch_db::queries::chats::KIND_GROUP).then(|| row.home())
-                    }),
                     place_kind: None,
                     name,
                     people_chat: people,
@@ -964,7 +923,6 @@ fn node_found(place: &PlaceRow) -> Found {
         object: place.id,
         org: place.org_id,
         node: Some(place.id),
-        policy_node: Some(place.id),
         place_kind: Some(place.kind.clone()),
         name: place.name.clone(),
         people_chat: false,
@@ -1237,18 +1195,6 @@ impl Engine {
         let parts = prepared.parts;
         let inside = request.inside.unwrap_or(true);
         let destinations = prepared.destinations.clone();
-        crate::link_origin::check(tx, principal, request.link_origin)
-            .await
-            .map_err(|error| match error {
-                EngineError::BeforeEffect(_) => invalid(
-                    "link_origin",
-                    "the sender cannot compose in this link's source context",
-                ),
-                error => ShareError::Internal(error),
-            })?;
-        let effective_before = self
-            .effective_reads_before(tx, prepared, principal.now())
-            .await?;
         if request.viewers_read == Some(true) {
             self.give_viewers_read_in(
                 tx,
@@ -1327,7 +1273,6 @@ impl Engine {
                 }
                 if missing.is_empty() {
                     return Ok(ShareTrial {
-                        effective_before,
                         before,
                         live: Vec::new(),
                         destinations: destinations
@@ -1424,7 +1369,6 @@ impl Engine {
         }
         let source_inside = live.first().is_some_and(|record| record.inside);
         Ok(ShareTrial {
-            effective_before,
             before,
             live,
             destinations: destinations
@@ -1463,54 +1407,12 @@ impl Engine {
     /// The same atomic writer, consuming operands prepared freshly by the action guard.
     pub async fn share_prepared_with_agents_guarded(
         &self,
-        tx: Tx,
+        mut tx: Tx,
         principal: Principal,
         origin: &Origin,
         request: &ShareWithAgents,
         prepared: &PreparedAgentShare,
     ) -> Result<Vec<Record>, ShareError> {
-        self.pending_prepared_agent_share(tx, principal, origin, request, prepared)
-            .await?
-            .publish(self)
-            .await
-    }
-
-    /// The native writer, retaining the transaction for an entrypoint's informed disclosure.
-    pub async fn pending_prepared_agent_share(
-        &self,
-        mut tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        request: &ShareWithAgents,
-        prepared: &PreparedAgentShare,
-    ) -> Result<PendingAgentShare, ShareError> {
-        crate::link_origin::check(&mut tx, &principal, request.link_origin)
-            .await
-            .map_err(|error| match error {
-                EngineError::BeforeEffect(_) => invalid(
-                    "link_origin",
-                    "the sender cannot compose in this link's source context",
-                ),
-                error => ShareError::Internal(error),
-            })?;
-        orch_db::audit::scope_link_origin(
-            request.link_origin,
-            principal.user(),
-            Box::pin(self.share_prepared_with_agents_guarded_inner(
-                tx, principal, origin, request, prepared,
-            )),
-        )
-        .await
-    }
-
-    async fn share_prepared_with_agents_guarded_inner(
-        &self,
-        mut tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        request: &ShareWithAgents,
-        prepared: &PreparedAgentShare,
-    ) -> Result<PendingAgentShare, ShareError> {
         let caller = principal.caller().clone();
         let caller = &caller;
         let now = principal.now().get();
@@ -1620,12 +1522,8 @@ impl Engine {
             }
             unit.finish().await.map_err(ShareError::from)?
         };
-        creation::observe(&mut tx, caller, prepared, &records).await?;
-        Ok(PendingAgentShare {
-            tx,
-            finished,
-            output: records,
-        })
+        self.commit(tx, finished).await?;
+        Ok(records)
     }
 
     /// Writes only a live privilege gift inside the caller's guarded transaction.
@@ -1770,7 +1668,7 @@ impl Engine {
             ));
         }
         let ordinary = principal.ordinary(conn).await?;
-        let policy = match found.policy_node {
+        let policy = match found.node {
             Some(node) => self.policy_at(conn, node).await?,
             None => Policy::default(),
         };
@@ -1934,7 +1832,7 @@ impl Engine {
         found: &Found,
         wanted: Vec<Row>,
     ) -> Result<Vec<Row>, ShareError> {
-        let policy = match found.policy_node {
+        let policy = match found.node {
             Some(node) => self.policy_at(tx, node).await?,
             None => Policy::default(),
         };
@@ -2169,7 +2067,7 @@ impl Engine {
         if delta.is_empty() {
             return Ok(());
         }
-        let policy = match found.policy_node {
+        let policy = match found.node {
             Some(node) => self.policy_at(tx, node).await?,
             None => Policy::default(),
         };
@@ -2378,7 +2276,7 @@ impl Engine {
         conn: &mut Conn,
         found: &Found,
     ) -> Result<(i64, Option<Id>), ShareError> {
-        let at = found.policy_node.unwrap_or(found.org);
+        let at = found.node.unwrap_or(found.org);
         let def = definition_of(keys::SHARING_SNAPSHOT_MAX_BYTES)?;
         let snapshot = orch_settings::Snapshot::load(
             conn,
@@ -2589,6 +2487,24 @@ impl Engine {
 // ---------------------------------------------------------------- telling the thread
 
 impl Engine {
+    /// The marker and the notice of a share, for `thread`: `begun` is whether it was made or ended.
+    #[expect(
+        dead_code,
+        reason = "consumed by the share update cohort of held-plan-ws"
+    )]
+    pub(crate) async fn put_share_line(
+        &self,
+        unit: &mut Unit<'_>,
+        thread: Id,
+        record: &Record,
+        found: &Found,
+        by: Id,
+        begun: bool,
+    ) -> Result<(), EngineError> {
+        self.put_share_line_in(unit, thread, record, found, by, begun, true)
+            .await
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the same history marker with one bounded source-name projection"
@@ -3252,27 +3168,12 @@ impl Engine {
     /// The same writer consumes those native operands and its opaque check at the first actual mutation.
     pub async fn update_prepared_share_guarded<'a>(
         &self,
-        tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        prepared: &PreparedShareUpdate,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<ShareUpdateResult, ShareError> {
-        self.pending_prepared_share_update(tx, principal, origin, prepared, before)
-            .await?
-            .publish(self)
-            .await
-    }
-
-    /// Keep a changed contribution in the same native transaction until its disclosure is confirmed.
-    pub async fn pending_prepared_share_update<'a>(
-        &self,
         mut tx: Tx,
         principal: Principal,
         origin: &Origin,
         prepared: &PreparedShareUpdate,
         before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<PendingShare<ShareUpdateResult>, ShareError> {
+    ) -> Result<ShareUpdateResult, ShareError> {
         let transaction: i64 = sqlx::query_scalar("SELECT txid_current()")
             .fetch_one(&mut *tx)
             .await
@@ -3406,13 +3307,10 @@ impl Engine {
             unit.finish().await?
         };
         let changed = !boundary.pending();
-        Ok(PendingShare {
-            tx,
-            finished,
-            output: ShareUpdateResult {
-                record: updated,
-                changed,
-            },
+        self.commit(tx, finished).await?;
+        Ok(ShareUpdateResult {
+            record: updated,
+            changed,
         })
     }
 
@@ -3679,7 +3577,6 @@ impl Engine {
                     object: copy.object_id,
                     org: place.org_id,
                     node: None,
-                    policy_node: None,
                     place_kind: None,
                     name: String::new(),
                     people_chat: false,
@@ -3689,6 +3586,22 @@ impl Engine {
         }
     }
 
+    /// Takes one entry out without the page's check: for the person who made it, and for an entry of a chat.
+    #[expect(
+        dead_code,
+        reason = "consumed by the share removal cohort of held-plan-ws"
+    )]
+    async fn take_entry_out(
+        &self,
+        conn: &mut Conn,
+        by: Id,
+        found: &Found,
+        entry: Id,
+        now: DateTime<Utc>,
+    ) -> Result<(), ShareError> {
+        self.take_entry_out_with_boundary(conn, by, found, entry, now, None)
+            .await
+    }
     async fn take_entry_out_with_boundary(
         &self,
         conn: &mut Conn,

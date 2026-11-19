@@ -164,8 +164,6 @@ pub struct Row {
     pub root_address: Option<String>,
     /// A node chat's ordinary-thread path step, authorized in SQL without seeding every thread.
     pub path_tail: Option<Json>,
-    /// The chat's actual node, independent of a people chat's placement home.
-    pub chat_node_id: Option<Id>,
 }
 
 impl Row {

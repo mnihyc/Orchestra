@@ -291,13 +291,13 @@ pub struct MemberMoveReceipt {
 #[serde(untagged)]
 pub enum MemberMoveResponse {
     Receipt(MemberMoveReceipt),
-    Full(Box<crate::directory::Member>),
+    Full(crate::directory::Member),
 }
 
 impl MemberMoveResponse {
     pub fn into_full(self) -> Result<crate::directory::Member, MemberMoveReceipt> {
         match self {
-            Self::Full(member) => Ok(*member),
+            Self::Full(member) => Ok(member),
             Self::Receipt(receipt) => Err(receipt),
         }
     }

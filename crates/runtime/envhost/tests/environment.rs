@@ -27,9 +27,6 @@ use orch_link_contract::session::Os;
 use orch_types::{Hash, Id, SystemClock};
 use tokio::sync::mpsc;
 
-#[path = "environment/mcp_visibility.rs"]
-mod mcp_visibility;
-
 /// How long a test waits for something the host does by itself.
 const PATIENCE: Duration = Duration::from_secs(15);
 
@@ -341,7 +338,6 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
     std::fs::write(rig.root.join("code.txt"), "current").unwrap();
     std::fs::write(rig.root.join("later.txt"), "made later").unwrap();
     let make_plan = FsRestorePlan {
-        touched: None,
         environment_id: rig.env,
         snapshot_id: snapshot,
         directory: String::new(),
@@ -361,7 +357,6 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
     );
     let apply = FsRestore {
         work: None,
-        recovery_only: None,
         environment_id: rig.env,
         job_id: orch_types::new_id(),
         snapshot_id: snapshot,
@@ -388,7 +383,6 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
         .fs_restore(
             &FsRestore {
                 work: None,
-                recovery_only: None,
                 job_id: orch_types::new_id(),
                 snapshot_id: result.undo_snapshot_id,
                 undo_snapshot_id: orch_types::new_id(),
@@ -491,7 +485,6 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
         .host
         .fs_restore_plan(
             &FsRestorePlan {
-                touched: None,
                 environment_id: rig.env,
                 snapshot_id: request.snapshot_id,
                 directory: request.directory.clone(),
@@ -508,7 +501,6 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
         .fs_restore(
             &FsRestore {
                 work: None,
-                recovery_only: None,
                 environment_id: rig.env,
                 job_id: orch_types::new_id(),
                 snapshot_id: request.snapshot_id,
@@ -591,9 +583,7 @@ impl Rig {
         let listed = tokio::time::timeout(PATIENCE, async {
             loop {
                 match self.host.fs_list(&self.list(path)).await {
-                    Err(HostError::Changed(_) | HostError::Stale { .. }) => {
-                        tokio::task::yield_now().await
-                    }
+                    Err(HostError::Changed(_)) => tokio::task::yield_now().await,
                     result => break result.unwrap(),
                 }
             }
@@ -2823,9 +2813,7 @@ async fn a_tool_server_definition_is_kept_by_the_connector_only_and_forgotten_on
     .unwrap();
     let request = McpImport {
         expected_fingerprint: None,
-        stored: None,
-        transfer: None,
-        environment_id: Some(rig.env),
+        environment_id: rig.env,
         server_id,
         source: "codex".into(),
         scope: "user".into(),

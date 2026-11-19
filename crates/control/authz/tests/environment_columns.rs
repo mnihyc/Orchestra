@@ -31,7 +31,7 @@ async fn report(w: &World, machine: Id, delegated: &[&str], label: &str) {
         machine,
         &json!({"hostname":label,
         "environment_descriptor":{"lifecycle":"attach"},"policy":{"policy.delegated":delegated}}),
-        (None, None),
+        (0, 0),
         0.5,
         w.now.get(),
     )

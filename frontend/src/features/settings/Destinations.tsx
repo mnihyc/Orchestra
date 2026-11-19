@@ -13,7 +13,6 @@ import { useTranslation } from 'react-i18next';
 import { choiceOption, offeredChoice } from '@/i18n/choices';
 
 import { destinationsKey, destinationsQuery, createDestination, deleteDestination, notifiersQuery, testDestination, updateDestination } from '@/api/settings';
-import { KIND_LOOK } from '@/features/inbox/kinds';
 import { TestDialog } from '@/features/settings/org/Channels';
 import { NotifierDialog, type NotifierFormValue } from '@/features/settings/NotifierForm';
 import { takes } from '@/features/settings/refusals';
@@ -38,7 +37,6 @@ import { toast } from '@/ui/Toast';
 export const EVENT_KINDS = [
   'turn.completed',
   'turn.failed',
-  'subagent.ended',
   'thread.blocked',
   'approval.requested',
   'milestone',
@@ -99,7 +97,7 @@ function Reach({
             {EVENT_KINDS.map((kind) => (
               <Checkbox
                 key={kind}
-                label={offeredChoice(t, 'eventKind', kind.replaceAll('.', '_'))?.name ?? t(KIND_LOOK[kind].label)}
+                label={offeredChoice(t, 'eventKind', kind.replaceAll('.', '_'))?.name ?? t(`settings.destinations.kinds.${kind}`)}
                 description={offeredChoice(t, 'eventKind', kind.replaceAll('.', '_'))?.description}
                 checked={kinds.includes(kind)}
                 onCheckedChange={(on) => onKinds(on ? [...kinds, kind] : kinds.filter((other) => other !== kind))}
@@ -268,7 +266,7 @@ export function Destinations({ node, level = 2 }: { node: Org | Project | Topic;
     >
       <p className="text-sm text-text-muted">{t('settings.destinations.sends', { name: node.name })}</p>
       {list.isPending || notifiers.isPending ? (
-        <SkeletonRows reads={[list, notifiers]} rows={2} />
+        <SkeletonRows rows={2} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : notifiers.isError ? (

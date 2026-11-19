@@ -66,27 +66,6 @@ pub struct BrowserProfile {
     pub browser: Option<Id>,
 }
 
-/// Acknowledges the actual native profile creation without disclosing profile metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct BrowserProfileCreateReceipt {
-    /// This answer carries only accepted identities.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual once-only native creating command.
-    pub command_id: Id,
-    /// The environment that owns the named profile.
-    pub environment_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The native profile or its accepted creation identity.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum BrowserProfileCreateResponse {
-        /// Current profile metadata under this operation's Read.
-        Full(BrowserProfile),
-        /// The accepted native creation, without another profile command.
-        Receipt(BrowserProfileCreateReceipt),
-    }
-}
-
 /// A browser known to Orch in an environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Browser {
@@ -292,48 +271,12 @@ crate::common::full_or_receipt! {
     }
 }
 
-/// The actual accepted browser without private current session metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct BrowserCreateReceipt {
-    /// This acknowledgement contains no full session projection.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual native reservation.
-    pub browser_id: Id,
-    /// The actual native environment.
-    pub environment_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The native first/current session or its accepted identity receipt.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum BrowserCreateResponse {
-        /// Same native session metadata, under this operation's current Read.
-        Full(Browser),
-        /// No session metadata is disclosed and no service is opened twice.
-        Receipt(BrowserCreateReceipt),
-    }
-}
-
-crate::common::full_or_receipt! {
-    /// A new once-only ticket or the identity of the ticket already accepted.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum BrowserTicketCreateResponse {
-        /// The unchanged first native ticket.
-        Full(BrowserTicketCreateReply),
-        /// No credential is retained for another return.
-        Receipt(crate::common::TicketCreateReceipt),
-    }
-}
-
 crate::endpoints! {
     /// Lists an environment's browsers and profiles and optionally looks again for its programs.
     EnvironmentBrowserList: GET "/environments/{id}/browsers", Permission("browser.view"), query EnvironmentBrowserListQuery, none, json EnvironmentBrowsers, 200;
     /// Starts a browser, or joins the one already running on its profile.
-    EnvironmentBrowserCreate: POST "/environments/{id}/browsers", Permission("browser.manage"), query ThroughThreadQuery, json EnvironmentBrowserCreateBody, json BrowserCreateResponse, 201,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Object(K::Environment)],Target::PermissionObject),
-            Facet::response_content(&[Object(K::Environment)],Target::PermissionObject),
-            Facet::response_content(&[Object(K::Thread)],Target::ResolvedCollection("close_threads")),
-        ]));
+    EnvironmentBrowserCreate: POST "/environments/{id}/browsers", Permission("browser.manage"), query ThroughThreadQuery, json EnvironmentBrowserCreateBody, json Browser, 201,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Asks a browser to quit, keeping its profile.
     BrowserClose: DELETE "/browsers/{browser_id}", Rule("browser.manage on its environment"), none, none, json BrowserCloseResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -342,8 +285,8 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("close_threads")),
         ]));
     /// Gives a ticket to watch a browser, or with Manage to drive it.
-    BrowserTicketCreate: POST "/browsers/{browser_id}/ticket", Rule("browser.view on its environment; control also needs browser.manage"), none, json BrowserTicketCreateBody, json BrowserTicketCreateResponse, 200,
-        operation Op::receipt(&Op::variants(&[
+    BrowserTicketCreate: POST "/browsers/{browser_id}/ticket", Rule("browser.view on its environment; control also needs browser.manage"), none, json BrowserTicketCreateBody, json BrowserTicketCreateReply, 200,
+        operation Op::variants(&[
             Variant {
                 name: "view",
                 selector: "control is false",
@@ -369,13 +312,13 @@ crate::endpoints! {
                     ),
                 ],
             },
-        ]));
+        ]);
     /// Watches and, on a control ticket, drives a browser through a socket.
     BrowserAttach: GET "/ws/browsers/{browser_id}", Public, query BrowserAttachQuery, none, raw, 101,
         operation Op::protocol();
     /// Creates a named empty profile outside the workspace.
-    BrowserProfileCreate: POST "/environments/{id}/browser-profiles", Permission("browser.manage"), none, json BrowserProfileCreateBody, json BrowserProfileCreateResponse, 201,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject));
+    BrowserProfileCreate: POST "/environments/{id}/browser-profiles", Permission("browser.manage"), none, json BrowserProfileCreateBody, json BrowserProfile, 201,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Renames a profile that no browser runs on.
     BrowserProfileUpdate: PATCH "/environments/{id}/browser-profiles/{name}", Permission("browser.manage"), none, json BrowserProfileUpdateBody, json BrowserProfile, 200,
         operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);

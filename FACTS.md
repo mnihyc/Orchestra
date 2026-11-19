@@ -6,7 +6,7 @@ Claude Code documents native follow-up turns after background completion. Codex 
 
 ## Evidence and version boundaries
 
-- [The release manifest](deploy/harness-builds.json) pins Claude Code **2.1.322** and Codex **0.167.2**; **0.166.0 is a comparison version**, not another current manifest default. The native observations below retain their actual older versions; the updated build requires the release conformance checks.
+- [The release manifest](deploy/harness-builds.json) pins Claude Code **2.1.312** and Codex **0.165.0**; **0.166.0 is a comparison version**, not another current manifest default.
 - An isolated, network-disabled image reported Claude Code 2.1.312. Its binary SHA-256 matches the manifest. Its `--help` was captured. The same image reported Codex 0.165.0 and generated `app-server generate-json-schema --experimental`.
 - Official Codex source was read at immutable release commits: [0.165.0, 360319d8](https://github.com/openai/codex/tree/360319d8dee62d87e2d59fc0c21805d79519cfed) and [0.166.0, 6ff1e1ca](https://github.com/openai/codex/tree/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856). The terminal watcher and child-completion sender are identical in those versions. The command, collaboration and subagent-activity item variants examined are also identical; this is not a claim that the whole protocols match.
 - Claude's linked official pages are current documentation, not archived 2.1.312 documentation. Explicitly documented introduction versions help establish applicability, but do not replace an exact-build observation. No native agent session, model request, build or test was run for this report.

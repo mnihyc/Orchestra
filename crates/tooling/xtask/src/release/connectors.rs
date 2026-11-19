@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The supported connector targets and their distribution file names.
-pub const TARGETS: [(&str, &str, &str, &str); 6] = [
+pub const TARGETS: [(&str, &str, &str, &str); 5] = [
     (
         "x86_64-unknown-linux-musl",
         "linux",
@@ -42,12 +42,6 @@ pub const TARGETS: [(&str, &str, &str, &str); 6] = [
         "windows",
         "x86_64",
         "orch-connector-windows-x86_64.exe",
-    ),
-    (
-        "aarch64-pc-windows-msvc",
-        "windows",
-        "aarch64",
-        "orch-connector-windows-aarch64.exe",
     ),
 ];
 
@@ -484,38 +478,6 @@ mod tests {
         assert_eq!(
             fs::read(&files[0].1).unwrap(),
             b"\xcf\xfa\xed\xfe connector"
-        );
-    }
-
-    #[test]
-    fn windows_arm_connector_is_required_and_has_its_own_verified_download() {
-        let mut names = TARGETS
-            .iter()
-            .chain(NODE_TARGETS.iter())
-            .map(|(_, _, _, name)| (*name).to_owned())
-            .collect::<BTreeSet<_>>();
-        assert!(require_all(&names).is_ok());
-        names.remove("orch-connector-windows-aarch64.exe");
-        assert!(
-            require_all(&names)
-                .unwrap_err()
-                .to_string()
-                .contains("orch-connector-windows-aarch64.exe")
-        );
-        let dir = tempfile::tempdir().unwrap();
-        input(
-            dir.path(),
-            "orch-connector-windows-aarch64.exe",
-            b"MZ native Windows ARM connector",
-        );
-        let files = read(&[dir.path().to_owned()], "1.2.3", "v1.2.3", &"a".repeat(40)).unwrap();
-        assert_eq!(
-            download_path(&files[0].0).as_deref(),
-            Some("/api/v1/downloads/connector/windows/aarch64")
-        );
-        assert_eq!(
-            fs::read(&files[0].1).unwrap(),
-            b"MZ native Windows ARM connector"
         );
     }
 

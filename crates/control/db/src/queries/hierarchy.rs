@@ -43,22 +43,6 @@ pub struct NodeRow {
     pub environment_id: Option<Id>,
 }
 
-/// One live node by its identifier, with the same environment facts as the other node reads; none when it does not
-/// exist or was deleted. Creation replays read the created node through it before rendering the current answer.
-pub async fn node(conn: &mut Conn, id: Id) -> Result<Option<NodeRow>, DbError> {
-    Ok(sqlx::query_as(
-        "SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.owner_id, n.archived_at, n.deleted_at,
-                n.revision, e.placement, t.environment_id
-           FROM nodes n
-           LEFT JOIN threads t ON t.node_id = n.id
-           LEFT JOIN environments e ON e.id = t.environment_id
-          WHERE n.id = $1 AND n.deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(conn)
-    .await?)
-}
-
 /// Current environments of a frame's threads, using their indexed node identifiers.
 pub async fn thread_environments(
     conn: &mut Conn,
@@ -75,81 +59,26 @@ pub async fn thread_environments(
 /// The nodes `ids` and every node on the way from their root orgs down to
 /// them, each once. A node that does not exist is not among them.
 pub async fn with_ancestors(conn: &mut Conn, ids: &[Id]) -> Result<Vec<NodeRow>, DbError> {
-    ancestor_rows(conn, ids).await
-}
-
-#[derive(sqlx::FromRow)]
-struct GovernedNode {
-    #[sqlx(flatten)]
-    node: NodeRow,
-    ask_root_org_id: Option<Id>,
-    ask_retention_days: Option<i32>,
-    ask_last_message_at: Option<DateTime<Utc>>,
-    ask_root_live: bool,
-}
-
-/// The same ancestor read with the native Ask association already joined from each Thread.
-/// None is observed absence, not a guess from its environment or program binding.
-pub async fn with_ancestor_governance(
-    conn: &mut Conn,
-    ids: &[Id],
-) -> Result<Vec<(NodeRow, Option<super::ask::Governance>)>, DbError> {
-    let rows: Vec<GovernedNode> = ancestor_rows(conn, ids).await?;
-    rows.into_iter()
-        .map(|row| {
-            let governance = match row.ask_root_org_id {
-                None => None,
-                Some(root_org_id) => {
-                    let (Some(retention_days), Some(last_message_at)) =
-                        (row.ask_retention_days, row.ask_last_message_at)
-                    else {
-                        return Err(DbError::Other(sqlx::Error::ColumnDecode {
-                            index: "ask governance".into(),
-                            source: std::io::Error::other(
-                                "the temporary conversation has incomplete governance",
-                            )
-                            .into(),
-                        }));
-                    };
-                    Some(super::ask::Governance {
-                        thread_id: row.node.id,
-                        root_org_id,
-                        person_id: row.node.owner_id,
-                        retention_days,
-                        last_message_at,
-                        root_live: row.ask_root_live,
-                    })
-                }
-            };
-            Ok((row.node, governance))
-        })
-        .collect()
-}
-
-async fn ancestor_rows<R>(conn: &mut Conn, ids: &[Id]) -> Result<Vec<R>, DbError>
-where
-    R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Unpin + Send,
-{
-    // Both the storage home and Ask's distinct governing root are watched in this
-    // same statement; the native graph keeps these factual associations together.
+    // Every permission decision about a node reads it here. In a write whose commit checks the authorization
+    // epochs (`transaction_guard`), the epochs of these nodes' root orgs are read in this same statement,
+    // so that a change of authority committed after these facts were read refuses that commit.
     Ok(sqlx::query_as(
         "WITH found AS MATERIALIZED (
              SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.owner_id, n.archived_at, n.deleted_at,
-                    n.revision, e.placement, t.environment_id, t.ask_root_org_id,
-                    t.ask_retention_days, t.ask_last_message_at,
-                    COALESCE(r.id IS NOT NULL AND r.deleted_at IS NULL AND r.kind='org',false) AS ask_root_live
+                    n.revision, e.placement, t.environment_id
                FROM nodes n
                LEFT JOIN threads t ON t.node_id = n.id
                LEFT JOIN environments e ON e.id = t.environment_id
-               LEFT JOIN nodes r ON r.id=t.ask_root_org_id
               WHERE n.id IN (SELECT unnest(path) FROM nodes WHERE id = ANY($1))
          ), watched AS MATERIALIZED (
-             SELECT orch_authz_saw(orch_authz_epochs(ARRAY(
-                 SELECT org_id FROM found UNION SELECT ask_root_org_id FROM found WHERE ask_root_org_id IS NOT NULL)))
+             SELECT orch_authz_saw(orch_authz_epochs(ARRAY(SELECT DISTINCT org_id FROM found)))
               WHERE COALESCE(current_setting('orch.authz_seen', true), '') <> ''
          )
          SELECT found.* FROM found, (SELECT count(*) FROM watched) w",
-    ).bind(ids).fetch_all(conn).await?)
+    )
+    .bind(ids)
+    .fetch_all(conn)
+    .await?)
 }
 
 /// The nodes that lie directly in `parent` and are not deleted, in the
@@ -168,7 +97,7 @@ pub async fn children_after(
            FROM nodes n
            LEFT JOIN threads t ON t.node_id = n.id
            LEFT JOIN environments e ON e.id = t.environment_id
-          WHERE n.parent_id = $1 AND n.deleted_at IS NULL AND NOT n.unlisted AND ($2::uuid IS NULL OR n.id > $2)
+          WHERE n.parent_id = $1 AND n.deleted_at IS NULL AND ($2::uuid IS NULL OR n.id > $2)
           ORDER BY n.id
           LIMIT $3",
     )
@@ -361,7 +290,9 @@ pub struct NodeDetail {
     pub custom_color: Option<String>,
     /// Who maintains the name: `user` or `auto`.
     pub title_source: String,
-    /// When automation last wrote the name or tags.
+    /// Who maintains the description: `user` or `auto`.
+    pub description_source: String,
+    /// When automation last wrote the name or the description.
     pub auto_updated_at: Option<DateTime<Utc>>,
     /// Its first owner.
     pub owner_id: Id,
@@ -415,7 +346,7 @@ pub async fn details(
 ) -> Result<Vec<NodeDetail>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.description, n.color, n.custom_color, n.title_source,
-                n.auto_updated_at, n.owner_id, n.archived_at, n.archived_by,
+                n.description_source, n.auto_updated_at, n.owner_id, n.archived_at, n.archived_by,
                 n.deleted_at, n.deleted_by, n.revision, n.created_at, n.updated_at, n.tree_seq,
                 c.id AS chat_id, COALESCE(c.last_message_seq, 0) AS chat_seq,
                 (SELECT count(DISTINCT x.person) FROM (
@@ -497,7 +428,7 @@ pub async fn org_facts(
                 (SELECT count(*) FROM nodes c
                   WHERE c.parent_id = n.id AND c.kind = 'org' AND c.deleted_at IS NULL) AS org_count,
                 (SELECT count(*) FROM nodes c
-                  WHERE c.parent_id = n.id AND c.kind = 'project' AND c.deleted_at IS NULL AND NOT c.unlisted) AS project_count,
+                  WHERE c.parent_id = n.id AND c.kind = 'project' AND c.deleted_at IS NULL) AS project_count,
                 (SELECT r.tree_changed_at FROM orgs r WHERE r.node_id = n.org_id) AS changed_at
            FROM nodes n
           WHERE n.id = ANY($1) AND n.kind = 'org'",
@@ -512,7 +443,7 @@ pub async fn org_facts(
 pub async fn topic_counts(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, i64)>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, (SELECT count(*) FROM nodes c
-                        WHERE c.parent_id = n.id AND c.kind = 'topic' AND c.deleted_at IS NULL AND NOT c.unlisted)
+                        WHERE c.parent_id = n.id AND c.kind = 'topic' AND c.deleted_at IS NULL)
            FROM nodes n WHERE n.id = ANY($1) AND n.kind = 'project'",
     )
     .bind(ids)
@@ -537,25 +468,22 @@ pub struct TopicFacts {
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
-/// Topic statistics of an explicitly View-checked page of main threads.
-/// The caller supplies native selected identities; no topic-wide fallback counts private rows.
-pub async fn topic_facts_for_threads(
-    conn: &mut Conn,
-    threads: &[Id],
-) -> Result<Vec<TopicFacts>, DbError> {
+/// The thread counts of the topics among `ids`.
+pub async fn topic_facts(conn: &mut Conn, ids: &[Id]) -> Result<Vec<TopicFacts>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT th.topic_id AS node_id,
+        "SELECT n.id AS node_id,
                 count(th.node_id) AS thread_count,
                 count(th.node_id) FILTER (WHERE th.state = 'running') AS running,
                 count(th.node_id) FILTER (WHERE th.state = 'waiting_approval') AS waiting_approval,
                 count(th.node_id) FILTER (WHERE th.state = 'blocked') AS blocked,
                 max(th.last_activity_at) AS last_activity_at
-           FROM threads th JOIN nodes n ON n.id=th.node_id
-          WHERE th.node_id=ANY($1) AND th.side_of IS NULL AND n.deleted_at IS NULL AND NOT n.unlisted
-            AND n.kind='thread' AND n.parent_id=th.topic_id
-          GROUP BY th.topic_id",
+           FROM nodes n
+           LEFT JOIN nodes c ON c.parent_id = n.id AND c.kind = 'thread' AND c.deleted_at IS NULL
+           LEFT JOIN threads th ON th.node_id = c.id AND th.side_of IS NULL
+          WHERE n.id = ANY($1) AND n.kind = 'topic'
+          GROUP BY n.id",
     )
-    .bind(threads)
+    .bind(ids)
     .fetch_all(conn)
     .await?)
 }
@@ -676,6 +604,8 @@ pub struct NewNode<'a> {
     pub name_by_person: bool,
     /// Its description.
     pub description: &'a str,
+    /// Whether a person wrote the description.
+    pub description_by_person: bool,
     /// Its first owner, who is also its maker.
     pub owner: Id,
     /// What an org adds.
@@ -689,37 +619,48 @@ pub struct NewNode<'a> {
 /// engine writes them). A parent that is not there is a missing reference.
 pub async fn create(conn: &mut Conn, new: &NewNode<'_>) -> Result<(), DbError> {
     let title_source = if new.name_by_person { "user" } else { "auto" };
+    let description_source = if new.description_by_person {
+        "user"
+    } else {
+        "auto"
+    };
     let inserted = match new.parent {
-        None => sqlx::query(
-            "INSERT INTO nodes (id, kind, parent_id, org_id, path, name, description, title_source,
-                                    owner_id, created_by, created_at, updated_at)
-                 VALUES ($1, $2, NULL, $1, ARRAY[$1]::uuid[], $3, $4, $5, $6, $6, $7, $7)",
-        )
-        .bind(new.id)
-        .bind(new.kind)
-        .bind(new.name)
-        .bind(new.description)
-        .bind(title_source)
-        .bind(new.owner)
-        .bind(new.at)
-        .execute(&mut *conn)
-        .await?,
-        Some(parent) => sqlx::query(
-            "INSERT INTO nodes (id, kind, parent_id, org_id, path, name, description, title_source,
-                                    owner_id, created_by, created_at, updated_at)
-                 SELECT $1, $2, p.id, p.org_id, p.path || $1, $3, $4, $5, $6, $6, $7, $7
-                   FROM nodes p WHERE p.id = $8 AND p.deleted_at IS NULL",
-        )
-        .bind(new.id)
-        .bind(new.kind)
-        .bind(new.name)
-        .bind(new.description)
-        .bind(title_source)
-        .bind(new.owner)
-        .bind(new.at)
-        .bind(parent)
-        .execute(&mut *conn)
-        .await?,
+        None => {
+            sqlx::query(
+                "INSERT INTO nodes (id, kind, parent_id, org_id, path, name, description, title_source,
+                                    description_source, owner_id, created_by, created_at, updated_at)
+                 VALUES ($1, $2, NULL, $1, ARRAY[$1]::uuid[], $3, $4, $5, $6, $7, $7, $8, $8)",
+            )
+            .bind(new.id)
+            .bind(new.kind)
+            .bind(new.name)
+            .bind(new.description)
+            .bind(title_source)
+            .bind(description_source)
+            .bind(new.owner)
+            .bind(new.at)
+            .execute(&mut *conn)
+            .await?
+        }
+        Some(parent) => {
+            sqlx::query(
+                "INSERT INTO nodes (id, kind, parent_id, org_id, path, name, description, title_source,
+                                    description_source, owner_id, created_by, created_at, updated_at)
+                 SELECT $1, $2, p.id, p.org_id, p.path || $1, $3, $4, $5, $6, $7, $7, $8, $8
+                   FROM nodes p WHERE p.id = $9 AND p.deleted_at IS NULL",
+            )
+            .bind(new.id)
+            .bind(new.kind)
+            .bind(new.name)
+            .bind(new.description)
+            .bind(title_source)
+            .bind(description_source)
+            .bind(new.owner)
+            .bind(new.at)
+            .bind(parent)
+            .execute(&mut *conn)
+            .await?
+        }
     };
     if inserted.rows_affected() != 1 {
         return Err(DbError::Reference {
@@ -850,6 +791,7 @@ pub async fn change_text(
     Ok(sqlx::query_scalar(
         "UPDATE nodes SET name = COALESCE($2, name), description = COALESCE($3, description),
                 title_source = CASE WHEN $2::text IS NULL THEN title_source ELSE 'user' END,
+                description_source = CASE WHEN $3::text IS NULL THEN description_source ELSE 'user' END,
                 revision = revision + 1, updated_at = $5
           WHERE id = $1 AND revision = $4 AND deleted_at IS NULL
           RETURNING revision",
@@ -868,6 +810,8 @@ pub async fn change_text(
 pub enum Field {
     /// The name.
     Title,
+    /// The description.
+    Description,
     /// A topic's tags.
     Tags,
 }
@@ -883,6 +827,9 @@ pub async fn hand_back(
     let statement = match field {
         Field::Title => {
             "UPDATE nodes SET title_source = 'auto', revision = revision + 1, updated_at = $2 WHERE id = $1"
+        }
+        Field::Description => {
+            "UPDATE nodes SET description_source = 'auto', revision = revision + 1, updated_at = $2 WHERE id = $1"
         }
         Field::Tags => "UPDATE nodes SET revision = revision + 1, updated_at = $2 WHERE id = $1",
     };
@@ -987,14 +934,14 @@ pub async fn lock_move_rows(conn: &mut Conn, node: Id, parent: Id) -> Result<boo
     if org.is_some() {
         // The final native org-parent UPDATE takes this same FK row. Other node
         // kinds have no org row and gain no additional organization prerequisite.
-        // A real parent of another kind is a native invalid-parent decision,
-        // not a missing Node. Lock its Org row when one exists, then let the
-        // caller's fresh plan report that decision before any move is applied.
-        let _parent_org: Option<Id> =
+        let parent_org: Option<Id> =
             sqlx::query_scalar("SELECT node_id FROM orgs WHERE node_id=$1 FOR KEY SHARE")
                 .bind(parent)
                 .fetch_optional(&mut *conn)
                 .await?;
+        if parent_org.is_none() {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -1172,8 +1119,6 @@ pub struct TreeRow {
     pub custom_color: Option<String>,
     /// Live documents beside it whose View still follows its documents row.
     pub docs: i64,
-    /// The document namespace's own membership stamp.
-    pub docs_seq: i64,
     /// Whether it, or a node above it, is archived.
     pub archived: bool,
     /// Whether it was deleted, itself or through a node above.
@@ -1248,7 +1193,6 @@ async fn tree_rows(
              GROUP BY d.node_id
          )
          SELECT n.id, n.kind, n.parent_id, n.name, n.owner_id, n.color, n.custom_color, COALESCE(dc.docs, 0) AS docs,
-                COALESCE(ds.seq, 0) AS docs_seq,
                 CASE WHEN n.kind = 'org' THEN (SELECT string_agg(o.slug, '.' ORDER BY p.ord) FROM unnest(n.path) WITH ORDINALITY p(id, ord) JOIN orgs o ON o.node_id = p.id) END AS address,
                 EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.archived_at IS NOT NULL) AS archived,
                 EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL) AS deleted,
@@ -1266,7 +1210,6 @@ async fn tree_rows(
            LEFT JOIN threads th ON th.node_id = n.id
            LEFT JOIN chats c ON c.node_id = n.id
            LEFT JOIN document_counts dc ON dc.node_id = n.id
-           LEFT JOIN document_tree_scopes ds ON ds.node_id = n.id
           WHERE n.org_id = $1
             AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
                  OR n.tree_seq > $2)
@@ -1643,15 +1586,7 @@ pub async fn touch_item_recent(
           visited_at=greatest(recents.visited_at,EXCLUDED.visited_at)")
         .bind(user).bind(kind).bind(id).bind(at).bind(VISIT_HALF_LIFE_SECONDS).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM recents WHERE user_id=$1 AND (kind,id) IN(SELECT kind,id FROM recents WHERE user_id=$1 ORDER BY visited_at DESC,kind,id OFFSET $2)")
-        .bind(user).bind(kept).execute(&mut *conn).await?;
-    crate::idempotency::creation::observe_with(
-        conn,
-        Some(user),
-        "recent_activity",
-        id,
-        serde_json::json!({"kind":kind}),
-    )
-    .await?;
+        .bind(user).bind(kept).execute(conn).await?;
     Ok(())
 }
 
@@ -1815,7 +1750,7 @@ pub async fn retention_page(
 ) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT n.id FROM nodes n LEFT JOIN threads t ON t.node_id=n.id
-        WHERE n.kind<>'org' AND n.deleted_at IS NULL AND NOT n.unlisted AND t.side_of IS NULL
+        WHERE n.kind<>'org' AND n.deleted_at IS NULL AND t.side_of IS NULL
           AND ($1::uuid IS NULL OR n.id>$1) ORDER BY n.id LIMIT $2",
     )
     .bind(after)
@@ -2180,7 +2115,7 @@ pub async fn topics_of(
           LEFT JOIN LATERAL (
               SELECT max(th.last_activity_at) AS last
                 FROM nodes c JOIN threads th ON th.node_id = c.id
-               WHERE c.parent_id = n.id AND c.deleted_at IS NULL AND NOT c.unlisted AND th.side_of IS NULL) act ON true
+               WHERE c.parent_id = n.id AND c.deleted_at IS NULL AND th.side_of IS NULL) act ON true
          WHERE (n.parent_id = $1 OR ($11::boolean AND $1 = ANY(n.path) AND n.id <> $1))
            AND n.kind = 'topic' AND n.deleted_at IS NULL
            AND ($2::text IS NULL OR t.status = $2)
@@ -2366,8 +2301,8 @@ pub async fn activity(
     limit: i64,
 ) -> Result<Vec<AuditRow>, DbError> {
     Ok(sqlx::query_as(
-        concat!("SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.history, a.override, a.object_kind,
-                a.object_id, a.node_id, a.summary, ", crate::queries::upload_history::details!("0", "2"), " AS details, host(a.ip) AS ip
+        "SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.history, a.override, a.object_kind,
+                a.object_id, a.node_id, a.summary, a.details, host(a.ip) AS ip
            FROM audit_log a JOIN nodes n ON n.id = a.node_id
           WHERE a.history
             AND (a.node_id = $1 OR n.parent_id = $1
@@ -2377,7 +2312,7 @@ pub async fn activity(
             AND ($2::timestamptz IS NULL OR a.at > $2)
             AND ($3::uuid IS NULL OR (a.at, a.id) < ($4, $3))
           ORDER BY a.at DESC, a.id DESC
-          LIMIT $5"),
+          LIMIT $5",
     )
     .bind(place)
     .bind(since)
@@ -2400,15 +2335,15 @@ pub async fn node_history(
     actions: Option<&[String]>,
 ) -> Result<Vec<AuditRow>, DbError> {
     Ok(sqlx::query_as(
-        concat!("SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.history, a.override, a.object_kind,
-                a.object_id, a.node_id, a.summary, ", crate::queries::upload_history::details!("0", "2"), " AS details, host(a.ip) AS ip
+        "SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.history, a.override, a.object_kind,
+                a.object_id, a.node_id, a.summary, a.details, host(a.ip) AS ip
            FROM audit_log a
           WHERE a.history AND a.node_id = $1
             AND ($6::text[] IS NULL OR (a.action = ANY($6) AND COALESCE(a.details->>'page', '') <> 'defaults'))
             AND ($2::uuid IS NULL OR a.actor_id = $2)
             AND ($3::uuid IS NULL OR (a.at, a.id) < ($4, $3))
           ORDER BY a.at DESC, a.id DESC
-          LIMIT $5"),
+          LIMIT $5",
     )
     .bind(node)
     .bind(actor)
@@ -2473,7 +2408,7 @@ pub async fn audit_trail(
 pub async fn project_counts(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, i64)>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, (SELECT count(*) FROM nodes c
-                        WHERE c.parent_id = n.id AND c.kind = 'project' AND c.deleted_at IS NULL AND NOT c.unlisted)
+                        WHERE c.parent_id = n.id AND c.kind = 'project' AND c.deleted_at IS NULL)
            FROM nodes n WHERE n.id = ANY($1) AND n.kind = 'project'",
     )
     .bind(ids)

@@ -15,8 +15,6 @@ use tokio::sync::{Notify, Semaphore};
 
 #[path = "confirmed_source/review.rs"]
 mod review;
-#[path = "confirmed_source/witness.rs"]
-mod witness;
 
 struct SuccessGate {
     inner: Arc<dyn Commands>,

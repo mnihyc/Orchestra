@@ -7,39 +7,24 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
-
-// A sibling test must not fork with another fixture's writable executable open.
-// Hold through child exit so no inherited write handle survives into the next launch.
-static EXECUTABLE_IO: Mutex<()> = Mutex::new(());
-
-fn execute(command: &mut Command) -> Output {
-    let _executable_io = EXECUTABLE_IO.lock().unwrap();
-    command.output().unwrap()
-}
 
 fn program(root: &Path) -> PathBuf {
-    let _executable_io = EXECUTABLE_IO.lock().unwrap();
     let path = root.join(if cfg!(windows) {
         "orch-connector.exe"
     } else {
         "orch-connector"
     });
-    let staged = tempfile::NamedTempFile::new_in(root).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_orch-connector"), staged.path()).unwrap();
-    staged.as_file().sync_all().unwrap();
-    // into_temp_path closes the file before its executable name becomes visible.
-    staged.into_temp_path().persist(&path).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_orch-connector"), &path).unwrap();
     path
 }
 
 fn run(program: &Path, data: &Path, arguments: &[&str]) -> Output {
-    execute(
-        Command::new(program)
-            .arg("--data-dir")
-            .arg(data)
-            .args(arguments),
-    )
+    Command::new(program)
+        .arg("--data-dir")
+        .arg(data)
+        .args(arguments)
+        .output()
+        .unwrap()
 }
 
 fn instance(program: &Path, data: &Path, name: &str) {
@@ -162,10 +147,14 @@ fn the_exact_uninstall_command_the_connector_reports_runs_with_its_named_directo
     let directory = orch_connector_core::enrollment::DataDir::inspect(&data).unwrap();
     let installation =
         orch_connector_core::installation::connector_with_program(&directory, &program);
-    let output = execute(Command::new("bash").arg("-c").arg(format!(
-        "{} --purge --yes",
-        installation.commands.uninstall.unwrap()
-    )));
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "{} --purge --yes",
+            installation.commands.uninstall.unwrap()
+        ))
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -206,17 +195,17 @@ fn a_refused_named_service_stop_leaves_its_data_and_program_untouched() {
     let manager = commands.join("systemctl");
     std::fs::write(&manager, "#!/bin/sh\nexit 1\n").unwrap();
     std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = execute(
-        Command::new(&program)
-            .arg("--data-dir")
-            .arg(&data)
-            .args(["uninstall", "--purge", "--yes"])
-            .env("XDG_CONFIG_HOME", &configuration)
-            .env(
-                "PATH",
-                format!("{}:{}", commands.display(), std::env::var("PATH").unwrap()),
-            ),
-    );
+    let output = Command::new(&program)
+        .arg("--data-dir")
+        .arg(&data)
+        .args(["uninstall", "--purge", "--yes"])
+        .env("XDG_CONFIG_HOME", &configuration)
+        .env(
+            "PATH",
+            format!("{}:{}", commands.display(), std::env::var("PATH").unwrap()),
+        )
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     assert!(program.is_file() && unit.is_file());
     assert!(data.join("identity/enrollment.json").is_file());

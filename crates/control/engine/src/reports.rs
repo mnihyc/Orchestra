@@ -93,17 +93,6 @@ impl Engine {
         if runtime.host_id != host {
             return Ok(());
         }
-        // Provider lifecycle writers take the provider before its unit row. Re-read after waiting
-        // so a host report cannot overwrite an intentional stop using an earlier running snapshot.
-        let runtime = if let Some(provider) = runtime.provider_id {
-            orch_db::queries::resources::provider_runtime::lock(&mut *unit.conn, provider).await?;
-            let Some(current) = environments::runtime(&mut *unit.conn, runtime.id).await? else {
-                return Ok(());
-            };
-            current
-        } else {
-            runtime
-        };
         let missing_changed = sqlx::query(
             "UPDATE runtimes SET loss_missing=$2 WHERE id=$1 AND loss_missing IS DISTINCT FROM $2",
         )

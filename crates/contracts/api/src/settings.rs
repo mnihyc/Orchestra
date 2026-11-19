@@ -77,14 +77,6 @@ pub enum SettingMerge {
     Append,
     /// The smallest value.
     Min,
-    /// The largest number among the scopes that set the key.
-    Max,
-    /// Permission is on only when every setting scope allows it.
-    All,
-    /// Protection is on when any setting scope requires it.
-    Any,
-    /// The strictest declared choice; the schema lists strictest last.
-    Stricter,
 }
 
 /// A setting as the registry defines it.
@@ -277,9 +269,6 @@ pub struct ResolvedSetting {
     /// Why this resolved setting does not apply to the selected harness, where one is selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_applicable_reason: Option<String>,
-    /// The selected program's declared display name for an inapplicable program setting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_applicable_program: Option<String>,
     /// Values that can be chosen for this setting with its bound or usable reported agents. An empty
     /// list offers none; absence leaves the registry schema in force. Stored values stay visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,9 +413,6 @@ pub struct ThreadSubagentLimits {
 /// What can be set on a thread's agent, and what it is now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadParameters {
-    /// The same declaration-derived routes used by capability planning; private backend intent is omitted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<orch_provider_contract::capabilities::Resolution>,
     /// The provider's ordinary resource view for a caller with provider View, shared by model options and status items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::resources::Provider>,
@@ -447,9 +433,6 @@ pub struct ThreadParameters {
     /// Native sub-agent limits; absent on an older server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_limits: Option<ThreadSubagentLimits>,
-    /// Current requested/effective port tools from the same native offer gates; absent when unreported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub port_tools: Option<crate::ports::ThreadPortTools>,
 }
 
 /// The model used by the harness's own permission reviewer for this session.

@@ -65,11 +65,6 @@ impl Exchange {
             Field::new("exchange", "Exchange secret", FieldType::Secret),
             Field::new("region", "Region", FieldType::Text),
         ];
-        descriptor.facts = Some(orch_provider_contract::source::SourceDescriptorFacts::default());
-        descriptor.set_admin_credential(orch_provider_contract::source::AdminCredential {
-            labels: [("en".into(), "Admin key".into())].into(),
-            reports: vec![],
-        });
         descriptor
     }
 }
@@ -97,10 +92,6 @@ impl CredentialPresenter for Exchange {
         Self::descriptor()
     }
     async fn present(&self, ask: PresentAsk) -> Result<Presented, SourceError> {
-        assert!(
-            !ask.secrets.contains_key("admin_key"),
-            "facts-only administrative credentials never reach model presentation"
-        );
         let settings = self.settings.lock().unwrap().clone();
         let call = {
             let mut asks = self.asks.lock().unwrap();
@@ -162,7 +153,7 @@ async fn start(p: &ProviderRig, name: &str) {
             {"protocol":MESSAGES,"base_url":p.mock.messages_base_url(),"options":{}}
         ],"credential":p.sealed_key_for(id,&p.key),"secrets":{},
         "presenter":{"by":"program","name":name,"provider":{"id":p.rig.provider,"name":"Team account"},"config":{"region":"east"},
-            "secrets":{"exchange":p.sealed_key_for(id,EXCHANGE_SECRET),"undeclared":p.sealed_key_for(id,UNDECLARED_SECRET),"admin_key":p.sealed_key_for(id,"made-up-admin-secret")}}})).unwrap();
+            "secrets":{"exchange":p.sealed_key_for(id,EXCHANGE_SECRET),"undeclared":p.sealed_key_for(id,UNDECLARED_SECRET)}}})).unwrap();
     assert!(matches!(
         p.command_with_id(id, &p.provider_key(), &body).await,
         Progress::Succeeded(_)

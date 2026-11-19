@@ -8,8 +8,6 @@ use crate::operations::{FacetUsage, TargetResolver};
 pub enum Source {
     /// Files authority follows the stored Snapshot's native current governor.
     SnapshotGovernor,
-    /// The stored origin supplying the existing metadata reference.
-    SnapshotOrigin,
     /// The actual Environment selected from the Thread's current snapshot binding.
     SnapshotEnvironment,
     /// Current optional disclosure of a completed snapshot request's source references.
@@ -26,38 +24,7 @@ pub enum Source {
     CopyEnvironment,
     /// Current optional disclosure of the completed copy's metadata.
     CopyContent,
-    /// The actual Environment of a native directory creation.
-    MkdirEnvironment,
-    /// The actual environment whose uploaded file is admitted by the native writer.
-    UploadEnvironment,
-    /// Optional current disclosure of that accepted native upload job.
-    UploadContent,
 }
-
-/// Upload admission writes its environment; reading its accepted job keeps its native Files door.
-pub const ENVIRONMENT_UPLOAD_WRITE: Declaration<Source> = Declaration {
-    operation: "EnvironmentUploadWrite",
-    bindings: &[
-        Binding {
-            source: Source::UploadEnvironment,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::UploadContent,
-            target: TargetResolver::Resolved("upload_job_environment"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::JobMachineNames,
-            target: TargetResolver::ResolvedCollection("job_machine_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
 
 /// Deleting retained state needs its actual Files governor, with no existing-content reply.
 pub const SNAPSHOT_DELETE: Declaration<Source> = Declaration {
@@ -68,31 +35,6 @@ pub const SNAPSHOT_DELETE: Declaration<Source> = Declaration {
         usage: FacetUsage::Required,
         cardinality: Cardinality::One,
     }],
-};
-
-/// Label changes use the native governor; full metadata additionally reads its stored origin.
-pub const SNAPSHOT_UPDATE: Declaration<Source> = Declaration {
-    operation: "SnapshotUpdate",
-    bindings: &[
-        Binding {
-            source: Source::SnapshotGovernor,
-            target: TargetResolver::Resolved("snapshot_environment"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::SnapshotGovernor,
-            target: TargetResolver::Resolved("snapshot_environment"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::SnapshotOrigin,
-            target: TargetResolver::Resolved("snapshot_origin"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-    ],
 };
 
 /// Ordinary native Job visibility, including a real empty creator-only subject set.
@@ -220,64 +162,6 @@ pub const ENVIRONMENT_FILE_COPY: Declaration<Source> = Declaration {
             target: TargetResolver::Resolved("copy_reply_environment"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::One,
-        },
-    ],
-};
-
-/// Directory creation writes its actual Environment; optional metadata reads that same source.
-pub const ENVIRONMENT_FILE_MKDIR: Declaration<Source> = Declaration {
-    operation: "EnvironmentFileMkdir",
-    bindings: &[
-        Binding {
-            source: Source::MkdirEnvironment,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::MkdirEnvironment,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-    ],
-};
-
-/// Existing sources of a native selected snapshot page, including its continuation witness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapshotListSource {
-    /// Current native Files custodians of the selected rows.
-    Governors,
-    /// Stored Environments supplying the existing metadata and selection eligibility.
-    Origins,
-}
-
-/// One actual current environment, whose maker-owned exports are selected before paging.
-pub const ENVIRONMENT_SNAPSHOT_LIST: Declaration<SnapshotListSource> = Declaration {
-    operation: "EnvironmentSnapshotList",
-    bindings: &[Binding {
-        source: SnapshotListSource::Governors,
-        target: TargetResolver::Path("id"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    }],
-};
-
-/// Actual selected rows retain both their Files custody and stored metadata sources.
-pub const THREAD_SNAPSHOT_LIST: Declaration<SnapshotListSource> = Declaration {
-    operation: "ThreadSnapshotList",
-    bindings: &[
-        Binding {
-            source: SnapshotListSource::Governors,
-            target: TargetResolver::ResolvedCollection("snapshot_governors"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: SnapshotListSource::Origins,
-            target: TargetResolver::ResolvedCollection("snapshot_origins"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
         },
     ],
 };

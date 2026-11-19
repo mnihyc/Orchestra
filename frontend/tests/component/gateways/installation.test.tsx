@@ -21,7 +21,7 @@ it.each(modes)('uses Automatic and short advertised labels in $locale/$theme at 
     .toHaveAttribute('data-help-heading', 'choose-a-gateway');
   expect(changed).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole('combobox', { name: i18n.t('regionalGateways.gateway') }));
-  await userEvent.click(screen.getByRole('option', { name: 'Asia tools' }));
+  await userEvent.click(screen.getByRole('option', { name: 'Asia tools', exact: true }));
   await waitFor(() => expect(changed).toHaveBeenCalledExactlyOnceWith('asia'));
 });
 

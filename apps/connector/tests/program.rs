@@ -1281,6 +1281,3 @@ async fn local_http_enrollment_finishes_and_its_machine_uses_the_pinned_tls_gate
     }
     local_enrollment.abort();
 }
-
-#[path = "program/platform_observations.rs"]
-mod platform_observations;

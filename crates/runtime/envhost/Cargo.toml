@@ -26,7 +26,6 @@ ignore.workspace = true
 liblzma.workspace = true
 notify.workspace = true
 orch-agent-contract.workspace = true
-orch-agent-programs.workspace = true
 orch-api-contract.workspace = true
 orch-driver-contract.workspace = true
 orch-executor-contract.workspace = true

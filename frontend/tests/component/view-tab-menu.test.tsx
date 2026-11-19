@@ -60,31 +60,3 @@ for (const entrance of ['pointer', 'keyboard'] as const) it(`returns focus to th
   expect(screen.queryByRole('tab', { name: 'Second' })).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole('tab', { name: 'First' })).toHaveFocus());
 });
-
-it('returns focus to the surviving group when the last tab removes its entire group', async () => {
-  function Split() {
-    const [beside, setBeside] = useState(true);
-    return <>
-      <ViewGroup label="Main" tabIds={['main']} activeId="main" panelId="main-panel" tabElementId={() => 'surviving-tab'}
-        tabInfo={[{ id: 'main', title: 'Main', onSelect: () => undefined, onClose: () => undefined }]}
-        renderTab={(_id, state) => <ViewTab id="surviving-tab" panelId="main-panel" title="Main" icon={null}
-          active={state.active} tabbable={state.tabbable} menu={[]} onSelect={() => undefined} onClose={() => undefined} />}>
-        Retained draft
-      </ViewGroup>
-      {beside && <ViewGroup label="Beside" tabIds={['result']} activeId="result" panelId="result-panel" tabElementId={() => 'result-tab'}
-        tabInfo={[{ id: 'result', title: 'Result', onSelect: () => undefined, onClose: () => setBeside(false) }]}
-        renderTab={(_id, state) => <ViewTab id="result-tab" panelId="result-panel" title="Result" icon={null}
-          active={state.active} tabbable={state.tabbable} menu={[{ id: 'close', label: 'Close', onSelect: () => setBeside(false) }]}
-          focusFallback={() => document.getElementById('surviving-tab')} onSelect={() => undefined} onClose={() => setBeside(false)} />}>
-        Found content
-      </ViewGroup>}
-    </>;
-  }
-  show(<Split />);
-  const user = userEvent.setup();
-  screen.getByRole('tab', { name: 'Result' }).focus();
-  await user.keyboard('{Shift>}{F10}{/Shift}');
-  await user.click(screen.getByRole('menuitem', { name: 'Close' }));
-  expect(screen.queryByRole('region', { name: 'Beside' })).not.toBeInTheDocument();
-  await waitFor(() => expect(screen.getByRole('tab', { name: 'Main' })).toHaveFocus());
-});

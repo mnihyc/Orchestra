@@ -44,7 +44,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
   -- Keep node paths plain and the shared parent expression intact, so both existing indexes remain usable.
   SELECT 'chat', c.id::text,
          COALESCE(c.name, CASE WHEN COALESCE((n."grant"->'chat'->>'scope_name_fallback')::boolean,true) THEN n.name ELSE '' END),
-         COALESCE(c.node_id, c.home_id, c.org_id)::text, n.path, c.org_id,
+         COALESCE(c.node_id, c.org_id)::text, n.path, c.org_id,
          c.created_by, NULL, c.created_at, c.last_message_at, NULL, NULL, NULL,
          CASE WHEN COALESCE((n."grant"->'chat'->>'scope_name_fallback')::boolean,true) OR c.name IS NOT NULL
            THEN COALESCE(n."grant"->'chat', '{}'::jsonb)
@@ -55,12 +55,12 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
   UNION ALL
   SELECT 'chat', c.id::text,
          COALESCE(c.name, (SELECT string_agg(u.display_name, ', ' ORDER BY u.username) FROM chat_members cm JOIN users u ON u.id = cm.user_id WHERE cm.chat_id = c.id AND cm.left_at IS NULL), ''),
-         COALESCE(c.node_id, c.home_id, c.org_id)::text, home.path, c.org_id,
+         COALESCE(c.node_id, c.org_id)::text, '{}'::uuid[], c.org_id,
          c.created_by, NULL, c.created_at, c.last_message_at, NULL, NULL, NULL,
          COALESCE(__GRANTS__->'objects'->c.id::text, '{}'::jsonb)
-    FROM chats c JOIN nodes root ON root.id = c.org_id JOIN nodes home ON home.id=COALESCE(c.home_id,c.org_id)
+    FROM chats c JOIN nodes root ON root.id = c.org_id
    WHERE c.node_id IS NULL
-     AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(home.path) AND gone.deleted_at IS NOT NULL)
+     AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(root.path) AND gone.deleted_at IS NOT NULL)
   UNION ALL
   SELECT r.kind, r.id::text, r.name, 'resources', COALESCE(n.path, '{}'::uuid[]), r.org_id,
          NULL, r.owner_id, r.created_at, r.last_activity, r.state, r.size_bytes, r.takes,
@@ -206,13 +206,9 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
       jsonb_build_object('id', place.id, 'kind', place.kind,
         'name', CASE WHEN COALESCE((__GRANTS__->'objects'->place.id::text->>'named')::boolean,false) THEN place.name END,
         'redacted', NOT COALESCE((__GRANTS__->'objects'->place.id::text->>'named')::boolean,false))) ORDER BY tag.name, tag.id)
-      FROM (
-        SELECT tag_id FROM node_tags WHERE node_id=CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
-        UNION ALL
-        SELECT tag_id FROM resource_tags WHERE resource_kind=i.kind
-          AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill') THEN i.id::uuid END
-      ) tt JOIN tags tag ON tag.id=tt.tag_id JOIN nodes place ON place.id=tag.node_id
-     WHERE COALESCE((i."grant"->>'view')::boolean, false)
+      FROM node_tags tt JOIN tags tag ON tag.id = tt.tag_id JOIN nodes place ON place.id = tag.node_id
+     WHERE tt.node_id = CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
+       AND COALESCE((i."grant"->>'view')::boolean, false)
   ), '[]'::jsonb) END tags,
   CASE WHEN COALESCE((i."grant"->>'view')::boolean, false) OR i.kind = 'group' THEN CASE $12
     WHEN 'name' THEN lower(i.name)
@@ -231,12 +227,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
     WHEN 'activity_by' THEN (SELECT lower(u.display_name) FROM documents d JOIN users u ON u.id=d.updated_by WHERE d.id=CASE WHEN i.kind='document' THEN i.id::uuid END)
     WHEN 'state' THEN i.state
     WHEN 'my_access' THEN CASE i."grant"->>'access' WHEN 'view' THEN '1' WHEN 'take_part' THEN '2' WHEN 'manage' THEN '3' END
-    WHEN 'tags' THEN (SELECT string_agg(lower(t.name), ',' ORDER BY lower(t.name)) FROM (
-      SELECT tag_id FROM node_tags WHERE node_id=CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
-      UNION ALL
-      SELECT tag_id FROM resource_tags WHERE resource_kind=i.kind
-        AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill') THEN i.id::uuid END
-    ) tt JOIN tags t ON t.id=tt.tag_id)
+    WHEN 'tags' THEN (SELECT string_agg(lower(t.name), ',' ORDER BY lower(t.name)) FROM node_tags tt JOIN tags t ON t.id = tt.tag_id WHERE tt.node_id = CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END)
   END ELSE CASE WHEN $12 = 'name' AND (i."grant"->>'named')::boolean THEN lower(i.name) END END sort_key
   FROM (SELECT * FROM filtered UNION ALL SELECT * FROM groups) i
   LEFT JOIN recents r ON (NOT $20 OR $12='opened') AND r.user_id=$1 AND r.kind=i.kind
@@ -272,8 +263,7 @@ SELECT page.*,
   (SELECT jsonb_build_object('id',n.uuid_key,'kind',n.kind,
       'name',CASE WHEN COALESCE((n."grant"->>'named')::boolean,false) THEN n.name END,
       'redacted',NOT COALESCE((n."grant"->>'named')::boolean,false))
-    FROM node_rows n WHERE page.kind = 'chat' AND n.uuid_key = page.path[cardinality(page.path)]) path_tail,
-  (SELECT c.node_id FROM chats c WHERE c.id=CASE WHEN page.kind='chat' THEN page.id::uuid END) chat_node_id
+    FROM node_rows n WHERE page.kind = 'chat' AND n.uuid_key = page.path[cardinality(page.path)]) path_tail
  FROM page
  ORDER BY relevance DESC, visit_score DESC, search_activity DESC NULLS LAST, CASE WHEN NOT $13 THEN sort_key END ASC NULLS LAST,
           CASE WHEN $13 THEN sort_key END DESC NULLS LAST, kind, id

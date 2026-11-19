@@ -35,10 +35,10 @@ use std::time::Duration;
 /// What the whole bar is: the weights of a job's phases are scaled to this.
 const WHOLE: u32 = 100;
 /// How many times a phase is asked again after a failure of the system under it (the database, a
-/// link that broke), before the job fails: such a failure is not the job's. What a host answered a command
-/// with is not such a failure, whatever code the host gave it, where the job keeps its commands from one run
-/// of a phase to the next ([`Phased::answers_are_final`]): the answer stands.
+/// link that broke), before the job fails: such a failure is not the job's.
 const PHASE_RETRIES: u32 = 2;
+/// How long to wait before asking a phase again.
+const PHASE_RETRY_PAUSE: Duration = Duration::from_millis(500);
 /// The code of a failure that is the system's own and not the host's or the person's.
 pub const INTERNAL: &str = "internal";
 /// How many jobs one sweep takes up at most.
@@ -94,7 +94,7 @@ pub enum Stop {
 }
 
 /// A reason for a job to fail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
     /// A stable code.
     pub code: String,
@@ -102,16 +102,6 @@ pub struct Failure {
     pub message: String,
     /// The end of what a phase printed, where one prints.
     pub log: Option<String>,
-    /// The failure is a host's answer to a command, with the code the host gave: the command stays what it
-    /// answered, so asking the phase again would only replay the same words. Not part of what a failure is.
-    #[serde(skip)]
-    pub(crate) answered: bool,
-}
-
-impl PartialEq for Failure {
-    fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.message == other.message && self.log == other.log
-    }
 }
 
 /// Once cleanup is admitted, recovery must finish the same failure rather than resume success.
@@ -146,15 +136,7 @@ impl Failure {
             code: code.into(),
             message: message.into(),
             log: None,
-            answered: false,
         }
-    }
-
-    /// The same, said to be a host's answer to a command: a job does not ask the phase again for it.
-    #[must_use]
-    pub const fn answered(mut self) -> Self {
-        self.answered = true;
-        self
     }
 
     /// The same, with the end of what was printed.
@@ -284,7 +266,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "pending_notices",
         "phase",
         "phase_at",
-        "phase_attempt",
         "pinned_at",
         "pinned_by",
         "position",
@@ -424,15 +405,6 @@ pub trait Phased: Send + Sync {
 
     /// Undoes what the job made, after a failure or a cancel before its commit.
     async fn undo(&self, job: &Job, why: &Stop) -> Undone;
-
-    /// Whether a host's answer to a command of one of this job's phases is final for the phase: its commands
-    /// keep their identity from one run of the phase to the next (they are made from the job and the phase),
-    /// so asking the phase again could only replay the stored answer, after a pause for nothing. A job whose
-    /// phases make a new command after a negative answer says no, and its phase is asked again as it is for a
-    /// failure of the system under it.
-    fn answers_are_final(&self) -> bool {
-        false
-    }
 
     /// What the job produced, once every phase is done.
     async fn result(&self, _job: &Job) -> Option<Json> {
@@ -602,16 +574,6 @@ pub async fn make(
     making: &Making<'_>,
     now: DateTime<Utc>,
 ) -> Result<JobRow, MakeError> {
-    make_before(conn, making, now, || Ok(())).await
-}
-
-/// The same native job insertion, with its writer's check after the complete lock footprint.
-pub async fn make_before(
-    conn: &mut orch_db::Conn,
-    making: &Making<'_>,
-    now: DateTime<Utc>,
-    before: impl FnOnce() -> Result<(), EngineError> + Send,
-) -> Result<JobRow, MakeError> {
     environments::lock_environment(conn, making.environment)
         .await?
         .ok_or(MakeError::NoEnvironment)?;
@@ -631,7 +593,6 @@ pub async fn make_before(
         return Err(MakeError::Running(Box::new(running)));
     }
     let progress = serde_json::to_value(initial_progress(making.phases)).unwrap_or(Json::Null);
-    before()?;
     Ok(rows::insert(
         conn,
         &NewJob {
@@ -1078,25 +1039,10 @@ impl Job {
         &self,
         change: impl FnOnce(&mut JobProgress, &mut Option<String>) + Send,
     ) -> Result<(), EngineError> {
-        self.amend_and_remember(None, change).await
-    }
-
-    /// Changes the progress as [`Job::amend`] does and, in the same transaction, writes `members` into
-    /// the plan as [`Job::remember`] does: what the progress shows and the record in the plan that says
-    /// what it shows are then never apart for a reader of the job, nor after a runner that stops between
-    /// them.
-    pub async fn amend_and_remember(
-        &self,
-        members: Option<&Json>,
-        change: impl FnOnce(&mut JobProgress, &mut Option<String>) + Send,
-    ) -> Result<(), EngineError> {
         let mut tx = self.engine.inner.db.begin().await?;
         let Some(row) = self.lock_owned(&mut tx).await? else {
             return Ok(());
         };
-        if let Some(members) = members {
-            rows::merge_plan(&mut tx, self.id, members, self.now()).await?;
-        }
         let (mut progress, mut log) = read_progress(&row);
         let before = progress.clone();
         change(&mut progress, &mut log);
@@ -1146,8 +1092,8 @@ impl Job {
     /// Sends a command and waits for its end, cancelling it if the job is cancelled meanwhile. A
     /// failure of the command is the job's failure, with the code the machine gave.
     pub async fn command(&self, command: Outgoing) -> Result<Json, Stop> {
-        let command = Box::pin(self.prepare_command(command)).await?;
-        Box::pin(self.run_command(command, true)).await
+        let command = self.prepare_command(command).await?;
+        self.run_command(command, true).await
     }
 
     /// The native immutable work report and retained deadline, before original-source capture.
@@ -1234,7 +1180,7 @@ impl Job {
     /// As [`Job::command`], for the work of undoing: a request to cancel the job does not stop it, since
     /// it is what the job is being undone for.
     pub async fn command_to_undo(&self, command: Outgoing) -> Result<Json, Stop> {
-        Box::pin(self.run_command(command, false)).await
+        self.run_command(command, false).await
     }
 
     /// Checks cancellation before an irreversible item, then confirms that item before stopping between items.
@@ -1246,7 +1192,7 @@ impl Job {
             self.flags.cancelled.store(true, Ordering::SeqCst);
             return Err(Stop::Cancelled);
         }
-        Box::pin(self.run_command(command, false)).await
+        self.run_command(command, false).await
     }
 
     async fn run_command(&self, command: Outgoing, respect_cancel: bool) -> Result<Json, Stop> {
@@ -1311,11 +1257,8 @@ impl Job {
                     continue;
                 }
                 if let Some(due) = due {
-                    match tokio::time::timeout_at(
-                        due,
-                        Box::pin(self.run_command_once(next, respect_cancel)),
-                    )
-                    .await
+                    match tokio::time::timeout_at(due, self.run_command_once(next, respect_cancel))
+                        .await
                     {
                         Ok(ended) => ended?,
                         Err(_) => {
@@ -1334,7 +1277,7 @@ impl Job {
                         }
                     }
                 } else {
-                    Box::pin(self.run_command_once(next, respect_cancel)).await?
+                    self.run_command_once(next, respect_cancel).await?
                 }
             };
             if retry_busy
@@ -1354,9 +1297,7 @@ impl Job {
             }
             return match ended {
                 Ended::Succeeded(result) => Ok(result),
-                Ended::Failed(error) => Err(Stop::Failed(
-                    Failure::new(error.code, error.detail).answered(),
-                )),
+                Ended::Failed(error) => Err(Stop::Failed(Failure::new(error.code, error.detail))),
                 Ended::Expired => Err(Stop::Failed(Failure::new(
                     "expired",
                     "the host did not take the command up in time",
@@ -1389,10 +1330,9 @@ impl Job {
             let provider_recreate_effect = super::recreate::batch_authority::applies(&row);
             provider_receipt_identity =
                 super::recreate::batch_authority::has_receipt_identity(&row, id);
-            creator_effect = super::provision::retains_creator_authority(&row)
+            creator_effect = row.plan.get("creator_provision").is_some()
                 || row.plan.get("provider_creator").is_some()
                 || provider_recreate_effect
-                || super::lifecycle_commands::applies(&row)
                 || super::source::publication_authority::is_restricted(&row)
                 || row
                     .plan
@@ -1479,8 +1419,6 @@ impl Job {
                         super::recreate::batch_authority::require_receipt_identity(self, &command)
                             .await?;
                     }
-                } else {
-                    super::recreate::batch_authority::seal_command(self, &mut command).await?;
                 }
                 if let Err(stop) =
                     super::source::publication_authority::remember_command(self, &command).await
@@ -1544,60 +1482,7 @@ impl Job {
             }
             crate::commands::snapshot_origin::decorate(self, &mut command).await?;
         }
-        if respect_cancel {
-            super::fork::command::remember_forward(self, &mut command).await?;
-        }
-        let restore = matches!(&command.authority, Some(crate::commands::CommandAuthority::WorkspaceRestore(authority))
-            if matches!(authority.as_ref(), super::restore::operation::RestoreCommand::Job { .. }));
-        if restore {
-            if let Some(retained) = commands.retained_command(id).await.map_err(commands_stop)? {
-                preserve_creator_report(&mut command, &retained)?;
-            }
-            super::restore::operation::decorate(self, &mut command, respect_cancel).await?;
-        }
-        super::recreate::capability_revocation::decorate(self, &mut command, !respect_cancel)
-            .await?;
-        super::retained::operation::decorate(self, &mut command, !respect_cancel).await?;
-        super::lifecycle_commands::decorate(self, &mut command, respect_cancel).await?;
-        let update_boundary = if respect_cancel
-            && super::recreate::environment_authority::is_restricted(&self.row().await?)
-        {
-            super::recreate::environment_authority::before_issue(self, &mut command).await?
-        } else {
-            None
-        };
-        let update_receipt = matches!(
-            &command.authority,
-            Some(crate::commands::CommandAuthority::UpdateJob(_))
-        )
-        .then(|| command.clone());
-        let issued = match update_boundary {
-            Some(before) => commands.issue_before(command, before).await,
-            None => commands.issue(command).await,
-        };
-        if let Err(error) = issued {
-            if let Some(command) = update_receipt
-                && matches!(&error, crate::commands::CommandsError::BeforeEffect(_))
-                && commands
-                    .status(id)
-                    .await
-                    .map_err(commands_stop)?
-                    .is_some_and(|info| {
-                        matches!(
-                            info.stage,
-                            crate::commands::Stage::Accepted | crate::commands::Stage::Over
-                        )
-                    })
-            {
-                super::recreate::batch_authority::require_receipt_identity(self, &command).await?;
-            } else {
-                return Err(commands_stop(error));
-            }
-        }
-
-        if restore {
-            super::restore::operation::issued(self, id).await?;
-        }
+        commands.issue(command).await.map_err(commands_stop)?;
         let waiting = commands.wait(id);
         tokio::pin!(waiting);
         let mut watch = tokio::time::interval(WATCH_EVERY);
@@ -2101,13 +1986,11 @@ impl Engine {
                 };
                 match step {
                     Err(Stop::Failed(ref failure))
-                        if failure.code == INTERNAL
-                            && attempts < PHASE_RETRIES
-                            && !(failure.answered && phased.answers_are_final()) =>
+                        if failure.code == INTERNAL && attempts < PHASE_RETRIES =>
                     {
                         attempts += 1;
                         tracing::warn!(job = %job.id, phase = %name, message = %failure.message, "a phase failed on the system's side; it is asked again");
-                        tokio::time::sleep(self.inner.config.hosting.phase_retry_pause).await;
+                        tokio::time::sleep(PHASE_RETRY_PAUSE).await;
                     }
                     other => break other,
                 }
@@ -2170,9 +2053,6 @@ impl Engine {
         .await?
         {
             return Ok(());
-        }
-        if finished_row.kind == super::measurement::KIND {
-            super::measurement::preparation::seal_finished(&mut tx, job.id).await?;
         }
         crate::notifications::job_finished(&mut tx, job.id, self.inner.clock.now()).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
@@ -2300,9 +2180,6 @@ impl Engine {
         .await?
         {
             return Ok(());
-        }
-        if row.kind == super::measurement::KIND {
-            super::measurement::preparation::seal_finished(&mut tx, job.id).await?;
         }
         crate::notifications::job_finished(&mut tx, job.id, self.inner.clock.now()).await?;
         if to == state::FAILED

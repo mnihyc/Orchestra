@@ -9,7 +9,6 @@ import type { AwayPage, GroupReadBody, PrefsChange, ReadResult, RouteChange } fr
 
 
 export const outsideKey = ['away', 'summary'] as const;
-export const outsideStatusKey = ['away', 'outside-status'] as const;
 export const routesKey = ['away', 'routes'] as const;
 export const devicesKey = ['away', 'devices'] as const;
 export const groupedKey = ['away', 'groups'] as const;
@@ -22,8 +21,8 @@ export const outsideQuery = (nodeId?: string) => queryOptions({
 
 /** Scoped consumers need the same status the setup producer already observed, not another counter read. */
 export const outsideStatusQuery = (nodeId: string) => queryOptions({
-  queryKey: [...outsideStatusKey, nodeId] as const,
-  ...suppliedRead([...outsideStatusKey, nodeId]),
+  queryKey: ['away', 'outside-status', nodeId] as const,
+  ...suppliedRead(['away', 'outside-status', nodeId]),
   queryFn: async ({ signal }): Promise<OutsideStatus> => (await ok(api.GET('/notifications/summary', { params: { query: { node_id: nodeId } }, signal }))).outside,
   retry: false,
 });

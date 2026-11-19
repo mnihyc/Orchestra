@@ -30,15 +30,21 @@ import { Button } from '@/ui/Button';
 import { copyText } from '@/ui/clipboard';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { toast } from '@/ui/Toast';
-import { fencedCode } from '@/lib/fencedCode';
+
+/** A fenced block that no run of backticks in its body can close. */
+function fenced(language: string, body: string): string {
+  const longest = Math.max(2, ...Array.from(body.matchAll(/`+/g), (run) => run[0].length));
+  const marks = '`'.repeat(longest + 1);
+  return `${marks}${language}\n${body}\n${marks}`;
+}
 
 /** An item as Markdown: a command and its output in a fenced block, a change as a diff, a step that is neither by its title, and what was said as its text. */
 export function itemMarkdown(item: Item): string {
   if (item.kind === 'tool_call') {
     const tool = item.payload.tool;
-    if (tool.kind === 'command') return fencedCode(`$ ${tool.command}\n${tool.output.inline}`.trimEnd(), 'sh');
+    if (tool.kind === 'command') return fenced('sh', `$ ${tool.command}\n${tool.output.inline}`.trimEnd());
     if (tool.kind === 'file_change') {
-      return tool.changes.map((change) => (change.diff === null ? `\`${change.path}\`` : fencedCode(change.diff, 'diff'))).join('\n\n');
+      return tool.changes.map((change) => (change.diff === null ? `\`${change.path}\`` : fenced('diff', change.diff))).join('\n\n');
     }
     return `**${item.payload.title}**`;
   }
@@ -118,7 +124,7 @@ export function TimelineSelectionBar({ threadId, ids, canQuote, onCancel }: Time
   const copies: MenuEntry[] = [
     { id: 'copy-plain', label: t('timeline.selection.copyPlain'), onSelect: () => void copyText(words) },
     { id: 'copy-json', label: t('timeline.selection.copyJson'), onSelect: () => void copyText(JSON.stringify(items, null, 2)) },
-    { id: 'copy-link', label: t('linkActions.copyLines'), onSelect: () => void copyText(itemsLink(read, ids)) },
+    { id: 'copy-link', label: t('timeline.selection.copyLink'), onSelect: () => void copyText(itemsLink(threadId, ids)) },
   ];
 
   const forward = () => {

@@ -1,28 +1,7 @@
 //! Native roster facts are prepared once; the actual transport reader owns their final projection.
 
 use super::*;
-use orch_api_contract::background::BackgroundEndReason;
 use orch_link_contract::background::NativeBackgroundCommand;
-
-fn end_reason(
-    interact: bool,
-    supported: bool,
-    state: BackgroundState,
-    current_target: bool,
-) -> Option<BackgroundEndReason> {
-    if !interact {
-        Some(BackgroundEndReason::InteractRequired)
-    } else if !supported {
-        Some(BackgroundEndReason::Unsupported)
-    } else {
-        match state {
-            BackgroundState::Offline => Some(BackgroundEndReason::Offline),
-            BackgroundState::Unavailable => Some(BackgroundEndReason::Unavailable),
-            BackgroundState::Live if !current_target => Some(BackgroundEndReason::NoCurrentTarget),
-            BackgroundState::Live => None,
-        }
-    }
-}
 
 /// Effect-free factual preparation. This contains no cached permission or reconstructed credential.
 #[derive(Debug, Clone)]
@@ -166,23 +145,22 @@ impl Engine {
         let mut state = BackgroundState::Live;
         let mut supported = false;
         let mut live = false;
+        let mut end_live = false;
         let mut reason = None;
         for prepared in &prepared.sources {
             let source = &prepared.source;
             let observed = &prepared.observation;
             supported |= observed.supported;
             live |= observed.state == orch_link_contract::background::BackgroundState::Live;
-            let source_state = match observed.state {
-                orch_link_contract::background::BackgroundState::Live => BackgroundState::Live,
-                orch_link_contract::background::BackgroundState::Offline => {
-                    BackgroundState::Offline
-                }
-                orch_link_contract::background::BackgroundState::Unavailable => {
-                    BackgroundState::Unavailable
-                }
-            };
-            if source_state != BackgroundState::Live {
-                state = source_state;
+            end_live |= observed.supported
+                && observed.state == orch_link_contract::background::BackgroundState::Live;
+            if observed.state != orch_link_contract::background::BackgroundState::Live {
+                state =
+                    if observed.state == orch_link_contract::background::BackgroundState::Offline {
+                        BackgroundState::Offline
+                    } else {
+                        BackgroundState::Unavailable
+                    };
             }
             if reason.is_none() {
                 reason.clone_from(&observed.reason);
@@ -237,11 +215,6 @@ impl Engine {
                     item_id: command.recorded.map(|(item, _)| item),
                     cpu_percent: native.cpu_percent,
                     memory_bytes: native.memory_bytes,
-                    end_reason: if interact && source.machine_id.is_none() {
-                        Some(BackgroundEndReason::NoCurrentTarget)
-                    } else {
-                        end_reason(interact, observed.supported, source_state, true)
-                    },
                 });
                 if let Some(machine) = source.machine_id.filter(|_| {
                     observed.supported
@@ -267,18 +240,6 @@ impl Engine {
             total = None;
             reason = Some("there is no existing native session to inspect".to_owned());
         }
-        let end_reason = if interact && prepared.sources.is_empty() {
-            Some(BackgroundEndReason::Unavailable)
-        } else if interact
-            && prepared
-                .sources
-                .iter()
-                .all(|source| source.source.machine_id.is_none())
-        {
-            Some(BackgroundEndReason::NoCurrentTarget)
-        } else {
-            end_reason(interact, supported, state, !targets.is_empty())
-        };
         let as_of = (state == BackgroundState::Live
             && prepared
                 .sources
@@ -312,8 +273,7 @@ impl Engine {
                 total,
                 list_ref: None,
                 expires_at: None,
-                can_end: end_reason.is_none(),
-                end_reason,
+                can_end: end_live && interact,
             },
             targets,
         ))

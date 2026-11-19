@@ -4,7 +4,6 @@ import { Pencil } from 'lucide-react';
 import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { SettingRow, type SettingRowProps } from '@/ui/SettingRow';
-import { restoreFocusQuietly } from '@/ui/focus';
 
 export interface SettingEditorProps extends Omit<SettingRowProps, 'value'> {
   /** The compact value, shown instead of the editor until it is opened. */
@@ -36,10 +35,10 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
       const controls = Array.from(editor?.querySelectorAll<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button, [contenteditable="true"]') ?? [])
         .filter((control) => (control.tabIndex >= 0 || control.hasAttribute('data-autofocus')) && !control.matches(':disabled,[aria-disabled="true"],[readonly]') && control.closest('[hidden],[inert],[aria-hidden="true"]') === null);
       const first = controls.find((control) => control.hasAttribute('data-autofocus')) ?? controls[0];
-      if (first !== undefined) restoreFocusQuietly(first);
+      first?.focus();
     }
     return () => {
-      if (editor?.contains(document.activeElement) === true && opener !== null) restoreFocusQuietly(opener);
+      if (editor?.contains(document.activeElement) === true) opener?.focus();
     };
   }, [expanded, placement]);
   const [visited, setVisited] = useState(expanded);
@@ -55,7 +54,7 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
       event.preventDefault();
       event.stopPropagation();
       change(false);
-      if (trigger.current !== null) restoreFocusQuietly(trigger.current);
+      trigger.current?.focus();
     }}>
     <Activity mode={expanded || !pauseEffects ? 'visible' : 'hidden'}>{(visited || expanded) && children}</Activity>
   </div>;

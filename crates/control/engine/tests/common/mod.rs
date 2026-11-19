@@ -13,13 +13,11 @@
 #![allow(dead_code, reason = "each test file uses some of what is here")]
 
 pub mod background;
-mod paid_commands;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use orch_access_contract::decisions::MissingAccess;
 use orch_access_contract::pages as contract_pages;
-use orch_agent_contract::descriptor::ArrangementType;
 use orch_api_contract::threads::{ContentPart, Delivery, ItemPayload};
 use orch_authz::Caller;
 use orch_db::audit::{Actor, Origin};
@@ -29,7 +27,7 @@ use orch_db::queries::identity::testing::insert_user;
 use orch_db::queries::link as link_queries;
 use orch_db::queries::resources::testing::insert_machine;
 use orch_db::{Conn, Db};
-use orch_engine::access::{AccessFault, Answer, Limit, ProviderUse, ResourceAccess, RunsIn};
+use orch_engine::access::{AccessFault, Answer, Limit, ProviderUse, ResourceAccess};
 use orch_engine::commands::{Commands, CommandsError, Info, Outcome, Outgoing, Stage};
 use orch_engine::config::EngineConfig;
 use orch_engine::inputs::InputRequest;
@@ -116,7 +114,6 @@ pub async fn meanwhile(how_long: Duration) {
 pub struct TestAccess {
     denied: Mutex<HashSet<Id>>,
     denied_models: Mutex<HashSet<(Id, String)>>,
-    entries: Mutex<HashMap<Id, Vec<orch_access_contract::permissions::ProviderUse>>>,
     no_bypass: Mutex<HashSet<Id>>,
     unreachable: AtomicBool,
 }
@@ -140,50 +137,6 @@ impl TestAccess {
     /// Restores one person's use of one model.
     pub fn allow_model(&self, person: Id, model: &str) {
         lock(&self.denied_models).remove(&(person, model.to_owned()));
-    }
-
-    /// From now on `person` uses the provider through entries with these options, and the double
-    /// decides as the access engine does: one single entry has to allow the model, the effort and
-    /// the place of what is asked together, and what is offered as types is theirs. A site that
-    /// asks without the place it works in is not held to it, and a case that depends on the place
-    /// fails there.
-    pub fn use_through(&self, person: Id, entries: Vec<Json>) {
-        let entries = entries
-            .iter()
-            .map(|options| {
-                match orch_access_contract::permissions::Options::parse(
-                    orch_access_contract::permissions::Permission::ProviderUse,
-                    options,
-                )
-                .expect("options that read")
-                {
-                    orch_access_contract::permissions::Options::ProviderUse(options) => options,
-                    other => panic!("the use of a provider takes options: {other:?}"),
-                }
-            })
-            .collect();
-        lock(&self.entries).insert(person, entries);
-    }
-
-    /// From now on `person` uses the provider through one entry that allows only these arrangement
-    /// types, as an entry that names them (or none, and so the types in which the credential stays)
-    /// does.
-    pub fn limit_types(&self, person: Id, types: &[ArrangementType]) {
-        self.use_through(person, vec![json!({ "arrangements": types })]);
-    }
-
-    /// From now on `person` uses the provider through one entry that names only these environments.
-    pub fn use_only_in(&self, person: Id, environments: &[Id]) {
-        let places: Vec<Json> = environments
-            .iter()
-            .map(|id| json!({ "kind": "environment", "id": id }))
-            .collect();
-        self.use_through(person, vec![json!({ "where": places })]);
-    }
-
-    /// Back to the double's own answer: nothing is narrowed.
-    pub fn use_through_nothing(&self, person: Id) {
-        lock(&self.entries).remove(&person);
     }
 
     /// From now on `person` may not let a turn past a limit.
@@ -217,102 +170,17 @@ impl TestAccess {
 impl ResourceAccess for TestAccess {
     async fn provider_use(
         &self,
-        conn: &mut Conn,
+        _: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
         let answer = self.answer(ask.person)?;
         if ask.model.is_some_and(|model| {
             lock(&self.denied_models).contains(&(ask.person, model.to_owned()))
         }) {
-            return Ok(Answer::Refused(Vec::new()));
-        }
-        let Some(entries) = lock(&self.entries).get(&ask.person).cloned() else {
-            return Ok(answer);
-        };
-        if !matches!(answer, Answer::Allowed { .. }) {
-            return Ok(answer);
-        }
-        let place = match ask.runs_in {
-            Some(RunsIn::Environment(environment)) => Some(
-                orch_authz::usable::place_of(conn, environment)
-                    .await
-                    .expect("a place"),
-            ),
-            Some(RunsIn::NewOnHost(host)) => Some(
-                orch_authz::usable::place_of_host(conn, host)
-                    .await
-                    .expect("a place"),
-            ),
-            Some(RunsIn::NewOnMachine(machine)) => Some(
-                orch_authz::usable::place_of_machine(conn, machine)
-                    .await
-                    .expect("a place"),
-            ),
-            None => None,
-        };
-        let wanted = orch_authz::options::Wanted {
-            model: ask.model.map(|model| (model, &[][..])),
-            effort: ask.effort,
-            at: place.as_ref(),
-            ..orch_authz::options::Wanted::default()
-        };
-        let allowing: Vec<&orch_access_contract::permissions::ProviderUse> = entries
-            .iter()
-            .filter(|entry| orch_authz::options::entry_allows(entry, &wanted))
-            .collect();
-        if allowing.is_empty() {
-            // As the access engine refuses: the place is what is lacking when an entry would allow the
-            // rest without it.
-            let without_place = orch_authz::options::Wanted { at: None, ..wanted };
-            let outside = place
-                .as_ref()
-                .filter(|_| {
-                    entries
-                        .iter()
-                        .any(|entry| orch_authz::options::entry_allows(entry, &without_place))
-                })
-                .and_then(orch_access_contract::whereabouts::Whereabouts::name);
-            return Ok(Answer::Refused(outside.map_or_else(Vec::new, |name| {
-                vec![MissingAccess {
-                    // As the access engine refuses, it names the provider's owner and the people who
-                    // could give the entry, to the person it was asked about.
-                    object: orch_access_contract::decisions::MissingObject {
-                        kind: orch_access_contract::permissions::ObjectKind::Provider,
-                        id: ask.provider,
-                        name: Some("A provider".to_owned()),
-                        owner: Some(new_id()),
-                    },
-                    permissions: vec![orch_access_contract::permissions::Permission::ProviderUse],
-                    options: Some(orch_access_contract::decisions::MissingOptions {
-                        r#where: Some(vec![name]),
-                        ..Default::default()
-                    }),
-                    ask: vec![new_id()],
-                    ask_more: 2,
-                    r#override: true,
-                    closed: None,
-                    locked_by: None,
-                }]
-            })));
-        }
-        // A question that names no model is answered with the types that every model chosen later
-        // will find allowed.
-        let offered = if ask.model.is_none() {
-            orch_authz::options::arrangements_whatever_the_model(&allowing)
+            Ok(Answer::Refused(Vec::new()))
         } else {
-            orch_authz::options::arrangements_of(&allowing)
-        };
-        let offered = offered
-            .into_iter()
-            .filter_map(|arrangement| {
-                ArrangementType::ALL
-                    .into_iter()
-                    .find(|kind| kind.as_str() == arrangement.as_str())
-            })
-            .collect();
-        Ok(Answer::Allowed {
-            arrangements: Some(offered),
-        })
+            Ok(answer)
+        }
     }
 
     async fn agent_use(
@@ -875,7 +743,6 @@ pub fn config() -> EngineConfig {
             // a test's runner can be kept from doing so for a couple of seconds; the job would then be taken
             // up a second time while the first runner is still at it.
             job_lease: orch_engine::hosting::JOB_LEASE,
-            phase_retry_pause: orch_engine::hosting::PHASE_RETRY_PAUSE,
             enroll_timeout: orch_engine::hosting::HostingConfig::default().enroll_timeout,
             reaper_every: Duration::from_millis(150),
             removal_first_pause: Duration::from_millis(300),
@@ -1181,11 +1048,6 @@ impl World {
             ..Setup::default()
         })
         .await
-    }
-
-    /// A world made of exactly this.
-    pub async fn from_setup(setup: Setup) -> Self {
-        Self::build(setup).await
     }
 
     async fn build(setup: Setup) -> Self {
@@ -1566,18 +1428,10 @@ impl World {
             db: self.pool.clone(),
             clock: self.clock.clone(),
             config: lock(&self.config).clone(),
-            commands: wrap(paid_commands::wrap(
-                self.commands.current(),
-                self.pool.clone(),
-                self.clock.clone(),
-                self.access.clone(),
-            )),
+            commands: wrap(self.commands.current()),
             access: self.access.clone(),
             live: self.live.clone(),
         });
-        engine.attach_capability_services(Arc::new(
-            orch_provider_contract::builtins::BuiltinSources::default(),
-        ));
         engine.start();
         *lock(&self.engine) = Some(engine);
         self.spawn_applier(link, notices);
@@ -2002,21 +1856,12 @@ impl World {
 
     /// Writes a setting at a node, as the person who made the tree.
     pub async fn set(&self, node: Id, key: &str, value: Json) {
-        self.set_at(Target::Node(node), key, value).await;
-    }
-
-    /// Writes a system setting without silently changing a node setting's scope.
-    pub async fn set_system(&self, key: &str, value: Json) {
-        self.set_at(Target::System, key, value).await;
-    }
-
-    async fn set_at(&self, target: Target, key: &str, value: Json) {
         let mut conn = self.pool.acquire().await.unwrap();
         settings_write::write(
             &mut conn,
             &settings_write::Write {
                 actor: Actor::User(self.ada),
-                target,
+                target: Target::Node(node),
                 key,
                 value,
                 locked: None,
@@ -2315,10 +2160,8 @@ impl World {
     pub async fn wait_turn(&self, turn: Id, state: &str) {
         let observed = Mutex::new(None);
         let config = self.engine().config().clone();
-        // Observe at a short interval of its own, whatever the world's supervisor interval is: a case may set that long
-        // (so that a sweep does not run what it holds back), and a helper that slept for it would sleep through the
-        // state it waits for. The test's failure guard also covers database reads, and its diagnostic shows the
-        // product's bound.
+        // Observe once per supervisor pass. The test's failure guard also
+        // covers database reads, and its diagnostic shows the product's bound.
         let observing = async {
             loop {
                 let found: (String, Option<Json>, Option<Json>) =
@@ -2332,7 +2175,7 @@ impl World {
                 if arrived {
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(config.sweep_every).await;
             }
         };
         assert!(
@@ -2786,21 +2629,12 @@ fn build_engine(
     access: &Arc<TestAccess>,
     live: &Arc<Recorder>,
 ) -> Engine {
-    let engine = Engine::new(EngineParts {
+    Engine::new(EngineParts {
         db: pool.clone(),
         clock: Arc::clone(clock),
         config: config.clone(),
-        commands: paid_commands::wrap(
-            commands.current(),
-            pool.clone(),
-            clock.clone(),
-            access.clone(),
-        ),
+        commands: commands.current(),
         access: access.clone(),
         live: live.clone(),
-    });
-    engine.attach_capability_services(Arc::new(
-        orch_provider_contract::builtins::BuiltinSources::default(),
-    ));
-    engine
+    })
 }

@@ -371,13 +371,7 @@ impl Engine {
         path: &str,
         command: Outgoing,
     ) -> Result<orch_types::Json, Refusal> {
-        let result = match super::image_generation::inputs::run(self, command.clone()).await {
-            Some(result) => result,
-            None => commands::run(&*self.inner.commands, command)
-                .await
-                .map_err(EngineError::from),
-        };
-        match result {
+        match commands::run(&*self.inner.commands, command).await {
             Ok(Outcome::Succeeded(value)) => Ok(value),
             Ok(Outcome::Failed(error)) => Err(match error.known() {
                 Some(ErrorCode::TooLarge) => {

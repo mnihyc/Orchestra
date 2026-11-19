@@ -14,7 +14,6 @@ import { i18n, setLocale } from '@/i18n';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 import { CATALOGUE, pageFor } from '../unit/general-access-fixtures';
-import { stepOption } from '@/features/access/agentShareWords';
 import { options } from '../unit/start-fixtures';
 import { show } from './support';
 
@@ -114,16 +113,10 @@ it('uses served future-topic bounds when creating a project’s new topic and fi
   expect(state.settingsReads).not.toHaveBeenCalled();
 });
 
-it.each(['en','zh-CN'] as const)('shows the effective reduced preset without inventing its policy source (%s)', async (locale) => {
-  await setLocale(locale);
+it('shows a reduced available preset from served parent-lock bounds without promising ownership bypass', async () => {
   state.bounds = { documents: 'read' };
   show(<NewThreadDialog parent={placeOfNode(topic())} open onClose={vi.fn()} />);
-  await screen.findByText(i18n.t('startImplicit.reducedTo'));
-  const reduction=document.querySelector('[data-agent-access-reduced]');
-  expect(reduction).toHaveTextContent(i18n.t('startImplicit.byAvailableAccess'));
-  expect(reduction).toHaveTextContent(i18n.t('access.agents.area.documents'));
-  expect(reduction).toHaveTextContent(stepOption(i18n.t,'documents',1).name);
-  expect(reduction).not.toHaveTextContent(stepOption(i18n.t,'documents',2).name);
+  await screen.findByText(i18n.t('agentAccess.presetReduced'));
   await userEvent.click(screen.getByRole('button', { name: i18n.t('start.create') }));
   expect(state.start.mock.calls[0]?.[0]).toMatchObject({ agentAccess: { where: 'topic', parts: { documents: 'read' } } });
 });

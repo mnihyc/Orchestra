@@ -160,23 +160,6 @@ pub fn in_transaction(conn: &mut Conn) -> bool {
     conn.is_in_transaction()
 }
 
-/// The identifier of the transaction the connection is in, so a credential captured inside one
-/// transaction can prove later that it is still the same one.
-pub async fn current_transaction_id(conn: &mut Conn) -> Result<i64, DbError> {
-    Ok(sqlx::query_scalar("SELECT txid_current()::bigint")
-        .fetch_one(conn)
-        .await?)
-}
-
-/// Holds a machine's row against deletion and owner change for the rest of the transaction.
-pub async fn share_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR SHARE")
-        .bind(machine)
-        .fetch_optional(conn)
-        .await?;
-    Ok(())
-}
-
 /// Makes an ordinary background action's commit check the system's authorization epoch, and the
 /// epoch of the root org of every node its permission decisions read, keeping a stronger class
 /// already declared in this transaction. Locks nothing.

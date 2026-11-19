@@ -29,10 +29,6 @@ pub(crate) struct InputAuthority {
     forward: Option<super::ForwardInputOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     snapshot_comment: Option<super::SnapshotCommentOrigin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    announcement_provenance: Option<crate::tools::announce::AnnouncementProvenance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    capability_parent: Option<crate::tools::capability_service::delegation::ParentLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,35 +140,6 @@ impl InputCallers {
 }
 
 impl InputAuthority {
-    pub(crate) fn capability_parent(
-        &self,
-    ) -> Option<&crate::tools::capability_service::delegation::ParentLink> {
-        self.capability_parent.as_ref()
-    }
-    pub(crate) fn with_capability_parent(
-        mut self,
-        parent: crate::tools::capability_service::delegation::ParentLink,
-    ) -> Result<Self, EngineError> {
-        if self
-            .capability_parent
-            .as_ref()
-            .is_some_and(|old| old != &parent)
-        {
-            return Err(EngineError::ToolCallIdentity);
-        }
-        self.capability_parent = Some(parent);
-        Ok(self)
-    }
-    /// A native future-input delegation may narrow an actual accepted starter
-    /// origin to ordinary holdings, but never replace its keys or operation.
-    pub(super) fn with_ordinary_ceiling(mut self, actor: Id) -> Result<Self, EngineError> {
-        self.validate_actor(actor)?;
-        let ordinary = CapturedCaller::capture(&Caller::session(actor));
-        if !self.boundaries.contains(&ordinary) {
-            self.boundaries.push(ordinary);
-        }
-        Ok(self)
-    }
     fn from_caller(caller: &Caller) -> Result<Self, EngineError> {
         if caller.admitted_operation().is_some() {
             return Ok(Self {
@@ -183,8 +150,6 @@ impl InputAuthority {
                 chat: None,
                 forward: None,
                 snapshot_comment: None,
-                announcement_provenance: None,
-                capability_parent: None,
             });
         }
         if caller.admitted_facets().is_some()
@@ -204,13 +169,11 @@ impl InputAuthority {
             chat: None,
             forward: None,
             snapshot_comment: None,
-            announcement_provenance: None,
-            capability_parent: None,
         })
     }
 
     fn validate(&self) -> Result<(), EngineError> {
-        if !self.has_actor_origins() && self.announcement_provenance.is_none() {
+        if self.credentials.is_empty() && self.boundaries.is_empty() && self.origins.is_empty() {
             return Err(EngineError::unreadable(
                 "input authority has no credential boundary",
             ));
@@ -226,33 +189,6 @@ impl InputAuthority {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) fn has_actor_origins(&self) -> bool {
-        !self.credentials.is_empty() || !self.boundaries.is_empty() || !self.origins.is_empty()
-    }
-
-    /// Posting attribution cannot supply an author or a model-use approver.
-    pub(crate) fn announcement_provenance(
-        &self,
-    ) -> Option<&crate::tools::announce::AnnouncementProvenance> {
-        self.announcement_provenance.as_ref()
-    }
-
-    pub(crate) fn for_announcement(
-        provenance: crate::tools::announce::AnnouncementProvenance,
-    ) -> Self {
-        Self {
-            credentials: Vec::new(),
-            boundaries: Vec::new(),
-            origins: Vec::new(),
-            scheduled: None,
-            chat: None,
-            forward: None,
-            snapshot_comment: None,
-            announcement_provenance: Some(provenance),
-            capability_parent: None,
-        }
     }
 
     pub(super) fn scheduled(&self) -> Option<super::ScheduledInputOrigin> {
@@ -349,32 +285,7 @@ impl InputAuthority {
                 "the input's producer reference changed",
             ));
         }
-        if self
-            .announcement_provenance
-            .as_ref()
-            .zip(current.announcement_provenance.as_ref())
-            .is_some_and(|(old, new)| old != new)
-        {
-            return Err(EngineError::unreadable(
-                "the input's posting provenance changed",
-            ));
-        }
         let mut result = self.clone();
-        if result
-            .capability_parent
-            .as_ref()
-            .zip(current.capability_parent.as_ref())
-            .is_some_and(|(old, new)| old != new)
-        {
-            return Err(EngineError::ToolCallIdentity);
-        }
-        if result.capability_parent.is_none() {
-            result.capability_parent = current.capability_parent.clone();
-        }
-
-        if result.announcement_provenance.is_none() {
-            result.announcement_provenance = current.announcement_provenance.clone();
-        }
         for credential in &current.credentials {
             if !result.credentials.contains(credential) {
                 result.credentials.push(credential.clone());
@@ -416,8 +327,6 @@ impl InputAuthority {
             chat: None,
             forward: None,
             snapshot_comment: None,
-            announcement_provenance: None,
-            capability_parent: None,
         };
         result.validate_actor(actor)?;
         Ok(result)
@@ -746,40 +655,5 @@ mod tests {
         assert_eq!(next.boundaries.len(), 2);
         assert_eq!(next.boundaries[0], decoded.boundaries[0]);
         assert!(narrowed(Some(&raw), &Caller::session(new_id())).is_err());
-    }
-    #[test]
-    fn a_helper_condition_preserves_every_acting_origin_and_cannot_become_one() {
-        let actor = new_id();
-        let original = InputAuthority::from_caller(&admitted(actor, "ThreadInputCreate")).unwrap();
-        let link: crate::tools::capability_service::delegation::ParentLink =
-            serde_json::from_value(
-                json!({"answer":new_id(),"helper":new_id(),"slot":"delegated_capability:attempt"}),
-            )
-            .unwrap();
-        let conditioned = original
-            .clone()
-            .with_capability_parent(link.clone())
-            .unwrap();
-        assert_eq!(conditioned.origins, original.origins);
-        assert_eq!(conditioned.boundaries, original.boundaries);
-        let edited = conditioned
-            .retaining_current(
-                actor,
-                &InputAuthority::from_caller(&Caller::session(actor)).unwrap(),
-            )
-            .unwrap();
-        assert_eq!(edited.capability_parent(), Some(&link));
-        assert_eq!(edited.origins, original.origins);
-        assert!(edited.has_actor_origins());
-        let wrong: crate::tools::capability_service::delegation::ParentLink =
-            serde_json::from_value(
-                json!({"answer":new_id(),"helper":new_id(),"slot":"delegated_capability:another"}),
-            )
-            .unwrap();
-        assert!(conditioned.clone().with_capability_parent(wrong).is_err());
-        assert!(
-            saved(Some(&json!({"capability_parent":link}))).is_err(),
-            "a condition supplies no actor, credential or admitted operation"
-        );
     }
 }

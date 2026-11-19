@@ -8,7 +8,6 @@ import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 
 import { settingsQuery } from '@/api/settings';
-import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { durationLabel, invitationRules } from '@/features/org/Invite';
 import type { Org, ResolvedSetting } from '@/generated/api-types';
 
@@ -29,8 +28,7 @@ export function ruleSources(settings: readonly ResolvedSetting[] | undefined): s
 /** The rules in force for the invitations of an org, in a sentence or two. */
 export function InvitationRules({ org }: { org: Org }) {
   const { t } = useTranslation();
-  const opening = useDefaultsOpening(org.id);
-  const settings = useQuery({ ...settingsQuery(org.id), enabled: !opening.waiting });
+  const settings = useQuery(settingsQuery(org.id));
   if (settings.data === undefined) return null;
   const rules = invitationRules(settings.data);
   const sources = ruleSources(settings.data);

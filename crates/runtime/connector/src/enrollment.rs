@@ -814,7 +814,7 @@ async fn enroll_inner(
             "the selected gateway is not advertised by this installation".into(),
         ));
     }
-    let mut selected = Vec::new();
+    let mut selected = None;
     let mut gateway_measurements = Vec::new();
     if !selection.catalogue.is_empty()
         || selection.choice.selection == orch_link_contract::gateways::GatewaySelection::Selected
@@ -849,11 +849,10 @@ async fn enroll_inner(
             .candidates(&prober, &candidates, None)
             .await
             .map_err(EnrollError::Unreachable)?;
-        for candidate in ordered {
-            if !selected.contains(&candidate.endpoint) {
-                selected.push(candidate.endpoint);
-            }
-        }
+        selected = ordered
+            .into_iter()
+            .next()
+            .map(|candidate| candidate.endpoint);
         gateway_measurements = measurements;
     }
     let pending = PendingEnrollment::start()?;
@@ -867,22 +866,9 @@ async fn enroll_inner(
         protocol_versions: vec![PROTOCOL_VERSION],
         roles: inputs.roles.clone(),
     };
-    let reply = if selected.is_empty() {
-        transport.enroll(&inputs.address, &token, &request).await?
-    } else {
-        let mut result = Err(EnrollError::Unreachable(
-            "no advertised gateway entrance answered enrollment".into(),
-        ));
-        for endpoint in selected {
-            match transport.enroll_at(&endpoint, &token, &request).await {
-                Err(error @ EnrollError::Unreachable(_)) => result = Err(error),
-                answer => {
-                    result = answer;
-                    break;
-                }
-            }
-        }
-        result?
+    let reply = match selected {
+        Some(endpoint) => transport.enroll_at(&endpoint, &token, &request).await?,
+        None => transport.enroll(&inputs.address, &token, &request).await?,
     };
     if previous
         .as_ref()

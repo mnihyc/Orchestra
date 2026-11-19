@@ -8,8 +8,6 @@ pub enum Source {
     Results,
     /// Optional protected context and address components.
     Names,
-    /// Optional physical origin labels of the actually selected resource names.
-    ResourceOrigins,
     /// The source document of a related search.
     Document,
     /// Native document-folder ancestor labels.
@@ -30,16 +28,7 @@ const NAMES: Binding<Source> = Binding {
 /// Ranked heterogeneous names keep their actual stored identity and context facts.
 pub const NAME_SEARCH: Declaration<Source> = Declaration {
     operation: "NameSearchList",
-    bindings: &[
-        RESULTS,
-        NAMES,
-        Binding {
-            source: Source::ResourceOrigins,
-            target: Target::ResolvedCollection("search_resource_origins"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
+    bindings: &[RESULTS, NAMES],
 };
 
 /// Related lookup reads the source document, actual heterogeneous results and optional contexts.

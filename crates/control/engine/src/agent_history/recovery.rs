@@ -182,16 +182,14 @@ impl Engine {
             return Ok(None);
         }
         if snapshot.thread.side_of.is_some() {
-            let mut tx = self.db().begin().await?;
             crate::side_threads::history::authorize_recovery(
                 self,
-                &mut tx,
+                &mut *self.db().acquire().await?,
                 &snapshot.thread,
                 &snapshot.segment,
                 self.inner.clock.now(),
             )
             .await?;
-            tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         if recipe["history"] == "none" {
             return Ok((!continued).then_some((SessionMode::New, SessionImport::default())));
@@ -404,16 +402,14 @@ impl Engine {
             )));
         }
         if snapshot.thread.side_of.is_some() {
-            let mut tx = self.db().begin().await?;
             crate::side_threads::history::authorize_recovery(
                 self,
-                &mut tx,
+                &mut *self.db().acquire().await?,
                 &snapshot.thread,
                 &snapshot.segment,
                 self.inner.clock.now(),
             )
             .await?;
-            tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         self.materialize_agent_history(snapshot, &cut, &transcript_meta)
             .await?;

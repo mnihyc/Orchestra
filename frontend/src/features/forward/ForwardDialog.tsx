@@ -268,7 +268,7 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
               className={`${fieldBoxClasses} input-leading-icon`}
             />
           </label>
-          <div role="group" aria-label={t('forward.found')} data-scroll-allow="choices" className="flex max-h-[30dvh] flex-col gap-1 overflow-y-auto rounded-lg border border-border p-1">
+          <div role="group" aria-label={t('forward.found')} className="flex max-h-[30dvh] flex-col gap-1 overflow-y-auto rounded-lg border border-border p-1">
             {choices.length === 0 ? (
               <EmptyState compact className="px-2" title={t('forward.nothing')} />
             ) : (

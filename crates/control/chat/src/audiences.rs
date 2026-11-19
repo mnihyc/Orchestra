@@ -176,7 +176,7 @@ pub async fn may_name_groups(
     }
     let policy = orch_settings::get::<String>(
         conn,
-        Place::Node(chat.row.home()),
+        Place::Node(chat.row.node_id.unwrap_or(chat.row.org_id)),
         keys::CHAT_GROUP_MENTIONS,
     )
     .await?
@@ -184,7 +184,7 @@ pub async fn may_name_groups(
     Ok(match policy.as_str() {
         "writers" => true,
         "managers" if chat.row.node_id.is_some() => chat.standing.moderate,
-        "managers" => chat.is_manager(act.user()) || chat.standing.manage,
+        "managers" => chat.row.created_by == Some(act.user()),
         _ => return Err(Error::Internal("unknown group mention policy".into())),
     })
 }
@@ -281,7 +281,7 @@ pub async fn list(
         return Ok(humans);
     }
     let reader_set: HashSet<Id> = people.into_iter().collect();
-    let scope = chat.row.home();
+    let scope = chat.row.node_id.unwrap_or(chat.row.org_id);
     let graph = Graph::load(conn, &[scope]).await?;
     let site = graph.site_of(scope).ok_or(Error::NotFound)?;
     let frame = Frame::load(

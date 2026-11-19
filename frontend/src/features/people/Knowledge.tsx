@@ -21,7 +21,7 @@ function TreePage({ threadId, path }: { threadId: string; path: string }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const query = useQuery({ ...sharedTreeQuery(threadId, path), retry: false, staleTime: 0 });
-  if (query.isPending) return <SkeletonRows read={query} rows={3} />;
+  if (query.isPending) return <SkeletonRows rows={3} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const entries = query.data.entries.filter((entry) => !entry.redacted && entry.name !== null);
   if (entries.length === 0) return <EmptyState compact icon={<BookOpen aria-hidden />} title={t('people.noMaterial')} />;
@@ -38,7 +38,7 @@ export function ThreadKnowledge({ threadId }: { threadId: string; topicId: strin
   const { t } = useTranslation();
   const query = useQuery({ ...threadSharedQuery(threadId), retry: false, staleTime: 0 });
   const [all, setAll] = useState(false);
-  if (query.isPending) return <SkeletonRows read={query} rows={3} />;
+  if (query.isPending) return <SkeletonRows rows={3} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const shared: SharedView = query.data;
   const shares: PriorityShare[] = shared.shares;
@@ -56,5 +56,5 @@ function ShareList({ shares }: { shares: PriorityShare[] }) {
 export function TopicKnowledge({ topicId }: { topicId: string }) {
   const { t } = useTranslation();
   const query = useQuery({ ...agentSharesQuery({ kind: 'topic', id: topicId }, 'to'), retry: false, staleTime: 0 });
-  return <div className="flex flex-col gap-4"><AgentKnowledgeNotice />{query.isPending ? <SkeletonRows read={query} rows={2} /> : query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data.length === 0 ? <EmptyState compact title={t('people.noExplicitShares')} /> : <ShareList shares={query.data} />}</div>;
+  return <div className="flex flex-col gap-4"><AgentKnowledgeNotice />{query.isPending ? <SkeletonRows rows={2} /> : query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data.length === 0 ? <EmptyState compact title={t('people.noExplicitShares')} /> : <ShareList shares={query.data} />}</div>;
 }

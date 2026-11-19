@@ -47,13 +47,6 @@ export class UserFeed implements Part {
     return this.listening.filter((feed) => feed.username === username);
   }
 
-  /** Retire this reader's old projection before a permission-filtered baseline is read again. */
-  invalidate(username: string): void {
-    const affected = this.listeners(username);
-    this.listening = this.listening.filter((feed) => feed.username !== username);
-    for (const feed of affected) feed.subscriber.send({ op: 'resync', id: feed.id, feed: 'user', reload: true });
-  }
-
   frame(subscriber: Subscriber, person: Person | undefined, frame: Record<string, unknown>): boolean {
     const id = Number(frame.id);
     if (frame.op === 'sub' && frame.feed === 'user') {

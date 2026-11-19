@@ -42,16 +42,6 @@ impl<T> Drop for Pending<'_, T> {
     }
 }
 
-pub(super) struct PoolConfig {
-    pub(super) identity: ClientIdentity,
-    pub(super) dialer: Arc<dyn Dialer>,
-    pub(super) clock: Arc<dyn Clock>,
-    pub(super) options: TunnelOptions,
-    pub(super) gauge: Option<Arc<Gauge>>,
-    pub(super) budget: Arc<tokio::sync::Semaphore>,
-    pub(super) incoming: mpsc::UnboundedSender<crate::tunnels::channel::IncomingTunnel>,
-}
-
 pub(super) struct Pool {
     parent: Weak<Shared>,
     identity: ClientIdentity,
@@ -66,7 +56,6 @@ pub(super) struct Pool {
     routes: Mutex<HashMap<Id, oneshot::Sender<TunnelRouteAnswer>>>,
     prepares: Mutex<HashMap<Id, oneshot::Sender<TunnelPrepareAnswer>>>,
     selected: Mutex<HashMap<Id, String>>,
-    recovering: Mutex<std::collections::HashSet<Id>>,
     attach_slots: Arc<tokio::sync::Semaphore>,
     stop: CancellationToken,
 }
@@ -78,250 +67,6 @@ impl std::fmt::Debug for Pool {
 }
 
 impl Pool {
-    fn hubs(&self) -> Vec<(Option<String>, TunnelHub)> {
-        let mut hubs = Vec::new();
-        if let Some(parent) = self.parent.upgrade() {
-            let gateway = parent
-                .gateway_id
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            hubs.push((gateway, parent.tunnels.clone()));
-        }
-        hubs.extend(
-            self.carriers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .values()
-                .map(|carrier| (Some(carrier.gateway.id.clone()), carrier.hub.clone())),
-        );
-        hubs
-    }
-
-    fn reported_retention(
-        &self,
-        retained: &crate::tunnels::channel::RetainedChannel,
-        gateway: &str,
-    ) {
-        if !retained.opener {
-            return;
-        }
-        let Some(plan) = retained.retention.route.as_ref() else {
-            return;
-        };
-        self.selected
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(plan.plan_id, gateway.into());
-        let reported_plan = self
-            .leases
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&plan.plan_id)
-            .map_or_else(|| plan.clone(), |(original, _)| original.clone());
-        self.send(Frame::TunnelSelected(TunnelSelected {
-            ticket: retained.retention.ticket.clone(),
-            plan: Some(reported_plan),
-            plan_id: plan.plan_id,
-            gateway_id: gateway.into(),
-        }));
-    }
-
-    pub(super) fn primary_ready(&self) {
-        for (gateway, hub) in self.hubs() {
-            if let Some(gateway) = gateway {
-                for retained in hub
-                    .retained_channels()
-                    .into_iter()
-                    .filter(|retained| retained.suspended.is_none())
-                {
-                    self.reported_retention(&retained, &gateway);
-                }
-            }
-        }
-    }
-
-    /// A trusted relay asks for an existing socket; never offer a new native tool on this path.
-    pub(super) fn adopt_resume(
-        &self,
-        target: &TunnelHub,
-        gateway: &str,
-        resume: &orch_link_contract::tunnels::Resume,
-    ) {
-        if !target.retained_supported() {
-            return;
-        }
-        let port_control = self
-            .parent
-            .upgrade()
-            .is_some_and(|parent| *parent.tunnels.port_control().borrow());
-        for (_, held) in self.hubs() {
-            let retained = held.retained_channel(resume.jti_channel);
-            if retained.is_some_and(|retained| !retained.port || port_control)
-                && held.transfer_retained(target, resume.jti_channel, gateway, Some(resume))
-            {
-                return;
-            }
-        }
-    }
-
-    pub(super) fn session_lost(self: &Arc<Self>, hub: &TunnelHub, failed: &str) {
-        for retained in hub
-            .retained_channels()
-            .into_iter()
-            .filter(|retained| retained.suspended.is_some())
-        {
-            if !self
-                .recovering
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(retained.cid)
-            {
-                continue;
-            }
-            let pool = self.clone();
-            let failed = failed.to_owned();
-            tokio::spawn(async move {
-                let cid = retained.cid;
-                let remaining = retained.grace.saturating_sub(
-                    retained
-                        .suspended
-                        .map_or(Duration::ZERO, |since| since.elapsed()),
-                );
-                tokio::select! {()=pool.stop.cancelled()=>{},_=tokio::time::timeout(remaining,pool.recover_retained(retained,failed))=>{}}
-                pool.recovering
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&cid);
-            });
-        }
-    }
-
-    async fn recover_retained(
-        self: &Arc<Self>,
-        retained: crate::tunnels::channel::RetainedChannel,
-        failed: String,
-    ) {
-        let Some(plan) = retained.retention.route.as_ref() else {
-            return;
-        };
-        let _recovery_lease = self.lease(vec![plan.clone()]);
-        let Ok(ticket) = Ticket::parse(&retained.retention.ticket) else {
-            return;
-        };
-        let Some(since) = retained.suspended else {
-            return;
-        };
-        let mut candidates = plan.gateways().collect::<Vec<_>>();
-        candidates.sort_by_key(|gateway| gateway.id == failed);
-        let mut retry = Backoff::default();
-        loop {
-            if !self
-                .hubs()
-                .iter()
-                .any(|(_, hub)| hub.retained_channel(retained.cid).is_some())
-            {
-                return;
-            }
-            for gateway in &candidates {
-                if since.elapsed() >= retained.grace {
-                    return;
-                }
-                if retained.port
-                    && !self
-                        .parent
-                        .upgrade()
-                        .is_some_and(|parent| *parent.tunnels.port_control().borrow())
-                {
-                    return;
-                }
-                for (current, hub) in self.hubs() {
-                    if let Some(active) = hub
-                        .retained_channel(retained.cid)
-                        .filter(|item| item.suspended.is_none())
-                    {
-                        if let Some(current) = current {
-                            if current != failed {
-                                self.unreference(plan.plan_id, &failed);
-                            }
-                            self.reported_retention(&active, &current);
-                        }
-                        return;
-                    }
-                }
-                let Ok(target) = self.ensure(plan, &gateway.id, ticket.claims().exp).await else {
-                    continue;
-                };
-                if !target.retained_supported() {
-                    continue;
-                }
-                if retained.port {
-                    let mut control = target.port_control();
-                    let ready = async {
-                        loop {
-                            if *control.borrow_and_update() {
-                                return true;
-                            }
-                            if control.changed().await.is_err() {
-                                return false;
-                            }
-                        }
-                    };
-                    if !tokio::time::timeout(
-                        Duration::from_secs(u64::from(
-                            orch_link_contract::session::CONNECT_TIMEOUT_SECS,
-                        )),
-                        ready,
-                    )
-                    .await
-                    .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                }
-                if retained.opener {
-                    // A surviving primary can prepare a peer whose old transport alone was cut.
-                    // A dead selected primary is not required: both ends also recover from their retained plan.
-                    let _ = self
-                        .prepare(&retained.retention.ticket, plan, &gateway.id)
-                        .await;
-                }
-                let port_current = !retained.port
-                    || self
-                        .parent
-                        .upgrade()
-                        .is_some_and(|parent| *parent.tunnels.port_control().borrow());
-                if !port_current {
-                    return;
-                }
-                let moved = self.hubs().into_iter().any(|(_, held)| {
-                    held.transfer_retained(&target, retained.cid, &gateway.id, None)
-                });
-                if !moved {
-                    continue;
-                }
-                target.resume_retained(retained.cid);
-                let remaining = retained.grace.saturating_sub(since.elapsed());
-                let attempt = remaining.min(Duration::from_secs(u64::from(
-                    orch_link_contract::tunnels::OPEN_TIMEOUT_SECS,
-                )));
-                if tokio::time::timeout(attempt, target.wait_resumed(retained.cid))
-                    .await
-                    .unwrap_or(false)
-                {
-                    self.unreference(plan.plan_id, &failed);
-                    self.reported_retention(&retained, &gateway.id);
-                    return;
-                }
-            }
-            let remaining = retained.grace.saturating_sub(since.elapsed());
-            if remaining.is_zero() {
-                return;
-            }
-            tokio::time::sleep(retry.failed(None).min(remaining)).await;
-        }
-    }
-
     pub(super) fn sessions(&self) -> usize {
         self.carriers
             .lock()
@@ -330,16 +75,16 @@ impl Pool {
             .filter(|carrier| matches!(*carrier.standing.borrow(), Standing::Ready))
             .count()
     }
-    pub(super) fn new(parent: Weak<Shared>, config: PoolConfig) -> Arc<Self> {
-        let PoolConfig {
-            identity,
-            dialer,
-            clock,
-            options,
-            gauge,
-            budget,
-            incoming,
-        } = config;
+    pub(super) fn new(
+        parent: Weak<Shared>,
+        identity: ClientIdentity,
+        dialer: Arc<dyn Dialer>,
+        clock: Arc<dyn Clock>,
+        options: TunnelOptions,
+        gauge: Option<Arc<Gauge>>,
+        budget: Arc<tokio::sync::Semaphore>,
+        incoming: mpsc::UnboundedSender<crate::tunnels::channel::IncomingTunnel>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             parent,
             identity,
@@ -354,7 +99,6 @@ impl Pool {
             routes: Mutex::new(HashMap::new()),
             prepares: Mutex::new(HashMap::new()),
             selected: Mutex::new(HashMap::new()),
-            recovering: Mutex::new(std::collections::HashSet::new()),
             attach_slots: Arc::new(tokio::sync::Semaphore::new(
                 orch_link_contract::version::MAX_CHANNELS as usize,
             )),
@@ -521,39 +265,6 @@ impl Pool {
         }
     }
 
-    /// Serialize an idle auxiliary's retirement before the same gateway gains the primary purpose.
-    pub(super) fn prepare_primary(&self, gateway: &str) -> bool {
-        let Some(parent) = self.parent.upgrade() else {
-            return false;
-        };
-        let carriers = self.carriers.lock().unwrap_or_else(PoisonError::into_inner);
-        if carriers
-            .get(gateway)
-            .is_some_and(|carrier| !carrier.hub.pause_if_idle())
-        {
-            return false;
-        }
-        *parent
-            .primary_attaching
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(gateway.to_owned());
-        true
-    }
-
-    /// A new measurement or operator selection can change an idle handoff's target.
-    pub(super) fn unpause_other_gateways(&self, primary: Option<&str>) {
-        for (id, carrier) in self
-            .carriers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-        {
-            if Some(id.as_str()) != primary {
-                carrier.hub.unpause_admissions();
-            }
-        }
-    }
-
     pub(super) async fn close_gateway(&self, gateway: &str) {
         let carrier = self
             .carriers
@@ -679,15 +390,6 @@ impl Pool {
             .ok_or_else(|| "the planned gateway is no longer advertised".to_owned())?;
         let carrier = {
             let mut carriers = self.carriers.lock().unwrap_or_else(PoisonError::into_inner);
-            if parent
-                .primary_attaching
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_deref()
-                == Some(id)
-            {
-                return Err("the gateway is becoming the primary attachment".into());
-            }
             if let Some(existing) = carriers.get(id).filter(|entry| !entry.stop.is_cancelled()) {
                 existing.clone()
             } else {
@@ -741,145 +443,129 @@ impl Pool {
         .map_err(|_| format!("{} did not become ready", carrier.gateway.label))?
     }
 
-    fn keep(self: Arc<Self>, carrier: Arc<Carrier>) -> futures::future::BoxFuture<'static, ()> {
-        Box::pin(async move {
-            let mut incoming = carrier.hub.incoming();
-            let tx = self.incoming.clone();
-            let parent = self.parent.clone();
-            tokio::spawn(async move {
-                while let Some(tunnel) = incoming.next().await {
-                    if tunnel.kind == TunnelKind::Port
-                        && !parent
-                            .upgrade()
-                            .is_some_and(|parent| *parent.tunnels.port_control().borrow())
-                    {
-                        tunnel.refuse(
-                            OpenErrorCode::Refused,
-                            "primary port control is unavailable",
-                        );
-                        continue;
-                    }
-                    if tx.send(tunnel).is_err() {
-                        return;
-                    }
-                }
-            });
-            let mut backoff = Backoff::default();
-            while !carrier.stop.is_cancelled() {
-                carrier.standing.send_replace(Standing::Connecting);
-                let mut established = None;
-                for endpoint in &carrier.gateway.endpoints {
-                    if carrier.stop.is_cancelled() {
-                        break;
-                    }
-                    let proof = match self
-                        .identity
-                        .proof
-                        .as_ref()
-                        .map(|(key, certificate)| {
-                            key.duplicate().map(|key| (key, certificate.clone()))
-                        })
-                        .transpose()
-                    {
-                        Ok(proof) => proof,
-                        Err(_) => break,
-                    };
-                    let identity = ClientIdentity {
-                        purpose: SessionPurpose::Tunnel,
-                        gateway_id: Some(carrier.gateway.id.clone()),
-                        endpoints: None,
-                        hosted_endpoints: None,
-                        machine_id: self.identity.machine_id,
-                        connector_version: self.identity.connector_version.clone(),
-                        platform: self.identity.platform,
-                        roles: self.identity.roles.clone(),
-                        proof,
-                    };
-                    let attempt = async {
-                        let connection = self
-                            .dialer
-                            .dial_tunnel(endpoint)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        connect(connection, &identity, self.clock.as_ref())
-                            .await
-                            .map_err(|error| error.to_string())
-                    };
-                    let result = tokio::select! { () = carrier.stop.cancelled() => break, result = attempt => result };
-                    if let Ok(session) = result {
-                        established = Some(session);
-                        break;
-                    }
-                }
-                if let Some(mut session) = established {
-                    backoff.succeeded();
-                    *carrier
-                        .sender
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(session.sender.clone());
-                    carrier.hub.session_up_at(
-                        session.sender.clone(),
-                        &carrier.gateway.id,
-                        session.capabilities.iter().any(|capability| {
-                            capability == orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY
-                        }),
+    async fn keep(self: Arc<Self>, carrier: Arc<Carrier>) {
+        let mut incoming = carrier.hub.incoming();
+        let tx = self.incoming.clone();
+        let parent = self.parent.clone();
+        tokio::spawn(async move {
+            while let Some(tunnel) = incoming.next().await {
+                if tunnel.kind == TunnelKind::Port
+                    && !parent
+                        .upgrade()
+                        .is_some_and(|parent| *parent.tunnels.port_control().borrow())
+                {
+                    tunnel.refuse(
+                        OpenErrorCode::Refused,
+                        "primary port control is unavailable",
                     );
-                    carrier.standing.send_replace(Standing::Ready);
-                    loop {
-                        let event = tokio::select! { () = carrier.stop.cancelled() => { session.sender.end(); break; }, event = session.inbox.next() => event };
-                        match event {
-                            Some(SessionEvent::Frame(frame))
-                                if matches!(
-                                    frame.as_ref(),
-                                    Frame::Open(_)
-                                        | Frame::OpenOk(_)
-                                        | Frame::OpenErr(_)
-                                        | Frame::Resume(_)
-                                        | Frame::ResumeOk(_)
-                                        | Frame::Credit(_)
-                                        | Frame::ChAck(_)
-                                        | Frame::Eof(_)
-                                        | Frame::Close(_)
-                                        | Frame::PtyResize(_)
-                                        | Frame::PtyExit(_)
-                                        | Frame::PortControl(_)
-                                ) =>
-                            {
-                                if let Frame::Resume(resume) = frame.as_ref() {
-                                    self.adopt_resume(&carrier.hub, &carrier.gateway.id, resume);
-                                }
-                                carrier.hub.on_frame(*frame)
-                            }
-                            Some(SessionEvent::Frame(_)) => {
-                                session
-                                    .sender
-                                    .bye(orch_link_contract::version::ByeCode::ProtocolError);
-                                break;
-                            }
-                            Some(SessionEvent::Data(data)) => carrier.hub.on_data(data),
-                            Some(SessionEvent::Datagram(packet)) => carrier.hub.on_datagram(packet),
-                            Some(SessionEvent::Ended(_)) | None => break,
-                        }
-                    }
-                    carrier.hub.session_down();
-                    if !carrier.stop.is_cancelled() {
-                        self.session_lost(&carrier.hub, &carrier.gateway.id);
-                    }
-                    *carrier
-                        .sender
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = None;
+                    continue;
                 }
-                carrier.standing.send_replace(Standing::Failed(format!(
-                    "{} is unavailable for tunnel-only attachment",
-                    carrier.gateway.label
-                )));
-                let delay = backoff.failed(None);
-                tokio::select! { () = carrier.stop.cancelled() => break, () = tokio::time::sleep(delay) => {} }
+                if tx.send(tunnel).is_err() {
+                    return;
+                }
             }
-            carrier.hub.reset_all();
-            carrier.standing.send_replace(Standing::Closed);
-        })
+        });
+        let mut backoff = Backoff::default();
+        while !carrier.stop.is_cancelled() {
+            carrier.standing.send_replace(Standing::Connecting);
+            let mut established = None;
+            for endpoint in &carrier.gateway.endpoints {
+                if carrier.stop.is_cancelled() {
+                    break;
+                }
+                let proof = match self
+                    .identity
+                    .proof
+                    .as_ref()
+                    .map(|(key, certificate)| key.duplicate().map(|key| (key, certificate.clone())))
+                    .transpose()
+                {
+                    Ok(proof) => proof,
+                    Err(_) => break,
+                };
+                let identity = ClientIdentity {
+                    purpose: SessionPurpose::Tunnel,
+                    gateway_id: Some(carrier.gateway.id.clone()),
+                    endpoints: None,
+                    hosted_endpoints: None,
+                    machine_id: self.identity.machine_id,
+                    connector_version: self.identity.connector_version.clone(),
+                    platform: self.identity.platform,
+                    roles: self.identity.roles.clone(),
+                    proof,
+                };
+                let attempt = async {
+                    let connection = self
+                        .dialer
+                        .dial_tunnel(endpoint)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    connect(connection, &identity, self.clock.as_ref())
+                        .await
+                        .map_err(|error| error.to_string())
+                };
+                let result = tokio::select! { () = carrier.stop.cancelled() => break, result = attempt => result };
+                if let Ok(session) = result {
+                    established = Some(session);
+                    break;
+                }
+            }
+            if let Some(mut session) = established {
+                backoff.succeeded();
+                *carrier
+                    .sender
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(session.sender.clone());
+                carrier.hub.session_up(session.sender.clone());
+                carrier.standing.send_replace(Standing::Ready);
+                loop {
+                    let event = tokio::select! { () = carrier.stop.cancelled() => { session.sender.end(); break; }, event = session.inbox.next() => event };
+                    match event {
+                        Some(SessionEvent::Frame(frame))
+                            if matches!(
+                                frame.as_ref(),
+                                Frame::Open(_)
+                                    | Frame::OpenOk(_)
+                                    | Frame::OpenErr(_)
+                                    | Frame::Resume(_)
+                                    | Frame::ResumeOk(_)
+                                    | Frame::Credit(_)
+                                    | Frame::ChAck(_)
+                                    | Frame::Eof(_)
+                                    | Frame::Close(_)
+                                    | Frame::PtyResize(_)
+                                    | Frame::PtyExit(_)
+                                    | Frame::PortControl(_)
+                            ) =>
+                        {
+                            carrier.hub.on_frame(*frame)
+                        }
+                        Some(SessionEvent::Frame(_)) => {
+                            session
+                                .sender
+                                .bye(orch_link_contract::version::ByeCode::ProtocolError);
+                            break;
+                        }
+                        Some(SessionEvent::Data(data)) => carrier.hub.on_data(data),
+                        Some(SessionEvent::Datagram(packet)) => carrier.hub.on_datagram(packet),
+                        Some(SessionEvent::Ended(_)) | None => break,
+                    }
+                }
+                carrier.hub.session_down();
+                *carrier
+                    .sender
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+            }
+            carrier.standing.send_replace(Standing::Failed(format!(
+                "{} is unavailable for tunnel-only attachment",
+                carrier.gateway.label
+            )));
+            let delay = backoff.failed(None);
+            tokio::select! { () = carrier.stop.cancelled() => break, () = tokio::time::sleep(delay) => {} }
+        }
+        carrier.hub.reset_all();
+        carrier.standing.send_replace(Standing::Closed);
     }
 
     async fn route(&self, ticket: &str) -> Result<Option<TunnelPlan>, OpenError> {
@@ -999,7 +685,10 @@ impl Pool {
                     continue;
                 }
             };
-            let opened = hub.open_routed(ticket, &plan, host_peer.clone()).await;
+            let opened = match host_peer.clone() {
+                Some(peer) => hub.open_host_port(ticket, peer).await,
+                None => hub.open(ticket).await,
+            };
             let opened = match opened {
                 Err(OpenError::Refused {
                     code: OpenErrorCode::PeerOffline,
@@ -1017,7 +706,10 @@ impl Pool {
                         ));
                         continue;
                     }
-                    hub.open_routed(ticket, &plan, host_peer.clone()).await
+                    match host_peer.clone() {
+                        Some(peer) => hub.open_host_port(ticket, peer).await,
+                        None => hub.open(ticket).await,
+                    }
                 }
                 other => other,
             };

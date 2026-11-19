@@ -24,7 +24,6 @@
 pub mod authorization;
 pub mod credentials;
 pub mod decimal;
-pub mod generation;
 pub mod models;
 pub mod requests;
 pub mod usage;
@@ -56,28 +55,6 @@ impl AnthropicMessages {
 }
 
 impl WireProtocol for AnthropicMessages {
-    fn generation_request(
-        &self,
-        model: &str,
-        input: &orch_model_contract::generation::GenerationInput,
-        stream: bool,
-    ) -> Option<(Method, &'static str, Bytes)> {
-        Some(generation::request(model, input, stream))
-    }
-
-    fn generation_output(
-        &self,
-        body: &[u8],
-    ) -> Result<orch_model_contract::generation::GenerationOutput, WireError> {
-        generation::output(body)
-    }
-
-    fn generation_stream(
-        &self,
-    ) -> Option<Box<dyn orch_model_contract::generation::GenerationStream>> {
-        Some(Box::new(generation::MessagesStream::default()))
-    }
-
     fn name(&self) -> &'static str {
         ANTHROPIC_MESSAGES
     }
@@ -106,27 +83,6 @@ impl WireProtocol for AnthropicMessages {
         secrets: &SecretHeaders,
     ) -> Result<Vec<(String, String)>, AuthorizeError> {
         authorization::present(headers, credential, options, secrets)
-    }
-
-    fn joined_headers(&self) -> &'static [&'static str] {
-        authorization::JOINED_HEADERS
-    }
-
-    fn model_lists(&self) -> &'static [orch_model_contract::protocol::ModelListField] {
-        &[
-            orch_model_contract::protocol::ModelListField {
-                pointer: "/models",
-                member: None,
-            },
-            orch_model_contract::protocol::ModelListField {
-                pointer: "/fallbacks",
-                member: Some("model"),
-            },
-        ]
-    }
-
-    fn request_header_rules(&self) -> &'static [orch_model_contract::protocol::RequestHeaderRule] {
-        authorization::REQUEST_HEADERS
     }
 
     fn deny(&self, status: StatusCode, code: &str, message: &str) -> Response<Bytes> {

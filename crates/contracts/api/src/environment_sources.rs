@@ -1,10 +1,5 @@
 //! Native Environment collection sources shared with the resource read adapter.
 
-pub mod duplicating;
-pub mod job_creation;
-pub mod lifecycle;
-pub mod update_batch;
-
 use crate::operation_sources::{Binding, Cardinality, Declaration};
 use crate::operations::FacetUsage;
 use crate::operations::{FacetSpec, TargetResolver};
@@ -265,7 +260,7 @@ pub const TRUST_SET_FACETS: [FacetSpec; 8] = [
 pub enum McpSource {
     /// The live Environment whose native whole reading door was selected.
     Environment,
-    /// Native enabled servers and stored imports identified beside their discovered origins.
+    /// Native enabled presets, imports and Environment-owned servers.
     Servers,
     /// Actual offering-machine references selected by the native reader.
     Machines,
@@ -659,12 +654,6 @@ pub const MCP_CREATE: Declaration<McpCreateSource> = Declaration {
     ],
 };
 
-/// A copied machine offering has the same real creation parent and independent Read roles.
-pub const MCP_IMPORT: Declaration<McpCreateSource> = Declaration {
-    operation: "EnvironmentMcpImportCreate",
-    bindings: MCP_CREATE.bindings,
-};
-
 /// Existing management acts remain required; response Read never becomes a creation prerequisite.
 pub const MCP_CREATE_FACETS: [FacetSpec; 9] = [
     FacetSpec::required(
@@ -727,12 +716,6 @@ pub enum PlaceReadSource {
     Mounts,
     /// Protected Topic labels on returned Environment choices.
     Topics,
-    /// Protected org labels on resource homes.
-    Orgs,
-    /// Protected project labels on resource homes.
-    Projects,
-    /// Protected thread labels on resource homes.
-    Threads,
 }
 
 /// One selected-row source declaration for both kinds of native place.
@@ -781,29 +764,11 @@ pub const PLACE_LIST: Declaration<PlaceReadSource> = Declaration {
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
         },
-        Binding {
-            source: PlaceReadSource::Orgs,
-            target: TargetResolver::ResolvedCollection("place_orgs"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: PlaceReadSource::Projects,
-            target: TargetResolver::ResolvedCollection("place_projects"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: PlaceReadSource::Threads,
-            target: TargetResolver::ResolvedCollection("place_threads"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
     ],
 };
 
 /// A native calculation reads its actual home and Template, then independently scoped choices.
-pub const PLACE_LIST_FACETS: [FacetSpec; 10] = [
+pub const PLACE_LIST_FACETS: [FacetSpec; 7] = [
     FacetSpec::required(
         KeyAction::Read,
         &[
@@ -843,18 +808,6 @@ pub const PLACE_LIST_FACETS: [FacetSpec; 10] = [
         &[KeyTargetKind::Object(ObjectKind::Topic)],
         TargetResolver::ResolvedCollection("place_topics"),
     ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Org)],
-        TargetResolver::ResolvedCollection("place_orgs"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Project)],
-        TargetResolver::ResolvedCollection("place_projects"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Thread)],
-        TargetResolver::ResolvedCollection("place_threads"),
-    ),
 ];
 
 /// Native individual Environment view sources, including its retained inspection shape.
@@ -874,10 +827,6 @@ pub enum GetSource {
     Topics,
     /// Protected thread labels.
     Threads,
-    /// Native independently visible Library binding names in the sync member.
-    SyncLibraryThreads,
-    /// Actual named machine waits of native feed jobs.
-    SyncJobMachines,
 }
 
 /// One operation row supplies both native intent variants with the same factual roles.
@@ -989,51 +938,6 @@ pub const GET_INSPECT_FACETS: [FacetSpec; 7] = {
     );
     facets
 };
-
-/// One row for the native environment feed's environment, Library and job members.
-pub const SYNC: Declaration<GetSource> = Declaration {
-    operation: "EnvironmentSyncGet",
-    bindings: &[
-        GET_READ.bindings[0],
-        GET_READ.bindings[1],
-        GET_READ.bindings[2],
-        GET_READ.bindings[3],
-        GET_READ.bindings[4],
-        GET_READ.bindings[5],
-        GET_READ.bindings[6],
-        Binding {
-            source: GetSource::SyncLibraryThreads,
-            target: TargetResolver::ResolvedCollection("environment_sync_library_threads"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: GetSource::SyncJobMachines,
-            target: TargetResolver::ResolvedCollection("environment_sync_job_machines"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// Additional members preserve their native privacy cuts and separately bound live labels.
-pub const SYNC_FACETS: [FacetSpec; 9] = [
-    GET_READ_FACETS[0],
-    GET_READ_FACETS[1],
-    GET_READ_FACETS[2],
-    GET_READ_FACETS[3],
-    GET_READ_FACETS[4],
-    GET_READ_FACETS[5],
-    GET_READ_FACETS[6],
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Thread)],
-        TargetResolver::ResolvedCollection("environment_sync_library_threads"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Machine)],
-        TargetResolver::ResolvedCollection("environment_sync_job_machines"),
-    ),
-];
 
 /// Actual native subjects of a privately stored operation audience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1192,476 +1096,5 @@ pub const UPDATE_FACETS: [FacetSpec; 9] = [
     FacetSpec::response_content(
         &[KeyTargetKind::Object(ObjectKind::Thread)],
         TargetResolver::ResolvedCollection("environment_update_threads"),
-    ),
-];
-
-/// Directory registration's actual known operands and independent native resource response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MachineCreateSource {
-    /// Actual physical Machine permission subject; its Host facade is not rewritten.
-    Machine,
-    /// Actual Node from which the new Environment takes its settings.
-    Home,
-    /// Actual created Environment, independent of the Machine path.
-    Environment,
-    /// Native foreign resources selected for optional content.
-    Foreign,
-    /// Native group-holder labels.
-    Groups,
-    /// Optional Org path labels.
-    Orgs,
-    /// Optional Project path labels.
-    Projects,
-    /// Optional Topic path labels.
-    Topics,
-    /// Optional Thread path labels.
-    Threads,
-}
-/// One prepared-effect row covers native registration and its completed singleton projection.
-pub const MACHINE_CREATE: Declaration<MachineCreateSource> = Declaration {
-    operation: "MachineEnvironmentCreate",
-    bindings: &[
-        Binding {
-            source: MachineCreateSource::Machine,
-            target: TargetResolver::Path("id"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: MachineCreateSource::Home,
-            target: TargetResolver::Resolved("home"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: MachineCreateSource::Environment,
-            target: TargetResolver::Resolved("created_environment"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: MachineCreateSource::Foreign,
-            target: TargetResolver::ResolvedCollection("machine_created_sources"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineCreateSource::Groups,
-            target: TargetResolver::ResolvedCollection("machine_created_groups"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineCreateSource::Orgs,
-            target: TargetResolver::ResolvedCollection("machine_created_orgs"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineCreateSource::Projects,
-            target: TargetResolver::ResolvedCollection("machine_created_projects"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineCreateSource::Topics,
-            target: TargetResolver::ResolvedCollection("machine_created_topics"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineCreateSource::Threads,
-            target: TargetResolver::ResolvedCollection("machine_created_threads"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// Actual selected recycling subjects and the independently readable candidate projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecycleSource {
-    /// Actual native candidates selected for management, before process IO.
-    Environments,
-    /// Actual candidate snapshots in the completed reply.
-    Content,
-    /// Native Host and Template labels used by those snapshots.
-    Foreign,
-    /// Native Org address or home labels.
-    Orgs,
-    /// Native Project home labels.
-    Projects,
-    /// Native Topic home labels.
-    Topics,
-    /// Native Thread home labels.
-    Threads,
-}
-/// One prepared recycling row, also consumed by its exact native probe/stop source.
-pub const RECYCLE: Declaration<RecycleSource> = Declaration {
-    operation: "NodeEnvironmentRecycle",
-    bindings: &[
-        Binding {
-            source: RecycleSource::Environments,
-            target: TargetResolver::ResolvedCollection("affected_environments"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: RecycleSource::Content,
-            target: TargetResolver::ResolvedCollection("recycled_environments"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: RecycleSource::Foreign,
-            target: TargetResolver::ResolvedCollection("recycled_sources"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: RecycleSource::Orgs,
-            target: TargetResolver::ResolvedCollection("recycled_orgs"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: RecycleSource::Projects,
-            target: TargetResolver::ResolvedCollection("recycled_projects"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: RecycleSource::Topics,
-            target: TargetResolver::ResolvedCollection("recycled_topics"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: RecycleSource::Threads,
-            target: TargetResolver::ResolvedCollection("recycled_threads"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// Canonical operation facets for the same real candidate and native presentation roles.
-pub const RECYCLE_FACETS: &[FacetSpec] = &[
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::ResolvedCollection("affected_environments"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::ResolvedCollection("recycled_environments"),
-    ),
-    FacetSpec::response_content(
-        &[
-            KeyTargetKind::Object(ObjectKind::Host),
-            KeyTargetKind::Object(ObjectKind::Template),
-        ],
-        TargetResolver::ResolvedCollection("recycled_sources"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Org)],
-        TargetResolver::ResolvedCollection("recycled_orgs"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Project)],
-        TargetResolver::ResolvedCollection("recycled_projects"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Topic)],
-        TargetResolver::ResolvedCollection("recycled_topics"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Thread)],
-        TargetResolver::ResolvedCollection("recycled_threads"),
-    ),
-];
-
-/// The native revocation's actual Environment, including its accepted unit reconciliation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapabilitySource {
-    /// The live Environment whose existing capability is removed.
-    Environment,
-}
-
-/// One declaration supplies the native effect and independent optional acknowledgement.
-pub const CAPABILITY_REVOKE: Declaration<CapabilitySource> = Declaration {
-    operation: "EnvironmentCapabilityRevoke",
-    bindings: &[
-        Binding {
-            source: CapabilitySource::Environment,
-            target: TargetResolver::Path("id"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: CapabilitySource::Environment,
-            target: TargetResolver::Path("id"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-    ],
-};
-
-/// Manage admits the native act; same-operation Read independently opens its native reply.
-pub const CAPABILITY_REVOKE_FACETS: [FacetSpec; 2] = [
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::Path("id"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::Path("id"),
-    ),
-];
-
-/// Actual kept Environment and independently disclosed native waiting-machine names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetainedChangeSource {
-    /// The stored Environment at its current retained home.
-    Environment,
-    /// Only actual physical names emitted by the existing job formatter.
-    WaitingMachines,
-}
-
-const RETAINED_CHANGE_BINDINGS: &[Binding<RetainedChangeSource>] = &[
-    Binding {
-        source: RetainedChangeSource::Environment,
-        target: TargetResolver::Path("id"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    },
-    Binding {
-        source: RetainedChangeSource::Environment,
-        target: TargetResolver::Path("id"),
-        usage: FacetUsage::ResponseContent,
-        cardinality: Cardinality::One,
-    },
-    Binding {
-        source: RetainedChangeSource::WaitingMachines,
-        target: TargetResolver::ResolvedCollection("retained_waiting_machines"),
-        usage: FacetUsage::ResponseContent,
-        cardinality: Cardinality::Collection,
-    },
-];
-
-/// Restoration retains its own captured operation on its native job.
-pub const RESTORE: Declaration<RetainedChangeSource> = Declaration {
-    operation: "EnvironmentRestore",
-    bindings: RETAINED_CHANGE_BINDINGS,
-};
-/// Permanent removal retains its own captured operation until its irreversible native boundary.
-pub const PURGE: Declaration<RetainedChangeSource> = Declaration {
-    operation: "EnvironmentPurge",
-    bindings: RETAINED_CHANGE_BINDINGS,
-};
-/// Manage performs the native retained-file act; Read independently opens the resulting job.
-pub const RETAINED_CHANGE_FACETS: [FacetSpec; 3] = [
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::Path("id"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::Path("id"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Machine)],
-        TargetResolver::ResolvedCollection("retained_waiting_machines"),
-    ),
-];
-
-/// Actual native standalone creation sources and its independently readable singleton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CreateSource {
-    /// Actual original environment ended only after its independent native copy succeeds.
-    MoveSubject,
-    /// The same original environment whose native deletion preview is returned.
-    MovePreview,
-    /// The actual connected machine chosen for a new owned workspace.
-    Machine,
-    /// The native home source.
-    Home,
-    /// The native creation template source.
-    Template,
-    /// The native creation host source.
-    Host,
-    /// The native creation mounts source.
-    Mounts,
-    /// The native creator initial file threads source.
-    InitialThreads,
-    /// The native creator initial file environments source.
-    InitialEnvironments,
-    /// The native created environment source.
-    Environment,
-    /// The native environment created sources source.
-    Foreign,
-    /// The native environment created groups source.
-    Groups,
-    /// The native environment created orgs source.
-    Orgs,
-    /// The native environment created projects source.
-    Projects,
-    /// The native environment created topics source.
-    Topics,
-    /// The native environment created threads source.
-    Threads,
-}
-
-/// One table supplies the standalone creator and its native continuation.
-pub const CREATE: Declaration<CreateSource> = Declaration {
-    operation: "EnvironmentCreate",
-    bindings: &[
-        Binding {
-            source: CreateSource::Home,
-            target: TargetResolver::Resolved("home"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: CreateSource::Template,
-            target: TargetResolver::Resolved("creation_template"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: CreateSource::Host,
-            target: TargetResolver::Resolved("creation_host"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: CreateSource::Mounts,
-            target: TargetResolver::ResolvedCollection("creation_mounts"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::InitialThreads,
-            target: TargetResolver::ResolvedCollection("creator_initial_file_threads"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::InitialEnvironments,
-            target: TargetResolver::ResolvedCollection("creator_initial_file_environments"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::Environment,
-            target: TargetResolver::Resolved("created_environment"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: CreateSource::Foreign,
-            target: TargetResolver::ResolvedCollection("environment_created_sources"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::Groups,
-            target: TargetResolver::ResolvedCollection("environment_created_groups"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::Orgs,
-            target: TargetResolver::ResolvedCollection("environment_created_orgs"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::Projects,
-            target: TargetResolver::ResolvedCollection("environment_created_projects"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::Topics,
-            target: TargetResolver::ResolvedCollection("environment_created_topics"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: CreateSource::Threads,
-            target: TargetResolver::ResolvedCollection("environment_created_threads"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// Creation keeps native resource-use gates and narrows each real source/effect independently.
-pub const CREATE_FACETS: [FacetSpec; 13] = [
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::Resolved("home"),
-    ),
-    FacetSpec::required(
-        KeyAction::Read,
-        &[KeyTargetKind::Object(ObjectKind::Template)],
-        TargetResolver::Resolved("creation_template"),
-    ),
-    FacetSpec::required(
-        KeyAction::Write,
-        &[KeyTargetKind::Object(ObjectKind::Host)],
-        TargetResolver::Resolved("creation_host"),
-    ),
-    FacetSpec::required(
-        KeyAction::Read,
-        &[KeyTargetKind::Object(ObjectKind::Mount)],
-        TargetResolver::ResolvedCollection("creation_mounts"),
-    ),
-    FacetSpec::required(
-        KeyAction::Read,
-        &[KeyTargetKind::Object(ObjectKind::Thread)],
-        TargetResolver::ResolvedCollection("creator_initial_file_threads"),
-    ),
-    FacetSpec::required(
-        KeyAction::Read,
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::ResolvedCollection("creator_initial_file_environments"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::Resolved("created_environment"),
-    ),
-    FacetSpec::response_content(
-        &[
-            KeyTargetKind::Object(ObjectKind::Template),
-            KeyTargetKind::Object(ObjectKind::Host),
-            KeyTargetKind::Object(ObjectKind::Machine),
-            KeyTargetKind::Object(ObjectKind::Mount),
-        ],
-        TargetResolver::ResolvedCollection("environment_created_sources"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Identity(KeyIdentityKind::Group)],
-        TargetResolver::ResolvedCollection("environment_created_groups"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Org)],
-        TargetResolver::ResolvedCollection("environment_created_orgs"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Project)],
-        TargetResolver::ResolvedCollection("environment_created_projects"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Topic)],
-        TargetResolver::ResolvedCollection("environment_created_topics"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Thread)],
-        TargetResolver::ResolvedCollection("environment_created_threads"),
     ),
 ];

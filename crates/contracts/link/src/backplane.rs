@@ -409,8 +409,8 @@ tagged! {
         TunnelSelected(crate::gateways::TunnelSelected) = "tunnel_selected",
         /// Safe source-bound failure metadata.
         TunnelFailed(Box<crate::gateways::TunnelFailed>) = "tunnel_failed",
-        /// A local tool-server request asked by the authenticated machine, as its current owner.
-        McpImportAsk(crate::mcp_import::McpLocalAsk) = "mcp_import_ask",
+        /// A local import asked by the authenticated machine, as its owner.
+        McpImportAsk(crate::mcp_import::McpImportAsk) = "mcp_import_ask",
         /// The authenticated machine's environment-local read/assertion refresh.
         PortLocalAsk(crate::local_ports::PortLocalAsk) = "port_local_ask",
         /// A host node's transient port record reply.

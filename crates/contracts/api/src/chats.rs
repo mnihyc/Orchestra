@@ -108,27 +108,6 @@ pub enum ChatKind {
     Group,
 }
 
-/// Whether a group is discoverable to readers of its home.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ChatVisibility {
-    /// Invitation and approved join requests only.
-    #[default]
-    Private,
-    /// Readers of the home may discover it and join themselves.
-    Public,
-}
-impl ChatVisibility {
-    /// The stored value used by the native group writer.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Private => "private",
-            Self::Public => "public",
-        }
-    }
-}
-
 /// A chat, named wherever another thing points at one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ChatRef {
@@ -140,14 +119,8 @@ pub struct ChatRef {
     pub org_id: Id,
     /// The node it belongs to, for a node's chat.
     pub node: Option<NodeRef>,
-    /// A group's actual home, with the ordinary private-place name fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home: Option<NodeRef>,
     /// Its name, for a group chat.
     pub name: Option<String>,
-    /// Node chats are public at their place; people's groups use their stored choice.
-    #[serde(default)]
-    pub visibility: ChatVisibility,
 }
 
 /// A person's own state in one chat.
@@ -164,10 +137,6 @@ pub struct ChatState {
     pub default_reason: Option<ChatDefaultReason>,
     /// The chat.
     pub chat_id: Id,
-    /// The chat's root organization, for personal unread counts without a chat-list read.
-    pub org_id: Id,
-    /// The sequence of the chat's newest message, independently of the person's read position.
-    pub last_message_seq: Seq,
     /// What they set with the bell; `null` when they have not.
     pub level: Option<ChatLevel>,
     /// Whether they posted here or were mentioned here.
@@ -213,16 +182,10 @@ pub struct ChatCan {
     /// An explicit assignment at the node or a current follow, independently of Read and As admin.
     #[serde(default, skip_serializing_if = "crate::common::is_false")]
     pub participating: bool,
-    /// Native public-home eligibility to join; discovery itself never joins.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub join: bool,
     /// Whether they may send.
     pub send: bool,
     /// Whether they may moderate: delete the messages of others.
     pub moderate: bool,
-    /// Whether the caller currently manages this group or chat area.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub manage: bool,
     /// Whether they may take it away as a file: they hold the Export row of a node's chat (`chat.export`), or are in
     /// a direct or a group chat. Somebody who only inspects one as an admin may not.
     pub export: bool,
@@ -246,9 +209,6 @@ pub struct Chat {
     pub members: Option<Vec<UserRef>>,
     /// Those of `members` who are not members of the root org; group chats only.
     pub guests: Vec<Id>,
-    /// The current members whose manager flag is set.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub managers: Vec<Id>,
     /// Deadlines of current timed members; absent entries are permanent.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub membership_expiries: std::collections::BTreeMap<Id, Time>,
@@ -410,11 +370,6 @@ pub struct ChatPin {
 /// One message of a chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ChatMessage {
-    /// Its one-based reference ordinal among all messages of this chat, including system and
-    /// deleted rows. This is the number in a written reference, not a chat change sequence.
-    /// Absent only in older or detached historical projections without a current row mapping.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reference_number: Option<i64>,
     /// Current safe display labels for deliberate targets; editing still sends their stable identities.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mention_names: Vec<ChatMentionName>,
@@ -504,12 +459,6 @@ pub struct NodeChatOpening {
     /// An explicitly requested Defaults projection; absent for ordinary chat readers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<NodeDefaultsOpening>,
-    /// Complete independently checked views for the selected chat, and for this topic or thread when it is one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub summaries: Vec<crate::summaries::SummarySnapshot>,
-    /// This reader's captured opening range, used only by the chat catch-up view.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary_range: Option<crate::summaries::SummaryChatRange>,
 }
 
 /// The existing native reads used by a place's Defaults editor, independently admitted.
@@ -517,7 +466,7 @@ pub struct NodeChatOpening {
 pub struct NodeDefaultsOpening {
     /// The same current node projection that the native node reader supplies.
     pub node: crate::nodes::Node,
-    /// The native registry, or its ordinary refusal/failure; absent for a settings-only consumer.
+    /// The native registry, or its ordinary refusal/failure.
     pub registry: Option<Vec<crate::settings::SettingDef>>,
     /// The registry's native problem, never a successful empty registry.
     pub registry_problem: Option<crate::common::Problem>,
@@ -567,12 +516,9 @@ pub struct NodeChatOpeningGetQuery {
     /// The initial message page size, with the same bounds as chat sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-    /// Include the existing settings reads when their consumer and this chat are both visible.
+    /// Include the existing Defaults reads when that editor and this chat are both visible.
     #[serde(default, skip_serializing_if = "crate::common::is_false")]
     pub defaults: bool,
-    /// Include only the visible settings consumer, without the unmounted registry/editor fields.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub settings_only: bool,
     /// The Defaults view currently mounts its configured secret-name section.
     #[serde(default, skip_serializing_if = "crate::common::is_false")]
     pub secret_names: bool,
@@ -654,12 +600,6 @@ pub struct OrgChatCreateBody {
     /// A name for a group, one to [`CHAT_NAME_MAX_CHARS`] characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// A group home in this root org's tree; absence keeps the existing root home.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home_id: Option<Id>,
-    /// An explicit group visibility; absence preserves direct-chat detection and private groups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility: Option<ChatVisibility>,
 }
 
 /// The native opening outcome without reading existing chat content.
@@ -688,52 +628,8 @@ crate::common::full_or_receipt! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChatUpdateBody {
-    /// A name, explicit null to use member names, or absence to retain the current name.
-    #[serde(
-        default,
-        deserialize_with = "crate::common::absent_or_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub name: Option<Option<String>>,
-    /// A new home, explicit null for the root org, or absence to keep the current home.
-    #[serde(
-        default,
-        deserialize_with = "crate::common::absent_or_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub home_id: Option<Option<Id>>,
-    /// Keep the current visibility when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility: Option<ChatVisibility>,
-}
-
-#[cfg(test)]
-mod home_patch_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn a_home_only_patch_keeps_the_name_and_explicit_null_still_clears_it() {
-        let id = orch_types::new_id();
-        let moved: ChatUpdateBody = serde_json::from_value(json!({"home_id":id})).unwrap();
-        assert_eq!(moved.name, None);
-        assert_eq!(moved.home_id, Some(Some(id)));
-        assert_eq!(serde_json::to_value(moved).unwrap(), json!({"home_id":id}));
-        let root: ChatUpdateBody =
-            serde_json::from_value(json!({"name":null,"home_id":null})).unwrap();
-        assert_eq!(root.name, Some(None));
-        assert_eq!(root.home_id, Some(None));
-        let old: OrgChatCreateBody = serde_json::from_value(json!({"user_ids":[id]})).unwrap();
-        assert_eq!(old.home_id, None);
-    }
-}
-
-/// Makes an existing member a manager or takes that flag back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ChatManagerSetBody {
-    /// The member's new manager flag; the last manager cannot be unset.
-    pub manager: bool,
+    /// Its new name; `null` names it after its members again.
+    pub name: Option<String>,
 }
 
 /// A committed group change without reading its existing roster, preview or access description.
@@ -1450,23 +1346,6 @@ const NODE_OPENING_READ_FACETS: &[Facet] = &[
         &[Object(K::Environment)],
         Target::ResolvedCollection("opening_node_environments"),
     ),
-    Facet::required(
-        Read,
-        crate::summaries::SUMMARY_FAMILIES,
-        Target::ResolvedCollection("opening_summary_targets"),
-    ),
-    Facet::required(
-        Read,
-        crate::summaries::SUMMARY_FAMILIES,
-        Target::ResolvedCollection("opening_summary_inputs"),
-    ),
-    // Denied supplier metadata is omitted by the producer. Any actually selected
-    // supplier is an admitted Read, like the opening's other optional parts.
-    Facet::required(
-        Read,
-        &[Object(K::Provider)],
-        Target::ResolvedCollection("opening_summary_providers"),
-    ),
 ];
 
 /// A mutation changes only its actual chat. Live names are optional content sources of
@@ -1633,31 +1512,6 @@ const fn group_change_facets(action: orch_access_contract::key_scope::KeyAction)
     ]
 }
 
-/// A group move additionally reads the actual destination it asks to inhabit.
-const fn group_update_facets() -> [Facet; 9] {
-    let base = group_change_facets(Write);
-    [
-        base[0],
-        base[1],
-        base[2],
-        base[3],
-        base[4],
-        base[5],
-        base[6],
-        base[7],
-        Facet::required(
-            Read,
-            &[
-                Object(K::Org),
-                Object(K::Project),
-                Object(K::Topic),
-                Object(K::Thread),
-            ],
-            Target::ResolvedCollection("chat_destination"),
-        ),
-    ]
-}
-
 crate::endpoints! {
     /// Opens a place's independently readable chat scopes and the selected conversation.
     NodeChatOpeningGet: GET "/nodes/{id}/chat-opening", Permission("node.view"), query NodeChatOpeningGetQuery, none, json NodeChatOpening, 200,
@@ -1666,7 +1520,7 @@ crate::endpoints! {
     ChatOpeningGet: GET "/chats/{id}/opening", READ, query ChatSyncGetQuery, none, json ChatOpening, 200,
         operation Op::facets(CHAT_SYNC_READ_FACETS);
     /// Stops or allows one origin here under current chat management.
-    ChatAgentPostingSet: PUT "/chats/{id}/agents/{thread_id}/posting", Rule("chat.manage on a node chat; a manager of a group chat"), none, json ChatAgentPostingSetBody, none, 204,
+    ChatAgentPostingSet: PUT "/chats/{id}/agents/{thread_id}/posting", Rule("chat.manage on a node chat; the creator of a group chat"), none, json ChatAgentPostingSetBody, none, 204,
         operation Op::returning(Manage, &[Identity(I::Chat)], Target::TypedPath { parameter: "id", kind: Identity(I::Chat) });
     /// Lists this chat's current readable people and permitted role and group audiences.
     ChatMentionList: GET "/chats/{id}/mentions", SEND, query ChatMentionListQuery, none, json ChatMentionPage, 200,
@@ -1702,23 +1556,17 @@ crate::endpoints! {
             Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_name_threads")),
             Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("message_name_groups")),
         ]);
-    /// Join a public group at its actual readable home.
-    ChatJoin: POST "/chats/{id}/join", Access::User, none, none, none, 204,
-        operation Op::facets(&crate::chat_sources::JOIN_FACETS);
     /// Asks the people who may add members to join a known group chat.
     ChatJoinRequest: POST "/chats/{id}/join-requests", Access::User, none, json ChatJoinRequestBody, json crate::access::AccessRequestWriteResponse, 201,
         operation Op::receipt(&Op::facets(&crate::access::join_request_facets()));
     /// Renames a group chat, or names it after its members again.
-    ChatUpdate: PATCH "/chats/{id}", Rule("a manager of the group chat"), none, json ChatUpdateBody, json ChatChangeResponse, 200,
-        operation Op::receipt(&Op::facets(&group_update_facets()));
+    ChatUpdate: PATCH "/chats/{id}", Rule("someone in the group chat"), none, json ChatUpdateBody, json ChatChangeResponse, 200,
+        operation Op::receipt(&Op::facets(&group_change_facets(Write)));
     /// Adds a person to a group chat; somebody who is no member of the root org joins as a guest when the caller may bring an outsider in.
-    ChatMemberAdd: PUT "/chats/{id}/members/{user_id}", Rule("a manager of the group chat"), none, none, json ChatChangeResponse, 200,
-        operation Op::receipt(&Op::facets(&group_change_facets(Manage)));
-    /// Makes an existing member a manager, or takes back that flag while preserving a manager.
-    ChatManagerSet: PUT "/chats/{id}/members/{user_id}/manager", Rule("a manager of the group chat"), none, json ChatManagerSetBody, json ChatChangeResponse, 200,
+    ChatMemberAdd: PUT "/chats/{id}/members/{user_id}", Rule("someone in the group chat who is a member of the root org"), none, none, json ChatChangeResponse, 200,
         operation Op::receipt(&Op::facets(&group_change_facets(Manage)));
     /// Takes a person out of a group chat, or lets them leave.
-    ChatMemberRemove: DELETE "/chats/{id}/members/{user_id}", Rule("that person, to leave; or a manager of the group"), none, none, none, 204,
+    ChatMemberRemove: DELETE "/chats/{id}/members/{user_id}", Rule("that person, to leave; or the creator of the group"), none, none, none, 204,
         operation Op::variants(&[
             Variant {
                 name: "leave",
@@ -1811,7 +1659,7 @@ crate::endpoints! {
         operation Op::returning(Write, &[Identity(I::Chat)], Target::TypedPath { parameter: "id", kind: Identity(I::Chat) });
     /// Stores a file for an `attachment` part, from a raw body with a filename header or from a finished upload.
     ChatAttachmentCreate: POST "/chats/{id}/attachments", SEND, none, bytes, json ChatAttachmentCreateReply, 200,
-        operation Op::receipt(&Op::facets(&crate::chat_sources::attachment_facets()));
+        operation Op::single(Write, &[Identity(I::Chat)], Target::Path("id"));
     /// Serves an image or an attachment carried by a message of this chat, forwarded copies included.
     ChatBlobGet: GET "/chats/{id}/blobs/{hash}", READ, query ChatBlobGetQuery, none, raw, 200,
         operation Op::facets(&crate::chat_sources::blob_read_facets());
@@ -1887,7 +1735,7 @@ mod tests {
                 { "type": "forwarded",
                   "from": { "kind": "chat", "chat": {
                       "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b05", "kind": "group", "org_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b06",
-                      "node": null, "name": "Release", "visibility": "private" } },
+                      "node": null, "name": "Release" } },
                   "source_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b07", "author": user(1),
                   "at": "2026-10-08T17:04:05.123Z", "text": "Ship it", "images": [], "attachments": [] }
             ],
@@ -1916,7 +1764,7 @@ mod tests {
     fn a_chat_is_a_reference_with_what_the_caller_may_do_in_it() {
         let written = json!({
             "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5c01", "kind": "direct", "org_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5c02",
-            "node": null, "name": null, "visibility": "private",
+            "node": null, "name": null,
             "members": [user(1), user(2)], "guests": [],
             "created_by": user(1), "created_at": "2026-10-08T17:04:05.123Z",
             "seq": 12, "last_message_seq": 12, "last_message_at": "2026-10-08T18:00:00.000Z",
@@ -1963,28 +1811,5 @@ mod tests {
             }))
             .is_err()
         );
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "contract codec controls")]
-mod group_visibility_contract {
-    use super::*;
-    #[test]
-    fn old_chat_openings_stay_private_and_visibility_is_an_explicit_known_choice() {
-        let old: OrgChatCreateBody =
-            serde_json::from_value(serde_json::json!({"user_ids":[]})).unwrap();
-        assert!(old.visibility.is_none());
-        assert_eq!(ChatVisibility::default(), ChatVisibility::Private);
-        assert!(
-            serde_json::from_value::<OrgChatCreateBody>(
-                serde_json::json!({"user_ids":[],"visibility":"everyone"})
-            )
-            .is_err()
-        );
-        let patch: ChatUpdateBody =
-            serde_json::from_value(serde_json::json!({"visibility":"public"})).unwrap();
-        assert!(patch.name.is_none() && patch.home_id.is_none());
-        assert_eq!(patch.visibility, Some(ChatVisibility::Public));
     }
 }

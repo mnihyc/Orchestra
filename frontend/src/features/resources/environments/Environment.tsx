@@ -9,7 +9,6 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
-import { liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
@@ -36,7 +35,6 @@ import { EnvironmentDoor } from '@/features/resources/environments/Doors';
 import { HarnessTrustSection } from '@/features/resources/environments/HarnessTrust';
 import { AgentReach } from '@/features/resources/environments/AgentReach';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
-import { EnvironmentReadinessNotice } from '@/features/resources/SandboxReadiness';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
 import { EnvironmentTools } from '@/features/resources/environments/Tools';
 import { EnvironmentStatusText } from '@/features/resources/environments/EnvironmentList';
@@ -61,7 +59,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { RelativeTime } from '@/ui/RelativeTime';
-import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { type Column, Table } from '@/ui/Table';
 import { SettingRow } from '@/ui/SettingRow';
@@ -74,10 +72,10 @@ function DoorPage({ children }: { children: ReactNode }) {
   return <div className="mx-auto flex h-full min-h-0 w-full max-w-(--container-page) flex-col gap-4 overflow-hidden px-4 py-4 sm:px-6">{children}</div>;
 }
 
-function Skeletons(props: SkeletonReads) {
+function Skeletons() {
   return (
     <Page>
-      <SkeletonGroup {...props} className="flex flex-col gap-6">
+      <SkeletonGroup className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -157,10 +155,6 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
-      {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
-        <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
-        <p>{t('largeTree.liveCost')}</p>
-      </InlineAlert>}
       <EnvironmentPrograms id={environment.id} generation={environment.generation} />
       <Section id="environment-about" title={t('environments.overview.about')}>
         <Facts compact
@@ -296,7 +290,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const back = useResourceHeading('environments', Boxes, query.data?.name ?? t('common.loading'), query.data?.id);
   const acts = useEnvironmentActs({ onTab: (_environment, next) => onTab(next), afterDelete: () => void navigate({ to: '/resources/environments' }) });
 
-  if (query.isPending) return <Skeletons read={query} />;
+  if (query.isPending) return <Skeletons />;
   if (query.isError) return <ErrorState className="h-full" title={t('environments.readFailed')} error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const environment = query.data;
   const manage = holds(environment.access, 'environment.manage');
@@ -374,7 +368,6 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
         }
       />
       <TemporaryStatus environment={environment} />
-      <EnvironmentReadinessNotice environment={environment} />
       {busy && (
         <InlineAlert
           tone="info"

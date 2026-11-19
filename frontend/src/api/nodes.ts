@@ -13,12 +13,9 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
-import { CancelledError, infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/react-query';
 
-import { scheduledReads, suppliedRead } from '@/api/readScheduler';
-import { outsideOpeningsQuery } from '@/api/ports';
-import { supplyOverviewPart } from '@/api/overviewParts';
-import { usageQuery, type UsageParams } from '@/api/usage';
+import { suppliedRead } from '@/api/readScheduler';
 import { joinedDefaultsNode } from '@/api/defaultsOpening';
 import { api, client, ok, repeatable } from '@/api/client';
 import { type ResourceRows, resourceRows } from '@/api/listed';
@@ -82,33 +79,16 @@ export const orgBySlugQuery = (slug: string) =>
       ok(api.GET('/orgs/by-slug/{slug}', { params: { path: { slug } }, signal })),
   });
 
-async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal, opening?: UsageParams): Promise<Node> {
-  const joined = await joinedDefaultsNode(cache, id, signal);
-  if (joined !== undefined) return joined;
-  if (opening === undefined) return ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal }));
-  if (opening.scope !== `node:${id}` || Object.keys(opening.filters).length > 0) throw new Error('The node overview needs its own unfiltered usage subject');
-  const reader = client.session.getState().readerVersion;
-  return scheduledReads.run(nodeKey(id), async (current) => {
-    const data = await ok(api.GET('/nodes/{id}/overview', { params: { path: { id }, query: {
-      from: opening.from, to: opening.to, breakdowns: opening.breakdowns.join(','), limit: opening.limit ?? null,
-    } }, signal }));
-    if (!current() || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
-    if (data.node.id !== id) throw new Error('The node overview returned a different node');
-    const keys: QueryKey[] = [];
-    const usage = usageQuery(opening).queryKey, outside = outsideOpeningsQuery(id).queryKey;
-    if (supplyOverviewPart(cache, usage, data.usage)) keys.push(usage);
-    if (supplyOverviewPart(cache, outside, data.outside_openings, (page) => ({ pages: [page], pageParams: [null] }))) keys.push(outside);
-    scheduledReads.supply(nodeKey(id), keys);
-    return data.node;
-  });
+async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal): Promise<Node> {
+  return await joinedDefaultsNode(cache, id, signal) ?? ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal }));
 }
 
-/** A node's frame and overview share the same native opening when those figures are visible. */
-export const nodeQuery = (id: string, opening?: UsageParams) =>
+/** Any node by its id, with what the caller holds on it. */
+export const nodeQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
     ...suppliedRead(nodeKey(id)),
-    queryFn: ({ signal, client: cache }): Promise<Node> => fetchNode(id, cache, signal, opening),
+    queryFn: ({ signal, client: cache }): Promise<Node> => fetchNode(id, cache, signal),
   });
 
 /** Explicitly reads current or retained facts to reconcile an uncertain write. */
@@ -117,24 +97,24 @@ export function readNode(id: string, inspectDeleted = false): Promise<Node> {
 }
 
 /** A project by its id: the same request as any node, narrowed to what a project screen reads. */
-export const projectQuery = (id: string, opening?: UsageParams) =>
+export const projectQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
     ...suppliedRead(nodeKey(id)),
     queryFn: ({ signal, client: cache }): Promise<Project> =>
-      fetchNode(id, cache, signal, opening).then((node) => {
+      fetchNode(id, cache, signal).then((node) => {
         if (node.kind !== 'project') throw new WrongKind('project', node.kind);
         return node;
       }),
   });
 
 /** A topic by its id. */
-export const topicQuery = (id: string, opening?: UsageParams) =>
+export const topicQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
     ...suppliedRead(nodeKey(id)),
     queryFn: ({ signal, client: cache }): Promise<Topic> =>
-      fetchNode(id, cache, signal, opening).then((node) => {
+      fetchNode(id, cache, signal).then((node) => {
         if (node.kind !== 'topic') throw new WrongKind('topic', node.kind);
         return node;
       }),

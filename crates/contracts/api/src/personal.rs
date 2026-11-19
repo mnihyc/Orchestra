@@ -112,7 +112,6 @@ pub const KEY_ACTIONS: &[(&str, &str)] = &[
     ("finder", "Mod+K"),
     ("search", "Mod+/"),
     ("find", "Mod+F"),
-    ("thread-changes", "Mod+Alt+G"),
     ("left-bar", "Mod+\\"),
     ("right-bar", "Mod+Shift+."),
     ("bottom", "Mod+J"),
@@ -130,7 +129,6 @@ pub const KEY_ACTIONS: &[(&str, &str)] = &[
     ("close-tab", "Alt+W"),
     ("focus-mode", ""),
     ("help", "F1"),
-    ("ask", "Shift+F1"),
     ("inbox", "G I"),
     ("approvals", "G A"),
     ("messages", "G M"),
@@ -517,7 +515,7 @@ crate::endpoints! {
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Notes that the caller went to a node; the client calls it on navigation.
     MeRecentCreate: POST "/me/recents", User, none, json MeRecentCreateBody, none, 204,
-        operation Op::receipt(&Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount));
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Stars or reorders a readable thing of any kind in the caller's own favorites.
     MeItemFavoriteSet: PUT "/me/favorites/{kind}/{id}", User, none, json MeItemFavoriteSetBody, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
@@ -526,7 +524,7 @@ crate::endpoints! {
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Records one visit to a readable thing, using the server's clock and decaying count.
     MeVisitCreate: POST "/me/visits", User, none, json PersonalTarget, none, 204,
-        operation Op::receipt(&Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount));
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists how far the caller has read their threads.
     MeReadStateList: GET "/me/read-states", User, query MeReadStateListQuery, none, json Vec<ReadState>, 200,
         operation Op::facets(&[

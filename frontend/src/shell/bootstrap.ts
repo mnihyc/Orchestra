@@ -2,8 +2,6 @@
 import { CancelledError, type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { adminModeKey } from '@/api/adminMode';
-import { permissionsKey } from '@/api/access';
-import { notificationPrefsKey, notifiersKey } from '@/api/notifications';
 import { meKey, metaKey } from '@/api/auth';
 import { outsideQuery } from '@/api/away';
 import { chatStatesKey } from '@/api/chats';
@@ -38,12 +36,6 @@ export function hydrateShell(cache: QueryClient, data: MeBootstrapReply): void {
   cache.setQueryData(adminModeKey, data.admin_mode);
   cache.setQueryData(favoritesKey, data.favorites);
   cache.setQueryData(chatStatesKey, data.chat_states);
-  if (data.permission_catalogue !== undefined && data.permission_catalogue !== null) {
-    cache.setQueryDefaults(permissionsKey, { staleTime: Infinity, gcTime: Infinity });
-    cache.setQueryData(permissionsKey, data.permission_catalogue);
-  }
-  if (data.notifier_catalogue !== undefined && data.notifier_catalogue !== null) cache.setQueryData(notifiersKey, data.notifier_catalogue);
-  if (data.notification_preferences !== undefined && data.notification_preferences !== null) cache.setQueryData(notificationPrefsKey, data.notification_preferences);
   const heldSummary = cache.getQueryData(outsideQuery().queryKey);
   cache.setQueryData(outsideQuery().queryKey, heldSummary !== undefined && heldSummary.seq > data.notification_summary.seq ? heldSummary : data.notification_summary);
   for (const org of data.orgs) {

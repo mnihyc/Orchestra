@@ -197,22 +197,7 @@ async fn custody(
         .bind(resources).bind(threads).fetch_all(conn).await.map_err(DbError::from)?)
 }
 
-/// The same native deletion selector, without writer locks, usable by a typed source supplier.
-pub async fn inspect(conn: &mut Conn, node: Id) -> Result<Prepared, RemovalScheduleError> {
-    Ok(select(conn, node, None).await?.into_prepared())
-}
-
 impl Engine {
-    /// Inspect the same native deletion operands without acquiring the later writer's locks.
-    /// Queue preparation supplies these facts; execution still uses prepare_home_deletion_in.
-    pub async fn inspect_home_deletion_in(
-        &self,
-        conn: &mut Conn,
-        node: Id,
-    ) -> Result<Prepared, RemovalScheduleError> {
-        inspect(conn, node).await
-    }
-
     /// Hold the actual thread/node/document/resource/member serialization footprint, then refresh it.
     /// A stable selection is reused by the writer; no trial mutation or DTO supplies scope sources.
     pub async fn prepare_home_deletion_in(

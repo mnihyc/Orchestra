@@ -1,9 +1,7 @@
 ---
-group: settings
 title: Document links
 screens: /doc/$documentId, /help, /help/$article
 keywords: links, backlinks, referenced by, references, graph, mentions, related, tabs, cited by
-summary: Explore a document’s incoming references, outgoing references, related items and graph.
 ---
 
 # Document links

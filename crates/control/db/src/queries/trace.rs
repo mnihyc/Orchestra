@@ -373,10 +373,6 @@ pub(crate) async fn collect_history(
     if table == "nodes" {
         crate::queries::storage::release_input_pins(conn, ids, now).await?;
         crate::queries::storage::release_schedule_pins(conn, ids, now).await?;
-        // Item deletion triggers update this live projection. Remove it before the
-        // continuation cascade removes its owner, within the same collection savepoint.
-        sqlx::query("DELETE FROM thread_history_turn_counts WHERE continuation_id IN(SELECT id FROM thread_continuations WHERE thread_id=ANY($1))")
-            .bind(ids).execute(&mut *conn).await?;
         sqlx::query("DELETE FROM thread_approval_rules WHERE thread_id=ANY($1)")
             .bind(ids)
             .execute(&mut *conn)

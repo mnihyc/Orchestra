@@ -20,7 +20,7 @@ const PROGRAM: &str = r#"#!/usr/bin/env python3
 import json, sys, time
 from pathlib import Path
 if '--version' in sys.argv:
-    print('2.1.322 (Claude Code)')
+    print('2.1.312 (Claude Code)')
     raise SystemExit(0)
 session = next((sys.argv[i+1] for i,arg in enumerate(sys.argv[:-1]) if arg in ('--session-id','--resume')), 'session')
 with open(__file__ + '.starts', 'a') as receipt:

@@ -457,7 +457,8 @@ impl SourceCommand {
         }
     }
 
-    pub(crate) fn capture(
+    pub(crate) async fn capture(
+        conn: &mut Conn,
         row: &JobRow,
         expected: &Request,
         command: &Outgoing,
@@ -559,7 +560,7 @@ pub(crate) async fn decorate(job: &Job, command: &mut Outgoing) -> Result<(), St
     let expected = expected.ok_or_else(refusal)?;
     let mut tx = job.engine().db().begin().await?;
     let row = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-    let authority = SourceCommand::capture(&row, &expected, command)?;
+    let authority = SourceCommand::capture(&mut tx, &row, &expected, command).await?;
     let existing = job
         .engine()
         .inner

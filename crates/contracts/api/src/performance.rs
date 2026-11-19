@@ -63,9 +63,6 @@ pub fn request_timing(request: &RequestSample) -> RequestTiming {
     };
     RequestTiming {
         web_searches: UsageMeasurement::Unsupported,
-        web_fetches: UsageMeasurement::Unsupported,
-        declared_counters: Default::default(),
-        reported_cost: UsageMeasurement::Unsupported,
         wire_protocol: None,
         requested_service_tier: None,
         reported_service_tier: UsageMeasurement::Unsupported,
@@ -94,7 +91,6 @@ pub fn request_timing(request: &RequestSample) -> RequestTiming {
         request_ms: whole,
         outcome: request.outcome.clone(),
         error_message: request.error_message.clone(),
-        ..RequestTiming::default()
     }
 }
 

@@ -7,8 +7,8 @@
 
 mod common;
 mod hosting;
+mod native_tools;
 mod shared;
-use shared::native_tools;
 
 use common::{World, eventually, queued, turn_ended};
 use orch_authz::Caller;
@@ -73,7 +73,7 @@ async fn a_world_with_all_native_tools() -> (World, hosting::ScriptedHost, hosti
         &mut conn,
         host.machine,
         &json!(facts),
-        (None, None),
+        (0, 0),
         1.0,
         world.clock.now(),
     )
@@ -238,14 +238,13 @@ async fn a_session_is_opened_with_the_tools_the_thread_enables_that_are_built() 
         .await;
     let thread = world.thread("Repro").await;
     let open = open_session(&world, thread).await;
-    // Enabled tools keep their fixed order; built-in help stays available too.
+    // Only what is enabled is offered, in the fixed order of the tools.
     assert_eq!(
         open.orch_tools,
         vec![
             OrchTool::ListShared,
             OrchTool::Announce,
-            OrchTool::RequestCapability,
-            OrchTool::OrchDocs
+            OrchTool::RequestCapability
         ]
     );
     assert!(
@@ -301,167 +300,22 @@ async fn prompts_no_duplicates_a_session_says_the_frames_the_guide_and_where_it_
 }
 
 #[tokio::test]
-async fn the_default_offers_built_shared_tools_and_docs_but_no_personal_read_delegation() {
+async fn every_tool_that_is_built_is_offered_while_the_thread_enables_all_of_them() {
     let (world, _host, _unit) = a_world_with_all_native_tools().await;
     let thread = world.thread("Repro").await;
     let open = open_session(&world, thread).await;
     let built: Vec<&str> = orch_engine::tools::definitions::BUILT
         .iter()
-        .filter(|tool| !tool.is_owner_read())
         .map(|tool| tool.name())
         .collect();
     assert_eq!(
         serde_json::to_value(&open.orch_tools).unwrap(),
         json!(built),
-        "the owner delegation is off as shipped; public help is always offered"
+        "as the setting ships, a thread enables them all"
     );
     assert!(
         open.orch_tools.contains(&OrchTool::ManageShared),
         "the tool that manages documents is one of them, and a share to manage is what lets it act"
-    );
-}
-
-#[tokio::test]
-async fn port_tool_inspection_uses_native_session_gates_and_keeps_closing_independent() {
-    use orch_api_contract::ports::PortToolInactiveReason;
-    use orch_engine::tools::{offered_for_session, port_tools_for_session};
-    let (world, _host, _unit) = a_world_with_all_native_tools().await;
-    let id = world.thread("Port tool inspection").await;
-    world
-        .set(
-            id,
-            "orch_tools.enabled",
-            json!([
-                "list_ports",
-                "open_port",
-                "close_port",
-                "list_port_connections"
-            ]),
-        )
-        .await;
-    let mut conn = world.pool.acquire().await.unwrap();
-    let row = orch_db::queries::threads::thread(&mut conn, id)
-        .await
-        .unwrap()
-        .unwrap();
-    let machine: Id = sqlx::query_scalar("SELECT machine_id FROM environments WHERE id=$1")
-        .bind(row.environment_id.unwrap())
-        .fetch_one(&mut *conn)
-        .await
-        .unwrap();
-    let status = port_tools_for_session(&mut conn, &row, true, world.clock.time())
-        .await
-        .unwrap();
-    let offered = offered_for_session(&mut conn, &row, true, world.clock.time())
-        .await
-        .unwrap();
-    let actual = offered
-        .iter()
-        .map(|tool| tool.name())
-        .filter(|name| {
-            status
-                .requested
-                .iter()
-                .any(|requested| requested.as_str() == *name)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(status.effective, actual);
-    assert_eq!(status.requested.len(), 4);
-    assert!(status.inactive.is_empty());
-    let unsupported = port_tools_for_session(&mut conn, &row, false, world.clock.time())
-        .await
-        .unwrap();
-    assert!(unsupported.effective.is_empty());
-    assert!(
-        unsupported
-            .inactive
-            .iter()
-            .all(|item| item.reason == PortToolInactiveReason::ProgramUnsupported)
-    );
-    sqlx::query("UPDATE machines SET platform_os='windows' WHERE id=$1")
-        .bind(machine)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    let unsupported = port_tools_for_session(&mut conn, &row, true, world.clock.time())
-        .await
-        .unwrap();
-    assert_eq!(unsupported.effective, vec!["close_port"]);
-    assert_eq!(unsupported.inactive.len(), 3);
-    assert!(
-        unsupported
-            .inactive
-            .iter()
-            .all(|item| item.reason == PortToolInactiveReason::Unsupported)
-    );
-    sqlx::query("UPDATE machines SET platform_os='linux' WHERE id=$1")
-        .bind(machine)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    let home: Id = sqlx::query_scalar("SELECT home_node_id FROM environments WHERE id=$1")
-        .bind(world.environment)
-        .fetch_one(&mut *conn)
-        .await
-        .unwrap();
-    drop(conn);
-    world.set(home, "ports.enabled", json!(false)).await;
-    let mut conn = world.pool.acquire().await.unwrap();
-    let disabled = port_tools_for_session(&mut conn, &row, true, world.clock.time())
-        .await
-        .unwrap();
-    assert_eq!(disabled.effective, vec!["close_port"]);
-    assert!(
-        disabled
-            .inactive
-            .iter()
-            .all(|item| item.reason == PortToolInactiveReason::PolicyOff)
-    );
-    drop(conn);
-    world.set(home, "ports.enabled", json!(true)).await;
-    world
-        .set(
-            home,
-            "capability.policy",
-            json!({
-                "port_place":{"decision":"deny","approver_scope":"environment"},
-                "port_link":{"decision":"deny","approver_scope":"environment"},
-                "port_host":{"decision":"deny","approver_scope":"environment"}
-            }),
-        )
-        .await;
-    let mut conn = world.pool.acquire().await.unwrap();
-    let closed = port_tools_for_session(&mut conn, &row, true, world.clock.time())
-        .await
-        .unwrap();
-    assert_eq!(
-        closed.effective,
-        vec!["list_ports", "close_port", "list_port_connections"]
-    );
-    assert_eq!(closed.inactive.len(), 1);
-    assert_eq!(closed.inactive[0].tool, "open_port");
-    assert_eq!(
-        closed.inactive[0].reason,
-        PortToolInactiveReason::NoAudience
-    );
-    sqlx::query("UPDATE threads SET environment_id=NULL WHERE node_id=$1")
-        .bind(id)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    let unbound = orch_db::queries::threads::thread(&mut conn, id)
-        .await
-        .unwrap()
-        .unwrap();
-    let missing = port_tools_for_session(&mut conn, &unbound, true, world.clock.time())
-        .await
-        .unwrap();
-    assert_eq!(missing.effective, vec!["close_port"]);
-    assert!(
-        missing
-            .inactive
-            .iter()
-            .all(|item| item.reason == PortToolInactiveReason::NoEnvironment)
     );
 }
 
@@ -475,16 +329,14 @@ async fn no_tools_are_offered_to_a_harness_that_takes_no_mcp_server() {
 }
 
 #[tokio::test]
-async fn an_empty_shared_tool_choice_keeps_docs_and_the_environment_switch_still_stops_mcp() {
+async fn no_tools_are_offered_where_the_setting_enables_none_or_the_environment_switches_them_off()
+{
     let world = a_world_whose_agent_takes_tools().await;
     world
         .set(world.topic, "orch_tools.enabled", json!([]))
         .await;
     let thread = world.thread("Repro").await;
-    assert_eq!(
-        open_session(&world, thread).await.orch_tools,
-        vec![OrchTool::OrchDocs]
-    );
+    assert!(open_session(&world, thread).await.orch_tools.is_empty());
 
     let other = a_world_whose_agent_takes_tools().await;
     other
@@ -813,10 +665,7 @@ async fn a_tool_the_thread_does_not_have_is_refused_and_the_tools_it_has_are_nam
         message.contains("send_message is not a tool you have here"),
         "{message}"
     );
-    assert!(
-        message.contains("You have: announce, orch_docs."),
-        "{message}"
-    );
+    assert!(message.contains("You have: announce."), "{message}");
 }
 
 #[tokio::test]
@@ -1092,7 +941,7 @@ async fn an_announcement_reaches_a_thread_by_what_it_is_doing_and_what_the_topic
         .set(
             world.topic,
             "broadcast.agent_options",
-            json!(["interrupt", "next_turn"]),
+            json!(["interrupt", "next_turn", "wake_idle"]),
         )
         .await;
     let sender = world.thread("Build").await;
@@ -1247,55 +1096,35 @@ async fn a_project_audience_selects_candidates_without_a_separate_permission_set
 }
 
 #[tokio::test]
-async fn announcements_and_thread_messages_have_separate_shipped_hourly_limits() {
+async fn what_an_agent_sends_into_other_threads_has_a_rate_in_the_hour_and_the_refusal_says_when() {
     let world = a_world_whose_agent_takes_tools().await;
+    world
+        .set(world.topic, "broadcast.rate_per_hour", json!(2))
+        .await;
     let sender = world.thread("Build").await;
-    let other = world.thread("Validate").await;
-    for n in 0..12 {
+    let _other = world.thread("Validate").await;
+    for title in ["one", "two"] {
         let sent = call(
             &world,
             sender,
             OrchTool::Announce,
-            json!({ "title": format!("Notice {n}") }),
+            json!({ "title": title }),
         )
         .await;
         assert!(sent.error.is_none(), "{sent:?}");
     }
-    let extra = call(
-        &world,
-        sender,
-        OrchTool::Announce,
-        json!({ "title": "One too many" }),
-    )
-    .await;
-    let (code, message) = refused(&extra);
-    assert_eq!(code, "rate_limited");
-    assert!(
-        message.contains("broadcast.rate_per_hour")
-            && message.contains("12")
-            && message.contains("seconds"),
-        "{message}"
-    );
-    for n in 0..60 {
-        let sent = call(&world, sender, OrchTool::SendMessage,
-            json!({ "target": { "kind": "thread", "path": "Validate" }, "text": format!("Message {n}") })).await;
-        assert!(sent.error.is_none(), "{sent:?}");
-    }
-    let extra = call(
+    // A message to a single thread counts with the announcements.
+    let third = call(
         &world,
         sender,
         OrchTool::SendMessage,
-        json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "One too many" }),
+        json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "where is the report?" }),
     )
     .await;
-    let (code, message) = refused(&extra);
+    let (code, message) = refused(&third);
     assert_eq!(code, "rate_limited");
-    assert!(
-        message.contains("broadcast.thread_messages_per_hour")
-            && message.contains("60")
-            && message.contains("seconds"),
-        "{message}"
-    );
+    assert!(message.contains("seconds"), "{message}");
+    // Milestones for the followers are not counted: the agent can still mark one.
     let milestone = call(
         &world,
         sender,
@@ -1303,111 +1132,7 @@ async fn announcements_and_thread_messages_have_separate_shipped_hourly_limits()
         json!({ "title": "Done", "category": "milestone" }),
     )
     .await;
-    assert!(milestone.error.is_none(), "{milestone:?}");
-    let another_sender = call(
-        &world,
-        other,
-        OrchTool::Announce,
-        json!({ "title": "My own budget" }),
-    )
-    .await;
-    assert!(another_sender.error.is_none(), "{another_sender:?}");
-}
-
-#[tokio::test]
-async fn wake_is_explicit_and_unavailable_wake_is_refused_for_both_agent_sends() {
-    let world = a_world_whose_agent_takes_tools().await;
-    let sender = world.thread("Build").await;
-    let idle = world.thread("Validate").await;
-    let message = call(
-        &world,
-        sender,
-        OrchTool::SendMessage,
-        json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "For your next turn" }),
-    )
-    .await;
-    assert_eq!(message.result.unwrap()["delivery"], "deferred");
-    world.wait_state(idle, "idle").await;
-    world
-        .set(world.topic, "broadcast.wake_idle", json!(false))
-        .await;
-    for (tool, arguments) in [
-        (
-            OrchTool::Announce,
-            json!({ "title": "Wake up", "wake_idle": true }),
-        ),
-        (
-            OrchTool::SendMessage,
-            json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "Wake up", "wake_idle": true }),
-        ),
-    ] {
-        let result = call(&world, sender, tool, arguments).await;
-        let (code, message) = refused(&result);
-        assert_eq!(code, "invalid");
-        assert!(message.contains("broadcast.wake_idle"), "{message}");
-    }
-    let no_wake = call(
-        &world,
-        sender,
-        OrchTool::Announce,
-        json!({ "title": "Later", "wake_idle": false }),
-    )
-    .await;
-    assert_eq!(delivered(&no_wake)["deferred"], 1);
-    world
-        .set(world.topic, "broadcast.wake_idle", json!(true))
-        .await;
-    let wake = call(&world, sender, OrchTool::SendMessage,
-        json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "Start now", "wake_idle": true })).await;
-    assert_eq!(wake.result.unwrap()["delivery"], "queued");
-    world.wait_state(idle, "starting").await;
-}
-
-#[tokio::test]
-async fn cross_topic_sends_use_the_receiving_topics_wake_availability() {
-    let world = a_world_whose_agent_takes_tools().await;
-    let sender = world.thread("Build").await;
-    let other_topic = world.topic("Elsewhere").await;
-    let receiver = shared::thread_in_topic(&world, other_topic, "Recipient").await;
-    shared::share_threads_inside(&world, other_topic, world.topic, true).await;
-    world
-        .set(other_topic, "broadcast.wake_idle", json!(false))
-        .await;
-    for (tool, arguments) in [
-        (
-            OrchTool::Announce,
-            json!({"title":"Wake everyone","audience":"project","wake_idle":true}),
-        ),
-        (
-            OrchTool::SendMessage,
-            json!({"target":{"kind":"thread","path":format!("id:{receiver}")},"text":"Wake up","wake_idle":true}),
-        ),
-    ] {
-        let result = call(&world, sender, tool, arguments).await;
-        let (code, message) = refused(&result);
-        assert_eq!(code, "invalid");
-        assert!(message.contains("broadcast.wake_idle"), "{message}");
-    }
-    let sends: i64 = world
-        .count(
-            "SELECT count(*) FROM announcements WHERE from_thread_id=$1",
-            sender,
-        )
-        .await;
-    assert_eq!(
-        sends, 0,
-        "a refused fan-out leaves no partial announcements"
-    );
-    world
-        .set(world.topic, "broadcast.wake_idle", json!(false))
-        .await;
-    world
-        .set(other_topic, "broadcast.wake_idle", json!(true))
-        .await;
-    let wake = call(&world, sender, OrchTool::SendMessage,
-        json!({"target":{"kind":"thread","path":format!("id:{receiver}")},"text":"Start now","wake_idle":true})).await;
-    assert_eq!(wake.result.unwrap()["delivery"], "queued");
-    world.wait_state(receiver, "starting").await;
+    assert!(milestone.error.is_none());
 }
 
 #[tokio::test]
@@ -1421,28 +1146,6 @@ async fn a_zero_rate_switches_what_agents_send_into_other_threads_off() {
     let (code, message) = refused(&result);
     assert_eq!(code, "limit");
     assert!(message.contains("broadcast.rate_per_hour"));
-    let _ = world.thread("Validate").await;
-    let message = call(
-        &world,
-        sender,
-        OrchTool::SendMessage,
-        json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "A separate budget" }),
-    )
-    .await;
-    assert!(message.error.is_none(), "{message:?}");
-    world
-        .set(world.topic, "broadcast.thread_messages_per_hour", json!(0))
-        .await;
-    let message = call(
-        &world,
-        sender,
-        OrchTool::SendMessage,
-        json!({ "target": { "kind": "thread", "path": "Validate" }, "text": "Not allowed" }),
-    )
-    .await;
-    let (code, message) = refused(&message);
-    assert_eq!(code, "limit");
-    assert!(message.contains("broadcast.thread_messages_per_hour"));
 }
 
 #[tokio::test]
@@ -1749,10 +1452,14 @@ async fn announcement_schema_follows_the_place_and_refreshes_only_before_the_nex
         json!(["followers", "topic", "project", "org"])
     );
     assert!(schema["properties"].get("delivery").is_none());
-    assert!(schema["properties"].get("wake_idle").is_some());
+    assert!(schema["properties"].get("wake_idle").is_none());
     let before = world.seen.of_kind(CommandKind::SessionOpen).len();
     world
-        .set(world.topic, "broadcast.agent_options", json!(["steer"]))
+        .set(
+            world.topic,
+            "broadcast.agent_options",
+            json!(["steer", "wake_idle"]),
+        )
         .await;
     world
         .engine()

@@ -1,10 +1,8 @@
-/** A visible settings consumer and its visible Chat share the independently admitted opening. */
+/** The visible Defaults page and its visible Chat share the existing independently admitted opening. */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLayoutEffect, useState } from 'react';
 import { nodeChatOpeningQuery } from '@/api/chats';
 import { settingsKey } from '@/api/settings';
-import { nodeKey } from '@/api/nodes';
-import type { Node } from '@/generated/api-types';
 import { useRequestedChat } from '@/features/chat/focus';
 import { settingsNavigation } from '@/features/settings/navigation';
 import { contentAddress, parsePageAddress } from '@/features/workbench/contentAddress';
@@ -16,15 +14,6 @@ import { useViewChoice } from '@/lib/viewChoices';
 
 interface ChatReader { shown: boolean; scope: string; chatId: string | null }
 
-/** Restored list presentation does not replace the destination that admitted Defaults metadata. */
-function metadataAddress(href: string | null): string | null {
-  const target = href === null ? null : parsePageAddress(href);
-  if (target === null) return null;
-  const search = Object.entries(target.search).filter(([key]) => key !== 'list' && key !== '_list')
-    .toSorted(([one], [other]) => one.localeCompare(other));
-  return JSON.stringify([target.pathname, search, target.hash]);
-}
-
 export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, capable = true) {
   const instance = useViewInstance();
   const cache = useQueryClient();
@@ -33,13 +22,9 @@ export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, cap
   const tab = owner === null ? null : findTab(state.layout, owner)?.tab ?? null;
   const href = tab === null ? null : contentAddress(tab);
   const target = href === null ? null : parsePageAddress(href);
-  const routeNavigation = target === null ? null : settingsNavigation(target.pathname, target.search);
-  const navigation = routeNavigation !== null && (routeNavigation.kind === 'org' || routeNavigation.kind === 'project' || routeNavigation.kind === 'topic') ? routeNavigation : null;
+  const navigation = target === null ? null : settingsNavigation(target.pathname, target.search);
   const unfiltered = target?.search.setting === undefined || target.search.setting === '';
-  const known = nodeId === null ? undefined : cache.getQueryData<Node>(nodeKey(nodeId));
-  const settingsOnly = navigation?.kind === 'org' && navigation.current === 'members'
-    && known?.kind === 'org' && known.access.permissions.includes('members.manage');
-  const relevant = capable && unfiltered && nodeId !== null && owner !== null && (navigation?.current === 'defaults' || settingsOnly)
+  const relevant = capable && unfiltered && nodeId !== null && owner !== null && navigation?.current === 'policies'
     && (navigation.kind === 'org' || navigation.id === nodeId);
   const candidates = relevant ? allTabs(state.layout).filter((candidate) => {
     if (candidate.view !== 'chat') return false;
@@ -49,7 +34,7 @@ export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, cap
   }).map((candidate) => candidate.id) : [];
   const contentOpening = useShownViewOpening(relevant ? [owner] : []);
   const chatOpening = useShownViewOpening(candidates);
-  const identity = JSON.stringify([owner, href, nodeId, relevant, settingsOnly]);
+  const identity = JSON.stringify([owner, href, nodeId, relevant]);
   const [settled, setSettled] = useState<string | null>(null);
   useLayoutEffect(() => {
     if (!relevant) return;
@@ -70,14 +55,14 @@ export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, cap
   const requested = useRequestedChat();
   const linked = target?.search.chat;
   const chatId = chat?.chatId ?? requested ?? (typeof linked === 'string' && linked !== '' ? linked : null);
-  const demand = eligible || admitted && settingsOnly ? { defaults: true, ...(settingsOnly ? { settings_only: true } : {}), secret_names: !settingsOnly, default_provider_name: !settingsOnly,
-    embeddings_provider_name: !settingsOnly && navigation.kind === 'org' } : undefined;
+  const demand = eligible ? { defaults: true, secret_names: true, default_provider_name: true,
+    embeddings_provider_name: navigation.kind === 'org' } : undefined;
   const owned = admitted ? { content: contentOpening, chat: chatOpening, href } : null;
   const current = () => {
     if (owned === null) return false;
     if (shownViewOpening(owned.content.view) !== owned.content.nonce || shownViewOpening(owned.chat.view) !== owned.chat.nonce) return false;
     const now = findTab(useWorkbench.getState().layout, owned.content.view);
-    return now !== null && metadataAddress(contentAddress(now.tab)) === metadataAddress(owned.href);
+    return now !== null && contentAddress(now.tab) === owned.href;
   };
   const opening = useQuery({ ...nodeChatOpeningQuery(nodeId ?? '', chat?.scope ?? storedScope, chatId, demand, current),
     enabled: nodeId !== null && (chat === undefined ? eligible : chat.shown) });

@@ -7,8 +7,7 @@ import { detailMount, detailUnitProvider } from '../component/resource-detail-fi
 import { inventoryRow } from '../doubles/everything-row';
 import { scenario, signIn } from './support';
 
-// Exercise genuine truncation at both table widths, where the full-name tooltip is offered.
-const longMountName = 'shared-notes-for-team-research-and-the-environments-on-the-shared-build-and-analysis-hosts';
+const longMountName = 'shared-notes-for-team-research';
 const mount = { ...detailMount, name: 'shared-notes', description: 'World 2: shared notes for all environments and all the researchers on this team', locations: [], locations_hidden: 0 };
 const longMount = { ...mount, id: 'long-mount', name: longMountName };
 const provider = { ...detailUnitProvider, name: 'A model connection with a long descriptive name on a newly created unit' };
@@ -57,7 +56,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(await shortName.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
     const fullName = mounts.getByRole('link', { name: longMount.name, exact: true }); await fullName.focus();
     await expect(page.getByRole('tooltip')).toContainText(longMount.name);
-    const edit = mounts.getByRole('button', { name: t('resources.act.of', { act: t('resources.act.editButton'), name: mount.name }), exact: true });
+    const edit = mounts.getByRole('button', { name: t('resources.act.of', { act: t('resources.act.editButton'), name: mount.name }) });
     await expect(edit).toBeInViewport(); await info.attach(`mounts-${locale}-${theme}-${width}.png`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     await page.goto('/resources/providers'); const providers = await expectTableFits(page, t('providers.list.label'));
     await expect(providers).not.toContainText('9fca895b060d');
@@ -65,14 +64,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const menu = providers.getByRole('button', { name: t('resources.act.menuOf', { name: provider.name }) });
     await expect(open).toBeInViewport(); await expect(menu).toBeInViewport();
     const name = providers.getByRole('link', { name: provider.name, exact: true }); await name.focus(); await expect(page.getByRole('tooltip')).toContainText(provider.name);
-    // Provider configuration is edited on its page; its row menu retains the native Rename action.
-    await menu.click(); await expect(page.getByRole('menuitem', { name: t('resources.act.rename'), exact: true })).toBeVisible(); await page.keyboard.press('Escape');
+    await menu.click(); await expect(page.getByRole('menuitem', { name: t('resources.act.edit'), exact: true })).toBeVisible(); await page.keyboard.press('Escape');
     await info.attach(`providers-${locale}-${theme}-${width}.png`, { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     if (width === 1440) {
-      await page.evaluate(() => { document.documentElement.style.zoom = '2'; });
-      // Enlarging the page moves the row below its wrapped header; use the native scroller to reach it.
-      await open.scrollIntoViewIfNeeded();
-      await expectTableFits(page, t('providers.list.label'));
+      await page.evaluate(() => { document.documentElement.style.zoom = '2'; }); await expectTableFits(page, t('providers.list.label'));
       await expect(open).toBeInViewport(); await expect(menu).toBeInViewport();
     }
   });

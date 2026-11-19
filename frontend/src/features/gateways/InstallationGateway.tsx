@@ -10,7 +10,7 @@ export function InstallationGateway({ value, onChange, disabled = false }: { val
   const { t } = useTranslation();
   const catalogue = useQuery(gatewayCatalogueQuery);
   return <div className="flex min-w-0 flex-col gap-2">
-    {catalogue.isPending && <SkeletonRows read={catalogue} rows={1} />}
+    {catalogue.isPending && <SkeletonRows rows={1} />}
     {catalogue.isError && <ErrorState compact title={t('regionalGateways.loadFailed')} error={catalogue.error} onRetry={() => void catalogue.refetch()} />}
     <GatewayChoice gateways={catalogue.data?.gateways ?? []} value={value} onChange={onChange} disabled={disabled || catalogue.isPending} />
   </div>;

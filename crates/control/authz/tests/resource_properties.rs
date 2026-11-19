@@ -322,7 +322,7 @@ impl Scene {
                     };
                     if *kind == ResourceKind::Provider {
                         for model in MODELS {
-                            if granted.named_together().allows_model(model) {
+                            if granted.provider().allows_model(model) {
                                 uses.insert((*user, *id, node, model));
                             }
                         }

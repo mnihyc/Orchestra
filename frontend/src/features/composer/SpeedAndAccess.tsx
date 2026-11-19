@@ -15,7 +15,6 @@ import { useTranslation } from 'react-i18next';
 import { type Chooser, type ContextState, forceLabel, type SpeedOrAccess, speedMultiple, type State } from '@/features/composer/modelState';
 import type { Rate } from '@/generated/api-types';
 import type { TranslationKey } from '@/i18n';
-import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Select } from '@/ui/Select';
 
@@ -92,31 +91,20 @@ interface ChoiceProps<S extends SpeedOrAccess> {
   performance?: (value: string | null) => string | null;
 }
 
-/** A refused null is an allowed-value restriction, independent of the value's inheritance source. */
-function NullChoiceRestriction({ state }: { state: SpeedOrAccess }) {
-  const { t } = useTranslation();
-  const provider = state.constraintProvider ?? null;
-  return <span className="inline-flex min-w-0 flex-wrap items-center gap-1" data-null-choice-restriction>
-    <span>{t('composer.model.notAmongAllowedValues')}</span>
-    {provider !== null && <><span aria-hidden>·</span><ResourceChip subject={{ kind: 'provider', provider }} card={false} hint={false} /></>}
-  </span>;
-}
-
 /** Speed: Standard, and the speeds the model's managers switched on. */
-export function SpeedChoice({ state, writable, pending = false, chooser, rate, onChoose, performance }: ChoiceProps<SpeedOrAccess> & { pending?: boolean }) {
+export function SpeedChoice({ state, writable, chooser, rate, onChoose, performance }: ChoiceProps<SpeedOrAccess>) {
   const { t, i18n } = useTranslation();
   const standard = t('composer.model.speed.standard');
   const inForce = forceLabel(state) ?? standard;
   const startLabel = state.start === null ? null : (state.open.find((one) => one.id === state.start)?.label ?? state.start);
-  const nullReason = state.allowNone === false && state.providerFixed !== true ? <NullChoiceRestriction state={state} /> : null;
   const segments = [
-    { value: NONE, name: t('usagePerf.choices.tier.name', { name: standard }), description: nullReason ?? <>{t('usagePerf.choices.tier.description')}{performance?.(null) && <span className="block">{performance(null)}</span>}</>, disabled: !writable || state.providerFixed === true || state.allowNone === false },
+    { value: NONE, name: t('usagePerf.choices.tier.name', { name: standard }), description: <>{t('usagePerf.choices.tier.description')}{performance?.(null) && <span className="block">{performance(null)}</span>}</>, disabled: !writable || state.providerFixed === true || state.allowNone === false },
     ...state.open.map((one) => ({ value: one.id, name: t('usagePerf.choices.tier.name', { name: one.label }), tooltip: speedLine(one.label, one.id, rate, t, (key) => i18n.exists(key), state.description), description: <>{speedLine(one.label, one.id, rate, t, (key) => i18n.exists(key), state.description)}{performance?.(one.id) && <span className="block">{performance(one.id)}</span>}</>, disabled: !writable || state.providerFixed === true })),
   ];
   return (
     <section aria-label={t('composer.model.speed.title')} data-section="speed" className={SECTION}>
       <ChoiceHead title={t('composer.model.speed.title')} value={inForce} state={state} chooser={chooser} />
-      <SegmentedControl label={t('composer.model.speed.title')} size="sm" value={state.force ?? NONE} onValueChange={(next) => onChoose(next === NONE ? null : next)} segments={segments} pending={pending} />
+      <SegmentedControl label={t('composer.model.speed.title')} size="sm" value={state.force ?? NONE} onValueChange={(next) => onChoose(next === NONE ? null : next)} segments={segments} />
       {startLabel !== null && <p className="text-xs text-text-muted">{t('composer.model.speed.startsWith', { label: startLabel })}</p>}
       <LockedLine state={state} />
       <p className="text-xs text-text-subtle">{appliesWords(state, t)}</p>
@@ -135,7 +123,6 @@ export function AccessChoice({ state, writable, chooser, onChoose, performance, 
   }
   const { t } = useTranslation();
   const none = t('composer.model.access.none');
-  const nullReason = state.allowNone === false && state.providerFixed !== true ? <NullChoiceRestriction state={state} /> : null;
   const inForce = forceLabel(state) ?? none;
   const startLabel = state.start === null ? null : (state.open.find((one) => one.id === state.start)?.label ?? state.start);
   return (
@@ -150,7 +137,7 @@ export function AccessChoice({ state, writable, chooser, onChoose, performance, 
         value={state.force ?? NONE}
         disabled={!writable || state.providerFixed === true}
         onValueChange={(next) => onChoose(next === NONE ? null : next)}
-        options={[{ value: NONE, name: t('usagePerf.choices.program.name', { name: none }), description: nullReason ?? <>{t('composer.model.access.lineNone')}{performance?.(null) && <span className="block">{performance(null)}</span>}</>, disabled: state.allowNone === false }, ...state.open.map((one) => ({ value: one.id, name: t('usagePerf.choices.program.name', { name: one.label }), description: <>{t('usagePerf.choices.program.description')}{performance?.(one.id) && <span className="block">{performance(one.id)}</span>}</> }))]}
+        options={[{ value: NONE, name: t('usagePerf.choices.program.name', { name: none }), description: <>{t('composer.model.access.lineNone')}{performance?.(null) && <span className="block">{performance(null)}</span>}</>, disabled: state.allowNone === false }, ...state.open.map((one) => ({ value: one.id, name: t('usagePerf.choices.program.name', { name: one.label }), description: <>{t('usagePerf.choices.program.description')}{performance?.(one.id) && <span className="block">{performance(one.id)}</span>}</> }))]}
       />
       {startLabel !== null && <p className="text-xs text-text-muted">{t('composer.model.access.startsWith', { label: startLabel })}</p>}
       <p className="text-xs text-text-muted">{state.force === null ? t('composer.model.access.lineNone') : t('composer.model.access.line', { label: inForce })}</p>

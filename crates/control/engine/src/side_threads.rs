@@ -32,9 +32,7 @@ use orch_settings::{Place, get as setting};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Time, new_id};
 
-pub mod command;
 pub(crate) mod history;
-pub mod operation;
 
 /// What goes after a thread's name in the name of its first side thread.
 const SIDE_SUFFIX: &str = " (side)";
@@ -116,38 +114,6 @@ pub struct Started {
     pub submitted: Submitted,
 }
 
-/// Effect-free native side admission, fenced to its original transaction and author.
-#[derive(Clone)]
-pub struct PreparedSide {
-    parent: Id,
-    actor: Id,
-    transaction: i64,
-    content: Vec<ContentPart>,
-    client_id: String,
-    state: SidePreparation,
-}
-#[derive(Clone)]
-enum SidePreparation {
-    Replay(Id),
-    New {
-        parent: Box<threads::ThreadRow>,
-        reading: SideReading,
-        from_turn: i32,
-        name: String,
-    },
-}
-impl PreparedSide {
-    pub fn parent(&self) -> Id {
-        self.parent
-    }
-    pub fn replay(&self) -> bool {
-        matches!(self.state, SidePreparation::Replay(_))
-    }
-    pub fn content(&self) -> &[ContentPart] {
-        &self.content
-    }
-}
-
 impl Engine {
     /// Starts a side thread of `parent`, with `content` queued in it as its first input, in one
     /// transaction: nothing is planned and nothing is chosen. The caller needs `thread.interact` on the
@@ -183,28 +149,8 @@ impl Engine {
         client_id: String,
         to_turn: Option<i64>,
     ) -> Result<Started, SideError> {
-        let value = self
-            .prepare_side_in(unit, caller, parent_id, content, client_id, to_turn)
-            .await?;
-        self.apply_side_in(unit, caller, value).await
-    }
-
-    /// Resolves the actual original parent, replay, read-only mode and history boundary without effects.
-    pub async fn prepare_side_in(
-        &self,
-        unit: &mut Unit<'_>,
-        caller: &Caller,
-        parent_id: Id,
-        content: Vec<ContentPart>,
-        client_id: String,
-        to_turn: Option<i64>,
-    ) -> Result<PreparedSide, SideError> {
         let now = unit.now();
         let person = caller.user();
-        let transaction: i64 = sqlx::query_scalar("SELECT txid_current()::bigint")
-            .fetch_one(&mut *unit.conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
         // The parent is looked at without its row locked first: the same request sent again is answered
         // by the side thread it made, and must not wait behind the parent for it. The turn of that side
         // thread may be starting at that moment, and the two would hold one row each and wait for the
@@ -249,31 +195,13 @@ impl Engine {
             Err(orch_authz::Error::NotFound(_)) => return Err(SideError::NotFound),
             Err(other) => return Err(other.into()),
         }
-        if !nodes::check(
-            unit.conn,
-            &principal,
-            parent_id,
-            orch_access_contract::permissions::Permission::ThreadView,
-            Act::Use,
-            orch_authz::Policy::default(),
-        )
-        .await?
-        .is_allowed()
-        {
-            return Err(SideError::NotFound);
-        }
         if let Some(made) =
             forking::side_thread_started_with(&mut *unit.conn, parent_id, person, &client_id)
                 .await?
         {
-            return Ok(PreparedSide {
-                parent: parent_id,
-                actor: person,
-                transaction,
-                content,
-                client_id,
-                state: SidePreparation::Replay(made),
-            });
+            return self
+                .first_message(unit, caller, made, content, client_id)
+                .await;
         }
         // Making one changes what the parent has of them: one request at a time. A request with the same
         // value that was waiting meanwhile finds what the first made.
@@ -290,14 +218,9 @@ impl Engine {
             forking::side_thread_started_with(&mut *unit.conn, parent_id, person, &client_id)
                 .await?
         {
-            return Ok(PreparedSide {
-                parent: parent_id,
-                actor: person,
-                transaction,
-                content,
-                client_id,
-                state: SidePreparation::Replay(made),
-            });
+            return self
+                .first_message(unit, caller, made, content, client_id)
+                .await;
         }
         if parent.archived_at.is_some() {
             return Err(SideError::Archived);
@@ -305,7 +228,7 @@ impl Engine {
         if parent.side_of.is_some() {
             return Err(SideError::Side);
         }
-        let (Some(agent_id), Some(_provider_id), Some(_environment_id)) =
+        let (Some(agent_id), Some(provider_id), Some(environment_id)) =
             (parent.agent_id, parent.provider_id, parent.environment_id)
         else {
             return Err(SideError::Unbound);
@@ -378,66 +301,7 @@ impl Engine {
         } else {
             format!("{}{SIDE_SUFFIX} {}", parent.name, names.len() + 1)
         };
-        Ok(PreparedSide {
-            parent: parent_id,
-            actor: person,
-            transaction,
-            content,
-            client_id,
-            state: SidePreparation::New {
-                parent: Box::new(parent),
-                reading,
-                from_turn,
-                name,
-            },
-        })
-    }
-
-    async fn apply_side_in(
-        &self,
-        unit: &mut Unit<'_>,
-        caller: &Caller,
-        value: PreparedSide,
-    ) -> Result<Started, SideError> {
-        let transaction: i64 = sqlx::query_scalar("SELECT txid_current()::bigint")
-            .fetch_one(&mut *unit.conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        if value.actor != caller.user() || value.transaction != transaction {
-            return Err(EngineError::unreadable(
-                "The native side preparation changed its author or transaction.",
-            )
-            .into());
-        }
-        let PreparedSide {
-            content,
-            client_id,
-            state,
-            ..
-        } = value;
-        let (parent, reading, from_turn, name) = match state {
-            SidePreparation::Replay(side) => {
-                return self
-                    .first_message(unit, caller, side, content, client_id)
-                    .await;
-            }
-            SidePreparation::New {
-                parent,
-                reading,
-                from_turn,
-                name,
-            } => (parent, reading, from_turn, name),
-        };
-        let (Some(agent_id), Some(provider_id), Some(environment_id)) =
-            (parent.agent_id, parent.provider_id, parent.environment_id)
-        else {
-            return Err(SideError::Unbound);
-        };
-        let parent_id = parent.node_id;
-        let person = caller.user();
-        let now = unit.now();
         let side = new_id();
-        unit.before_effect()?;
         if !forking::insert_side_thread(
             &mut *unit.conn,
             &forking::NewSide {
@@ -539,31 +403,6 @@ impl Engine {
         }
         self.first_message(unit, caller, side, content, client_id)
             .await
-    }
-
-    /// Applies the native preparation on its guarded transaction with a check at the original first INSERT.
-    pub async fn apply_prepared_side<'a>(
-        &self,
-        mut tx: orch_db::Tx,
-        principal: &Principal,
-        value: PreparedSide,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-        before_commit: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<Started, SideError> {
-        let (finished, started) = {
-            let parent = value.parent();
-            let mut unit = Unit::with_first_effect(&mut tx, self.inner.clock.now(), before);
-            let started = self
-                .apply_side_in(&mut unit, principal.caller(), value)
-                .await?;
-            orch_db::idempotency::creation::observe_with(unit.conn,Some(principal.caller().user()),"side_thread",started.thread,
-                serde_json::json!({"parent":parent,"input":started.submitted.input.id,"seq":started.submitted.seq})).await?;
-            (unit.finish().await?, started)
-        };
-        before_commit()?;
-        self.commit(tx, finished).await?;
-        self.wake(started.thread);
-        Ok(started)
     }
 
     /// The first message of a side thread, queued in it, or as it stands where the request that made the
@@ -721,15 +560,7 @@ impl Engine {
     /// parent's through the turn it was taken at, where the adapter does that; the history as items,
     /// otherwise; nothing, for an aside that was taken before the parent had said anything. A side thread
     /// whose session exists already, and any thread that is no side thread, is left to the ordinary way.
-    pub(crate) fn side_session<'a>(
-        &'a self,
-        snap: &'a crate::sessions::StartSnapshot,
-    ) -> futures::future::BoxFuture<'a, Result<Option<(SessionMode, SessionImport)>, EngineError>>
-    {
-        Box::pin(self.side_session_inner(snap))
-    }
-
-    async fn side_session_inner(
+    pub(crate) async fn side_session(
         &self,
         snap: &crate::sessions::StartSnapshot,
     ) -> Result<Option<(SessionMode, SessionImport)>, EngineError> {
@@ -768,11 +599,8 @@ impl Engine {
         // Current/frozen creator rights still gate verification and delivery.
         let recovered = history::recovered(self, snap, &cut).await?;
         let cut = {
-            let mut tx = self.db().begin().await?;
-            let cut =
-                history::authorize(self, &mut tx, &snap.thread, self.inner.clock.now()).await?;
-            tx.commit().await.map_err(orch_db::DbError::from)?;
-            cut
+            let mut conn = self.db().acquire().await?;
+            history::authorize(self, &mut conn, &snap.thread, self.inner.clock.now()).await?
         };
         if let Some(native) = recovered {
             return Ok(Some((

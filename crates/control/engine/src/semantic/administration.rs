@@ -409,8 +409,6 @@ impl EmbeddingCommand {
                     provider: self.provider,
                     model: Some(&self.model),
                     effort: None,
-                    // The semantic index runs in no environment.
-                    runs_in: None,
                 },
             )
             .await?

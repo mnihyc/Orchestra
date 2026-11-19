@@ -724,8 +724,6 @@ impl Fixture {
             thread_id: self.thread,
             actor_id: self.world.ada,
             authorization_token: None,
-            operation_origin: None,
-            byte_sources: Vec::new(),
             authorization_scope: None,
             request_hash: recipe::request_hash(&request)?,
             request,

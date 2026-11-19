@@ -8,7 +8,7 @@
 import { queryOptions } from '@tanstack/react-query';
 
 import { meQuery } from '@/api/auth';
-import { accepted, api, client, done, ok, repeatable } from '@/api/client';
+import { api, done, ok, repeatable } from '@/api/client';
 import { queryClient } from '@/api/query';
 import type {
   ApiTokenCreateBody,
@@ -20,7 +20,7 @@ import type {
   Invitation,
   InvitationAcceptReply,
   InvitationCreateBody,
-  InvitationCreateResponse,
+  InvitationCreateReply,
   InvitationPreview,
   Me,
   MeTotpSetupReply,
@@ -45,9 +45,8 @@ export const invitationQuery = (token: string) =>
   });
 
 /** Takes what an invitation carries, for the person signed in. */
-export function acceptInvitation(token: string, acceptedTermsHash?: string): Promise<InvitationAcceptReply> {
-  const body = { token, ...(acceptedTermsHash === undefined ? {} : { accepted_terms_hash: acceptedTermsHash }) };
-  return ok(api.POST('/invitations/accept', { body }));
+export function acceptInvitation(token: string): Promise<InvitationAcceptReply> {
+  return ok(api.POST('/invitations/accept', { body: { token } }));
 }
 
 export const invitationsKey = (orgId: string) => ['invitations', orgId] as const;
@@ -64,8 +63,8 @@ export const invitationsQuery = (orgId: string) =>
  * Makes an invitation. With an address it is a personal link, for that address alone; without one,
  * a shared link. The answer holds the link, which is shown once.
  */
-export function createInvitation(body: InvitationCreateBody, key: string): Promise<InvitationCreateResponse> {
-  return accepted(api.POST('/invitations', { body, ...repeatable(key) }));
+export function createInvitation(body: InvitationCreateBody, key: string): Promise<InvitationCreateReply> {
+  return ok(api.POST('/invitations', { body, ...repeatable(key) }));
 }
 
 /** Takes an invitation back: its link stops being good. */
@@ -82,13 +81,8 @@ async function refreshMe(): Promise<Me> {
 }
 
 /** Changes the password; every other session of the person ends with it. */
-export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
-  const { userId, readerVersion } = client.session.getState();
-  await done(api.POST('/me/password', { body: { current_password: currentPassword, new_password: newPassword } }));
-  const current = client.session.getState();
-  if (current.userId !== userId || current.readerVersion !== readerVersion) return;
-  // Success ends every other session; this known postcondition needs no second list read.
-  queryClient.setQueryData<SessionInfo[]>(sessionsKey, (before) => before?.filter((session) => session.current));
+export function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  return done(api.POST('/me/password', { body: { current_password: currentPassword, new_password: newPassword } }));
 }
 
 /**

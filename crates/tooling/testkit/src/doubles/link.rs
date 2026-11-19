@@ -1009,12 +1009,7 @@ async fn serve(hub: Arc<HubInner>, connection: Connection) {
         }
         slot.controller.clone()
     };
-    lock(&hub.relay).session_up_capable(
-        machine_id,
-        session_id,
-        sender.clone(),
-        accepted.auth.capabilities.clone(),
-    );
+    lock(&hub.relay).session_up(machine_id, session_id, sender.clone());
     controller.session_up(session_id);
     while let Some(event) = inbox.next().await {
         match event {

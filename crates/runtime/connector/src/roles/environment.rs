@@ -152,8 +152,6 @@ const TAKES: &[CommandKind] = &[
     CommandKind::ProcSignal,
     CommandKind::ProcSuspend,
     CommandKind::ProcResume,
-    CommandKind::ProcSuspendOwned,
-    CommandKind::ProcResumeOwned,
     CommandKind::WatchSet,
 ];
 
@@ -501,7 +499,7 @@ impl EnvironmentRole {
             host: host.clone(),
             services: Arc::clone(services),
             link: link.clone(),
-            imports: McpImports::new(host.clone(), hosting, Arc::clone(&services.keys)),
+            imports: McpImports::new(host.clone(), hosting),
             relay: ToolRelay::new(services, link, Some(host)),
             stop: stop.clone(),
             tasks: Mutex::new(Vec::new()),
@@ -1350,12 +1348,6 @@ impl EnvironmentRole {
             Command::ProcResume(body) => {
                 CommandResult::ProcResume(self.host.proc_resume(&body).await?)
             }
-            Command::ProcSuspendOwned(body) => {
-                CommandResult::ProcSuspendOwned(self.host.proc_suspend_owned(&body).await?)
-            }
-            Command::ProcResumeOwned(body) => {
-                CommandResult::ProcResumeOwned(self.host.proc_resume_owned(&body).await?)
-            }
             Command::WatchSet(body) => {
                 self.host.watch_set(&body).await?;
                 CommandResult::WatchSet(Empty {})
@@ -1662,11 +1654,6 @@ async fn publish_reports(
             }
             HostReport::McpRestarted { name } => {
                 tracing::info!(server = %name, "a tool server runs again");
-                server_changed(&services, &host, environment_id, None);
-                None
-            }
-            HostReport::McpUnavailable { name, reason } => {
-                tracing::info!(server = %name, %reason, "a tool server awaits a missing requirement");
                 server_changed(&services, &host, environment_id, None);
                 None
             }

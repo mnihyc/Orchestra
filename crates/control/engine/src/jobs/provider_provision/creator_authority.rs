@@ -10,14 +10,6 @@ use orch_db::queries::jobs;
 use orch_types::Hash;
 use serde::{Deserialize, Serialize};
 
-mod duplicate;
-mod harness;
-pub use harness::Command as CreatorCommand;
-mod transfer;
-pub(super) use transfer::audit as copy_audit;
-pub(super) use transfer::run as copy_credential;
-pub use transfer::{CopyAck, recorded_copy};
-
 const FIELD: &str = "provider_creator";
 const COMMANDS: &str = "provider_creator_commands";
 
@@ -35,8 +27,6 @@ struct Authority {
     kind: String,
     harness: Option<String>,
     runtime_config_hash: Hash,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    duplicate: Option<duplicate::Origin>,
 }
 
 fn read(row: &JobRow) -> Result<Option<Authority>, EngineError> {
@@ -106,193 +96,14 @@ pub async fn retain(
     job: Id,
     now: Time,
 ) -> Result<(), EngineError> {
-    retain_inner(conn, origin, provider, home, job, None, now).await
-}
-/// Retains the same first-Make family under the actual duplication operation and raw identity.
-pub async fn retain_duplicate(
-    conn: &mut Conn,
-    raw: &crate::operation_scope::http_origin::HttpOrigin,
-    source: Id,
-    provider: Id,
-    home: Id,
-    job: Id,
-    clock: &dyn orch_types::Clock,
-) -> Result<(), EngineError> {
-    retain_copy(conn, raw, (source, None), provider, home, job, clock).await
-}
-/// The same initial Make retains an owner's confirmed native source ending.
-pub async fn retain_move(
-    conn: &mut Conn,
-    raw: &crate::operation_scope::http_origin::HttpOrigin,
-    source: (Id, Hash),
-    provider: Id,
-    home: Id,
-    job: Id,
-    clock: &dyn orch_types::Clock,
-) -> Result<(), EngineError> {
-    retain_copy(
-        conn,
-        raw,
-        (source.0, Some(source.1)),
-        provider,
-        home,
-        job,
-        clock,
-    )
-    .await
-}
-async fn retain_copy(
-    conn: &mut Conn,
-    raw: &crate::operation_scope::http_origin::HttpOrigin,
-    source: (Id, Option<Hash>),
-    provider: Id,
-    home: Id,
-    job: Id,
-    clock: &dyn orch_types::Clock,
-) -> Result<(), EngineError> {
-    let (source, moving) = source;
-    if raw.origin().operation()
-        != if moving.is_some() {
-            "ProviderMoveOut"
-        } else {
-            "ProviderDuplicate"
-        }
-        || source == provider
-    {
-        return Err(EngineError::unreadable(
-            "The copied provider origin changed.",
-        ));
-    }
-    let carries_secrets =
-        !orch_db::queries::settings::secret_names_of(conn, &[("provider", provider)])
-            .await?
-            .is_empty();
-    retain_inner(
-        conn,
-        raw.origin(),
-        provider,
-        home,
-        job,
-        Some(duplicate::Origin {
-            source,
-            raw: raw.clone(),
-            carries_secrets,
-            copy_keeper: None,
-            moving,
-        }),
-        clock.time(),
-    )
-    .await?;
-    let row = jobs::job(conn, job)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The copied provider job disappeared."))?;
-    let principal = principal(conn, &row, clock)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The copied provider creator ended."))?;
-    let actual_source = rows::state(conn, source)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The copied provider source disappeared."))?;
-    let has_server_key = orch_db::queries::settings::secret(conn, "provider", provider, "api_key")
-        .await?
-        .is_some();
-    if ((actual_source.kind == "api" && !has_server_key)
-        || (actual_source.kind == "subscription" && moving.is_some()))
-        && resources::effective(
-            conn,
-            &principal,
-            ObjectRef {
-                kind: ObjectKind::Provider,
-                id: source,
-            },
-            Policy::default(),
-        )
-        .await?
-        .owner
-        && let Some(keeper) = actual_source.key_machine_id.or(actual_source.machine_id)
-    {
-        let current = jobs::job(conn, job)
-            .await?
-            .ok_or_else(|| EngineError::unreadable("The copied provider job disappeared."))?;
-        let mut authority = read(&current)?
-            .ok_or_else(|| EngineError::unreadable("The copied provider authority disappeared."))?;
-        let duplicate = authority
-            .duplicate
-            .as_mut()
-            .ok_or_else(|| EngineError::unreadable("The copied provider source disappeared."))?;
-        duplicate.copy_keeper = Some(keeper);
-        duplicate.carries_secrets = true;
-        jobs::merge_plan(conn, job, &json!({FIELD:authority}), clock.now()).await?;
-    }
-    if !principal.caller().key_deadline_allows(clock) {
-        return Err(EngineError::unreadable(
-            "The copied provider creator ended.",
-        ));
-    }
-    Ok(())
-}
-/// The HTTP owner rechecks its one actual copied-provider Make after configuration waits,
-/// immediately before committing the native creation transaction. No new authority is attached.
-pub async fn copy_checkpoint(
-    conn: &mut Conn,
-    provider: Id,
-    clock: &dyn orch_types::Clock,
-) -> Result<(orch_authz::Caller, Option<Time>), EngineError> {
-    let owners: Vec<Id> = sqlx::query_scalar("SELECT id FROM jobs WHERE provider_id=$1 AND kind='provider_provision' AND state='queued' AND plan->>'mode'='make' AND plan ? 'provider_creator' ORDER BY id FOR UPDATE")
-        .bind(provider).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-    if owners.len() != 1 {
-        return Err(EngineError::unreadable(
-            "The new provider has no unique retained Make.",
-        ));
-    }
-    let row = jobs::job(conn, owners[0])
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The copied provider Make disappeared."))?;
-    if read(&row)?
-        .is_none_or(|authority| authority.provider != provider || authority.duplicate.is_none())
-    {
-        return Err(EngineError::unreadable(
-            "The copied provider source changed.",
-        ));
-    }
-    let principal = principal(conn, &row, clock)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The copied provider creator ended."))?;
-    let fresh = jobs::job(conn, row.id)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The copied provider Make disappeared."))?;
-    let raw = read(&fresh)?
-        .and_then(|authority| authority.duplicate)
-        .ok_or_else(|| EngineError::unreadable("The copied provider raw origin disappeared."))?
-        .raw;
-    if !principal.caller().key_deadline_allows(clock)
-        || raw.until().is_some_and(|end| clock.time() >= end)
-    {
-        return Err(EngineError::unreadable(
-            "The copied provider lifetime ended.",
-        ));
-    }
-    Ok((principal.caller().clone(), raw.until()))
-}
-
-async fn retain_inner(
-    conn: &mut Conn,
-    origin: &CapturedOperation,
-    provider: Id,
-    home: Id,
-    job: Id,
-    duplicate: Option<duplicate::Origin>,
-    now: Time,
-) -> Result<(), EngineError> {
     let row = jobs::lock(conn, job)
         .await?
         .ok_or_else(|| EngineError::unreadable("The new provider job disappeared."))?;
     let current = rows::state(conn, provider)
         .await?
         .ok_or_else(|| EngineError::unreadable("The new provider disappeared."))?;
-    if !matches!(
-        (origin.operation(), duplicate.is_some()),
-        ("ProviderCreate", false) | ("ProviderDuplicate" | "ProviderMoveOut", true)
-    ) || row.kind != provider_jobs::PROVISION
+    if origin.operation() != "ProviderCreate"
+        || row.kind != provider_jobs::PROVISION
         || row.provider_id != Some(provider)
         || row.environment_id.is_some()
         || row.state != "queued"
@@ -329,7 +140,6 @@ async fn retain_inner(
         kind: current.kind,
         harness: current.harness_kind,
         runtime_config_hash: body_hash(&current.runtime_config)?,
-        duplicate,
     };
     if let Some(previous) = read(&row)? {
         if previous != authority {
@@ -401,14 +211,7 @@ pub async fn creator_principal(
     };
     let mut plan = Prepared::for_selection(origin.operation()).map_err(EngineError::unreadable)?;
     let home = match targets::node(conn, current.home_id).await {
-        Ok(home)
-            if matches!(
-                home.object.kind,
-                KeyTargetKind::Object(ObjectKind::Org | ObjectKind::Project)
-            ) =>
-        {
-            home
-        }
+        Ok(home) if home.object.kind == KeyTargetKind::Object(ObjectKind::Org) => home,
         Ok(_) | Err(targets::TargetError::Missing) => return Ok(None),
         Err(targets::TargetError::Db(error)) => return Err(error.into()),
         Err(targets::TargetError::Authz(error)) if unavailable(&error) => return Ok(None),
@@ -526,7 +329,7 @@ pub async fn creator_principal(
 pub(super) async fn principal(
     conn: &mut Conn,
     row: &JobRow,
-    clock: &dyn orch_types::Clock,
+    now: Time,
 ) -> Result<Option<Principal>, EngineError> {
     let Some(authority) = read(row)? else {
         return Ok(None);
@@ -568,19 +371,11 @@ pub(super) async fn principal(
             "The accepted provider runtime choice changed.",
         ));
     }
-    tracing::debug!(target: "orch_api::native_operations", phase = "provider.creator.binding",
-        operation = authority.origin.operation(), "native provider creator binding current");
-    let principal = if authority.duplicate.is_some() {
-        duplicate::principal(conn, &authority, clock).await?
-    } else {
-        creator_principal(conn, &authority.origin, authority.provider, clock.time())
-            .await?
-            .ok_or_else(|| {
-                EngineError::unreadable("The provider creator credential is no longer authorized.")
-            })?
-    };
-    tracing::debug!(target: "orch_api::native_operations", phase = "provider.creator.source",
-        operation = authority.origin.operation(), "native provider creator source admitted");
+    let principal = creator_principal(conn, &authority.origin, authority.provider, now)
+        .await?
+        .ok_or_else(|| {
+            EngineError::unreadable("The provider creator credential is no longer authorized.")
+        })?;
     let template = host_rows::template(conn, authority.template)
         .await?
         .filter(|template| {
@@ -589,9 +384,6 @@ pub(super) async fn principal(
         .ok_or_else(|| EngineError::unreadable("The provider creator template is unavailable."))?;
     if !resources::provider_creation_template_use(conn, &principal, current.id, template.id).await?
     {
-        tracing::debug!(target: "orch_api::native_operations", phase = "provider.creator.require",
-            reason = "template_use", operation = authority.origin.operation(),
-            "native provider creator source closed");
         return Err(EngineError::unreadable(
             "The creator no longer has the provider template's Use.",
         ));
@@ -603,12 +395,12 @@ pub(super) async fn principal(
         .cloned()
         .map(serde_json::from_value::<Id>)
         .transpose()?;
-    if let Some(runtime) = planned
-        && !jobs::lock_provider_creator_candidate(conn, authority.provider, runtime).await?
-    {
-        return Err(EngineError::unreadable(
-            "The provider creator candidate disappeared.",
-        ));
+    if let Some(runtime) = planned {
+        if !jobs::lock_provider_creator_candidate(conn, authority.provider, runtime).await? {
+            return Err(EngineError::unreadable(
+                "The provider creator candidate disappeared.",
+            ));
+        }
     }
     let candidate = rows::live_runtime(conn, authority.provider).await?;
     match row.plan.get("runtime").filter(|value| !value.is_null()) {
@@ -647,9 +439,6 @@ pub(super) async fn principal(
                 })?;
             if !resources::provider_creation_host_use(conn, &principal, current.id, host.id).await?
             {
-                tracing::debug!(target: "orch_api::native_operations", phase = "provider.creator.require",
-                    reason = "host_use", operation = authority.origin.operation(),
-                    "native provider creator source closed");
                 return Err(EngineError::unreadable(
                     "The creator no longer has the provider host's Use.",
                 ));
@@ -661,27 +450,6 @@ pub(super) async fn principal(
             ));
         }
         None => {}
-    }
-    if !principal.caller().key_deadline_allows(clock) {
-        return Err(EngineError::unreadable(
-            "The provider creator lifetime ended.",
-        ));
-    }
-    let fresh = jobs::job(conn, row.id)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The provider creator job disappeared."))?;
-    if read(&fresh)?
-        .and_then(|authority| authority.duplicate)
-        .is_some_and(|origin| origin.raw.until().is_some_and(|end| clock.time() >= end))
-    {
-        return Err(EngineError::unreadable(
-            "The raw provider creator lifetime ended.",
-        ));
-    }
-    if !principal.caller().key_deadline_allows(clock) {
-        return Err(EngineError::unreadable(
-            "The provider creator lifetime ended.",
-        ));
     }
     Ok(Some(principal))
 }
@@ -702,7 +470,7 @@ pub(super) async fn phase(job: &Job, phase: &str) -> Result<(), Stop> {
     {
         return Ok(());
     }
-    principal(&mut tx, &owner, job.engine().inner.clock.as_ref())
+    principal(&mut tx, &owner, Time::new(job.now()))
         .await
         .map_err(stop)?
         .ok_or_else(|| {
@@ -734,16 +502,6 @@ async fn command_binding(
     let Some(authority) = read(owner)? else {
         return Ok(false);
     };
-    if transfer::inverse(body) {
-        return if matches!(
-            kind,
-            "provider.credential.issue" | "provider.credential.accept"
-        ) {
-            transfer::inverse_binding(conn, owner, &authority, machine, key, kind, body).await
-        } else {
-            Ok(false)
-        };
-    }
     let Some(runtime) = rows::live_runtime(conn, authority.provider).await? else {
         return Ok(false);
     };
@@ -753,12 +511,6 @@ async fn command_binding(
     let Some(host) = host_rows::host(conn, runtime.host_id).await? else {
         return Ok(false);
     };
-    if matches!(
-        kind,
-        "provider.credential.issue" | "provider.credential.accept"
-    ) {
-        return transfer::binding(conn, owner, &authority, machine, key, kind, body).await;
-    }
     if kind == "unit.after_up" {
         return Ok(runtime.machine_id == Some(machine)
             && key == SerialKey::Runtime(runtime.id).wire().as_deref()
@@ -812,7 +564,7 @@ pub async fn remember_command(job: &Job, command: &Outgoing) -> Result<(), Stop>
     let mut tx = job.engine().db().begin().await?;
     orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
     let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-    principal(&mut tx, &owner, job.engine().inner.clock.as_ref())
+    principal(&mut tx, &owner, Time::new(job.now()))
         .await
         .map_err(stop)?
         .ok_or_else(|| {
@@ -854,14 +606,7 @@ pub async fn remember_command(job: &Job, command: &Outgoing) -> Result<(), Stop>
     }
     entries.insert(command.id.to_string(), native);
     // Existing finite phase/template IDs repeat on recovery. This journal follows job retention.
-    let mut patch = json!({COMMANDS:journal});
-    if command.kind.as_str() == "provider.credential.issue" {
-        patch["provider_copy_issue"] = json!(command.id);
-    }
-    if command.kind.as_str() == "provider.credential.accept" {
-        patch["provider_copy_accept"] = json!(command.id);
-    }
-    jobs::merge_plan(&mut tx, job.id(), &patch, job.now()).await?;
+    jobs::merge_plan(&mut tx, job.id(), &json!({COMMANDS:journal}), job.now()).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
@@ -874,14 +619,11 @@ pub async fn command_authorized(
     key: Option<&str>,
     kind: &str,
     body: &Json,
-    clock: &dyn orch_types::Clock,
+    now: Time,
 ) -> Result<bool, EngineError> {
     let owners = jobs::lock_provider_creator_command_owners(conn, command).await?;
     if owners.is_empty() {
-        return Ok(!(matches!(
-            kind,
-            "provider.credential.issue" | "provider.credential.accept"
-        ) && body.get("copy").is_some_and(|copy| !copy.is_null())));
+        return Ok(true);
     }
     if owners.len() != 1 {
         return Ok(false);
@@ -915,10 +657,7 @@ pub async fn command_authorized(
     if !command_binding(conn, &owner, machine, key, kind, body).await? {
         return Ok(false);
     }
-    if transfer::inverse(body) {
-        return Ok(true);
-    }
-    match principal(conn, &owner, clock).await {
+    match principal(conn, &owner, now).await {
         Ok(principal) => Ok(principal.is_some()),
         Err(EngineError::Unreadable(_)) => Ok(false),
         Err(error) => Err(error),
@@ -935,7 +674,7 @@ pub async fn command_current_callers(
     body: &Json,
     clock: &dyn orch_types::Clock,
 ) -> Result<Option<Vec<(Option<orch_authz::Caller>, Option<Time>)>>, EngineError> {
-    if !command_authorized(conn, command, machine, key, kind, body, clock).await? {
+    if !command_authorized(conn, command, machine, key, kind, body, clock.time()).await? {
         return Ok(None);
     }
     let owners = jobs::lock_provider_creator_command_owners(conn, command).await?;
@@ -951,21 +690,6 @@ pub async fn command_current_callers(
     let Some(authority) = read(&owner)? else {
         return Ok(None);
     };
-    if transfer::inverse(body) {
-        return Ok(Some(Vec::new()));
-    }
-    if let Some(duplicate) = authority.duplicate {
-        let current = duplicate
-            .raw
-            .current(conn, clock)
-            .await
-            .map_err(duplicate::error)?;
-        current.check(clock).map_err(duplicate::error)?;
-        return Ok(Some(vec![(
-            Some(current.caller().clone()),
-            current.until(),
-        )]));
-    }
     Ok(authority
         .origin
         .restore_current(conn, clock)
@@ -973,111 +697,5 @@ pub async fn command_current_callers(
         .map(|caller| vec![(Some(caller), None)]))
 }
 
-/// The source ending changes authority; take its native global lock before any row lock.
-pub(super) async fn lock_commit(conn: &mut Conn, owner: &JobRow) -> Result<(), EngineError> {
-    if read(owner)?
-        .and_then(|authority| authority.duplicate)
-        .is_some_and(|copy| copy.moving.is_some())
-    {
-        orch_db::queries::transaction_guard::lock_authority(conn).await?;
-    } else {
-        orch_db::queries::transaction_guard::lock_action(conn).await?;
-    }
-    Ok(())
-}
-/// The successful native initial Make and its original source Delete share this commit.
-pub(super) async fn end_moved_source(
-    engine: &Engine,
-    conn: &mut Conn,
-    owner: &JobRow,
-    principal: &Principal,
-    clock: &dyn orch_types::Clock,
-) -> Result<crate::unit::Finished, EngineError> {
-    let Some(authority) = read(owner)? else {
-        return Ok(Default::default());
-    };
-    let Some(copy) = &authority.duplicate else {
-        return Ok(Default::default());
-    };
-    let Some(expected) = copy.moving else {
-        return Ok(Default::default());
-    };
-    if !transfer::move_ready(conn, owner).await? {
-        return Err(EngineError::unreadable(
-            "The provider move has no completed native credential copy.",
-        ));
-    }
-    if authority.origin.operation() != "ProviderMoveOut"
-        || principal.user() != authority.origin.user()
-        || principal.caller().admitted_operation() != Some("ProviderMoveOut")
-        || !principal.caller().key_deadline_allows(clock)
-        || copy.raw.until().is_some_and(|end| clock.time() >= end)
-    {
-        return Err(EngineError::unreadable("The provider move lifetime ended."));
-    }
-    let source = orch_db::queries::resources::routes::providers(conn, &[copy.source])
-        .await?
-        .pop()
-        .ok_or_else(|| EngineError::unreadable("The moving source disappeared."))?;
-    if crate::providers::deleting::fingerprint(conn, &source).await? != expected {
-        return Err(EngineError::unreadable(
-            "The reviewed provider Delete plan changed.",
-        ));
-    }
-    let boundary = crate::copy_out::authorize(
-        conn,
-        principal,
-        crate::copy_out::Subject::Object(ObjectRef {
-            kind: ObjectKind::Provider,
-            id: source.id,
-        }),
-        Some(authority.home),
-    )
-    .await
-    .map_err(|error| EngineError::unreadable(error.to_string()))?
-    .ok_or_else(|| {
-        EngineError::unreadable("The provider no longer moves between organizations.")
-    })?;
-    let origin = orch_db::audit::Origin {
-        as_admin: copy.raw.as_admin().then_some(principal.user()),
-        ..Default::default()
-    };
-    crate::copy_out::record(
-        conn,
-        boundary,
-        orch_db::audit::Actor::User(principal.user()),
-        &origin,
-        authority.provider,
-        clock.now(),
-    )
-    .await?;
-    let (_, finished) =
-        crate::providers::deleting::apply(engine, conn, &source, principal.user(), clock.now())
-            .await?;
-    let action = orch_access_contract::audit::AuditAction::ProviderDeleted;
-    let mut entry = orch_db::audit::Entry::new(
-        orch_db::audit::Actor::User(principal.user()),
-        action.as_str(),
-        "provider",
-        Some(source.id),
-        "deleted the original provider after its native copy was prepared",
-    );
-    entry.history = action.is_history_line();
-    entry.node_id = Some(source.home_id);
-    entry.org_id = Some(source.org_id);
-    entry.details = json!({"provider":source.id,"name":source.name,"created_id":authority.provider,"job":owner.id});
-    orch_db::audit::append(conn, &entry, &origin, clock.now()).await?;
-    if !principal.caller().key_deadline_allows(clock)
-        || copy.raw.until().is_some_and(|end| clock.time() >= end)
-    {
-        return Err(EngineError::unreadable("The provider move lifetime ended."));
-    }
-    Ok(finished)
-}
-
 #[cfg(test)]
 mod tests;
-
-pub(super) async fn undo_transfer(job: &Job) -> Result<(), Stop> {
-    transfer::undo(job).await
-}

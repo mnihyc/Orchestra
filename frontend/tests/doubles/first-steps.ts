@@ -76,7 +76,7 @@ export class FirstStepsWorld implements Part {
         created_by: document.created_by, deleted: document.deleted, discussion_level: document.discussion_level,
         files_bytes: document.files_bytes,
         id: document.id, node: document.node, open_discussions: document.open_discussions,
-        description: document.description,
+        description: document.description, description_source: document.description_source,
         description_line: document.description_line,
         owner: document.owner, owners: document.owners, page: document.page, seen_seq: document.seen_seq,
         seq: document.seq, title: document.title, updated_at: document.updated_at,

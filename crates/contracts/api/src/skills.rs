@@ -8,9 +8,12 @@
 //! `agents.skills` (each skill off, at its latest version, or at a pinned one); a person's own skills
 //! reach the threads they started where the place's `agents.personal_skills` allows them.
 
-use crate::operations::{OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant};
-use orch_access_contract::key_scope::KeyAction::{Manage, Read};
-use orch_access_contract::key_scope::KeyTargetKind::Object;
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
 use orch_access_contract::permissions::ObjectKind as K;
 
 use orch_types::{Hash, Id, Revision, Time};
@@ -22,22 +25,6 @@ use crate::common::{Listed, Page};
 use crate::nodes::NodeRef;
 use crate::routes::Access::{Permission, Rule, User};
 use crate::users::UserRef;
-
-/// The native Skill Get/List/Inventory source and protected permission/home labels.
-pub const READS: crate::resource_reads::Family = crate::resource_reads::Family {
-    kind: orch_access_contract::permissions::ResourceKind::Skill,
-    sources: &[],
-    names: crate::resource_reads::NameRoles {
-        groups: Some("skill_groups"),
-        nodes: [
-            "skill_names_orgs",
-            "skill_names_projects",
-            "skill_names_topics",
-            "skill_names_threads",
-        ],
-        containers: None,
-    },
-};
 
 /// One file of a skill's version, as its manifest lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -103,8 +90,6 @@ pub enum SkillOrigin {
         /// The directory, relative to the environment's workspace.
         path: String,
     },
-    /// Readable current skill content duplicated in Orch, without its original source credentials or history.
-    Copy,
     /// The skill's draft, published in Orch.
     Draft {
         /// The version the draft was started from; `null` for a draft that began empty.
@@ -176,9 +161,6 @@ pub struct SkillDraftInfo {
 /// A skill, as a resource.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Skill {
-    /// Protected origin and native contextual availability, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Places that explicitly enable this skill, excluding off entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_places: Option<i64>,
@@ -323,22 +305,6 @@ pub struct SkillFileQuery {
     pub path: String,
 }
 
-/// The actual accepted version without its protected manifest or origin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct SkillVersionWriteReceipt {
-    /// Restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual keeping skill.
-    pub skill_id: Id,
-    /// The actual recorded version.
-    pub version_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The original native version or its accepted version identity.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum SkillVersionWriteResponse {Full(SkillVersion),Receipt(SkillVersionWriteReceipt),}
-}
-
 /// Makes a version of a skill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -369,20 +335,6 @@ pub struct SkillDraft {
     pub info: SkillDraftInfo,
     /// Its files, in the order of their paths.
     pub files: Vec<SkillDraftFile>,
-}
-
-/// The native skill's single draft slot without its protected file metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct SkillDraftCreateReceipt {
-    /// Restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The skill whose draft was started.
-    pub skill_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The existing native draft or its accepted slot identity.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum SkillDraftCreateResponse {Full(SkillDraft),Receipt(SkillDraftCreateReceipt),}
 }
 
 /// Starts a skill's draft.
@@ -521,35 +473,74 @@ pub struct ThreadSkills {
     pub skipped: Vec<SkippedSkill>,
 }
 
-/// A newly accepted skill identity, without its existing-content projection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct SkillCreateReceipt {
-    pub projection: crate::common::ReceiptProjection,
-    pub skill_id: Id,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_id: Option<Id>,
-}
-crate::common::full_or_receipt! {
- #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
- pub enum SkillCreateResponse {Full(Skill),Receipt(SkillCreateReceipt),}
-}
-
 crate::endpoints! {
     /// Lists the skills the caller may see, of whatever org.
     SkillList: GET "/skills", User, query SkillListQuery, none, json Vec<Listed<Skill>>, 200,
-        operation Op::facets(&READS.facets::<6>(Target::ResolvedCollection("results")));
+        operation Op::single(Read, &[Object(K::Skill)], Target::Resolved("results"));
     /// Makes a skill from an uploaded archive, which is checked and kept as its first version.
-    SkillCreate: POST "/skills", Rule("its home is the caller's domain or an org or project inside it and the members of that home may make skills there, a project also asking that the caller may work in it; else settings.manage on that home; a directory also asks environment.manage on its environment, a repository or an address host.use on the host that fetches it"), none, json SkillCreateBody, json SkillCreateResponse, 201,
-        operation Op::receipt(&Op::variants(&[
-            Variant {name:"new",selector:"from.kind=new",facets:&crate::skill_sources::NEW_FACETS},
-            Variant {name:"upload",selector:"from.kind=upload",facets:&crate::skill_sources::UPLOAD_FACETS},
-            Variant {name:"environment",selector:"from.kind=environment",facets:&crate::skill_sources::ENVIRONMENT_FACETS},
-            Variant {name:"git",selector:"from.kind=git",facets:&crate::skill_sources::GIT_FACETS},
-            Variant {name:"url",selector:"from.kind=url",facets:&crate::skill_sources::URL_FACETS},
-        ]));
+    SkillCreate: POST "/skills", Rule("its home is the caller's domain or an org or project inside it and the members of that home may make skills there, a project also asking that the caller may work in it; else settings.manage on that home; a directory also asks environment.manage on its environment, a repository or an address host.use on the host that fetches it"), none, json SkillCreateBody, json Skill, 201,
+        operation Op::variants(&[
+            Variant {
+                name: "new",
+                selector: "from.kind=new",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Skill)], Target::Resolved("home")),
+                    Facet::response_content(&[Object(K::Skill)], Target::Resolved("created_skill")),
+                ],
+            },
+            Variant {
+                name: "upload",
+                selector: "from.kind=upload",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Skill)], Target::Resolved("home")),
+                    Facet::required(
+                        Read,
+                        &[Identity(I::Upload)],
+                        Target::Resolved("source_upload"),
+                    ),
+                    Facet::response_content(&[Object(K::Skill)], Target::Resolved("created_skill")),
+                ],
+            },
+            Variant {
+                name: "environment",
+                selector: "from.kind=environment",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Skill)], Target::Resolved("home")),
+                    Facet::required(
+                        Read,
+                        &[Object(K::Environment)],
+                        Target::Resolved("source_environment"),
+                    ),
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Environment)],
+                        Target::Resolved("source_environment"),
+                    ),
+                    Facet::response_content(&[Object(K::Skill)], Target::Resolved("created_skill")),
+                ],
+            },
+            Variant {
+                name: "git",
+                selector: "from.kind=git",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Skill)], Target::Resolved("home")),
+                    Facet::required(Write, &[Object(K::Host)], Target::Resolved("fetch_host")),
+                    Facet::response_content(&[Object(K::Skill)], Target::Resolved("created_skill")),
+                ],
+            },
+            Variant {
+                name: "url",
+                selector: "from.kind=url",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Skill)], Target::Resolved("home")),
+                    Facet::required(Write, &[Object(K::Host)], Target::Resolved("fetch_host")),
+                    Facet::response_content(&[Object(K::Skill)], Target::Resolved("created_skill")),
+                ],
+            },
+        ]);
     /// Reads a skill.
     SkillGet: GET "/skills/{id}", Rule("any permission on the skill"), none, none, json Skill, 200,
-        operation Op::facets(&READS.facets::<6>(Target::TypedPath { parameter: "id", kind: Object(K::Skill) }));
+        operation Op::single(Read, &[Object(K::Skill)], Target::TypedPath { parameter: "id", kind: Object(K::Skill) });
     /// Switches a skill on or off.
     SkillUpdate: PATCH "/skills/{id}", Permission("skill.manage"), none, json SkillUpdateBody, json Skill, 200,
         operation Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject);
@@ -565,16 +556,16 @@ crate::endpoints! {
     /// One file of a version, as it is.
     SkillVersionFileGet: GET "/skills/{id}/versions/{version_id}/file", Permission("skill.view"), query SkillFileQuery, none, raw, 200;
     /// Makes a version of a skill from an uploaded archive or an environment's directory.
-    SkillVersionCreate: POST "/skills/{id}/versions", Permission("skill.manage"), none, json SkillVersionCreateBody, json SkillVersionWriteResponse, 201,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject));
+    SkillVersionCreate: POST "/skills/{id}/versions", Permission("skill.manage"), none, json SkillVersionCreateBody, json SkillVersion, 201,
+        operation Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject);
     /// Takes a skill again from the address, repository or directory it was last imported from.
     SkillReimport: POST "/skills/{id}/reimport", Permission("skill.manage"), none, none, json SkillReimportReply, 200,
         operation Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject);
     /// Reads a skill's draft with its files.
     SkillDraftGet: GET "/skills/{id}/draft", Permission("skill.manage"), none, none, json SkillDraft, 200;
     /// Starts a skill's draft from one of its versions.
-    SkillDraftCreate: POST "/skills/{id}/draft", Permission("skill.manage"), none, json SkillDraftCreateBody, json SkillDraftCreateResponse, 201,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject));
+    SkillDraftCreate: POST "/skills/{id}/draft", Permission("skill.manage"), none, json SkillDraftCreateBody, json SkillDraft, 201,
+        operation Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject);
     /// Discards a skill's draft.
     SkillDraftDelete: DELETE "/skills/{id}/draft", Permission("skill.manage"), none, none, none, 204,
         operation Op::returning(Manage, &[Object(K::Skill)], Target::TypedPath { parameter: "id", kind: Object(K::Skill) });
@@ -587,8 +578,8 @@ crate::endpoints! {
     SkillDraftFileDelete: DELETE "/skills/{id}/draft/file", Permission("skill.manage"), query SkillDraftFileDeleteQuery, none, json SkillDraft, 200,
         operation Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject);
     /// Publishes a skill's draft as its next version, after checking it.
-    SkillDraftPublish: POST "/skills/{id}/draft/publish", Permission("skill.manage"), none, json SkillDraftPublishBody, json SkillVersionWriteResponse, 201,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject));
+    SkillDraftPublish: POST "/skills/{id}/draft/publish", Permission("skill.manage"), none, json SkillDraftPublishBody, json SkillVersion, 201,
+        operation Op::returning(Manage, &[Object(K::Skill)], Target::PermissionObject);
 }
 
 #[cfg(test)]

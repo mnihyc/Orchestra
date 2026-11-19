@@ -1,5 +1,4 @@
 /** Cold route/frame admission uses current bootstrap Meta; later native repairs remain available. */
-import type * as AuthApi from '@/api/auth';
 import { QueryObserver } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
@@ -12,7 +11,7 @@ import { bootstrap } from '../doubles/bootstrap';
 import { World } from '../doubles/world';
 
 const calls = vi.hoisted(() => ({ bootstrap: vi.fn<() => Promise<MeBootstrapReply>>(), nativeMeta: vi.fn<() => Promise<Meta>>() }));
-vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>(), fetchMeta: calls.nativeMeta }));
+vi.mock('@/api/auth', async (original) => ({ ...await original<typeof import('@/api/auth')>(), fetchMeta: calls.nativeMeta }));
 vi.mock('@/shell/bootstrap', () => ({ shellBootstrapKey: (id: string) => ['shell-bootstrap', id], ensureShellBootstrap: calls.bootstrap }));
 const previous = client.session.getState();
 afterEach(() => { queryClient.clear(); client.session.setState(previous); vi.restoreAllMocks(); });

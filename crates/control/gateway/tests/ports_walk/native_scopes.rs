@@ -47,7 +47,7 @@ pub(super) async fn scoped_native_uses(
         let secret = new_token(API_TOKEN_PREFIX);
         let now = world.clock.now();
         identity::create_api_token_scoped(
-            &mut world.db.acquire().await.unwrap(),
+            &mut *world.db.acquire().await.unwrap(),
             &identity::NewApiToken {
                 id,
                 user_id: user,
@@ -74,7 +74,7 @@ pub(super) async fn scoped_native_uses(
             assert_eq!(response.status, http::StatusCode::FORBIDDEN);
             continue;
         }
-        let usage = response.ok().into_full().unwrap();
+        let usage = response.ok();
         assert_eq!(usage.environment_id, environment);
         let ingress = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -113,7 +113,7 @@ pub(super) async fn scoped_native_uses(
         let closer = channel.closer();
         assert!(
             identity::revoke_api_token(
-                &mut world.db.acquire().await.unwrap(),
+                &mut *world.db.acquire().await.unwrap(),
                 id,
                 user,
                 world.clock.now()

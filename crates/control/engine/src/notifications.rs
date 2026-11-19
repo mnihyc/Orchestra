@@ -48,9 +48,6 @@ use orch_types::{Id, Json, Seq, Time};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 
-pub mod person_notices;
-pub use person_notices::ThreadMoveNotice;
-
 mod operations;
 pub use operations::{
     NotificationOperation, OperationRecipient, attach_operation, extend_operation_audience,
@@ -848,7 +845,18 @@ where
     let Some(announced) = people::announce_with(conn, notice, before).await? else {
         return Ok(None);
     };
-    let snapshot = Snapshot::person_notice(Some(announced.id), notice);
+    let snapshot = Snapshot {
+        id: Some(announced.id),
+        kind: notice.kind.to_owned(),
+        at: Time::new(notice.at),
+        title: notice.title.to_owned(),
+        body: notice.body.to_owned(),
+        node_id: notice.node_id,
+        thread_id: notice.thread_id,
+        approval_id: notice.approval_id,
+        chat_id: notice.chat_id,
+        data: notice.data.clone(),
+    };
     let mail_shared = orch_settings::get::<bool>(conn, Place::System, MAIL_SHARED)
         .await?
         .unwrap_or(true);
@@ -1122,7 +1130,7 @@ pub(crate) async fn approval_settled(unit: &mut Unit<'_>, approval: Id) -> Resul
 
 /// A person owns a thread, or sent an input to it: from now on they follow it
 /// at `all`, unless they already chose a level at that thread.
-pub async fn follow_thread(
+pub(crate) async fn follow_thread(
     conn: &mut Conn,
     person: Id,
     thread: Id,
@@ -1442,11 +1450,6 @@ pub async fn job_finished(
         .and_then(|id| id.parse::<Id>().ok());
     if approval.is_some() {
         data["path"] = json!("/approvals");
-    } else if thread.is_none()
-        && let Some(provider) = full.as_ref().and_then(|job| job.provider_id)
-    {
-        data["provider_id"] = json!(provider);
-        data["path"] = json!(format!("/resources/providers/{provider}"));
     }
     if let Some(snapshot) = exported_snapshot {
         data["snapshot_id"] = json!(snapshot);

@@ -645,17 +645,6 @@ impl Engine {
         target: &str,
         hash: &Hash,
     ) -> Result<FileWritten, EngineError> {
-        if let Some(result) = crate::tools::image_generation::delivery::same_file(
-            self,
-            machine,
-            environment,
-            target,
-            hash,
-        )
-        .await
-        {
-            return result;
-        }
         let command = Outgoing::new(
             new_id(),
             machine,

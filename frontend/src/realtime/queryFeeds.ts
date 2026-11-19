@@ -2,7 +2,6 @@
 import { QueryObserver, type QueryClient, type QueryKey, type QueryObserverResult } from '@tanstack/react-query';
 import { applyRow, feedSequences, record } from '@/api/cache';
 import { ApiError } from '@/api/client';
-import { pendingScheduleKey } from '@/api/inputSchedules';
 import { seedEnvironmentLibrary } from '@/api/resourceLibrary';
 import { isOver, jobQuery } from '@/api/forks';
 import { deliverLiveValue, refuseLiveValue } from '@/api/liveValue';
@@ -16,8 +15,6 @@ interface Source {
   member?: string;
   /** Keep the HTTP answer's static capability fields around a smaller live snapshot. */
   merge?: boolean;
-  /** This feed advances the source stamp; the admitted HTTP projection owns the member's content. */
-  invalidate?: boolean;
 }
 
 const isQueryKey = (value: unknown): value is QueryKey => Array.isArray(value);
@@ -28,8 +25,6 @@ export function queryFeed(key: QueryKey): Source | null {
   if (typeof head !== 'string' || typeof id !== 'string' || id === '') return null;
   const through = typeof third === 'string' && third !== '' ? `thread:${third}` : `env:${id}`;
   switch (head) {
-    case 'thread-pending-agent-schedules': return typeof third === 'string' ? { feed: `topic:${third}`, invalidate: true } : null;
-    case 'topic-schedules': return { feed: `topic:${id}`, invalidate: true };
     case 'environment': return { feed: `env:${id}`, member: 'environment' };
     case 'processes': return { feed: `env:${id}:procs` };
     case 'resources': return { feed: `env:${id}:stats` };
@@ -50,13 +45,6 @@ export function applyQueryFrame(cache: QueryClient, key: QueryKey, frame: FeedFr
   const source = queryFeed(key);
   if (source === null || (frame.op !== 'event' && frame.op !== 'sync')) return;
   const data = frame.data;
-  if (source.invalidate === true) {
-    if (pendingScheduleKey(key)) {
-      const held = cache.getQueryData<{ seq: number }>(key);
-      if (frame.op === 'sync' && typeof held?.seq === 'number' && frame.seq <= held.seq) return;
-    }
-    void cache.invalidateQueries({ queryKey: key, exact: true }); return;
-  }
   // Ports owns a domain snapshot inside its full projection; it is not an outer feed envelope.
   const envelope = key[0] === 'environment-ports' ? data : record(data.snapshot) ? data.snapshot : data;
   if (envelope.offline === true) {
@@ -134,8 +122,6 @@ export function installQueryFeeds(socket: RealtimeSocket, cache: QueryClient): (
   const subscriptions = new Map<string, Subscription>();
   const cursors = new Map<string, number>();
   const repairs = new Map<string, object>();
-  const pendingRepairs = new Map<string, number>();
-  const frameRefreshes = new Set<string>();
   let queued = false;
   let stopped = false;
   const wanted = (): Map<string, QueryKey[]> => {
@@ -190,8 +176,7 @@ export function installQueryFeeds(socket: RealtimeSocket, cache: QueryClient): (
     } else if ((frame.op === 'closed' && frame.reason !== 'unsubscribed') || frame.op === 'error') {
       const forbidden = frame.op === 'closed' && frame.reason === 'revoked' || frame.op === 'error' && frame.code === 'forbidden';
       const missing=frame.op==='closed' && frame.reason==='deleted' || frame.op==='error' && frame.code==='not_found';
-      const unavailablePorts = frame.op === 'error' && frame.code === 'read_unavailable' && /^env:[^:]+:ports$/.test(feed);
-      const code = forbidden ? 'authz.denied' : missing ? 'not_found' : unavailablePorts ? 'ports.unavailable' : 'internal';
+      const code=forbidden?'authz.denied':missing?'not_found':'internal';
       const error = new ApiError({ type: `orch:error:${code}`, code, title: '', detail: '', status: forbidden ? 403 : missing ? 404 : 503, request_id: '' }, null);
       for (const key of wanted().get(feed) ?? []) {
         refuseLiveValue(key, error);
@@ -204,9 +189,7 @@ export function installQueryFeeds(socket: RealtimeSocket, cache: QueryClient): (
       subscriptions.get(feed)?.unsubscribe();
       return;
     }
-    frameRefreshes.add(feed);
-    try { for (const key of wanted().get(feed) ?? []) applyQueryFrame(cache, key, frame); }
-    finally { frameRefreshes.delete(feed); }
+    for (const key of wanted().get(feed) ?? []) applyQueryFrame(cache, key, frame);
   };
   const follow = (feed: string): Subscription => {
     let active = true;
@@ -219,24 +202,6 @@ export function installQueryFeeds(socket: RealtimeSocket, cache: QueryClient): (
     queued = false;
     if (stopped) return;
     const needed = wanted();
-    // A newly mounted thread subset can start behind a topic subscription another view
-    // already advanced. Repair that subset instead of treating its older opening as current.
-    for (const [feed, keys] of needed) {
-      const seq = Math.max(cursors.get(feed) ?? -1, feedSequences.get(feed) ?? -1);
-      if (seq < 0) continue;
-      for (const key of keys) {
-        if (!pendingScheduleKey(key)) continue;
-        const query = cache.getQueryCache().find({ queryKey: key, exact: true });
-        const held = query?.state.data;
-        if (query !== undefined && record(held) && typeof held.seq === 'number' && held.seq < seq
-          && query.state.fetchStatus !== 'fetching' && query.state.status !== 'error'
-          && (pendingRepairs.get(query.queryHash) ?? -1) < seq) {
-          // One repair per observed cut; a stale/refused answer must not become a read loop.
-          pendingRepairs.set(query.queryHash, seq);
-          void cache.invalidateQueries({ queryKey: key, exact: true });
-        }
-      }
-    }
     for (const [feed, subscription] of subscriptions) if (!needed.has(feed)) { subscription.unsubscribe(); subscriptions.delete(feed); }
     for (const feed of needed.keys()) if (!subscriptions.has(feed) && !repairs.has(feed)) subscriptions.set(feed, follow(feed));
   };
@@ -246,7 +211,7 @@ export function installQueryFeeds(socket: RealtimeSocket, cache: QueryClient): (
       const key: unknown = event.query.queryKey;
       const source = isQueryKey(key) ? queryFeed(key) : null;
       const subscription = source === null ? undefined : subscriptions.get(source.feed);
-      if (source !== null && !(source.invalidate === true && frameRefreshes.has(source.feed))) { repairs.delete(source.feed); subscription?.unsubscribe(); subscriptions.delete(source.feed); cursors.delete(source.feed); }
+      if (source !== null) { repairs.delete(source.feed); subscription?.unsubscribe(); subscriptions.delete(source.feed); cursors.delete(source.feed); }
     }
     if (queued || event.type === 'observerResultsUpdated') return;
     queued = true;

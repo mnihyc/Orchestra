@@ -135,19 +135,11 @@ export function useForm<Values extends Record<string, string>>(initial: Values, 
  * same act, so that a second press after an answer was lost makes nothing twice; an act whose content
  * was changed since is another act and gets a key of its own.
  */
-export interface ActKey {
-  (content: unknown): string;
-  /** A deliberate new act may have the same contents as the completed one. */
-  reset(): void;
-}
-
-export function useActKey(): ActKey {
+export function useActKey(): (content: unknown) => string {
   const held = useRef<{ key: string; content: string } | null>(null);
-  const key = (content: unknown) => {
+  return (content) => {
     const text = JSON.stringify(content);
     if (held.current?.content !== text) held.current = { key: newActKey(), content: text };
     return held.current.key;
   };
-  key.reset = () => { held.current = null; };
-  return key;
 }

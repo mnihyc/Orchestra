@@ -48,14 +48,6 @@ pub const ENTRIES_MAX: usize = 500;
 /// The most nodes read in one database page of the agent's selected reach; every continuation is followed.
 pub const NODES_MAX: i64 = 20_000;
 
-fn read_phase(started: std::time::Instant, stage: &'static str) {
-    tracing::debug!(
-        stage,
-        elapsed_ms = %started.elapsed().as_millis(),
-        "shared tree read checkpoint"
-    );
-}
-
 /// The most characters of the opening of a description.
 pub const DESCRIPTION_CHARS: usize = 200;
 
@@ -951,8 +943,6 @@ impl Tree {
         scope: Scope,
         search_parts: Option<&orch_db::queries::search::CandidateSet>,
     ) -> Result<Self, EngineError> {
-        let started = std::time::Instant::now();
-        read_phase(started, "entered");
         let selected_documents = search_parts.map(|parts| parts.documents.as_slice());
         let headers_only = search_parts.is_some_and(|parts| parts.headers_only);
         let grants = if headers_only {
@@ -960,13 +950,11 @@ impl Tree {
         } else {
             reach::grants(conn, &agent, now).await?
         };
-        read_phase(started, "grants ready");
         let loaded = if let Some(parts) = search_parts.filter(|_| headers_only) {
             loading::headers(conn, &agent, parts, scope).await?
         } else {
             loading::load(conn, &agent, scope, &grants).await?
         };
-        read_phase(started, "raw pages ready");
         let places = loaded.places;
         let capped = loaded.capped;
         let content_nodes: HashSet<_> = loaded.content.iter().copied().collect();
@@ -1015,7 +1003,6 @@ impl Tree {
         )
         .await
         .map_err(folders::read_error)?;
-        read_phase(started, "document entries ready");
         let folder_ancestors: HashMap<_, _> = organized
             .ancestors
             .into_iter()
@@ -1123,7 +1110,7 @@ impl Tree {
             Vec::new()
         } else {
             if headers_only {
-                sqlx::query_as("SELECT id chat_id,org_id,COALESCE(home_id,org_id) home_id,kind,name,created_at,last_message_at,0::bigint messages FROM chats WHERE id=ANY($1) AND kind<>'node' ORDER BY created_at,id")
+                sqlx::query_as("SELECT id chat_id,org_id,kind,name,created_at,last_message_at,0::bigint messages FROM chats WHERE id=ANY($1) AND kind<>'node' ORDER BY created_at,id")
                     .bind(&people_ids).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?
             } else {
                 rows::people_chats(conn, &people_ids).await?
@@ -1166,7 +1153,6 @@ impl Tree {
             .iter()
             .find(|place| place.id == agent.thread)
             .and_then(|place| place.environment_id);
-        read_phase(started, "metadata ready");
         let reach = Reach::load_current(
             conn,
             agent.clone(),
@@ -1182,7 +1168,6 @@ impl Tree {
             },
         )
         .await?;
-        read_phase(started, "current reach ready");
         let member_names = if headers_only {
             HashMap::new()
         } else {
@@ -1419,7 +1404,7 @@ impl Tree {
                         .unwrap_or_else(|| "chat".to_owned())
                 });
             let label: String = label.chars().take(CHAT_NAME_CHARS).collect();
-            messages.entry(chat.home_id).or_default().push(PeopleEntry {
+            messages.entry(chat.org_id).or_default().push(PeopleEntry {
                 chat: chat.chat_id,
                 label: label.clone(),
                 name: label,
@@ -1485,7 +1470,6 @@ impl Tree {
             scope_at,
         };
         tree.work_out_presence();
-        read_phase(started, "tree ready");
         Ok(tree)
     }
 

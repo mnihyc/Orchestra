@@ -21,8 +21,6 @@ import { IconButton } from '@/ui/IconButton';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { Select } from '@/ui/Select';
-import { OptionSchemaEditor } from '@/features/models/OptionSchemaEditor';
-import { EndpointHeaders } from '@/features/models/EndpointHeaders';
 
 /** An endpoint as it is being edited. */
 export interface EndpointDraft {
@@ -159,9 +157,6 @@ export function EndpointsEditor({ value, onChange, protocols, httpAllowed, error
       {value.map((row, index) => {
         const protocol = protocols.find((candidate) => candidate.name === row.protocol);
         const fields: readonly Field[] = (protocol?.endpoint_options ?? []).filter((field) => !compact || field.name !== 'auth' && field.type !== 'secret' && field.type !== 'secret_text' && field.type !== 'secret_map');
-        const schemaField = fields.find((field) => field.name === 'request_options' && field.type === 'json');
-        const ordinaryFields = fields.filter((field) => field !== schemaField);
-        const headersField = fields.find((field) => field.name === 'headers' && field.type === 'map');
         const agents = protocol?.agents ?? [];
         const clear = row.baseUrl.trim().toLowerCase().startsWith('http://') && !runtimeLoopback(row.baseUrl.trim());
         const { fields: optionErrors, ...rowErrors } = endpointErrors(row.id, errors);
@@ -213,14 +208,10 @@ export function EndpointsEditor({ value, onChange, protocols, httpAllowed, error
                   ? t('resources.endpoint.oneAgent', { agents: agents.map((agent) => agent.name).join(', ') })
                   : t('resources.endpoint.manyAgents', { agents: agents.map((agent) => agent.name).join(', ') })}
             </p>}
-            {headersField !== undefined && <EndpointHeaders protocol={row.protocol} value={row.options.headers} disabled={disabled}
-              onChange={(headers) => change(row.id, { options: { ...row.options, headers } })} />}
-            {schemaField !== undefined && <OptionSchemaEditor protocols={[row.protocol]} value={typeof row.options.request_options === 'string' ? row.options.request_options : JSON.stringify(row.options.request_options ?? {}, null, 2)} disabled={disabled} error={optionErrors.request_options}
-              onChange={(request_options) => change(row.id, { options: { ...row.options, request_options } })} />}
-            {ordinaryFields.length > 0 && (
+            {fields.length > 0 && (
               <details className="group" open={advanced || Object.keys(optionErrors).length>0} onToggle={(event) => { if (event.currentTarget.open !== advanced) chooseAdvanced(event.currentTarget.open); }}>
                 <summary className="cursor-default rounded-md text-sm font-medium text-accent-text select-none hover:underline">{t('resources.endpoint.advanced')}</summary>
-                <FieldForm className="pt-3" fields={ordinaryFields} values={row.options} errors={optionErrors} helpFor={(field) => <DeclaredHint term={field.label} help={field.help} />} onChange={(name, next) => change(row.id, { options: { ...row.options, [name]: next } })} />
+                <FieldForm className="pt-3" fields={fields} values={row.options} errors={optionErrors} helpFor={(field) => <DeclaredHint term={field.label} help={field.help} />} onChange={(name, next) => change(row.id, { options: { ...row.options, [name]: next } })} />
               </details>
             )}
             {(rowErrors.options!==undefined || otherOptions.length>0) && <InlineAlert tone="warning">{[rowErrors.options,...otherOptions].filter((message)=>message!==undefined).join(' ')}</InlineAlert>}

@@ -12,7 +12,7 @@ import { areasOf, partsOfLevel } from '@/features/access/agentShares';
 import type { AgentAccessAvailability, AgentShare, MarkerPayload, ShareParts, SharePreview } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ADA, CATALOGUE, TOPIC, pageFor } from '../unit/general-access-fixtures';
-import { show, skipOverflowFallback } from './support';
+import { show } from './support';
 
 const calls = vi.hoisted(() => ({ review: vi.fn<typeof AccessApi.previewShare>(), share: vi.fn<typeof ShareApi.shareWithAgents>() }));
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), previewShare: calls.review,
@@ -21,7 +21,6 @@ vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(), shar
 vi.mock('@/features/people/ThreadIdentity', () => ({ ThreadIdentity: () => null }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-skipOverflowFallback();
 const target = { kind: 'topic' as const, id: TOPIC.id, name: 'Shared topic' };
 const preview: SharePreview = { allowed: true, revision: 1, permissions: [], holders: [], effects: { pages: 0, orgs: null, gaining: [], losing: [], more: 0 }, already: [], already_more: 0, agents: [], rows: [], rules: [], refusal: null };
 
@@ -101,7 +100,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(screen.getByRole('checkbox', { name: i18n.t('access.agents.archive') })).toBeChecked();
     expect(screen.getByText(i18n.t('agentContributions.reason.per_target'))).toBeVisible();
     expect(view.container.querySelector('[data-choice-selected-description]')).toBeNull();
-    expect(view.container).not.toHaveTextContent(i18n.t('choiceCatalog.agentStep.manage.description'));
+    expect(view.container).not.toHaveTextContent(i18n.t('access.agents.manageNote'));
   });
 
   it(`disables unowned management and Archive while leaving an independent Fork grant available (${locale})`, async () => {

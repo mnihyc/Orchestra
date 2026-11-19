@@ -8,7 +8,7 @@ import { observedAt, privateProvider,planSectionId } from '@/features/resources/
 import { ProviderUsageSummary } from '@/features/resources/providers/ProviderUsageCard';
 import { useProviderRefresh } from '@/features/resources/providers/PlanPanel';
 import { RefreshCw } from 'lucide-react';
-import { creditHistoryVisible,detailState,unavailableReason } from '@/features/resources/providers/details';
+import { creditHistoryVisible,detailState } from '@/features/resources/providers/details';
 import { auditEntryAnchor } from '@/features/trace/params';
 import type { ProviderPlanSeries, UsageBucket, UsageWindow } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
@@ -95,11 +95,7 @@ function PlanPage({provider,span,mode,metric='subscription',bucket,onMode,onMetr
     void client.invalidateQueries({queryKey:['provider',provider.id]});
     setPages([undefined]);
   };
-  if (privateProvider(provider)) return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')}><p className="text-sm text-text-muted" data-provider-usage-state="private">{t('providerCredits.unavailableHere')}</p></Section>;
-  if (!(['windows','balances','spend','extra_usage'] as const).some((member)=>detailState(provider,member)!=='unsupported')) {
-    const needsAdminKey = (['windows','balances','spend','extra_usage'] as const).some((member)=>unavailableReason(provider,member)==='needs_admin_key');
-    return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')}><p className="text-sm text-text-muted" data-provider-usage-state="unsupported">{t(needsAdminKey ? 'providerSources.needsAdminKey' : 'providerCredits.historyUnsupported')}</p></Section>;
-  }
+  if(privateProvider(provider) || !(['windows','balances','spend','extra_usage'] as const).some((member)=>detailState(provider,member)!=='unsupported'))return null;
   const known=new Map(provider.facts.windows.map((window)=>[window.id,window]));
   const windows=subscription.query.data===undefined ? provider.facts.windows.filter((window)=>Number.isFinite(window.used_percent)).toSorted((one,other)=>Number(other.is_active===true)-Number(one.is_active===true) || (one.duration_minutes ?? Infinity)-(other.duration_minutes ?? Infinity)).slice(0,PLAN_PAGE_SIZE) : subscription.query.data.items.flatMap((series)=>{const window=known.get(series.window_id);return window===undefined ? [] : [window];});
   return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')} className="@container" action={<>

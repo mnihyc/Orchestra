@@ -7,11 +7,6 @@
 
 mod common;
 
-#[path = "native_operation_frames/mkdir.rs"]
-mod mkdir;
-#[path = "native_operation_frames/preparation.rs"]
-mod preparation;
-
 use common::World;
 use futures::future::BoxFuture;
 use orch_access_contract::key_scope::{KeyScope, KeyTargetKind};
@@ -225,7 +220,7 @@ impl Fixture {
         world.engine().stop();
         let tag = new_id();
         hierarchy::create_tag(
-            &mut world.pool.acquire().await.unwrap(),
+            &mut *world.pool.acquire().await.unwrap(),
             tag,
             world.root,
             "Original selected tag",
@@ -382,101 +377,6 @@ async fn native_transport_ceiling_is_retained_restored_and_cannot_lend_a_wider_k
             .is_err(),
         "the still-wide original cannot replace the current retained extra-key ceiling"
     );
-    assert_eq!(s.name().await, "Original selected tag");
-}
-
-#[tokio::test]
-async fn a_saved_checkpoint_keeps_its_own_transport_without_lending_it_to_another_operation() {
-    use orch_engine::operation_scope::{http_origin::HttpOrigin, request_origin::Credential};
-    let s = Fixture::new().await;
-    let saved = s.key(s.world.ada, false).await;
-    let other = s.key(s.world.ada, true).await;
-    let system_admin: bool = sqlx::query_scalar("SELECT is_system_admin FROM users WHERE id=$1")
-        .bind(s.world.ada)
-        .fetch_one(s.world.pool.pool())
-        .await
-        .unwrap();
-    let http = |key: &Key| {
-        HttpOrigin::capture(
-            key.origin.clone(),
-            Credential::Token {
-                id: key.id,
-                hash: Hash::of(key.id.as_bytes()).as_bytes().to_vec(),
-            },
-            false,
-            system_admin,
-            Some(Time::new(s.clock.now() + chrono::Duration::hours(1))),
-        )
-        .unwrap()
-    };
-    let saved_http = http(&saved);
-    let other_http = http(&other);
-    let mut tx = s.world.pool.begin().await.unwrap();
-    other_http
-        .scope(async {
-            assert!(matches!(
-                continuing::prepare::<SelectedTag>(&mut tx, &s.clock, &saved.origin, s.world.root,)
-                    .await,
-                Err(Error::Refused)
-            ));
-            let frame =
-                continuing::checkpoint::<SelectedTag>(&mut tx, &s.clock, &saved_http, s.world.root)
-                    .await
-                    .unwrap();
-            assert_eq!(
-                frame.principal().caller().admitted_operation(),
-                Some("TagUpdate")
-            );
-            assert_eq!(
-                frame.http_origin().unwrap().origin().operation(),
-                "TagUpdate"
-            );
-            let keys = frame
-                .principal()
-                .caller()
-                .grant()
-                .unwrap()
-                .token_ids()
-                .collect::<Vec<_>>();
-            assert_eq!(keys, vec![saved.id]);
-            let refreshed = frame
-                .into_parts()
-                .opened
-                .refresh(&mut tx, &s.clock)
-                .await
-                .unwrap();
-            refreshed.check_deadline(&s.clock).unwrap();
-            assert!(matches!(
-                continuing::prepare::<SelectedTag>(&mut tx, &s.clock, &saved.origin, s.world.root,)
-                    .await,
-                Err(Error::Refused)
-            ));
-            other_http.current(&mut tx, &s.clock).await.unwrap();
-        })
-        .await;
-    tx.rollback().await.unwrap();
-    sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
-        .bind(saved.id)
-        .bind(json!(s.policy("TagDelete", "manage")))
-        .execute(s.world.pool.pool())
-        .await
-        .unwrap();
-    let mut tx = s.world.pool.begin().await.unwrap();
-    other_http
-        .scope(async {
-            assert!(
-                continuing::checkpoint::<SelectedTag>(
-                    &mut tx,
-                    &s.clock,
-                    &saved_http,
-                    s.world.root,
-                )
-                .await
-                .is_err()
-            );
-            other_http.current(&mut tx, &s.clock).await.unwrap();
-        })
-        .await;
     assert_eq!(s.name().await, "Original selected tag");
 }
 
@@ -756,7 +656,9 @@ async fn captured_native_work_uses_the_same_required_team_second_step_setup_hold
     let s = Fixture::new().await;
     let member = s.world.person("native-member").await;
     let mut tx = s.world.pool.begin().await.unwrap();
-    // World::person already established this actual root membership.
+    orch_db::queries::access::testing::insert_member(&mut tx, s.world.root, member, s.world.root)
+        .await
+        .unwrap();
     orch_db::queries::access::testing::give_role(
         &mut tx,
         s.world.root,

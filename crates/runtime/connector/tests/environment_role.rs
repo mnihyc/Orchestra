@@ -531,7 +531,6 @@ async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_
     let spec = json!({ "transport": "stdio", "command": ["true"] });
     assert_eq!(
         rig.fail(&McpStart::Given(Box::new(McpStartGiven {
-            preset: false,
             server_id: None,
             environment_id,
             name: "mine".to_owned(),
@@ -544,9 +543,7 @@ async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_
     assert_eq!(
         rig.fail(&McpImport {
             expected_fingerprint: None,
-            stored: None,
-            transfer: None,
-            environment_id: Some(environment_id),
+            environment_id,
             server_id: new_id(),
             source: "codex".to_owned(),
             scope: "user".to_owned(),

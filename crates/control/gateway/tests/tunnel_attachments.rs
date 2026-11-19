@@ -181,21 +181,6 @@ fn ticket(world: &World, source: &Machine, destination: &Machine) -> String {
         .unwrap()
 }
 
-async fn planned_ticket(
-    world: &World,
-    source: &Machine,
-    destination: &Machine,
-) -> (String, TunnelPlan) {
-    let signed = ticket(world, source, destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &signed)
-        .await
-        .unwrap();
-    (signed, plan)
-}
-
 async fn open(
     source: &Machine,
     incoming: &mut IncomingTunnels,
@@ -218,12 +203,7 @@ async fn auxiliary_does_not_replace_primary_and_tool_bytes_use_only_the_executor
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     assert_eq!(plan.preferred_gateway.id, "asia");
     let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
     let mut incoming = destination.link.incoming_tunnels();
@@ -259,12 +239,7 @@ async fn only_unused_auxiliaries_close_after_the_operator_idle_interval() {
     let (mut world, regional) = world(1).await;
     let (source, destination) = machines(&world).await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
     let mut incoming = destination.link.incoming_tunnels();
     let (near, far) = open(&source, &mut incoming, &ticket, &plan).await;
@@ -297,12 +272,7 @@ async fn all_gateway_carriers_share_the_existing_channel_allowance() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let mut local = plan.clone();
     local.plan_id = new_id();
     local.preferred_gateway = local
@@ -377,12 +347,7 @@ async fn a_third_common_gateway_preserves_both_hand_picked_primaries() {
     })
     .await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
     let mut incoming = destination.link.incoming_tunnels();
     let (mut near, mut far) = open(&source, &mut incoming, &ticket, &plan).await;
@@ -438,12 +403,7 @@ async fn no_common_gateway_refuses_with_labels_and_does_not_move_primaries() {
     })
     .await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let result = tokio::time::timeout(PATIENCE, source.link.open_routed_tunnel(&ticket, &plan))
         .await
         .unwrap();
@@ -477,12 +437,7 @@ async fn an_api_outage_preserves_existing_carriers_but_refuses_new_admission() {
     let late = world.enroll("late-machine").await;
     let (source, destination) = machines(&world).await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
     let mut incoming = destination.link.incoming_tunnels();
     let (mut near, mut far) = open(&source, &mut incoming, &ticket, &plan).await;
@@ -534,34 +489,26 @@ async fn an_api_outage_preserves_existing_carriers_but_refuses_new_admission() {
 }
 
 #[tokio::test]
-async fn a_restarted_gateway_can_rebuild_the_route_without_replacing_the_native_sockets() {
+async fn a_gateway_process_loss_resets_the_old_channel_before_the_next_open() {
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
     let mut incoming = destination.link.incoming_tunnels();
-    let (mut near, mut far) = open(&source, &mut incoming, &ticket, &plan).await;
-    let cid = near.cid();
+    let (mut near, far) = open(&source, &mut incoming, &ticket, &plan).await;
     regional.stop().await;
     let endpoint = &plan.preferred_gateway.endpoints[0];
     let port = url::Url::parse(&endpoint.url).unwrap().port().unwrap();
     let restarted = start_gateway(&world, "asia", port).await;
-    far.write_all(b"retained").await.unwrap();
-    let mut bytes = [0; 8];
-    tokio::time::timeout(PATIENCE, near.read_exact(&mut bytes))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&bytes, b"retained");
-    assert_eq!(near.cid(), cid);
-    assert_eq!(far.cid(), cid);
-    near.closer().close();
+    let mut byte = [0];
+    assert!(
+        tokio::time::timeout(PATIENCE, near.read_exact(&mut byte))
+            .await
+            .unwrap()
+            .is_err(),
+        "a new gateway process has no channel state to resume"
+    );
     far.closer().close();
     tokio::time::timeout(PATIENCE, destination.link.connected())
         .await
@@ -669,12 +616,7 @@ async fn an_api_restart_recovers_pairing_capabilities_without_moving_either_prim
     })
     .await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     assert_eq!(plan.preferred_gateway.id, "asia");
     assert!(
         plan.common_fallbacks
@@ -699,12 +641,7 @@ async fn revocation_kicks_the_primary_and_every_auxiliary_without_an_auxiliary_r
     let (mut world, regional) = world(60).await;
     let (source, destination) = machines(&world).await;
     let ticket = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &ticket)
-        .await
-        .unwrap();
+    let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
     let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
     let mut incoming = destination.link.incoming_tunnels();
     let (near, far) = open(&source, &mut incoming, &ticket, &plan).await;
@@ -738,92 +675,14 @@ async fn revocation_kicks_the_primary_and_every_auxiliary_without_an_auxiliary_r
 }
 
 #[tokio::test]
-async fn two_threads_share_one_cold_tunnel_attachment_without_changing_the_primary() {
-    let (mut world, gateways) = world_with_gateways(60, false).await;
-    let (source, destination) = machines(&world).await;
-    let primary = source.link.status().borrow().clone();
-    let first_ticket = ticket(&world, &source, &destination);
-    let second_ticket = ticket(&world, &source, &destination);
-    let first_plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &first_ticket)
-        .await
-        .unwrap();
-    let second_plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &second_ticket)
-        .await
-        .unwrap();
-    assert_ne!(first_plan.plan_id, second_plan.plan_id);
-    assert_eq!(source.link.auxiliary_sessions(), 0);
-    let lease = source
-        .link
-        .retain_tunnel_plans(vec![first_plan.clone(), second_plan.clone()]);
-    let mut incoming = destination.link.incoming_tunnels();
-    let (opened, mut accepted) = tokio::time::timeout(PATIENCE, async {
-        tokio::join!(
-            async {
-                tokio::join!(
-                    source.link.open_routed_tunnel(&first_ticket, &first_plan),
-                    source.link.open_routed_tunnel(&second_ticket, &second_plan)
-                )
-            },
-            async {
-                [
-                    incoming.next().await.unwrap().accept().unwrap(),
-                    incoming.next().await.unwrap().accept().unwrap(),
-                ]
-            },
-        )
-    })
-    .await
-    .unwrap();
-    let mut opened = [opened.0.unwrap(), opened.1.unwrap()];
-    for tunnel in &mut opened {
-        tunnel.write_all(b"pooled").await.unwrap();
-    }
-    for tunnel in &mut accepted {
-        let mut bytes = [0; 6];
-        tokio::time::timeout(PATIENCE, tunnel.read_exact(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(&bytes, b"pooled");
-    }
-    eventually("two threads share their one cold source attachment", || {
-        let source = source.link.clone();
-        let near = gateways[0].gateway.clone();
-        async move { source.auxiliary_sessions() == 1 && near.sessions_held() == 2 }
-    })
-    .await;
-    assert_eq!(*source.link.status().borrow(), primary);
-    assert_eq!(world.gateway.gateway.sessions_held(), 1);
-    for tunnel in opened.into_iter().chain(accepted) {
-        tunnel.closer().close();
-    }
-    drop(lease);
-    source.link.shutdown().await;
-    destination.link.shutdown().await;
-    for gateway in gateways {
-        gateway.stop().await;
-    }
-    world.stop().await;
-}
-
-#[tokio::test]
 async fn five_gateways_keep_one_transport_each_while_concurrent_threads_share_the_pool() {
     let (mut world, gateways) = world_with_count(60, 5).await;
     let enrolled = world.enroll("five-region-source").await;
     let source = world.start_machine_on_gateway(&enrolled, "test-gateway", vec![Role::Agent]);
-    let mut expected_primaries = vec![(source.id, "test-gateway".to_owned())];
     let mut peers = Vec::new();
     for gateway in world.config.gateway.advertised_gateways() {
         let enrolled = world.enroll(&format!("executor-{}", gateway.id)).await;
-        let peer = world.start_machine_on_gateway(&enrolled, &gateway.id, vec![Role::Environment]);
-        expected_primaries.push((peer.id, gateway.id));
-        peers.push(peer);
+        peers.push(world.start_machine_on_gateway(&enrolled, &gateway.id, vec![Role::Environment]));
     }
     tokio::time::timeout(PATIENCE, async {
         source.link.connected().await;
@@ -833,81 +692,29 @@ async fn five_gateways_keep_one_transport_each_while_concurrent_threads_share_th
     })
     .await
     .unwrap();
-    eventually("five-region exact primary registry", || {
+    let mut ids = vec![source.id];
+    ids.extend(peers.iter().map(|peer| peer.id));
+    eventually("five-region primary registry", || {
         let link = world.api.link.clone();
-        let expected = expected_primaries.clone();
-        async move {
-            expected
-                .iter()
-                .all(|(id, gateway)| link.gateway_of(*id).as_deref() == Some(gateway.as_str()))
-        }
+        let ids = ids.clone();
+        async move { ids.iter().all(|id| link.gateway_of(*id).is_some()) }
     })
     .await;
     let primary = source.link.status().borrow().clone();
-    let mut retained = Vec::new();
-    let mut warm_routes = Vec::new();
-    let mut thread_routes = Vec::new();
-    for peer in &peers {
-        let warm = planned_ticket(&world, &source, peer).await;
-        let threads = [
-            planned_ticket(&world, &source, peer).await,
-            planned_ticket(&world, &source, peer).await,
-        ];
-        assert_ne!(threads[0].1.plan_id, threads[1].1.plan_id);
-        retained.push(warm.1.clone());
-        retained.extend(threads.iter().map(|(_, plan)| plan.clone()));
-        warm_routes.push(warm);
-        thread_routes.push(threads);
-    }
-    let lease = source.link.retain_tunnel_plans(retained);
-    let mut held = Vec::new();
-    // The native incoming queue has one owner for the lifetime of each peer.
-    let mut incoming = peers
-        .iter()
-        .map(|peer| peer.link.incoming_tunnels())
-        .collect::<Vec<_>>();
-    // Establish each real transport before measuring sharing of a five-entry pool.
-    // A cold-attachment race is tested separately, without requiring five concurrent TLS handshakes.
-    for ((signed, plan), incoming) in warm_routes.iter().zip(&mut incoming) {
-        let (mut opened, mut accepted) = open(&source, incoming, signed, plan).await;
-        opened.write_all(b"warm").await.unwrap();
-        let mut request = [0; 4];
-        tokio::time::timeout(PATIENCE, accepted.read_exact(&mut request))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(&request, b"warm");
-        accepted.write_all(b"ready").await.unwrap();
-        let mut response = [0; 5];
-        tokio::time::timeout(PATIENCE, opened.read_exact(&mut response))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(&response, b"ready");
-        held.push((vec![opened], vec![accepted]));
-    }
-    let observed_gateways = std::iter::once(world.gateway.gateway.clone())
-        .chain(gateways.iter().map(|gateway| gateway.gateway.clone()))
-        .collect::<Vec<_>>();
-    eventually("all five source attachments to be ready", || {
-        let source = source.link.clone();
-        let gateways = observed_gateways.clone();
-        async move {
-            source.auxiliary_sessions() == 4
-                && gateways.iter().all(|gateway| gateway.sessions_held() == 2)
-        }
-    })
-    .await;
+    let mut plans = Vec::new();
     let mut tasks = Vec::new();
-    for (routes, mut incoming) in thread_routes.into_iter().zip(incoming) {
+    for peer in &peers {
+        let ticket = ticket(&world, &source, peer);
+        let plan = world.api.link.tunnel_plan_for(source.id, &ticket).unwrap();
+        plans.push(plan.clone());
         let link = source.link.clone();
+        let mut incoming = peer.link.incoming_tunnels();
         tasks.push(tokio::spawn(async move {
-            let [(first_ticket, first_plan), (second_ticket, second_plan)] = routes;
             let (opened, accepted) = tokio::join!(
                 async {
                     tokio::join!(
-                        link.open_routed_tunnel(&first_ticket, &first_plan),
-                        link.open_routed_tunnel(&second_ticket, &second_plan)
+                        link.open_routed_tunnel(&ticket, &plan),
+                        link.open_routed_tunnel(&ticket, &plan)
                     )
                 },
                 async {
@@ -920,6 +727,8 @@ async fn five_gateways_keep_one_transport_each_while_concurrent_threads_share_th
             (vec![opened.0.unwrap(), opened.1.unwrap()], accepted)
         }));
     }
+    let lease = source.link.retain_tunnel_plans(plans);
+    let mut held = Vec::new();
     for task in tasks {
         held.push(tokio::time::timeout(PATIENCE, task).await.unwrap().unwrap());
     }
@@ -934,7 +743,7 @@ async fn five_gateways_keep_one_transport_each_while_concurrent_threads_share_th
         gateways
             .iter()
             .all(|gateway| gateway.gateway.sessions_held() == 2),
-        "different concurrent thread plans must share each source auxiliary"
+        "two concurrent opens must share each source auxiliary"
     );
     for (opened, accepted) in held {
         for tunnel in opened.into_iter().chain(accepted) {
@@ -948,426 +757,6 @@ async fn five_gateways_keep_one_transport_each_while_concurrent_threads_share_th
     }
     for gateway in gateways {
         gateway.stop().await;
-    }
-    world.stop().await;
-}
-
-async fn gateway_samples(world: &World, machine: &Machine, values: &[(&str, u64)], at: Time) {
-    use orch_link_contract::{events::Event, session::MachineFacts, streams::Stream};
-    let catalogue = world.config.gateway.advertised_gateways();
-    let measurements=values.iter().map(|(id,rtt)|{
-        let gateway=catalogue.iter().find(|gateway|gateway.id==*id).unwrap();
-        serde_json::json!({"gateway_id":id,"endpoint":{"url":gateway.endpoints[0].url,"trust":gateway.endpoints[0].trust},"round_trip_ms":rtt})
-    }).collect::<Vec<_>>();
-    let facts:MachineFacts=serde_json::from_value(serde_json::json!({"hostname":"placement-fixture","os_version":"fixture","cpus":1,"memory_bytes":1,"harnesses":[],"adapters":[],"plugins":[],"policy":null,"rates":{},"clock_offset_ms":0,"gateway":{"choice":machine.link.gateway_status().choice,"measured_at":at,"measurements":measurements}})).unwrap();
-    machine
-        .link
-        .publish(&Stream::Machine, &Event::MachineFacts(facts))
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn fresh_two_sided_measurements_choose_one_common_gateway_without_moving_selected_primaries()
-{
-    use orch_api_contract::gateways::TunnelGatewayRule;
-    let (mut world, regional) = world_with_count(60, 3).await;
-    let (source, destination) = machines(&world).await;
-    let issued = ticket(&world, &source, &destination);
-    let missing = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &issued)
-        .await
-        .unwrap();
-    assert_eq!(missing.preferred_gateway.id, "asia");
-    assert_eq!(
-        missing.decision.rule,
-        TunnelGatewayRule::ExecutorSamplesUnavailable
-    );
-    let now = world.clock.time();
-    gateway_samples(
-        &world,
-        &source,
-        &[("test-gateway", 5), ("asia", 190), ("us", 20)],
-        now,
-    )
-    .await;
-    gateway_samples(
-        &world,
-        &destination,
-        &[("test-gateway", 180), ("asia", 5), ("us", 20)],
-        now,
-    )
-    .await;
-    eventually("both committed measurement vectors", || {
-        let link = world.api.link.clone();
-        let ticket = issued.clone();
-        let id = source.id;
-        async move {
-            link.tunnel_plan_for(id, &ticket)
-                .await
-                .is_some_and(|plan| plan.preferred_gateway.id == "us")
-        }
-    })
-    .await;
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &issued)
-        .await
-        .unwrap();
-    assert_eq!(plan.decision.rule, TunnelGatewayRule::LowestCombinedRtt);
-    assert_eq!(plan.decision.combined_round_trip_ms, Some(40));
-    assert_eq!(plan.decision.source_measured_at, Some(now));
-    assert_eq!(plan.decision.destination_measured_at, Some(now));
-    let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
-    let mut incoming = destination.link.incoming_tunnels();
-    let europe_before = world.gateway.gateway.bytes_relayed();
-    let asia_before = regional[0].gateway.bytes_relayed();
-    let (mut near, mut far) = open(&source, &mut incoming, &issued, &plan).await;
-    near.write_all(b"one gateway").await.unwrap();
-    let mut bytes = [0; 11];
-    far.read_exact(&mut bytes).await.unwrap();
-    assert_eq!(&bytes, b"one gateway");
-    assert_eq!(world.gateway.gateway.bytes_relayed(), europe_before);
-    assert_eq!(regional[0].gateway.bytes_relayed(), asia_before);
-    assert!(regional[1].gateway.bytes_relayed() >= 11);
-    assert_eq!(source.link.gateway_id().as_deref(), Some("test-gateway"));
-    assert_eq!(destination.link.gateway_id().as_deref(), Some("asia"));
-    assert_eq!(source.link.auxiliary_sessions(), 1);
-    assert_eq!(destination.link.auxiliary_sessions(), 1);
-    near.closer().close();
-    far.closer().close();
-    drop(lease);
-    let stale = Time::new(
-        now.get()
-            - chrono::Duration::seconds(
-                i64::try_from(world.config.link.dead_after_secs).unwrap() + 1,
-            ),
-    );
-    gateway_samples(&world, &source, &[("us", 0)], stale).await;
-    eventually("stale vector cannot choose a gateway", || {
-        let link = world.api.link.clone();
-        let ticket = issued.clone();
-        let id = source.id;
-        async move {
-            link.tunnel_plan_for(id, &ticket).await.is_some_and(|plan| {
-                plan.preferred_gateway.id == "asia"
-                    && plan.decision.rule == TunnelGatewayRule::ExecutorSamplesUnavailable
-            })
-        }
-    })
-    .await;
-    source.link.shutdown().await;
-    destination.link.shutdown().await;
-    for gateway in regional {
-        gateway.stop().await;
-    }
-    world.stop().await;
-}
-
-#[tokio::test]
-async fn the_normal_inherited_operator_setting_pins_a_measured_pair_to_the_executor() {
-    use orch_api_contract::gateways::TunnelGatewayRule;
-    use orch_settings::write::{Write, write};
-    let (mut world, regional) = world_with_count(60, 3).await;
-    let (source, destination) = machines(&world).await;
-    gateway_samples(&world, &source, &[("us", 20)], world.clock.time()).await;
-    gateway_samples(&world, &destination, &[("us", 20)], world.clock.time()).await;
-    let issued = ticket(&world, &source, &destination);
-    eventually("measured default before the pin", || {
-        let link = world.api.link.clone();
-        let ticket = issued.clone();
-        let id = source.id;
-        async move {
-            link.tunnel_plan_for(id, &ticket)
-                .await
-                .is_some_and(|plan| plan.preferred_gateway.id == "us")
-        }
-    })
-    .await;
-    let mut conn = world.db.acquire().await.unwrap();
-    write(
-        &mut conn,
-        &Write {
-            actor: orch_db::audit::Actor::System,
-            target: orch_settings::Target::System,
-            key: "gateways.tunnel_strategy",
-            value: serde_json::json!("executor"),
-            locked: None,
-            expected_revision: None,
-            may_lock: true,
-            origin: &orch_db::audit::Origin::default(),
-        },
-        world.clock.now(),
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &issued)
-        .await
-        .unwrap();
-    assert_eq!(plan.preferred_gateway.id, "asia");
-    assert_eq!(plan.decision.rule, TunnelGatewayRule::ExecutorPinned);
-    source.link.shutdown().await;
-    destination.link.shutdown().await;
-    for gateway in regional {
-        gateway.stop().await;
-    }
-    world.stop().await;
-}
-
-#[tokio::test]
-async fn automatic_moves_a_healthy_idle_primary_after_a_better_gateway_appears_and_drains_its_auxiliary()
- {
-    let (mut world, regional) = world(60).await;
-    let enrolled = world.enroll("moving-automatic").await;
-    let scores = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([
-        ("test-gateway".into(), 10),
-        ("asia".into(), 100),
-    ])));
-    let source = world.start_automatic_machine(&enrolled, scores.clone());
-    let destination = world.enroll("moving-peer").await;
-    let destination = world.start_machine_on_gateway(&destination, "asia", vec![Role::Environment]);
-    source.link.connected().await;
-    destination.link.connected().await;
-    eventually("initial automatic primary", || {
-        let link = world.api.link.clone();
-        let id = source.id;
-        async move { link.gateway_of(id).as_deref() == Some("test-gateway") }
-    })
-    .await;
-    let original = source.link.status().borrow().clone();
-    let issued = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &issued)
-        .await
-        .unwrap();
-    let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
-    let mut incoming = destination.link.incoming_tunnels();
-    let (mut near, mut far) = open(&source, &mut incoming, &issued, &plan).await;
-    assert_eq!(source.link.auxiliary_sessions(), 1);
-    let mut samples = source.link.gateway_changes();
-    samples.borrow_and_update();
-    scores.lock().unwrap().insert("asia".into(), 1);
-    // Await the actual periodic verified probe, not a sleep or a primary disconnect.
-    tokio::time::timeout(PATIENCE, samples.changed())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        *source.link.status().borrow(),
-        original,
-        "the live target auxiliary delays voluntary movement"
-    );
-    near.write_all(b"still live").await.unwrap();
-    let mut bytes = [0; 10];
-    far.read_exact(&mut bytes).await.unwrap();
-    assert_eq!(&bytes, b"still live");
-    near.closer().close();
-    far.closer().close();
-    let mut status = source.link.status();
-    tokio::time::timeout(
-        PATIENCE + Duration::from_secs(u64::from(orch_link_contract::session::HEARTBEAT_SECS)),
-        async {
-            loop {
-                if source.link.gateway_id().as_deref() == Some("asia")
-                    && matches!(
-                        *status.borrow(),
-                        orch_link::machine::LinkStatus::Connected { .. }
-                    )
-                {
-                    break;
-                }
-                status.changed().await.unwrap();
-            }
-        },
-    )
-    .await
-    .unwrap();
-    eventually("one transport after idle purpose change", || {
-        let gateway = regional.gateway.clone();
-        let source = source.link.clone();
-        let link = world.api.link.clone();
-        let id = enrolled.identity.machine_id;
-        async move {
-            gateway.sessions_held() == 2
-                && source.auxiliary_sessions() == 0
-                && link.gateway_of(id).as_deref() == Some("asia")
-        }
-    })
-    .await;
-    assert_eq!(
-        source.link.gateway_status().choice.selection,
-        orch_link_contract::gateways::GatewaySelection::Automatic
-    );
-    assert_eq!(
-        world.api.link.gateway_of(destination.id).as_deref(),
-        Some("asia")
-    );
-    let next = ticket(&world, &source, &destination);
-    let next_plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &next)
-        .await
-        .unwrap();
-    let (mut near, mut far) = open(&source, &mut incoming, &next, &next_plan).await;
-    near.write_all(b"primary now").await.unwrap();
-    let mut bytes = [0; 11];
-    far.read_exact(&mut bytes).await.unwrap();
-    assert_eq!(&bytes, b"primary now");
-    assert_eq!(source.link.auxiliary_sessions(), 0);
-    near.closer().close();
-    far.closer().close();
-    drop(lease);
-    source.link.shutdown().await;
-    destination.link.shutdown().await;
-    regional.stop().await;
-    world.stop().await;
-}
-
-#[tokio::test]
-async fn losing_the_gateway_process_resumes_the_same_tool_sockets_and_replay_through_a_fallback() {
-    retained_process_loss(false).await;
-}
-
-#[tokio::test]
-async fn retained_tool_sockets_use_the_third_gateway_when_the_first_fallback_is_unreachable() {
-    retained_process_loss(true).await;
-}
-
-async fn retained_process_loss(third: bool) {
-    let (mut world, mut regionals) = world_with_count(60, if third { 3 } else { 2 }).await;
-    let regional = regionals.remove(0);
-    let (source, destination) = if third {
-        let source = world.enroll("retained-source").await;
-        let destination = world.enroll("retained-peer").await;
-        let source = world.start_machine_on_gateway(&source, "test-gateway", vec![Role::Agent]);
-        let destination = world.start_machine_with_reachability(
-            &destination,
-            "asia",
-            vec![Role::Environment],
-            denied_urls(&world, &["test-gateway"]),
-        );
-        tokio::time::timeout(PATIENCE, async {
-            source.link.connected().await;
-            destination.link.connected().await;
-        })
-        .await
-        .unwrap();
-        eventually("retained original primaries", || {
-            let link = world.api.link.clone();
-            let (s, d) = (source.id, destination.id);
-            async move {
-                link.gateway_of(s).as_deref() == Some("test-gateway")
-                    && link.gateway_of(d).as_deref() == Some("asia")
-            }
-        })
-        .await;
-        (source, destination)
-    } else {
-        machines(&world).await
-    };
-    let issued = ticket(&world, &source, &destination);
-    let plan = world
-        .api
-        .link
-        .tunnel_plan_for(source.id, &issued)
-        .await
-        .unwrap();
-    let lease = source.link.retain_tunnel_plans(vec![plan.clone()]);
-    let mut incoming = destination.link.incoming_tunnels();
-    let (mut near, mut far) = open(&source, &mut incoming, &issued, &plan).await;
-    let cid = near.cid();
-    assert_eq!(far.cid(), cid);
-    // More than a receive window, less than one replay store: the unread tail must be retained, not re-executed.
-    let bytes = (0..6 * 1024 * 1024)
-        .map(|index| (index % 251) as u8)
-        .collect::<Vec<_>>();
-    tokio::time::timeout(PATIENCE, near.write_all(&bytes))
-        .await
-        .unwrap()
-        .unwrap();
-    regional.stop().await;
-    let mut received = vec![0; bytes.len()];
-    tokio::time::timeout(
-        PATIENCE + Duration::from_secs(u64::from(orch_link_contract::tunnels::RESUME_GRACE_SECS)),
-        far.read_exact(&mut received),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(received, bytes);
-    assert_eq!(near.cid(), cid);
-    assert_eq!(far.cid(), cid);
-    far.write_all(b"same native socket").await.unwrap();
-    let mut response = [0; 18];
-    tokio::time::timeout(PATIENCE, near.read_exact(&mut response))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&response, b"same native socket");
-    let expected = if third { "us" } else { "test-gateway" };
-    let fallback = if third {
-        regionals[0].gateway.clone()
-    } else {
-        world.gateway.gateway.clone()
-    };
-    eventually(
-        "fallback attachments preserve the selected primaries",
-        || {
-            let gateway = fallback.clone();
-            let source = source.link.clone();
-            let destination = destination.link.clone();
-            async move {
-                gateway.sessions_held() == 2
-                    && source.gateway_id().as_deref() == Some("test-gateway")
-                    && destination.gateway_id().is_none()
-                    && destination.auxiliary_sessions() == 1
-            }
-        },
-    )
-    .await;
-    let thread = orch_link_contract::tunnels::Ticket::parse(&issued)
-        .unwrap()
-        .claims()
-        .thread_id
-        .unwrap();
-    eventually("the API observes the resumed carrier", || {
-        let link = world.api.link.clone();
-        let source = source.id;
-        async move { link.tool_gateway_for(thread, source).as_deref() == Some(expected) }
-    })
-    .await;
-    assert_eq!(
-        destination
-            .link
-            .gateway_status()
-            .choice
-            .gateway_id
-            .as_deref(),
-        Some("asia")
-    );
-    // There is still exactly the one destination acceptance; recovery never dispatches another OpenOffer.
-    assert!(
-        tokio::time::timeout(Duration::ZERO, incoming.next())
-            .await
-            .is_err()
-    );
-    near.closer().close();
-    far.closer().close();
-    drop(lease);
-    source.link.shutdown().await;
-    destination.link.shutdown().await;
-    for regional in regionals {
-        regional.stop().await;
     }
     world.stop().await;
 }

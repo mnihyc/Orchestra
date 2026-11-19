@@ -9,9 +9,6 @@ mod common;
 mod hosting;
 mod native_tools;
 
-#[path = "orch_capabilities/recreation_scopes.rs"]
-mod recreation_scopes;
-
 use common::{World, eventually, queued};
 use orch_api_contract::approvals::{ApprovalDecision, CapabilityDecision};
 use orch_authz::Caller;
@@ -255,16 +252,6 @@ async fn native_scoped_revocation_retains_the_actual_key_operation_in_its_unit_r
         contains(&job.plan, &origin),
         "known key-origin reconciliation retains its actual operation and credential, never only an actor id"
     );
-    assert_eq!(job.plan["revocation_origin"], origin);
-    assert_eq!(job.plan["revocation_origin_required"], true);
-    assert_eq!(
-        job.plan["grant"], false,
-        "reconciliation can only finish the accepted removal"
-    );
-    assert!(
-        job.plan["approval_binding"].is_object(),
-        "the removal owns its actual frozen unit frame"
-    );
     let (state, _, error) = hosting::wait_over(&world, job.id).await;
     assert_eq!(state, "succeeded", "{error:?}");
 }
@@ -406,7 +393,7 @@ async fn a_live_grant_reports_available_now_after_the_node_applies_it_and_sends_
     let initial_open = world.commands.issued_bodies("session.open")[0].1.clone();
     assert_eq!(
         initial_open["orch_tools"],
-        json!(["read_shared", "request_capability", "orch_docs"])
+        json!(["read_shared", "request_capability"])
     );
     assert!(
         initial_open["instructions"]

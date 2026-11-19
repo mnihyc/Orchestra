@@ -513,14 +513,15 @@ impl HandoverCommandAuthority {
         {
             return Ok(false);
         }
-        if let Some(origin) = &self.origin
-            && (origin.lost
+        if let Some(origin) = &self.origin {
+            if origin.lost
                 || origin.provider != self.source.provider
                 || origin.holder != self.source.holder
                 || origin.since != self.source.since
-                || !origin.authorized(conn, now).await?)
-        {
-            return Ok(false);
+                || !origin.authorized(conn, now).await?
+            {
+                return Ok(false);
+            }
         }
         if let Some(expected) = self.returned {
             if machine != self.source.custodian.machine_id
@@ -532,7 +533,7 @@ impl HandoverCommandAuthority {
                 Ok(value) => value,
                 Err(_) => return Ok(false),
             };
-            if accept.copy.is_some() || accept.provider_id != self.source.provider {
+            if accept.provider_id != self.source.provider {
                 return Ok(false);
             }
             let sealed = SealedCredential {

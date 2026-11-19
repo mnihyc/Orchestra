@@ -26,13 +26,12 @@ use orch_db::queries::chats::{self as rows, ChatRow, StateRow};
 use orch_db::queries::{storage, uploads};
 use orch_realtime_contract::feeds::UserEvent;
 use orch_types::{Hash, Id, Seq, Time};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// A possible or selected source of supplied bytes. The identity alone grants no authority;
 /// a content hash is never an object identifier, and candidates may not be readable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlobOrigin {
     /// The person already retained the bytes through an upload or authorized copy.
     RetainedByCaller,
@@ -328,16 +327,12 @@ pub fn effective_level(
 
 /// A person's state in a chat as the API has it.
 #[must_use]
-pub fn state_view(chat: &ChatRow, state: Option<&StateRow>, effective: ChatLevel) -> ChatState {
+pub fn state_view(chat: Id, state: Option<&StateRow>, effective: ChatLevel) -> ChatState {
     ChatState {
         read_revision: state.map_or(0, |state| state.read_revision),
         default_level: None,
         default_reason: None,
-        chat_id: chat.id,
-        org_id: state.map_or(chat.org_id, |state| state.org_id),
-        last_message_seq: state.map_or(chat.last_message_seq, |state| {
-            state.last_message_seq.max(chat.last_message_seq)
-        }),
+        chat_id: chat,
         level: state
             .and_then(|state| state.level.as_deref())
             .and_then(parse_level),
@@ -347,35 +342,6 @@ pub fn state_view(chat: &ChatRow, state: Option<&StateRow>, effective: ChatLevel
         mentions_unread: state.map_or(0, |state| i64::from(state.mentions_unread)),
         hidden: state.is_some_and(|state| state.hidden),
     }
-}
-
-/// Personal state for a current readable audience of a direct or group chat, including new members
-/// without a stored state. Both supporting reads are batched across that audience.
-pub(crate) async fn member_states(
-    conn: &mut Conn,
-    chat: &ChatRow,
-    users: &[Id],
-) -> Result<Vec<(Id, ChatState)>, Error> {
-    if !chat.is_people_chat() || users.is_empty() {
-        return Ok(Vec::new());
-    }
-    let states: HashMap<Id, StateRow> = rows::states_of_members(conn, chat.id, users)
-        .await?
-        .into_iter()
-        .map(|state| (state.user_id, state))
-        .collect();
-    let defaults = rows::default_levels(conn, users).await?;
-    Ok(users
-        .iter()
-        .map(|user| {
-            let state = states.get(user);
-            let defaults = Defaults::of(defaults.get(user));
-            let mut shown = state_view(chat, state, effective_level(true, true, state, defaults));
-            shown.default_level = Some(defaults.direct);
-            shown.default_reason = Some(ChatDefaultReason::Member);
-            (*user, shown)
-        })
-        .collect())
 }
 
 /// The caller's own state in a chat: always there in a direct or a group chat
@@ -420,7 +386,7 @@ pub async fn my_state(
         .and_then(|state| state.level.as_deref())
         .and_then(parse_level)
         .unwrap_or(default);
-    let mut shown = state_view(chat, state.as_ref(), level);
+    let mut shown = state_view(chat.id, state.as_ref(), level);
     shown.default_level = Some(default);
     shown.default_reason = Some(reason);
     Ok(Some(shown))
@@ -440,7 +406,7 @@ async fn tell_screens(
         act.now,
     )
     .await?
-    .unwrap_or_else(|| state_view(&loaded.row, None, ChatLevel::Off));
+    .unwrap_or_else(|| state_view(loaded.id(), None, ChatLevel::Off));
     notifications::tell_users(
         conn,
         &[act.user()],
@@ -608,7 +574,7 @@ pub async fn refresh_thread_people(
         let state = my_state(conn, user, &chat, false, now)
             .await?
             .unwrap_or_else(|| {
-                let mut state = state_view(&chat, None, ChatLevel::Off);
+                let mut state = state_view(chat.id, None, ChatLevel::Off);
                 state.default_level = Some(ChatLevel::Off);
                 state.default_reason = Some(ChatDefaultReason::Quiet);
                 state
@@ -1128,8 +1094,6 @@ mod tests {
             read_revision: 0,
             user_id: new_id(),
             chat_id: new_id(),
-            org_id: new_id(),
-            last_message_seq: 0,
             level: level.map(str::to_owned),
             engaged,
             last_read_seq: 0,

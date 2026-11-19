@@ -2,12 +2,14 @@
 import { useCallback, useMemo } from 'react';
 import type { UsageDimension } from '@/generated/api-types';
 import { useRememberedView } from '@/lib/viewChoices';
-import { DEFAULT_MEASURE, DEFAULT_RANGE, DEFAULT_SPLIT, RANGES, DIMENSIONS, SPLITS, type UsageSearch, type Measure, type Split } from './search';
+import { DEFAULT_MEASURE, DEFAULT_RANGE, DEFAULT_SPLIT, RANGES, type UsageSearch, type Measure, type Split } from './search';
 
 export type SearchPatch = { [Key in keyof UsageSearch]?: UsageSearch[Key] | undefined };
 const VIEWS = ['usage', 'performance', 'requests'] as const;
 const USAGE_MEASURES: readonly Measure[] = ['turns', 'requests', 'tokens', 'credits'];
 const PERFORMANCE_MEASURES: readonly Measure[] = ['speed', 'first_token', 'errors'];
+const SPLITS: readonly Split[] = ['person','model','provider','agent','environment','effort','tier','program','org','project','topic','thread','token_kind','none'];
+const DIMENSIONS = ['person','model','provider','agent','environment','effort','tier','program','org','project','topic','thread'] as const;
 const BUCKETS = ['auto','hour','day','week','month'] as const;
 const PLAN_MODES = ['current','history'] as const;
 const PLAN_METRICS = ['subscription','credits'] as const;

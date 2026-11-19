@@ -302,35 +302,6 @@ pub(super) async fn require_entries(
     Ok(())
 }
 
-/// Export uses the same native person row or agent reach as an ordinary file export.
-pub(super) async fn require_exports(
-    conn: &mut Conn,
-    actor: Actor<'_>,
-    entries: &[containers::EntryRow],
-    now: Time,
-) -> Result<(), Error> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let ids = entries.iter().map(|row| row.id).collect::<Vec<_>>();
-    let allowed = match actor {
-        Actor::Person(principal) => {
-            let rows = documents::listed(conn, principal, &ids, Policy::default()).await?;
-            rows.len() == ids.len() && rows.iter().all(|row| row.holds(Permission::DocExport))
-        }
-        Actor::Agent { thread } => {
-            let mut graph = Graph::default();
-            let documents = documents::read_into(conn, &mut graph, &ids).await?;
-            let reach = agent_reach(conn, thread, documents.clone(), Vec::new(), now).await?;
-            documents.len() == ids.len()
-                && documents
-                    .iter()
-                    .all(|document| reach.may_download_document(document))
-        }
-    };
-    if allowed { Ok(()) } else { Err(Error::Denied) }
-}
-
 pub(super) struct Identity {
     pub kind: &'static str,
     pub id: Id,

@@ -78,10 +78,6 @@ pub struct Prices {
     pub cached: i128,
     /// For input that was written to a cache.
     pub cache_write: i128,
-    /// A separately quoted hourly write, absent when this rate cannot price it.
-    pub cache_write_1h: Option<i128>,
-    /// A separately quoted twelve-hour write; absence does not supply its price.
-    pub cache_write_12h: Option<i128>,
     /// For output, the reasoning among it.
     pub output: i128,
 }
@@ -99,14 +95,6 @@ impl Prices {
             cache_write: match &rate.cache_write_per_mtok {
                 Some(price) => parse_billionths(price)?,
                 None => input,
-            },
-            cache_write_1h: match &rate.cache_write_1h_per_mtok {
-                Some(price) => Some(parse_billionths(price)?),
-                None => None,
-            },
-            cache_write_12h: match &rate.cache_write_12h_per_mtok {
-                Some(price) => Some(parse_billionths(price)?),
-                None => None,
             },
             output: parse_billionths(&rate.output_per_mtok)?,
         };
@@ -130,14 +118,6 @@ impl Prices {
                 Some(price) => parse_billionths(price)?,
                 None => step_input,
             },
-            cache_write_1h: match &step.cache_write_1h_per_mtok {
-                Some(price) => Some(parse_billionths(price)?),
-                None => base.cache_write_1h,
-            },
-            cache_write_12h: match &step.cache_write_12h_per_mtok {
-                Some(price) => Some(parse_billionths(price)?),
-                None => base.cache_write_12h,
-            },
             output: parse_billionths(&step.output_per_mtok)?,
         })
     }
@@ -146,53 +126,21 @@ impl Prices {
     /// for (see [`credits_text`]).
     #[must_use]
     pub fn accrue(&self, usage: &TokenUsage) -> i128 {
-        self.accrue_with_hourly(usage, Some(0))
-    }
-    /// The quota estimate uses the actual subset; missing counters use the higher known write price.
-    pub fn accrue_with_hourly(&self, usage: &TokenUsage, hourly: Option<i64>) -> i128 {
-        self.accrue_with_lifetimes(usage, hourly, None)
-    }
-
-    /// Disjoint lifetime subsets share the same allowance; unknown quantities use the largest quote.
-    pub fn accrue_with_lifetimes(
-        &self,
-        usage: &TokenUsage,
-        hourly: Option<i64>,
-        twelve_hour: Option<i64>,
-    ) -> i128 {
         let cached = i128::from(usage.cached_input_tokens.max(0));
         let written = i128::from(usage.cache_write_tokens.max(0));
         let fresh = (i128::from(usage.input_tokens) - cached - written).max(0);
         let output = i128::from(usage.output_tokens.max(0));
-        let largest = self
-            .cache_write
-            .max(self.cache_write_1h.unwrap_or(self.cache_write))
-            .max(self.cache_write_12h.unwrap_or(self.cache_write));
-        let twelve_hour = twelve_hour.or_else(|| self.cache_write_12h.is_none().then_some(0));
-        let parts = hourly.zip(twelve_hour).and_then(|(hourly, long)| {
-            let total = hourly.checked_add(long)?;
-            (hourly >= 0 && long >= 0 && i128::from(total) <= written)
-                .then_some((i128::from(hourly), i128::from(long)))
-        });
-        let cache = match parts {
-            Some((hourly, long)) => (written - hourly - long)
-                .saturating_mul(self.cache_write)
-                .saturating_add(hourly.saturating_mul(self.cache_write_1h.unwrap_or(largest)))
-                .saturating_add(long.saturating_mul(self.cache_write_12h.unwrap_or(largest))),
-            None => written.saturating_mul(largest),
-        };
-        fresh
-            .saturating_mul(self.input)
-            .saturating_add(cached.saturating_mul(self.cached))
-            .saturating_add(cache)
-            .saturating_add(output.saturating_mul(self.output))
+        fresh * self.input
+            + cached * self.cached
+            + written * self.cache_write
+            + output * self.output
     }
 }
 
 /// An accrued charge as credits, to the six places the rule of the rate card keeps (half up).
 #[must_use]
 pub fn credits_text(accrued: i128) -> String {
-    let shown_units = accrued.saturating_add(ACCRUED_PER_SHOWN_UNIT / 2) / ACCRUED_PER_SHOWN_UNIT;
+    let shown_units = (accrued + ACCRUED_PER_SHOWN_UNIT / 2) / ACCRUED_PER_SHOWN_UNIT;
     let one = 10_i128.pow(SHOWN_PLACES);
     format!(
         "{}.{:0width$}",
@@ -270,13 +218,6 @@ impl Allowance {
                 {
                     return Err(AllowanceError::Price);
                 }
-                if rate
-                    .web_fetch_per_call
-                    .as_deref()
-                    .is_some_and(|price| parse_billionths(price).is_none())
-                {
-                    return Err(AllowanceError::Price);
-                }
                 for step in rate.above.iter().flatten() {
                     Prices::of(&rate, step.context_tokens.saturating_add(1))
                         .ok_or(AllowanceError::Price)?;
@@ -309,27 +250,6 @@ impl Allowance {
             .and_then(|credits| Prices::of(&credits.rate, usage.input_tokens))
             .map_or(0, |prices| prices.accrue(usage))
     }
-    /// Extend the same quota expression with independently observed cache-write lifetimes.
-    #[must_use]
-    pub fn accrue_observed(&self, usage: &TokenUsage, timing: &RequestTiming) -> i128 {
-        use orch_api_contract::usage::UsageMeasurement;
-        let hourly = match timing.cache_write_1h_tokens.as_ref() {
-            None | Some(UsageMeasurement::Unsupported) => Some(0),
-            Some(UsageMeasurement::Told { value }) => Some(*value),
-            _ => None,
-        };
-        let twelve_hour = match timing.cache_write_12h_tokens.as_ref() {
-            Some(UsageMeasurement::Unsupported) => Some(0),
-            Some(UsageMeasurement::Told { value }) => Some(*value),
-            _ => None,
-        };
-        self.credits
-            .as_ref()
-            .and_then(|credits| Prices::of(&credits.rate, usage.input_tokens))
-            .map_or(0, |prices| {
-                prices.accrue_with_lifetimes(usage, hourly, twelve_hour)
-            })
-    }
 
     /// Native search fees use the same accrued currency scale, with no token or tier multiplier.
     #[must_use]
@@ -340,18 +260,6 @@ impl Allowance {
             .and_then(parse_billionths)
             .unwrap_or(0)
             .saturating_mul(i128::from(searches.max(0)))
-            .saturating_mul(TOKENS_PER_PRICE)
-    }
-
-    /// Fetch fees use their own count and the same exact accrued-currency scale.
-    #[must_use]
-    pub fn accrue_fetches(&self, fetches: i64) -> i128 {
-        self.credits
-            .as_ref()
-            .and_then(|credits| credits.rate.web_fetch_per_call.as_deref())
-            .and_then(parse_billionths)
-            .unwrap_or(0)
-            .saturating_mul(i128::from(fetches.max(0)))
             .saturating_mul(TOKENS_PER_PRICE)
     }
 
@@ -394,7 +302,7 @@ impl Totals {
     pub fn add_usage(&mut self, usage: &TokenUsage, accrued: i128) {
         self.usage = self.usage.plus(*usage);
         self.known = true;
-        self.accrued = self.accrued.saturating_add(accrued);
+        self.accrued += accrued;
     }
 
     /// Replaces only one active meter's prior contribution. The lease holds its existing mutex
@@ -407,46 +315,9 @@ impl Totals {
             let group = &mut groups[index];
             group.usage = growth(&group.usage, &before.usage);
             group.requests -= before.requests;
-            if let (Some(held), Some(before)) =
-                (&mut group.reported_cost_usage, &before.reported_cost_usage)
-            {
-                held.subtract(before);
-            }
-            if let (Some(held), Some(before)) =
-                (&mut group.cache_write_usage, &before.cache_write_usage)
-            {
-                held.one_hour_tokens = held.one_hour_tokens.saturating_sub(before.one_hour_tokens);
-                held.known_requests = held.known_requests.saturating_sub(before.known_requests);
-                held.twelve_hour_tokens = held
-                    .twelve_hour_tokens
-                    .saturating_sub(before.twelve_hour_tokens);
-                held.twelve_hour_known_requests = held
-                    .twelve_hour_known_requests
-                    .saturating_sub(before.twelve_hour_known_requests);
-            } else {
-                group.cache_write_usage = None;
-            }
-            if group.cache_write_usage.is_none()
-                && (group.timing.cache_write_1h_tokens.is_some()
-                    || before.timing.cache_write_1h_tokens.is_some())
-            {
-                group.timing.cache_write_1h_tokens =
-                    Some(orch_api_contract::usage::UsageMeasurement::Unread);
-            }
-            if group.cache_write_usage.is_none()
-                && (group.timing.cache_write_12h_tokens.is_some()
-                    || before.timing.cache_write_12h_tokens.is_some())
-            {
-                group.timing.cache_write_12h_tokens =
-                    Some(orch_api_contract::usage::UsageMeasurement::Unread);
-            }
             if let (Some(held), Some(before)) = (&mut group.search_usage, &before.search_usage) {
                 held.searches = held.searches.saturating_sub(before.searches);
                 held.known_requests = held.known_requests.saturating_sub(before.known_requests);
-                held.fetches = held.fetches.saturating_sub(before.fetches);
-                held.fetch_known_requests = held
-                    .fetch_known_requests
-                    .saturating_sub(before.fetch_known_requests);
             } else {
                 group.search_usage = None;
             }
@@ -459,46 +330,9 @@ impl Totals {
         if let Some(group) = groups.iter_mut().find(|group| group.key() == now.key()) {
             group.usage = group.usage.plus(now.usage);
             group.requests += now.requests;
-            if let Some(now) = &now.reported_cost_usage {
-                group
-                    .reported_cost_usage
-                    .get_or_insert_with(Default::default)
-                    .merge(now);
-            }
-            if let (Some(held), Some(now)) = (&mut group.cache_write_usage, &now.cache_write_usage)
-            {
-                held.one_hour_tokens = held.one_hour_tokens.saturating_add(now.one_hour_tokens);
-                held.known_requests = held.known_requests.saturating_add(now.known_requests);
-                held.twelve_hour_tokens = held
-                    .twelve_hour_tokens
-                    .saturating_add(now.twelve_hour_tokens);
-                held.twelve_hour_known_requests = held
-                    .twelve_hour_known_requests
-                    .saturating_add(now.twelve_hour_known_requests);
-            } else {
-                group.cache_write_usage = None;
-            }
-            if group.cache_write_usage.is_none()
-                && (group.timing.cache_write_1h_tokens.is_some()
-                    || now.timing.cache_write_1h_tokens.is_some())
-            {
-                group.timing.cache_write_1h_tokens =
-                    Some(orch_api_contract::usage::UsageMeasurement::Unread);
-            }
-            if group.cache_write_usage.is_none()
-                && (group.timing.cache_write_12h_tokens.is_some()
-                    || now.timing.cache_write_12h_tokens.is_some())
-            {
-                group.timing.cache_write_12h_tokens =
-                    Some(orch_api_contract::usage::UsageMeasurement::Unread);
-            }
             if let (Some(held), Some(now)) = (&mut group.search_usage, &now.search_usage) {
                 held.searches = held.searches.saturating_add(now.searches);
                 held.known_requests = held.known_requests.saturating_add(now.known_requests);
-                held.fetches = held.fetches.saturating_add(now.fetches);
-                held.fetch_known_requests = held
-                    .fetch_known_requests
-                    .saturating_add(now.fetch_known_requests);
             } else {
                 group.search_usage = None;
             }
@@ -642,43 +476,6 @@ mod tests {
         // A rate without the price counts what was written as input.
         let as_input = Prices::of(&standard(), 1000).unwrap().accrue(&written);
         assert_eq!(credits_text(as_input), "0.003550");
-    }
-
-    #[test]
-    fn lifetime_quota_charge_uses_disjoint_writes_and_unknown_uses_the_highest_quote() {
-        let quoted = rate(json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1",
-            "output_per_mtok":"2","cache_write_per_mtok":"1.25","cache_write_12h_per_mtok":"2.5"}));
-        let used = TokenUsage::from_parts(TokensReportedApart {
-            input: 1000,
-            cache_read: 4000,
-            cache_write: 7000,
-            output: 0,
-            reasoning: 0,
-        });
-        let prices = Prices::of(&quoted, 12000).unwrap();
-        assert_eq!(
-            credits_text(prices.accrue_with_lifetimes(&used, Some(0), Some(4000))),
-            "0.015150"
-        );
-        assert_eq!(
-            credits_text(prices.accrue_with_lifetimes(&used, Some(0), None)),
-            "0.018900"
-        );
-        assert_eq!(
-            credits_text(prices.accrue_with_lifetimes(&used, Some(0), Some(7001))),
-            "0.018900"
-        );
-        let all_short = TokenUsage::from_parts(TokensReportedApart {
-            input: 0,
-            cache_read: 0,
-            cache_write: 1000,
-            output: 0,
-            reasoning: 0,
-        });
-        assert_eq!(
-            credits_text(prices.accrue_with_lifetimes(&all_short, Some(0), Some(0))),
-            "0.001250"
-        );
     }
 
     #[test]

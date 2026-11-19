@@ -1,7 +1,7 @@
 /** Tier-only request envelopes preserve dense counts without inventing measurements or a tier facet. */
 import { expect, it } from 'vitest';
 import type { RequestTiming } from '@/generated/api-types';
-import { hasRequestMeasurements, requestInputParts, measured, requestSpeed, requestTokenCount } from '@/features/usage/performance';
+import { hasRequestMeasurements, measured, requestSpeed, requestTokenCount } from '@/features/usage/performance';
 import { matchesTier, tierAvailable, tierLabel } from '@/features/usage/tier';
 import { i18n } from '@/i18n';
 import { timingFixture } from '../doubles/performance';
@@ -85,18 +85,4 @@ it('distinguishes unsupported wire capability from historical ordinary rows and 
   const reported = { ...missing, tier: 'priority', tier_unknown: false, timing: { ...missing.timing, reported_service_tier: { state: 'told', value: 'priority' } } };
   expect(tierAvailable(reported)).toBe(true);
   expect(matchesTier(reported, { tier: 'priority' })).toBe(true);
-});
-
-
-it('keeps request facts from manufacturing token measurements on legacy rows',()=>{
-  const timing=unsupported({attempt:1,upstream_status:200,provider_request_id:'native-local'});
-  const row=requestRow({timing,tokens:{input_tokens:100,cached_input_tokens:20,cache_write_tokens:10,output_tokens:0,reasoning_tokens:0,total_tokens:100}});
-  expect(hasRequestMeasurements(timing)).toBe(false);
-  expect(requestInputParts(row)).toEqual({uncached:70,cached:20,written:10});
-});
-
-it('separates real zero cache parts from an unreported part',()=>{
-  const known=requestRow({timing:timingFixture({reported_tokens:{input_tokens:100,cached_input_tokens:0,cache_write_tokens:0,output_tokens:0,reasoning_tokens:0,total_tokens:100}})});
-  expect(requestInputParts(known)).toEqual({uncached:100,cached:0,written:0});
-  expect(requestInputParts({...known,timing:timingFixture({reported_tokens:{input_tokens:100,cached_input_tokens:20,cache_write_tokens:null,output_tokens:0,reasoning_tokens:0,total_tokens:100}})})).toEqual({uncached:null,cached:20,written:null});
 });

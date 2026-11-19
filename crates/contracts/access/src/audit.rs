@@ -21,17 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::roles::{UnknownName, words};
 
-/// The composer context of an explicitly requested link grant. A link itself grants nothing;
-/// the actor is supplied by the server, and this records no claim that a message was sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum LinkOrigin {
-    /// A viewing gift chosen beside a draft in this chat.
-    Chat { chat_id: orch_types::Id },
-    /// A viewing gift chosen beside an input being composed for this thread.
-    ThreadInput { thread_id: orch_types::Id },
-}
-
 words! {
     /// The part of the catalogue an action belongs to.
     pub enum AuditArea ("area of the audit catalogue") {
@@ -195,7 +184,6 @@ audit_actions! {
         MemberResumed = "member.resumed", line, "Somebody's suspension in an org was lifted.";
         MemberRemoved = "member.removed", line, "A membership ended: somebody was removed from a tree of orgs, or left it.";
         MemberMoved = "member.moved", line, "A member's domain was changed to another org of the tree.";
-        MemberTermsAccepted = "member.terms_accepted", line, "Somebody accepted an organization's terms when joining.";
         ServiceAccountCreated = "service_account.created", line, "A service account was made.";
         ServiceAccountDeleted = "service_account.deleted", line, "A service account was deleted.";
         ProfileInspected = "profile.inspected", trail, "The act profile inspected was recorded.";
@@ -246,7 +234,6 @@ audit_actions! {
         SettingsSecretDeleted = "settings.secret_deleted", line, "A secret was deleted.";
     }
     Threads {
-        HarnessChanged = "harness.changed", trail, "An agent program reported a runtime change.";
         ThreadCreated = "thread.created", line, "A thread was created.";
         ThreadBound = "thread.bound", line, "A thread was put on a provider, a profile and an environment.";
         ThreadSwitched = "thread.switched", line, "What a thread runs on changed: its provider, its profile, its arrangement, its environment or its directory.";
@@ -266,8 +253,6 @@ audit_actions! {
         InputScheduleRan = "input_schedule.ran", line, "The act input schedule ran was recorded.";
         InputScheduleResumed = "input_schedule.resumed", line, "The act input schedule resumed was recorded.";
         InputScheduleUpdated = "input_schedule.updated", line, "The act input schedule updated was recorded.";
-        ScheduleCreatedByAgent = "schedule.created_by_agent", line, "The agent created a managed future input.";
-        ScheduleCancelled = "schedule.cancelled", line, "The future agent input was cancelled.";
         NativeActionInvoked = "native_action.invoked", trail, "The act native action invoked was recorded.";
         QueueHeld = "queue.held", line, "The act queue held was recorded.";
         QueueResumed = "queue.resumed", line, "The act queue resumed was recorded.";
@@ -349,7 +334,7 @@ audit_actions! {
         ProviderArrangementsChanged = "provider.arrangements_changed", line, "The arrangements a provider may be used in were changed.";
         ProviderRuntimeRecreated = "provider.runtime_recreated", line, "The runtime of a provider was recreated.";
         ProviderRuntimeUpdated = "provider.runtime_updated", line, "The runtime of a provider was updated.";
-        ProviderCredentialIssued = "provider.credential_issued", trail, "A copy of a provider's credential was issued to a machine.";
+        ProviderCredentialIssued = "provider.credential_issued", trail, "A copy of a provider's credential was issued to a machine for a thread.";
         ProviderHandedOver = "provider.handed_over", line, "The credential of a provider was handed over to an environment.";
         ProviderReturned = "provider.returned", line, "A credential that was handed over came back to its provider.";
         ProviderHandoverLost = "provider.handover_lost", line, "A credential that was handed over could not be brought back.";
@@ -385,8 +370,6 @@ audit_actions! {
         SkillVersionMade = "skill.version_made", line, "A version of a skill was made: imported, updated from where it came from, uploaded or published from its draft.";
         EnvironmentExecChanged = "environment.exec_changed", line, "What an environment's exec node offers was changed, or whether its agents get Orch's own tools.";
         ResourceTransferred = "resource.transferred", line, "The first owner of a resource changed.";
-        ResourceHomeChanged = "resource.home_changed", line, "A resource's sharing and settings home changed.";
-        ResourceTagsChanged = "resource.tags_changed", line, "The display tags of a resource changed.";
         HostCreated = "host.created", line, "A host was added.";
         HostDeleted = "host.deleted", line, "A host was removed.";
         MountCreated = "mount.created", line, "A mount was added.";
@@ -423,7 +406,6 @@ audit_actions! {
     }
     Collaboration {
         AnnouncementSent = "announcement.sent", trail, "An announcement was sent to threads.";
-        MessageSent = "message.sent", trail, "An administrator sent a message to members.";
         PersonNotified = "person.notified", trail, "A person explicitly notified people about a thing.";
         DestinationCreated = "destination.created", line, "A destination of a node was added.";
         DestinationUpdated = "destination.updated", line, "A destination of a node was changed.";
@@ -432,11 +414,7 @@ audit_actions! {
         ChannelUpdated = "channel.updated", line, "A channel of the system or of a root org was changed.";
         ChannelDeleted = "channel.deleted", line, "A channel of the system or of a root org was removed.";
         ChatCreated = "chat.created", trail, "A group chat was started.";
-        ChatVisibilityChanged = "chat.visibility_changed", trail, "A group chat visibility was changed.";
         ChatRenamed = "chat.renamed", trail, "A group chat was renamed.";
-        ChatEnded = "chat.ended", trail, "A group and its history ended as part of its move to another organization.";
-        ChatMoved = "chat.moved", trail, "A group chat was moved to another home.";
-        ChatManagerChanged = "chat.manager_changed", trail, "A group chat member's manager role changed.";
         ChatMemberAdded = "chat.member_added", trail, "Somebody was added to a group chat.";
         ChatMemberRemoved = "chat.member_removed", trail, "Somebody left a group chat, or was removed from it.";
         ChatMessageDeleted = "chat.message_deleted", trail, "A chat message was deleted by somebody other than its author.";
@@ -476,7 +454,6 @@ audit_actions! {
         HostPortsChanged = "host.ports_changed", line, "The act host ports changed was recorded.";
     }
     Exports {
-        ContentCopiedOut = "content.copied_out", trail, "A copy into another root organization was accepted.";
         ChatExported = "chat.exported", trail, "A chat was exported.";
         ExportCreated = "export.created", trail, "An archive of what a person may read in a place was asked for, and again when it was written, with how much it holds.";
         ExportDownloaded = "export.downloaded", trail, "An archive was fetched for the first time.";
@@ -506,7 +483,6 @@ impl AuditAction {
             | Self::HostCreated
             | Self::IdentityProviderCreated
             | Self::InputScheduleCreated
-            | Self::ScheduleCreatedByAgent
             | Self::McpCreated
             | Self::SkillCreated
             | Self::MountCreated
@@ -523,18 +499,14 @@ impl AuditAction {
             | Self::WorkspaceFileCopied
             | Self::WorkspaceSnapshotCreated
             | Self::WorkspaceWorktreeCreated => AuditKind::Made,
-            Self::HarnessChanged
-            | Self::HostPortsChanged
+            Self::HostPortsChanged
             | Self::AgentDisabled
             | Self::AgentEnabled
             | Self::AgentUpdated
             | Self::BrowserProfileRenamed
             | Self::CapabilityDefUpdated
             | Self::ChannelUpdated
-            | Self::ChatVisibilityChanged
             | Self::ChatRenamed
-            | Self::ChatMoved
-            | Self::ChatManagerChanged
             | Self::ChatAgentPostingStopped
             | Self::ChatAgentPostingAllowed
             | Self::DestinationUpdated
@@ -579,7 +551,6 @@ impl AuditAction {
             | Self::ProviderModelsChanged
             | Self::ProviderUpdated
             | Self::ProviderSourcesChanged
-            | Self::ResourceTagsChanged
             | Self::SettingsReset
             | Self::SettingsUpdated
             | Self::SystemSettingsUpdated
@@ -599,7 +570,6 @@ impl AuditAction {
             | Self::ThreadGoalCleared
             | Self::BrowserProfileDeleted
             | Self::ChannelDeleted
-            | Self::ChatEnded
             | Self::ChatMessageDeleted
             | Self::ChatMessageDeletedByAgent
             | Self::ThreadDeletedByAgent
@@ -611,7 +581,6 @@ impl AuditAction {
             | Self::HostDeleted
             | Self::IdentityProviderDeleted
             | Self::InputScheduleDeleted
-            | Self::ScheduleCancelled
             | Self::McpDeleted
             | Self::SkillDeleted
             | Self::MountDeleted
@@ -659,7 +628,6 @@ impl AuditAction {
             | Self::MemberRemoved
             | Self::MemberResumed
             | Self::MemberSuspended
-            | Self::MemberTermsAccepted
             | Self::NodeTransferred
             | Self::OrgInvitationGiven
             | Self::OrgInvitationTakenBack
@@ -675,7 +643,6 @@ impl AuditAction {
             | Self::ProviderKeyRotated
             | Self::ProviderReturned
             | Self::ResourceTransferred
-            | Self::ResourceHomeChanged
             | Self::RoleChanged
             | Self::RoleGiven
             | Self::RoleRemoved
@@ -698,14 +665,12 @@ impl AuditAction {
             | Self::PortsClosed
             | Self::PortsLinkUsed
             | Self::AnnouncementSent
-            | Self::MessageSent
             | Self::PersonNotified
             | Self::AuditExported
             | Self::BrowserClosed
             | Self::BrowserDriven
             | Self::BrowserOpened
             | Self::ChatExported
-            | Self::ContentCopiedOut
             | Self::ChatPostedByAgent
             | Self::DisplayClosed
             | Self::DisplayDriven
@@ -801,8 +766,6 @@ impl AuditAction {
     pub fn object_kind(self) -> Option<&'static str> {
         match self {
             Self::McpRestarted => Some("environment"),
-            Self::ContentCopiedOut => None,
-            Self::HarnessChanged => None,
             Self::MemberSuspended
             | Self::MemberResumed
             | Self::MemberMoved
@@ -811,8 +774,6 @@ impl AuditAction {
             | Self::RoleRemoved
             | Self::PersonNotified
             | Self::ResourceTransferred
-            | Self::ResourceHomeChanged
-            | Self::ResourceTagsChanged
             | Self::ShareFileDownloaded
             | Self::StorageCleaned => None,
             // An invitation to make an org is about the person it was given to: no org exists yet.
@@ -841,7 +802,6 @@ impl AuditAction {
             | Self::ThreadUnarchivedByAgent
             | Self::ThreadForkedByAgent
             | Self::ThreadDeletedByAgent
-            | Self::ScheduleCreatedByAgent
             | Self::ChatMessageDeletedByAgent => Some(ActorKind::Agent),
             Self::UsageCapReached | Self::ThreadGoalEnded => Some(ActorKind::System),
             _ => None,
@@ -862,24 +822,6 @@ impl AuditAction {
 mod tests {
     use super::*;
     use AuditAction as A;
-
-    #[test]
-    fn a_native_runtime_change_uses_the_existing_audit_catalogue_and_its_actual_scope() {
-        assert_eq!(A::HarnessChanged.as_str(), "harness.changed");
-        assert_eq!(A::HarnessChanged.kind(), AuditKind::Changed);
-        assert!(
-            A::HarnessChanged.object_kind().is_none(),
-            "thread and process-scoped facts name their actual object"
-        );
-        assert!(
-            !A::HarnessChanged.is_history_line(),
-            "the native item already is its timeline history"
-        );
-        assert!(
-            A::HarnessChanged.actor().is_none(),
-            "owned turn and idle origins retain their actual actor"
-        );
-    }
 
     #[test]
     fn an_action_is_written_as_its_key() {
@@ -1075,8 +1017,6 @@ mod tests {
             A::MemberMoved,
             A::RoleGiven,
             A::ResourceTransferred,
-            A::ResourceHomeChanged,
-            A::ResourceTagsChanged,
             A::ShareFileDownloaded,
         ] {
             assert_eq!(elsewhere.object_kind(), None, "{elsewhere}");

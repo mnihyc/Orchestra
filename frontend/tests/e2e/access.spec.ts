@@ -55,30 +55,25 @@ test('Share opens the page with the field that adds people in focus, and shows t
   await expect(dialog(page).getByRole('group', { name: 'Owners' })).toContainText('Primary owner');
   // As shipped a Developer manages the topic and everybody who can see it reads it.
   await expect(line(page, 'Can manage')).toContainText('Developers');
-  await expect(line(page, 'Can view')).toContainText('Everyone in Acme > Research > Web > Fix login');
+  await expect(line(page, 'Can view')).toContainText('Everyone in Fix login');
   await expect(line(page, 'Can view')).toContainText('Inherited from the system');
   await expect(dialog(page).getByText('Admins of Web, Research, Acme, and the system')).toBeVisible();
 });
 
 test('a person is added to a line, shows as pending until the server answers, and is taken out again after being told whom that reaches', async ({ page }) => {
-  // A missing preview must recover before the access change can be confirmed.
+  // Where the server does not say whom a change reaches, the dialog says so.
   await steer('/serve', { previews: false });
   await share(page);
   await name(page, 'Grace Hopper', 'Can interact');
   await expect(line(page, 'Can interact')).toContainText('Grace Hopper');
-  // An individual grant keeps the inherited general audience on Defaults.
-  await expect(dialog(page).getByRole('combobox', { name: 'General access', exact: true })).toContainText('Defaults');
+  await expect(dialog(page).getByText('Custom', { exact: true }).first()).toBeVisible();
 
   await line(page, 'Can interact').getByRole('button', { name: 'Change Grace Hopper’s access' }).click();
   await page.getByRole('menuitem', { name: 'Take Grace Hopper out' }).click();
   const confirm = page.getByRole('alertdialog', { name: 'Take Grace Hopper out?' });
-  // Preview failures now show their actual cause and keep confirmation disabled.
-  await expect(confirm.getByRole('alert')).toContainText('This does not exist, was deleted, or is not open to you.');
-  await expect(confirm.getByRole('button', { name: 'Take out Grace Hopper' })).toBeDisabled();
+  // The server cannot say yet whom this reaches, and the dialog does not pretend that it can.
+  await expect(confirm).toContainText('The server cannot say yet whom this reaches');
   await expect(confirm).not.toContainText('Nobody gains or loses anything');
-  await steer('/serve', { previews: true });
-  await confirm.getByRole('button', { name: 'Try again', exact: true }).click();
-  await expect(confirm.getByRole('button', { name: 'Take out Grace Hopper' })).toBeEnabled();
   await confirm.getByRole('button', { name: 'Take out Grace Hopper' }).click();
   await expect(dialog(page).locator('[data-access-roster]')).not.toContainText('Grace Hopper');
 });
@@ -91,7 +86,7 @@ test('where the server says whom a change reaches, the dialog names them before 
   await expect(confirm).toContainText('Only you and the people named here. It stops following Web.');
   await expect(confirm.getByText(/people lose access/)).toBeVisible();
   await expect(confirm).toContainText('Grace Hopper');
-  await confirm.getByRole('button', { name: 'Make private Fix login', exact: true }).click();
+  await confirm.getByRole('button', { name: 'Make Fix login private' }).click();
   await expect(dialog(page).getByText('Private', { exact: true }).first()).toBeVisible();
   await expect(dialog(page).getByRole('group', { name: 'Owners', exact: true })).toContainText('Ada Lovelace');
 });
@@ -114,15 +109,14 @@ test('a page stops following its place for one row and follows it again, and the
 
   await dialog(page).getByRole('button', { name: 'Back to the short form' }).click();
   await dialog(page).getByRole('button', { name: 'Make private', exact: true }).click();
-  await page.getByRole('alertdialog').getByRole('button', { name: 'Make private Fix login', exact: true }).click();
-  await expect(dialog(page).locator('[data-access-roster]')).not.toContainText('Everyone in Acme > Research > Web > Fix login');
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Make Fix login private' }).click();
+  await expect(dialog(page).locator('[data-access-roster]')).not.toContainText('Everyone in Fix login');
   await expect(dialog(page).getByRole('group', { name: 'Owners', exact: true })).toContainText('Ada Lovelace');
 
   // Put back: the page follows its place again, and what it named stops being named.
-  await dialog(page).getByRole('combobox', { name: 'General access', exact: true }).click();
-  await page.getByRole('option', { name: 'Defaults', exact: true }).click();
-  await page.getByRole('alertdialog').getByRole('button', { name: 'Use Web permissions', exact: true }).click();
-  await expect(line(page, 'Can view')).toContainText('Everyone in Acme > Research > Web > Fix login');
+  await dialog(page).getByRole('button', { name: 'As Web decides' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Follow Web again' }).click();
+  await expect(line(page, 'Can view')).toContainText('Everyone in Fix login');
 });
 
 test('a row that a lock above decides shows the lock and where it was set, and has no menu', async ({ page }) => {
@@ -164,7 +158,7 @@ test('the full form lays every row out by area, with the advanced rows and Admin
   await expect(grid.getByText('(Edit)')).toBeVisible();
 
   await dialog(page).locator('summary', { hasText: 'Advanced' }).click();
-  for (const row of ['Create document', 'Comment', 'Archive Topic', 'Go past limits', 'Share outside']) await expect(dialog(page).getByText(row, { exact: true }).first()).toBeVisible();
+  for (const row of ['New documents', 'Comment', 'Archive Topic', 'Go past limits', 'Share outside']) await expect(dialog(page).getByText(row, { exact: true }).first()).toBeVisible();
   await dialog(page).locator('summary', { hasText: 'Administration' }).click();
   for (const row of ['Manage Settings', 'View Usage', 'Usage summary', 'View Audit', 'Manage Access']) await expect(dialog(page).getByText(row, { exact: true }).first()).toBeVisible();
 
@@ -206,7 +200,7 @@ test('a person is given a role in a place, changed and taken away, and those who
   const give = page.getByRole('dialog', { name: 'Give a role in Web' });
   await give.getByRole('combobox', { name: 'Person or group' }).fill('marg');
   await page.getByRole('option', { name: /Margaret Hamilton/ }).click();
-  await give.getByRole('combobox', { name: 'Role', exact: true }).click();
+  await give.getByRole('combobox', { name: 'Role' }).click();
   await page.getByRole('option', { name: 'Developer' }).click();
   await give.getByRole('button', { name: 'Give the role' }).click();
 
@@ -220,9 +214,7 @@ test('a person is given a role in a place, changed and taken away, and those who
   await page.getByRole('menuitem', { name: 'Take the role away…' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Take the role from Margaret Hamilton' }).click();
   await expect(table).toHaveCount(0);
-  // Owners remain on People, so this page no longer uses the completely empty-roster message.
-  await expect(dialog(page).getByRole('region', { name: 'Owners', exact: true })).toContainText('Ada Lovelace');
-  await expect(dialog(page).getByRole('tabpanel', { name: 'People', exact: true })).not.toContainText('Margaret Hamilton');
+  await expect(dialog(page).getByText('Nobody holds a role here yet')).toBeVisible();
 });
 
 test('what a place gives to what is made inside it is a grid for each kind with two for threads, and a row can be locked after being told whom that reaches', async ({ page }) => {
@@ -252,11 +244,10 @@ test('what a place gives to what is made inside it is a grid for each kind with 
 test('Share shows the inherited holder, its level and its actual people without an unavailable View as action', async ({ page }) => {
   await share(page);
   await expect(dialog(page).getByRole('button', { name: 'View as…' })).toHaveCount(0);
-  const holderName = 'Developers of Acme > Research > Web > Fix login';
-  const row = line(page, 'Can manage').getByRole('listitem').filter({ has: page.getByRole('button', { name: holderName, exact: true }) });
-  const holder = row.getByRole('button', { name: holderName, exact: true });
-  await expect(row).toContainText('Inherited from the system');
-  await expect(row).toContainText('Can manage');
+  const holder = dialog(page).getByRole('button', { name: 'Developers of Fix login', exact: true });
+  const row = dialog(page).locator('li[data-access-level]').filter({ has: holder });
+  await expect(row).toContainText('Inherited from Web');
+  await expect(row).toContainText('Manage');
   await holder.click();
   await expect(row).toContainText('Grace Hopper');
   await expect(row).not.toContainText('acme.grace');
@@ -266,10 +257,10 @@ test('somebody from outside the org is named by whoever may, with who they are m
   await share(page);
   const field = dialog(page).getByRole('combobox', { name: 'Add people, groups or roles' });
   await field.fill('zoe');
-  await expect(page.getByRole('option', { name: /Zoe Outsider/ })).toContainText('Outside');
+  await expect(page.getByRole('option', { name: /Zoe Outsider/ })).toContainText('Not in this org');
   await page.getByRole('option', { name: /Zoe Outsider/ }).click();
   await onlyHere(page);
-  await expect(dialog(page).getByText('Zoe Outsider · @zoe is not in this org and gets access to Fix login only.')).toBeVisible();
+  await expect(dialog(page).getByText('Zoe Outsider is not in this org and gets access to Fix login only.')).toBeVisible();
   await dialog(page).getByRole('button', { name: 'Add', exact: true }).click();
   await expect(line(page, 'Can view')).toContainText('Outside');
 
@@ -279,9 +270,8 @@ test('somebody from outside the org is named by whoever may, with who they are m
   await page.getByRole('menuitem', { name: 'Share…' }).click();
   await dialog(page).getByRole('combobox', { name: 'Add people, groups or roles' }).fill('zoe');
   const option = page.getByRole('option', { name: /Zoe Outsider/ });
-  await expect(option).toContainText('Outside');
   await expect(option).toHaveAttribute('aria-disabled', 'true');
-  await expect(option).toContainText('Developers of Acme > Research > Web > Fix login can add someone from outside.');
+  await expect(option).toContainText('Developers can add someone from outside.');
 });
 
 test('an address nobody is registered with is invited to this one place, and the link is shown to copy', async ({ page }) => {
@@ -304,9 +294,7 @@ test('somebody who reads a page may add people up to what they hold, and reads t
   await expect(line(page, 'Can manage')).toContainText('Developers');
   // How the page stands is told in words, with nothing to press.
   await expect(dialog(page).getByRole('button', { name: 'How the page stands' })).toHaveCount(0);
-  const general = dialog(page).getByRole('combobox', { name: 'General access', exact: true });
-  await expect(general).toContainText('Defaults');
-  await expect(general).toBeDisabled();
+  await expect(dialog(page).getByText('As Web decides', { exact: true })).toBeVisible();
   await dialog(page).getByRole('button', { name: 'Permissions' }).click();
   await expect(dialog(page).getByRole('button', { name: /: more$/ })).toHaveCount(0);
 });
@@ -332,9 +320,7 @@ test('a refusal says what is missing and whom to ask, and asking through Orch sa
 
   await expect(page.getByRole('heading', { name: /You don.t have access/ })).toBeVisible();
   await expect(page.getByText('The project “Web”')).toBeVisible();
-  // The compact refusal opens the same request and its permission details on demand.
-  await page.getByRole('button', { name: 'Request access', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Request access', exact: true })).toContainText('You can’t view Web.');
+  await expect(page.getByText('View Project')).toBeVisible();
   await expect(page.getByText('Ask Ada Lovelace.')).toBeVisible();
   await expect(page.getByRole('button', { name: /Open as an admin/ })).toHaveCount(0);
 
@@ -342,8 +328,7 @@ test('a refusal says what is missing and whom to ask, and asking through Orch sa
   await expect(page.getByRole('radio', { name: 'View', exact: true })).toBeChecked();
   await page.getByRole('textbox', { name: /Why do you need it/ }).fill('I review the web work');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Request access', exact: true }).getByRole('alert')).toContainText('This does not exist, was deleted, or is not open to you.');
-  await expect(page.getByRole('textbox', { name: /Why do you need it/ })).toHaveValue('I review the web work');
+  await expect(page.getByText('Asking for access through Orch is not available yet. Ask Ada Lovelace yourself.')).toBeVisible();
 
   // Where the server takes requests, the request is sent, shows where it stands, and can be taken back.
   await steer('/serve', { requests: true });
@@ -367,16 +352,14 @@ test('a current refusal never offers an administrator a self-grant, including wh
 
 /** Opens Share from the thread's own header. */
 async function shareThread(page: Page): Promise<void> {
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share', exact: true }).click();
 }
 
-/** Resource access moved into Settings; its own Share action still opens the same permission page. */
-async function openFromResource(page: Page, path: string, name: string): Promise<void> {
+/** Opens the permission page of a resource from the Access tab of its own page. */
+async function openFromResource(page: Page, path: string): Promise<void> {
   await page.goto(path);
-  const main = page.locator('[data-main-area]');
-  await expect(main.getByRole('heading', { name, exact: true, level: 1 })).toBeVisible();
-  await main.getByRole('button', { name: `Actions for ${name}`, exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Share…', exact: true }).click();
+  await page.getByRole('tab', { name: 'Access' }).click();
+  await page.getByRole('button', { name: 'Permissions' }).click();
 }
 
 test('a thread on a person’s machine says what naming somebody there includes, before it is done', async ({ page }) => {
@@ -393,7 +376,7 @@ test('a thread on a person’s machine says what naming somebody there includes,
   await expect(dialog(page)).toContainText('They can make the agent act on Ada Lovelace’s machine and reach its files and a terminal there');
 });
 
-test('the Share action of each kind of resource opens the permission page of that resource', async ({ page }) => {
+test('the Access tab of each kind of resource opens the permission page of that resource', async ({ page }) => {
   await signIn(page, PEOPLE.ada);
   const resources = [
     [`/resources/providers/${RUNS_ON.openAiKey}`, 'OpenAI key'],
@@ -403,19 +386,9 @@ test('the Share action of each kind of resource opens the permission page of tha
     [`/resources/templates/${RUNS_ON.defaultTemplate}`, 'Default'],
   ] as const;
   for (const [path, name] of resources) {
-    await openFromResource(page, path, name);
-    const access = page.getByRole('dialog', { name: `Access to “${name}”` });
-    await expect(access).toBeVisible();
-    const people = access.getByRole('combobox', { name: 'Add people, groups or roles' });
-    await expect(people).toBeFocused();
-    const choosing = await people.getAttribute('aria-expanded') === 'true';
+    await openFromResource(page, path);
+    await expect(page.getByRole('dialog', { name: `Access to “${name}”` })).toBeVisible();
     await page.keyboard.press('Escape');
-    if (choosing) {
-      // Escape dismisses the focused picker's list before it dismisses the permission dialog.
-      await expect(people).toHaveAttribute('aria-expanded', 'false');
-      await expect(access).toBeVisible();
-      await page.keyboard.press('Escape');
-    }
     await expect(page.getByRole('dialog')).toHaveCount(0);
   }
 });
@@ -430,7 +403,7 @@ test('what goes with a permission is given in the same step where the caller man
 
   // A provider's page: the page itself is there, and the history, the people behind a chip and what a person holds say that they are not served yet.
   await page.keyboard.press('Escape');
-  await openFromResource(page, `/resources/providers/${RUNS_ON.openAiKey}`, 'OpenAI key');
+  await openFromResource(page, `/resources/providers/${RUNS_ON.openAiKey}`);
   const provider = page.getByRole('dialog', { name: 'Access to “OpenAI key”' });
   await expect(provider).toBeVisible();
   await expect(provider.getByRole('group', { name: 'Can use' })).toBeVisible();

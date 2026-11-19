@@ -6,8 +6,7 @@
  * or, in its place, the bar of a selection being made, or the sentence that says why the reader may not
  * write here. The chat is followed only while it is on screen.
  */
-import { ChatSummaries } from '@/features/summaries/ChatSummaries';
-import { messageReferenceText } from '@/features/chat/messageReference';
+import { useQuery } from '@tanstack/react-query';
 import { Lock, MessageSquareOff, Search } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -22,12 +21,12 @@ import { fetchMessages } from '@/api/chats';
 import { client } from '@/api/client';
 import { setReadPosition } from '@/api/people';
 import { ChatPeople } from '@/features/people/ChatPeople';
+import { orgsQuery } from '@/api/nodes';
 import { discard, pin, read, remove, toggleReaction } from '@/features/chat/acts';
 import { Bell } from '@/features/chat/Bell';
 import { ChatContext, type ChatContextValue, type MessageActions, usePeople } from '@/features/chat/context';
 import { Composer } from '@/features/chat/Composer';
 import { type Quote, partsOfDraft, useDraft } from '@/features/chat/draft';
-import { GroupHeading } from '@/features/chat/GroupHeading';
 import { GroupMenu } from '@/features/chat/GroupMenu';
 import { ChatMenu } from '@/features/export/ChatMenu';
 import { messagePowers } from '@/features/chat/Message';
@@ -41,9 +40,8 @@ import { inChat, readParams } from '@/features/search/params';
 import { useViewFind } from '@/features/search/ViewFind';
 import { useOpenPath } from '@/features/chat/open';
 import { SelectionBar, useSelection } from '@/features/forward/Selection';
-import { linkTo } from '@/lib/links';
-import type { Chat } from '@/api/chat-contract';
-import type { ChatMessage, SearchHit } from '@/generated/api-types';
+import { placeUrl } from '@/features/navigation/places';
+import type { Chat, ChatMessage, SearchHit } from '@/generated/api-types';
 import { chatWriter, refreshChatStates, reloadChat, useChatEntry, useChatFeed, useChatState, useChatStates, useChatStore } from '@/realtime/stores/chat';
 import { IconButton } from '@/ui/IconButton';
 import { Avatar } from '@/ui/Avatar';
@@ -156,9 +154,10 @@ function OpenChat({
   const entry = useChatEntry(chat.id);
   const state = useChatState(chat.id, chat.my);
   const people = usePeople(entry);
+  const orgsRead = useQuery(orgsQuery).data;
+  const orgs = useMemo(() => orgsRead ?? [], [orgsRead]);
   const visible = usePageVisible();
   const [readTo] = useState(opened);
-  const [summaryRange] = useState(() => ({ after: Math.max(0, Math.min(opened ?? 0, chat.last_message_seq)), through: chat.last_message_seq }));
   const selection = useSelection(entry.order);
   const draft = useDraft(chat.id, chat.can.send, shown);
   const addQuotes = draft.addQuotes;
@@ -226,6 +225,16 @@ function OpenChat({
   }, [lit]);
 
   // ---- links and copies
+  const linkTo = useCallback(
+    (id: string): string => {
+      if (chat.kind === 'node' && chat.node !== null) {
+        return `${placeUrl({ id: chat.node.id, kind: chat.node.kind })}?panel=chat&chat=${chat.id}&message=${id}`;
+      }
+      const org = orgs.find((one) => one.id === chat.org_id);
+      return `${location.origin}/org/${org?.address ?? chat.org_id}/messages?chat=${chat.id}&message=${id}`;
+    },
+    [chat, orgs],
+  );
   const copy = useCallback((text: string) => void copyText(text), []);
 
   const acts = useMemo<MessageActions>(
@@ -248,11 +257,7 @@ function OpenChat({
       forward: (target_) => setForwarding(forwardSource(chat, [target_])),
       select: (target_) => selection.start(target_.id),
       copyText: (target_) => copy(textOfParts(target_.parts)),
-      copyLink: (target_) => copy(linkTo({ kind: 'chat', id: target_.chat_id }, { message: target_.id })),
-      copyReference: (target_) => {
-        const written = messageReferenceText(target_, label);
-        if (written !== null) void copyText(written, t('people.reference.copied'));
-      },
+      copyLink: (target_) => copy(linkTo(target_.id)),
       jump: (id) => void jump(id),
       unread: (target_) => {
         suppressReads.current = true; setMarkedUnread(true);
@@ -263,7 +268,7 @@ function OpenChat({
     }),
     // `draft` and `selection` change with every keystroke and pick; what the actions use of them is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chat, label, me, jump, copy, draft.setReplyTo, selection.start, state, t],
+    [chat, me, jump, copy, linkTo, draft.setReplyTo, selection.start, state, t],
   );
 
   const picked = useMemo(() => new Set(selection.ids), [selection.ids]);
@@ -347,18 +352,16 @@ function OpenChat({
           <Pinned chatId={chat.id} onJump={(id) => void jump(id)} />
           <IconButton size="sm" label={t('search.find.chat')} icon={<Search aria-hidden />} onClick={find.show} />
           <IconButton size="sm" action="searchHistory" label={t('screenReview.searchChatHistory')} onClick={() => {
-            const params = inChat(readParams(Object.fromEntries(new URLSearchParams(location.search))), chat.id, chat.node?.id ?? chat.org_id, chat.org_id);
+            const params = inChat(readParams(Object.fromEntries(new URLSearchParams(location.search))), chat.id, chat.node?.id ?? chat.org_id);
             openPath(`/search?${new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => typeof entry[1] === 'string')).toString()}`);
           }} />
           {chat.kind === 'group' ? <GroupMenu chat={chat} me={me} onLeft={() => reloadChat(chat.id)} /> : <ChatMenu chat={chat} me={me} />}
           {actions}
           </div>
         </header>
-        {chat.kind === 'group' && <GroupHeading key={chat.id} chat={chat} />}
 
         <AdminReachNotice of={chat.can.admin_access?.place} private={privateAdminAccess(chat.can.admin_access)} object={{ kind: 'chat', id: chat.id }} />
 
-        <ChatSummaries id={chat.id} range={summaryRange} named={chat.name !== null} shown={shown} />
         {find.bar}
 
         <ChatPeople chat={chat} me={me} />

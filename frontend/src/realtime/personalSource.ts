@@ -22,10 +22,6 @@ export function dispatchPersonalEvent(apply: () => void): void {
 }
 export function retirePersonalEvents(): void { heldEvents.clear(); events = []; }
 
-function personalSourceError(error: unknown): Error {
-  return error instanceof Error ? error : new Error('The personal live source is unavailable', { cause: error });
-}
-
 /** An unavailable live transport must not take away authorized HTTP views.
  * A later accepted source still needs a new post-admission baseline.
  */
@@ -37,7 +33,7 @@ export function admittedOrOffline(ready: Promise<void>, status: RealtimeSocket['
     let leave: () => void = () => undefined;
     const finish = (accepted: boolean) => { if (settled) return; settled = true; leave(); resolve(accepted); };
     leave = status.subscribe(() => { if (unavailable()) finish(false); });
-    void ready.then(() => { finish(true); }, (error: unknown) => { if (!settled) { settled = true; leave(); reject(personalSourceError(error)); } });
+    void ready.then(() => { finish(true); }, (error: unknown) => { if (!settled) { settled = true; leave(); reject(error); } });
     if (unavailable()) finish(false);
   });
 }
@@ -56,7 +52,7 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
     completed = false;
     admission = new Promise<void>((resolve, reject) => {
       accept = () => { completed = true; resolve(); };
-      refuse = (error) => { completed = true; reject(personalSourceError(error)); };
+      refuse = (error) => { completed = true; reject(error); };
     });
     void admission.catch(() => undefined);
   };

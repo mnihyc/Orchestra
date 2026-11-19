@@ -46,7 +46,7 @@ it.each([true,false])('an exhausted provider remains selectable in the ordinary 
   const option=screen.getByRole('option',{name:compact?'Agent display name on Provider display name':'Provider display name'});
   expect(option).not.toHaveAttribute('aria-disabled','true');
   await userEvent.click(option);
-  expect(changed).toHaveBeenCalledWith({providerId:'target-provider',agentId:'agent',model:null,effort:undefined,arrangement:null,automaticRuns:compact?{}:{profile:{providerId:'target-provider',agentId:'agent',by:'first',previous:'unavailable'}}});
+  expect(changed).toHaveBeenCalledWith({providerId:'target-provider',agentId:'agent',model:null,effort:undefined,arrangement:null});
 });
 
 it.each(['needs_setup','error','offline','disabled','no_use'] as const)('keeps %s providers unavailable even when selecting a replacement',async(reason)=>{
@@ -77,8 +77,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`uses one named provider/profi
   await userEvent.click(choice);
   const name = locale === 'en' ? 'Agent display name on Provider display name' : 'Agent display name，使用 Provider display name';
   await userEvent.click(screen.getByRole('option', { name }));
-  expect(changed).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'agent', model: null, effort: undefined, arrangement: null, automaticRuns: {} });
-  expect(choice).toHaveValue(name);
+  expect(changed).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'agent', model: null, effort: undefined, arrangement: null });
+  expect(choice).toHaveTextContent(name);
   expect(screen.getByRole('combobox', { name: locale === 'en' ? 'Model' : '模型' })).toBeVisible();
 });
 
@@ -93,7 +93,7 @@ it('settles a switch when the new provider lists the same model as the current p
   show(<Form />);
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('private_route_to'));
   expect(changed).toHaveBeenCalledOnce();
-  expect(changed).toHaveBeenCalledWith({ model: 'private_route_to', effort: null, automaticRuns: { model: { providerId: 'target-provider', model: 'private_route_to', by: 'retained', replaced: false }, effort: { providerId: 'target-provider', model: 'private_route_to', value: null, by: 'unreported', replaced: false } } });
+  expect(changed).toHaveBeenCalledWith({ model: 'private_route_to', effort: null });
 });
 
 for (const locale of ['en', 'zh-CN'] as const) it(`keeps routing and harness keys out of the form and the open model list (${locale})`, async () => {
@@ -118,7 +118,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`keeps routing and harness key
   expect(screen.queryByText('private_route_to')).toBeNull();
   expect(screen.queryByText('private_route_other')).toBeNull();
   await user.click(screen.getByRole('option', { name: 'Second Model' }));
-  expect(changed).toHaveBeenLastCalledWith({ model: 'private_route_other', effort: null, automaticRuns: { profile: undefined, effort: { providerId: 'target-provider', model: 'private_route_other', value: null, by: 'unreported', replaced: false } } });
+  expect(changed).toHaveBeenLastCalledWith({ model: 'private_route_other', effort: null });
   expect(picker).toHaveTextContent('Second Model');
 });
 

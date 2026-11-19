@@ -1,5 +1,4 @@
 /** A cold owned-root entrance resolves both stale memories once before choosing its visible scope. */
-import type * as ClientModule from '@/api/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
 import { queryClient } from '@/api/query';
@@ -14,7 +13,7 @@ import { World } from '../doubles/world';
 const calls = vi.hoisted(() => ({ bootstrap: vi.fn<() => Promise<MeBootstrapReply>>(), get: vi.fn<(path: string, options?: { params?: { query?: { resolve_ids?: string } } }) => Promise<{ data: unknown; response: Response }>>() }));
 vi.mock('@/features/shared/Shared', () => ({ SharedScreen: () => null }));
 vi.mock('@/shell/bootstrap', () => ({ ensureShellBootstrap: calls.bootstrap }));
-vi.mock('@/api/client', async (original) => { const actual = await original<typeof ClientModule>(); return { ...actual, api: { ...actual.api, GET: calls.get } }; });
+vi.mock('@/api/client', async (original) => { const actual = await original<typeof import('@/api/client')>(); return { ...actual, api: { ...actual.api, GET: calls.get } }; });
 const previous = client.session.getState();
 afterEach(() => { queryClient.clear(); scheduledReads.advance(); localStorage.clear(); client.session.setState(previous); });
 

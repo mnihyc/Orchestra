@@ -139,9 +139,6 @@ struct FakeControl {
     done: tokio::sync::watch::Receiver<bool>,
     stop: Arc<Notify>,
     state: Arc<FakeState>,
-    // Each process owns its channels even after the fixture addresses a newer process.
-    _inject: mpsc::UnboundedSender<Json>,
-    _raw: mpsc::UnboundedSender<String>,
 }
 
 #[async_trait]
@@ -177,7 +174,7 @@ impl FakeLauncher {
                 inject: Mutex::new(None),
                 raw: Mutex::new(None),
                 stop: Mutex::new(None),
-                version: Mutex::new("0.167.2".to_owned()),
+                version: Mutex::new("0.165.0".to_owned()),
                 stderr: Mutex::new(String::new()),
                 exit_on_initialize: Mutex::new(false),
                 initialize_delay: Mutex::new(Duration::ZERO),
@@ -201,9 +198,9 @@ impl Launcher for FakeLauncher {
         let (adapter_writes, harness_reads) = duplex(1 << 20);
         let (harness_writes, adapter_reads) = duplex(1 << 20);
         let (inject, mut injected) = mpsc::unbounded_channel::<Json>();
-        *self.state.inject.lock().unwrap() = Some(inject.clone());
+        *self.state.inject.lock().unwrap() = Some(inject);
         let (raw_inject, mut raw_injected) = mpsc::unbounded_channel::<String>();
-        *self.state.raw.lock().unwrap() = Some(raw_inject.clone());
+        *self.state.raw.lock().unwrap() = Some(raw_inject);
         let (done_sender, done) = tokio::sync::watch::channel(false);
         *self.state.process_exit.lock().unwrap() = Some(done_sender.clone());
         let stop = Arc::new(Notify::new());
@@ -284,8 +281,6 @@ impl Launcher for FakeLauncher {
                 done,
                 stop,
                 state: Arc::clone(&self.state),
-                _inject: inject,
-                _raw: raw_inject,
             }),
         })
     }
