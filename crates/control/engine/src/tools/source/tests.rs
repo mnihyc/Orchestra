@@ -653,6 +653,7 @@ impl Scene {
                 let dir = body.path != "web/out/result.bin";
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: if dir { "web" } else { "result.bin" }.into(),
                             path: body.path.clone(),
@@ -705,6 +706,7 @@ impl Scene {
                 }
                 Ok(CommandResult::FsFetch(
                     orch_link_contract::commands::FsFetchResult {
+                        minimum_reach: orch_link_contract::policy::FileReach::Roots,
                         hash: blob,
                         size,
                         mtime_ns: at.get().timestamp_nanos_opt().ok_or_else(|| {
@@ -734,6 +736,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -1845,6 +1849,7 @@ async fn download_peer(
             })?;
             Ok(CommandResult::FsWrite(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "copied-doc.md".into(),
                         path: body.path.clone(),
@@ -1899,6 +1904,7 @@ async fn download_peer(
             };
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: if is_source {
                             "result.bin"
@@ -1940,6 +1946,69 @@ async fn admitted_download(cancel_live: bool) -> Proof {
     let scene = Scene::new().await?;
     let (native, destination, _export) = download_peer(&scene, cancel_live).await?;
     let environment = scene.world.environment;
+    let observed_source = scene.directory.path().join("out/result.bin");
+    let observed_destination = destination.clone();
+    let expected_source = scene.blob;
+    let thread = scene.thread;
+    let turn = scene.start.turn_id;
+    let sealed = Mutex::new(None::<orch_link_contract::source::WorkspaceObserveResult>);
+    // This peer exposes only the original source and the download destination. Observe their
+    // real unchanged baseline before admission is released, then publish that same sealed fact.
+    scene
+        .world
+        .machine
+        .handler
+        .on(CommandKind::WorkspaceObserve, move |command| {
+            let Command::WorkspaceObserve(body) = command else {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "wrong native observation",
+                ));
+            };
+            if body.environment_id != environment
+                || body.thread_id != thread
+                || body.turn_id != Some(turn)
+                || body.directory != "web"
+            {
+                return Err(CommandError::new(
+                    ErrorCode::NotFound,
+                    "the native observation names another source",
+                ));
+            }
+            let mut sealed = sealed.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(requested) = &body.sealed {
+                if sealed.as_ref() != Some(requested) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the original native observation changed",
+                    ));
+                }
+                return Ok(CommandResult::WorkspaceObserve(requested.clone()));
+            }
+            if let Some(observed) = sealed.as_ref() {
+                return Ok(CommandResult::WorkspaceObserve(observed.clone()));
+            }
+            let bytes = std::fs::read(&observed_source).map_err(|_| {
+                CommandError::new(ErrorCode::NotFound, "the original native source is absent")
+            })?;
+            if Hash::of(&bytes) != expected_source
+                || !std::fs::symlink_metadata(&observed_destination)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native download namespace changed before its original observation",
+                ));
+            }
+            let observed = orch_link_contract::source::WorkspaceObserveResult {
+                end_patch_blob: None,
+                end_manifest_blob: None,
+                changed_paths: Some(Vec::new()),
+                changed_paths_complete: true,
+            };
+            *sealed = Some(observed.clone());
+            Ok(CommandResult::WorkspaceObserve(observed))
+        });
     let call = "durably-admitted-download";
     let canonical = crate::ids::tool_result(scene.thread, call);
     let (admitted, release) = gate(scene.thread, &canonical.to_string(), Point::Native);
@@ -3347,6 +3416,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     let environment = scene.world.environment;
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             environment_id: environment,
             workspace_root: Some(root.display().to_string()),
             resources: None,

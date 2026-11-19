@@ -37,3 +37,33 @@ it.each(['en', 'zh-CN'] as const)('announces an export cancellation and its plac
     view.unmount(); cache.clear();
   }
 });
+
+it.each(['en', 'zh-CN'] as const)('announces the actual partial result before offering its download in %s', async (locale) => {
+  await setLocale(locale);
+  watchExport(job, 'Team work');
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  cache.setQueryData(jobQuery(job.id).queryKey, { ...job, state: 'succeeded', result: { export_id: 'archive', omitted_items: 2 } });
+  const view = show(<QueryClientProvider client={cache}><Watch /></QueryClientProvider>);
+  try {
+    expect(await screen.findByText(locale === 'en' ? 'Team work: partial export · report included' : 'Team work：部分导出 · 内含报告')).toBeVisible();
+    expect(screen.getByRole('button', { name: locale === 'en' ? 'Download partial' : '下载部分导出' })).toBeVisible();
+    expect(useWatched.getState().items).toMatchObject([{ state: 'ready', exportId: 'archive', omitted: 2 }]);
+  } finally {
+    for (const button of screen.queryAllByRole('button', { name: i18n.t('common.dismiss') })) fireEvent.click(button);
+    view.unmount(); cache.clear();
+  }
+});
+
+it('keeps an unavailable omission count unknown instead of reporting a complete archive', async () => {
+  watchExport(job, 'Team work');
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  cache.setQueryData(jobQuery(job.id).queryKey, { ...job, state: 'succeeded', result: { export_id: 'archive', omitted_items: null } });
+  const view = show(<QueryClientProvider client={cache}><Watch /></QueryClientProvider>);
+  try {
+    expect(await screen.findByText('Team work: ready · omission count unavailable')).toBeVisible();
+    expect(useWatched.getState().items).toMatchObject([{ state: 'ready', exportId: 'archive', omitted: null }]);
+  } finally {
+    for (const button of screen.queryAllByRole('button', { name: i18n.t('common.dismiss') })) fireEvent.click(button);
+    view.unmount(); cache.clear();
+  }
+});

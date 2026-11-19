@@ -48,6 +48,68 @@ fn fixture() -> (Registry, ThreadContext, OfferingRef) {
 }
 
 #[test]
+fn a_thousand_capability_resolutions_compile_one_route_declaration_and_check_each_offering() {
+    use orch_types::schema::{CacheLimits, check, testing::observe_compilations};
+    use std::sync::atomic::Ordering;
+
+    let (mut registry, mut context, _) = fixture();
+    let mut bundle = registry.extension("fixture").unwrap().clone();
+    let schema = json!({"$comment":new_id().to_string(), "required":["available_here"],
+        "properties":{"available_here":{"const":true}}});
+    let count = observe_compilations(&schema);
+    bundle
+        .interfaces
+        .get_mut("fixture-generation")
+        .unwrap()
+        .native_tools
+        .get_mut("lookup")
+        .unwrap()
+        .eligible_when = schema.clone();
+    bundle.routes.get_mut("native").unwrap().eligible_when = schema;
+    registry.register("fixture", bundle).unwrap();
+
+    for i in 0..1_000 {
+        if i == 1 {
+            // A live declaration still belongs to its registry after unrelated forms fill the idle cache.
+            for field in 0..=CacheLimits::default().entries {
+                check(&json!({"const":field})).unwrap();
+            }
+        }
+        let available = i % 2 == 0;
+        context.facts = json!({"available_here":available});
+        let result = registry.resolve(&context);
+        assert_eq!(result[0].route.is_some(), available);
+        if !available {
+            assert_eq!(result[0].reason.as_deref(), Some("route_not_applicable"));
+        }
+    }
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+
+    let previous = registry.clone();
+    let mut edited = registry.extension("fixture").unwrap().clone();
+    edited.routes.get_mut("native").unwrap().eligible_when = json!(false);
+    registry.register("fixture", edited).unwrap();
+    context.facts = json!({"available_here":true});
+    assert!(registry.resolve(&context)[0].route.is_none());
+    assert!(previous.resolve(&context)[0].route.is_some());
+}
+
+#[test]
+fn the_shipped_schema_check_includes_endpoint_predicates_while_unrelated_routes_remain_usable() {
+    let (mut registry, context, _) = fixture();
+    let mut extra = Declarations::default();
+    extra.endpoint_rules.push(EndpointRule {
+        when: json!({"type":"invalid"}),
+        ..EndpointRule::default()
+    });
+    registry.register("extra", extra).unwrap();
+    assert!(registry.check_route_schemas().is_err());
+    assert!(registry.resolve(&context)[0].route.is_some());
+    assert!(registry.remove("extra"));
+    assert!(registry.check_route_schemas().is_ok());
+}
+
+#[test]
 fn one_thread_resolution_keeps_native_defaults_and_requires_an_exact_explicit_paid_backend() {
     let (registry, mut context, reference) = fixture();
     let native = registry.resolve(&context);
@@ -437,7 +499,7 @@ fn fallback_previews_use_call_rules_without_selecting_a_service_or_exposing_priv
         .unwrap()
         .recovery_purpose = Some("web_search".into());
     registry.register("fixture", declaration).unwrap();
-    let candidate = json!({"provider_id":reference.provider,"model":"","route":{"route":"auxiliary","offering":reference,"config":{"private":"never-publish"}},"params":{"private":"never-publish"}});
+    let candidate = json!({"target":{"type":"single","resource":{"kind":"model","backend":{"route":"auxiliary","offering":reference,"config":{"private":"never-publish"}}}},"params":{"private":"never-publish"}});
     context.recovery=Some(RecoveryPolicy { scope:"org".into(),rules:crate::calls::validate(&json!([{"id":"lookup-fallback","when":{"kind":"unavailable","purpose":"web_search"},"steps":[{"type":"failover","candidate":candidate}]}])).unwrap() });
     let rows = registry.resolve(&context);
     assert_eq!(rows[0].route.as_ref().unwrap().kind, "native-model");
@@ -1243,6 +1305,7 @@ fn a_selected_backend_uses_its_actual_endpoint_and_ceiling_without_rebinding_the
         "service",
         "auxiliary",
         true,
+        &registry.predicates,
     )
     .unwrap();
     assert_eq!(
@@ -1275,6 +1338,7 @@ fn a_selected_backend_uses_its_actual_endpoint_and_ceiling_without_rebinding_the
         "live",
         "native",
         true,
+        &registry.predicates,
     )
     .unwrap();
     assert_eq!(native.facts["endpoint"]["interface"], "fixture-generation");
@@ -1428,4 +1492,77 @@ fn a_native_delegated_backend_has_no_wire_endpoint_and_keeps_its_own_denial() {
         registry.declarations().providers[&reference.provider],
         primary
     );
+}
+
+#[test]
+fn a_host_pool_cannot_be_submitted_as_a_model_choice() {
+    use crate::pools::{Kind, Target};
+    let target = Target::Pool {
+        id: new_id(),
+        kind: Kind::Host,
+    };
+    assert!(target.validate(Kind::Model).is_err());
+    assert!(target.validate(Kind::Host).is_ok());
+}
+
+#[test]
+fn two_native_placements_of_one_model_remain_distinct_choices() {
+    use crate::pools::{Leaf, Target};
+    let (_, _, offering) = fixture();
+    let first = Target::Single {
+        resource: Leaf::Model {
+            backend: BackendRef {
+                route: "program-session".into(),
+                offering: Some(offering.clone()),
+                config: json!({"environment_id": new_id()}),
+                ..BackendRef::default()
+            },
+        },
+    };
+    let second = Target::Single {
+        resource: Leaf::Model {
+            backend: BackendRef {
+                route: "program-session".into(),
+                offering: Some(offering),
+                config: json!({"environment_id": new_id()}),
+                ..BackendRef::default()
+            },
+        },
+    };
+    assert_ne!(first.identity().unwrap(), second.identity().unwrap());
+    let reordered: Target = serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+    assert_eq!(first.identity().unwrap(), reordered.identity().unwrap());
+}
+
+#[test]
+fn a_pool_member_cannot_change_the_kind_of_its_parent() {
+    use crate::pools::{Kind, Leaf, MemberRule};
+    let member = MemberRule::Single {
+        resource: Leaf::Host { id: new_id() },
+    };
+    assert!(member.validate(Kind::Environment).is_err());
+    assert!(member.validate(Kind::Host).is_ok());
+    let nested = MemberRule::Pool {
+        id: new_id(),
+        kind: Kind::Provider,
+    };
+    assert!(nested.validate(Kind::Model).is_err());
+}
+
+#[test]
+fn an_enabled_pool_needs_an_explicit_selection_policy() {
+    use crate::pools::{Definition, Kind, Policy};
+    let mut pool = Definition {
+        kind: Kind::Model,
+        enabled: false,
+        policy: None,
+        lend_members: false,
+        members: vec![],
+        config: json!({}),
+    };
+    assert!(pool.validate().is_ok());
+    pool.enabled = true;
+    assert!(pool.validate().is_err());
+    pool.policy = Some(Policy::Ordered);
+    assert!(pool.validate().is_ok());
 }

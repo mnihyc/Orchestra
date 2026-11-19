@@ -1,6 +1,6 @@
 /** What an environment's own feed changes on its screen: the environment a frame carries takes the place of the one held, a frame of jobs alone leaves it, and being followed anew reads it again. */
-import { QueryClient } from '@tanstack/react-query';
-import { describe, expect, it } from 'vitest';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
+import { describe, expect, it, vi } from 'vitest';
 
 import { environmentKey } from '@/api/environments';
 import type { Environment } from '@/generated/api-types';
@@ -39,4 +39,25 @@ describe("an environment's own feed", () => {
     applyEnvironmentFrame(client, ID, { op: 'resync', id: 1, feed: environmentFeed(ID) } as unknown as FeedFrame);
     expect(client.getQueryState(environmentKey(ID))?.isInvalidated).toBe(false);
   });
+});
+
+it('retakes open native configuration rows when their discovered names change', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const rows = vi.fn(() => Promise.resolve('current configurations'));
+  const other = vi.fn(() => Promise.resolve('other configurations'));
+  const key = ['environment-mcp', ID, 'thread'];
+  const otherKey = ['environment-mcp', 'another-environment', 'thread'];
+  client.setQueryData(environmentKey(ID), { ...environment('running'), mcp_found: [] });
+  client.setQueryData(key, 'old configurations'); client.setQueryData(otherKey, 'old other configurations');
+  const stop = new QueryObserver(client, { queryKey: key, queryFn: rows, staleTime: Infinity }).subscribe(() => undefined);
+  const stopOther = new QueryObserver(client, { queryKey: otherKey, queryFn: other, staleTime: Infinity }).subscribe(() => undefined);
+  try {
+    const current = { ...environment('running'), mcp_found: [{ name: 'docs', source: 'codex', scope: 'user', directory: null, transport: 'stdio', imported: null }] };
+    applyEnvironmentFrame(client, ID, sync(10, { environment: current, jobs: [] }));
+    await vi.waitFor(() => expect(rows).toHaveBeenCalledOnce());
+    expect(other).not.toHaveBeenCalled();
+    applyEnvironmentFrame(client, ID, sync(11, { environment: current, jobs: [] }));
+    await Promise.resolve();
+    expect(rows).toHaveBeenCalledOnce();
+  } finally { stop(); stopOther(); client.clear(); }
 });
