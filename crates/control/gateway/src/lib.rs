@@ -70,9 +70,6 @@ use tokio_util::sync::CancellationToken;
 /// How long what is under way is let finish when the gateway is told to
 /// stop.
 const DRAIN: Duration = Duration::from_secs(10);
-/// The oldest connector until the system says otherwise: the first release,
-/// which spoke this protocol.
-const FIRST_CONNECTOR_VERSION: &str = "0.1.0";
 
 /// What a gateway is configured with, apart from its certificates.
 #[derive(Debug, Clone)]
@@ -110,6 +107,8 @@ impl Settings {
             limits: Limits {
                 max_frame_bytes: u32::try_from(config.link.max_frame_bytes)
                     .unwrap_or(defaults.max_frame_bytes),
+                max_message_bytes: u32::try_from(config.link.max_message_bytes)
+                    .unwrap_or(defaults.max_message_bytes),
                 tunnel_window_bytes: u32::try_from(config.link.tunnel_window_bytes)
                     .unwrap_or(defaults.tunnel_window_bytes),
                 max_channels: MAX_CHANNELS,
@@ -224,10 +223,8 @@ impl Gateway {
         )?;
         let api = ApiState {
             limits: settings.limits,
-            versions: ConnectorVersions {
-                min: FIRST_CONNECTOR_VERSION.to_owned(),
-                recommended: FIRST_CONNECTOR_VERSION.to_owned(),
-            },
+            // Until the system says otherwise, the same as a system of this gateway's own release says.
+            versions: ConnectorVersions::of_release(&settings.version),
         };
         let started_at = clock.time();
         Ok(Self {

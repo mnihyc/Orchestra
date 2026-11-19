@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-api-base --lib -- key_operations::native::thread_openings::tests::
+test -p orch-api-core --lib
+test -p orch-api-core --test everything_scale -- --nocapture --test-threads=1
+test -p orch-api-core --test thread_opening_scopes --test threads_read --test people_scale --test transaction_guards
+test -p orch-api-core --test creation_replays --test personal
