@@ -2,6 +2,7 @@
 import { useCallback, useMemo } from 'react';
 import type { UsageDimension } from '@/generated/api-types';
 import { useRememberedView } from '@/lib/viewChoices';
+import { bindDeviceChoiceFields } from '@/lib/viewChoiceFacts';
 import { DEFAULT_MEASURE, DEFAULT_RANGE, DEFAULT_SPLIT, RANGES, DIMENSIONS, SPLITS, type UsageSearch, type Measure, type Split } from './search';
 
 export type SearchPatch = { [Key in keyof UsageSearch]?: UsageSearch[Key] | undefined };
@@ -39,5 +40,5 @@ export function useUsageChoices(raw: UsageSearch, kind: 'usage' | 'providerUsage
     if (patch.range !== undefined) keepRange(patch.range);
   },[keepView,keepShow,keepSeries,keepBucket,keepPlan,keepPlanMetric,keepPlanBucket,keepBy,keepRange]);
   const search=useMemo(()=>({...raw,view,show,series,bucket,plan,plan_metric:planMetric,plan_bucket:planBucket,by,range}),[raw,view,show,series,bucket,plan,planMetric,planBucket,by,range]);
-  return [search,keep];
+  return [search,bindDeviceChoiceFields(keep, { view: keepView, show: keepShow, series: keepSeries, bucket: keepBucket, plan: keepPlan, plan_metric: keepPlanMetric, plan_bucket: keepPlanBucket, by: keepBy, range: keepRange })];
 }

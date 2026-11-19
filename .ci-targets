@@ -1,0 +1,3 @@
+fmt
+test -p orch-engine --test caps --test caps_models --test initial_files --test volume_carry
+test -p orch-engine --lib --test forks --test environment_moves --test machine_moves -- --skip history_pages::

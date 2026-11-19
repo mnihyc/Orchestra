@@ -416,6 +416,68 @@ async fn an_attach_the_machine_refuses_fails_the_directory_with_what_it_said_and
 }
 
 #[tokio::test]
+async fn an_attach_retry_keeps_its_captured_time_when_an_unrelated_environment_edit_arrives() {
+    let world = World::new().await;
+    let (laptop, environment) = laptop_with_directory(&world, &["agent", "environment"]).await;
+    laptop.refuse_attach_then_hold(CommandError::new(
+        ErrorCode::PolicyRootNotAllowed,
+        "its owner offers no such directory",
+    ));
+    world.set_machine_online(laptop.id, true).await;
+    wait_status(&world, environment, "failed").await;
+    let captured: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT facts->'attach_retry' FROM environments WHERE id=$1")
+            .bind(environment)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    let captured = captured.expect("a refused attach retains its actual retry receipt");
+    let attempted: chrono::DateTime<Utc> =
+        serde_json::from_value(captured["last_attempt_at"].clone()).unwrap();
+    let eligible: chrono::DateTime<Utc> =
+        serde_json::from_value(captured["next_eligible_at"].clone()).unwrap();
+    let pause = chrono::Duration::from_std(common::config().hosting.attach_retry).unwrap();
+    assert_eq!(eligible - attempted, pause);
+    assert!(
+        captured["last_problem"]
+            .as_str()
+            .unwrap()
+            .contains("policy.root_not_allowed")
+    );
+    assert!(captured["revision"].as_i64().unwrap() > 0);
+    // A metadata edit after this retry is eligible cannot start a fresh wait.
+    sqlx::query("UPDATE environments SET updated_at=$2 WHERE id=$1")
+        .bind(environment)
+        .bind(eligible + pause)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let mut conn = world.pool.acquire().await.unwrap();
+    let due =
+        orch_db::queries::environments::hosting::connected_out_of_step(&mut conn, eligible, 200)
+            .await
+            .unwrap();
+    assert!(due.iter().any(|row| row.id == environment));
+    drop(conn);
+    eventually("the captured attach retry", || async {
+        laptop.began(K::EnvAttach) == 2
+    })
+    .await;
+    laptop.let_go();
+    wait_status(&world, environment, "running").await;
+    let cleared: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT facts->'attach_retry' FROM environments WHERE id=$1")
+            .bind(environment)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert!(
+        cleared.is_none(),
+        "a successful attach retires its old refusal"
+    );
+}
+
+#[tokio::test]
 async fn a_machine_that_does_not_serve_environments_cannot_have_a_directory_attached() {
     let world = World::new().await;
     let (laptop, environment) = laptop_with_directory(&world, &["agent"]).await;
@@ -458,6 +520,48 @@ async fn a_turn_waits_for_the_attach_of_its_directory_and_runs_when_it_is_up() {
     )
     .await;
     assert_eq!(world.state(thread).await.0, "starting");
+    eventually(
+        "the actual attach to publish its current preparation",
+        || async {
+            let mut conn = world.pool.acquire().await.unwrap();
+            orch_engine::environment_preparation::of_thread(&mut conn, thread, environment)
+                .await
+                .unwrap()
+                .is_some()
+        },
+    )
+    .await;
+    let preparation = orch_engine::environment_preparation::of_thread(
+        &mut world.pool.acquire().await.unwrap(),
+        thread,
+        environment,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        preparation.kind,
+        orch_api_contract::threads::EnvironmentPreparationKind::Attach
+    );
+    assert!(
+        preparation.actual_command.is_some(),
+        "a real attach command owns the status"
+    );
+    assert!(
+        preparation.actual_job.is_none(),
+        "the connected attach is not a fabricated job"
+    );
+    assert!(
+        orch_engine::environment_preparation::of_thread(
+            &mut world.pool.acquire().await.unwrap(),
+            thread,
+            world.provider
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "a later associated environment cannot lend facts to another selected body"
+    );
     // The shared provider process can be up for discovery; directory sessions still wait for attach.
     assert_eq!(world.ran(K::SessionOpen), 0);
     assert_eq!(world.ran(K::TurnStart), 0);
@@ -487,6 +591,17 @@ async fn a_turn_waits_for_the_attach_of_its_directory_and_runs_when_it_is_up() {
     )
     .await;
     assert_eq!(status(&world, environment).await.0, "running");
+    assert!(
+        orch_engine::environment_preparation::of_thread(
+            &mut world.pool.acquire().await.unwrap(),
+            thread,
+            environment
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "successful preparation retires its active status"
+    );
     let start = world.turn_start(thread, 0).await;
     let input: Id = world
         .scalar("SELECT input_id FROM turns WHERE id=$1", start.turn_id)

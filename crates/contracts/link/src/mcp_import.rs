@@ -14,6 +14,9 @@ pub const MAX_PENDING: usize = 16;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpImportAsk {
+    /// The exact hosted profile selected by native discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<orch_agent_contract::discovery::McpProfile>,
     /// Correlation and replay key, also the identifier of the copy the system files.
     pub request_id: Id,
     /// A registered environment on this authenticated machine; supplies the discovered configuration's context.
@@ -105,6 +108,7 @@ mod tests {
     #[test]
     fn native_tool_requests_keep_import_bytes_and_distinguish_forget_without_an_actor() {
         let old = McpImportAsk {
+            profile: None,
             request_id: new_id(),
             environment_id: new_id(),
             source: "fake".into(),
