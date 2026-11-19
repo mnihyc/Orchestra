@@ -8,20 +8,16 @@
  * an answer of the API is an answer, and is never asked for again by itself. A write is not repeated
  * here at all: whoever makes one that is safe to repeat says so by its key.
  */
-import { QueryClient, type InvalidateOptions, type InvalidateQueryFilters, type QueryKey } from '@tanstack/react-query';
+import { QueryClient, type InvalidateOptions, type InvalidateQueryFilters, type QueryClientConfig, type QueryKey } from '@tanstack/react-query';
 
-import { ApiError } from '@/api/client';
-import { scheduledReads } from '@/api/readScheduler';
+import { ApiError, client } from '@/api/client';
+import { shellBootstrapIndex } from '@/api/bootstrapIndex';
+import { scheduledReads, startingRead } from '@/api/readScheduler';
 import { NetworkError, retryPause, retryRead } from '@/lib/requests';
 import { setOrchLinkSource, type OrchLinkAddresses } from '@/lib/orchLinks';
-
-/**
- * How long an answer counts as fresh. Within it a screen that is opened again shows what it has and
- * asks nothing; after it the screen shows what it has and asks behind it. Half a minute covers going
- * back and forth between two screens without a request each time, and nothing a person acts on is
- * read from here alone: what changes while they look arrives by the live connection.
- */
-const FRESH_FOR_MS = 30_000;
+import { readFreshness, readFreshnessSettings } from '@/api/freshness';
+import { holdAwaitedRead, observeReadAttempts, queryRead } from '@/api/reads';
+import { observedRetryDelay, requestReader } from '@/lib/readAttempts';
 
 /** How long an answer nobody shows is kept: long enough to come back to a screen and find it there. */
 const KEPT_FOR_MS = 5 * 60_000;
@@ -36,6 +32,32 @@ export interface ReadOptions {
  * A person's explicit Retry/Refresh still calls that query's refetch directly.
  */
 export class LiveQueryClient extends QueryClient {
+  constructor(config?: QueryClientConfig) {
+    super(config);
+    shellBootstrapIndex(this.getQueryCache());
+  }
+
+  private wrapped = new WeakSet<object>();
+  override query: QueryClient['query'] = (options) => {
+    const reading = super.query(options);
+    const query = this.getQueryCache().find({ queryKey: options.queryKey, exact: true });
+    const release = query === undefined || query.state.fetchStatus === 'idle' ? () => undefined : holdAwaitedRead(this, query);
+    return reading.finally(release);
+  };
+  override defaultQueryOptions: QueryClient['defaultQueryOptions'] = (options) => {
+    observeReadAttempts(this);
+    const configured = super.defaultQueryOptions(options);
+    const defaults = { ...configured, ...(configured.staleTime === undefined ? { staleTime: () => readFreshness(options.queryKey) } : {}), ...startingRead(options.queryKey) };
+    const read = defaults.queryFn;
+    if (typeof read !== 'function' || this.wrapped.has(read)) return defaults;
+    const wrapped: typeof read = (context) => {
+      const reader = client.session.getState();
+      return queryRead(this, context.queryKey, () => read(context), requestReader(reader.userId, reader.readerVersion));
+    };
+    this.wrapped.add(wrapped);
+    return { ...defaults, queryFn: wrapped, ...(defaults.retryDelay === undefined ? {} : { retryDelay: observedRetryDelay(defaults.retryDelay) }) };
+  };
+
   override async invalidateQueries<Key extends QueryKey = QueryKey>(filters: InvalidateQueryFilters<Key> = {}, options?: InvalidateOptions): Promise<void> {
     if (filters.exact !== true) return;
     await super.invalidateQueries(filters, options);
@@ -45,7 +67,7 @@ export class LiveQueryClient extends QueryClient {
 export const queryClient = new LiveQueryClient({
   defaultOptions: {
     queries: {
-      staleTime: FRESH_FOR_MS,
+      staleTime: (query) => readFreshness(query.queryKey),
       gcTime: KEPT_FOR_MS,
       retry: retryRead,
       retryDelay: (attempt) => retryPause(attempt),
@@ -65,9 +87,18 @@ export const queryClient = new LiveQueryClient({
 });
 
 setOrchLinkSource(() => queryClient.getQueryData<OrchLinkAddresses>(['meta']));
+readFreshnessSettings(() => {
+  const meta = queryClient.getQueryData<{ interface_defaults?: { read_freshness_ms?: Record<string, unknown> } }>(['meta']);
+  const state = queryClient.getQueryData<Record<string, unknown>>(['me-state']);
+  const own = typeof state?.interface === 'object' && state.interface !== null && !Array.isArray(state.interface) ? state.interface : {};
+  const windows = 'read_freshness_ms' in own ? own.read_freshness_ms : undefined;
+  return { ...meta?.interface_defaults?.read_freshness_ms, ...(typeof windows === 'object' && windows !== null && !Array.isArray(windows) ? windows : {}) };
+});
 
 queryClient.getQueryCache().subscribe((event) => {
   if (event.type === 'removed') {
+    const current = queryClient.getQueryCache().get(event.query.queryHash);
+    if (current !== undefined && current !== event.query) return;
     const key: unknown = event.query.queryKey;
     if (Array.isArray(key)) scheduledReads.release(key);
   }
