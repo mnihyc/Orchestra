@@ -77,8 +77,7 @@ normal and QA binary consistency, final process cleanup and exact owned-image re
 same clean frozen candidate. The combined64-live/16-waiting impaired-native case is still missing: the index explicitly keeps
 `wss_release_gate_qualified:false` even after all attributed stream cases pass. Existing native
 capacity/window/resume controls are complementary evidence, not a substitute for that combined case.
-See [RUNBOOK.md](RUNBOOK.md) for the input seal and finite commands; source presence and pure controls
-are not runtime qualification.
+Source presence and pure controls are not runtime qualification.
 
 Evidence survives stack cleanup under `.tmp/deploy-smoke/evidence/<run>/linkload`: exact candidate
 manifest and connector hash, image identities, qdisc configuration and counters, both ends' counts
@@ -118,7 +117,7 @@ a fresh candidate pass. Every integration round also records its own `deny=` sta
 `python3 -m unittest discover -s scripts/smoke/link-load -p 'test_*.py'` checks evidence rejection,
 not product transport. No execution is claimed by the presence of these runners; an integrator
 must retain a successful released-stack run before calling the release transfer proof complete.
-The default-off [dedicated observer controls](OBSERVERS.md) provide the exact real-TLS ACK and
+The default-off dedicated observer controls provide the exact real-TLS ACK and
 selected queue hooks for a separately reviewed test invocation. Their loopback receipt always
 remains partial; the hooks alone do not qualify the full mixed runtime path.
 The pure tests cover protocol/evidence rejection only and do not execute sockets, kernels,

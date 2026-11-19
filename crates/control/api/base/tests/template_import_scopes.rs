@@ -558,6 +558,7 @@ fn gate(s: &mut Scene, at: GateAt) -> Arc<Barrier> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(store.clone(), store.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
