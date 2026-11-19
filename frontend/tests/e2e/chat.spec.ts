@@ -243,7 +243,8 @@ test('several people make a group with a name; an admin who leaves reads on, rea
   await chatSurface(page).getByRole('button', { name: 'Actions', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Leave group' }).click();
   await page.getByRole('button', { name: 'Leave group' }).last().click();
-  await expect(chatSurface(page).getByRole('img', { name: 'You see this as an admin of Acme' })).toBeVisible();
+  await expect(page.locator('[data-screen-titlebar]:visible').getByRole('switch', { name: 'As admin: On' })).toBeChecked();
+  await expect(chatSurface(page).locator('[data-as-admin-mark]')).toHaveCount(0);
   await expect(page.getByText('Ada Lovelace left')).toBeVisible();
   await expect(page.getByText('Nobody has written here yet.')).toBeVisible();
   await expect(composer(page)).toHaveCount(0);
@@ -462,7 +463,7 @@ test('a reader who may not read the timeline is told that an item was quoted, an
   await expect(bar.getByText('A secret step')).toHaveCount(0);
 });
 
-test('an admin reads a chat among others without being in it: read-only, with the sentence that says so, and unseen by the others', async ({ page, browser, baseURL }) => {
+test('an admin reads a chat among others without being in it: read-only, with the session mode in the title bar, and unseen by the others', async ({ page, browser, baseURL }) => {
   await signIn(page);
   const made = await chats('/chat', { org: ACME.org, members: ['dora', 'linus'], name: 'Secret plans' });
   await chats('/say', { chat: made.chat, as: 'dora', text: 'Do not tell Ada yet' });
@@ -475,7 +476,8 @@ test('an admin reads a chat among others without being in it: read-only, with th
   await page.getByRole('link', { name: 'Secret plans' }).click();
 
   await expect(messageSaying(page, 'Do not tell Ada yet')).toBeVisible();
-  await expect(chatSurface(page).getByRole('img', { name: /You see this as an admin of/ })).toBeVisible();
+  await expect(page.locator('[data-screen-titlebar]:visible').getByRole('switch', { name: 'As admin: On' })).toBeChecked();
+  await expect(chatSurface(page).locator('[data-as-admin-mark]')).toHaveCount(0);
   await expect(composer(page)).toHaveCount(0);
 
   // Dora has the chat open: she is told of nobody looking over it.

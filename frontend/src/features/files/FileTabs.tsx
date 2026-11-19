@@ -16,7 +16,6 @@ import { openContent, type ContentHistory } from '@/features/workbench/contentNa
 import type { ViewProps } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { writeViewChoice } from '@/lib/viewChoices';
-import { useViewportShape } from '@/features/workbench/Narrow';
 import { Button } from '@/ui/Button';
 import { CopyButton } from '@/ui/CopyButton';
 import { EmptyState } from '@/ui/EmptyState';
@@ -24,6 +23,7 @@ import { ErrorBoundary } from '@/ui/ErrorBoundary';
 import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Menu } from '@/ui/Menu';
+import { DeviceChoiceException, DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { viewerDragOver, viewerDrop } from '@/lib/drop';
 
@@ -34,7 +34,7 @@ import { downloadFile, invalidateHead, useFileHead } from './content';
 import { lazyPart } from './lazy';
 import { Unavailable } from './Unavailable';
 import { isAway, useEnvironment, useWorkspaceDoor, type EnvironmentWorkspaceAccess, workspaceBinding, workspaceDenial } from './door';
-import { chosenViewer, factsOf, rememberChoice, type ReadOnlyReason, useViewerChoice, type Viewer, type ViewerId, VIEWERS, viewersFor, type ViewerProps } from './viewers';
+import { chosenViewer, factsOf, rememberChoice, type ReadOnlyReason, useViewerChoiceObservation, type Viewer, type ViewerId, VIEWERS, viewersFor, type ViewerProps } from './viewers';
 
 /** What a file tab shows: the environment, the thread it is read through, and the path. */
 export interface FileTabOf {
@@ -185,7 +185,6 @@ export function FileTab({ tab }: ViewProps) {
 function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId: string | null; access: EnvironmentWorkspaceAccess }) {
   const { t } = useTranslation();
   const shown = useViewShown();
-  const small = useViewportShape() === 'small';
   const queryClient = useQueryClient();
   const { door } = access;
   const { head, error, loading, reload } = useFileHead(door, of.path);
@@ -219,7 +218,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
     }
   }, [binding, directory?.generation, directory?.page, directory?.invalidated, entry?.mtime, entry?.size, head?.stat.mtime, head?.stat.size, shown]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const chosen = useViewerChoice(userId, baseName(of.path));
+  const [chosen, choiceObservation] = useViewerChoiceObservation(userId, baseName(of.path));
   const viewer = useMemo<Viewer | null>(() => {
     if (head === undefined) return null;
     const facts = factsOf(head.stat);
@@ -240,9 +239,14 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
   if (loading || head === undefined || viewer === null) return <SkeletonRows rows={8} />;
 
   const facts = factsOf(head.stat);
-  const reason: ReadOnlyReason | null = small ? { kind: 'small_screen' } : whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
+  const reason = whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
   const props: ViewerProps = { door, path: of.path, head, line: jump?.line ?? null, endLine: fileLine(of.endLine), lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
   const choices = viewersFor(facts);
+  const savedViewer = VIEWERS.find((candidate) => candidate.id === choiceObservation?.saved);
+  const observation = choiceObservation === undefined ? undefined : { ...choiceObservation, effective: viewer.id,
+    origin: override !== null ? 'page' as const : chosen === null || chosen !== viewer.id ? 'default' as const : choiceObservation.origin,
+    saved_choice_availability: choiceObservation.saved === undefined ? choiceObservation.saved_choice_availability : savedViewer?.takes(facts) === true ? 'available' as const : 'unavailable' as const };
+  const choiceFacts = <DeviceChoiceFacts observation={observation} current={t(viewer.title)} saved={savedViewer === undefined ? undefined : t(savedViewer.title)} inline />;
   const updatesPaused = capacity !== null || directory?.capacity !== undefined && directory.capacity !== null
     || directory?.watch === 'failed' || directory?.invalidated === true;
   const updateReason = capacity !== null || directory?.capacity !== undefined && directory.capacity !== null
@@ -267,6 +271,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
         {choices.length > 1 && (
           <Menu
             label={t('files.openWith.label')}
+            facts={choiceFacts}
             trigger={
               <Button size="sm" variant="ghost" icon={<ScanEye aria-hidden />}>
                 {t(viewer.title)}
@@ -288,6 +293,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
             ]}
           />
         )}
+        {choices.length > 1 ? observation !== undefined && <DeviceChoiceException observation={observation} /> : <span className="inline-flex min-w-0 flex-wrap items-center gap-1 text-text-muted">{t(viewer.title)}<DeviceChoiceFacts observation={observation} current={t(viewer.title)} saved={savedViewer === undefined ? undefined : t(savedViewer.title)} /></span>}
         <Button size="sm" variant="ghost" icon={<Download aria-hidden />} pending={downloading} onClick={download}>
           {t('files.download')}
         </Button>

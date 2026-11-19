@@ -11,7 +11,8 @@ import { client } from '@/api/client';
 import { meQuery } from '@/api/auth';
 import { seedPendingAgentSchedules, type InputSchedule } from '@/api/inputSchedules';
 import { scheduledReads } from '@/api/readScheduler';
-import { PendingAgentSchedules, ThreadSchedules, SchedulesView } from '@/features/schedules/Schedules';
+import { ThreadSchedules, SchedulesView } from '@/features/schedules/Schedules';
+import { PendingAgentSchedules } from '@/features/schedules/PendingAgentSchedules';
 import { makeTab } from '@/features/workbench/layout';
 import type * as ViewOpening from '@/features/workbench/viewOpening';
 import { i18n, setLocale } from '@/i18n';
@@ -43,7 +44,7 @@ beforeEach(() => {
   vi.clearAllMocks(); wire.remove.mockReset(); wire.shown = false; rows = [inputSchedule()];
   client.session.setState({ userId: thread().owner.id, readerVersion: 801 });
   wire.get.mockImplementation((path: string) => {
-    if (path === '/topics/{id}/sync') return Promise.resolve({ data: { input_schedules: rows }, response: new Response() });
+    if (path === '/topics/{id}/input-schedules') return Promise.resolve({ data: { items: rows, next_cursor: null }, response: new Response() });
     if (path === '/threads/{id}/opening') return Promise.resolve({ data: { sync: { thread: thread() }, pending_agent_schedules: { status: 'ready', data: pending() } }, response: new Response() });
     throw new Error(`Unexpected read ${path}`);
   });
@@ -74,7 +75,7 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
   expect(within(list).queryByText('Another thread')).toBeNull();
   expect(screen.getByTestId('schedule-settings')).toHaveTextContent('threads.agent_schedules,threads.agent_schedule_hours,threads.agent_schedule_runs');
   expect(wire.get).toHaveBeenCalledOnce();
-  expect(wire.get.mock.calls[0]?.[0]).toBe('/topics/{id}/sync');
+  expect(wire.get.mock.calls[0]?.[0]).toBe('/topics/{id}/input-schedules');
   expect(wire.remove).not.toHaveBeenCalled();
 });
 
