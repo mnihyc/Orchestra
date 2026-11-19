@@ -54,9 +54,9 @@ use chrono::{DateTime, Utc};
 use orch_agent_contract::events::TokenUsage;
 use orch_agent_contract::parameters::{ModelList, ModelParameters, ParameterDef, ParameterOptions};
 use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
+use orch_db::queries::resources::binding;
 use orch_db::queries::resources::keeper::{self, SecretRef, StartRow};
 use orch_db::queries::resources::thread_engine::{self as resources, ProviderRow};
-use orch_db::queries::resources::{binding, provider_runtime as runtime_rows};
 use orch_db::queries::threads::{self, LeaseRow, turn_state};
 use orch_db::usage::ledger::{self, Attribution, NewEvent, Tokens};
 use orch_link::streams::DeliveredEvent;
@@ -185,6 +185,8 @@ pub fn plan_start(row: &StartRow, secrets: &[SecretRef]) -> Result<StartPlan, Pl
         provider: row.id,
         machine,
         body: ProviderStart {
+            upstream_policy: Default::default(),
+            translation_output_tokens: 4096,
             provider_id: row.id,
             protocols: row.protocols.clone(),
             upstreams,
@@ -442,8 +444,41 @@ impl Engine {
         let Some(row) = keeper::start_row(&mut conn, provider).await? else {
             return Ok(Err(PlanError::NotKeyed));
         };
+        if (row.key_machine_id.is_none() || row.key_machine_id == row.machine_id)
+            && orch_db::queries::provider_connections::available(&mut conn, provider).await?
+                == Some(false)
+        {
+            return Ok(Err(PlanError::NoMachine));
+        }
         let secrets = keeper::secret_refs(&mut conn, provider).await?;
-        Ok(plan_start(&row, &secrets))
+        let mut plan = match plan_start(&row, &secrets) {
+            Ok(plan) => plan,
+            Err(error) => return Ok(Err(error)),
+        };
+        plan.body.translation_output_tokens = orch_settings::provider_translation::load(
+            &mut conn,
+            orch_settings::Place::Provider(provider),
+        )
+        .await?
+        .output_tokens;
+        plan.body.upstream_policy = orch_settings::provider_upstream::load(
+            &mut conn,
+            orch_settings::Place::Provider(provider),
+        )
+        .await?;
+        let mut digest = Hash::hasher();
+        digest.update(&serde_json::to_vec(&plan.body.upstream_policy)?);
+        digest.update(plan.digest.as_bytes());
+        digest.update(&plan.body.translation_output_tokens.to_le_bytes());
+        plan.digest = Hash::finish(&digest).to_string();
+        Ok(Ok(plan))
+    }
+
+    /// Factual current configuration for one source-bound model call. Native issue still requires its original operation.
+    pub async fn public_relay_plan(&self, provider: Id) -> Result<StartPlan, EngineError> {
+        self.start_plan(provider)
+            .await?
+            .map_err(EngineError::unreadable)
     }
 
     /// Makes sure the provider runs on the machine that keeps its key: `provider.start` where the link's
@@ -593,20 +628,17 @@ pub(crate) fn refreshed_transition(
     }
 }
 
-/// A refused provider's waiting threads name the provider and its recorded reason.
+/// What a refused provider's waiting threads say of it: the reason its manager recorded. The thread already names
+/// the provider, and an identifier is no part of what a person reads.
 pub(crate) fn unavailable_detail(provider: &ProviderRow) -> String {
-    if provider.status == "error" {
-        format!(
-            "Provider {} ({}): {}",
-            provider.name,
-            provider.id,
-            provider
-                .status_detail
-                .as_deref()
-                .unwrap_or("its credential was refused")
-        )
+    unavailable_words(&provider.status, provider.status_detail.as_deref())
+}
+
+fn unavailable_words(status: &str, recorded: Option<&str>) -> String {
+    if status == "error" {
+        recorded.unwrap_or("its credential was refused").to_owned()
     } else {
-        provider.status.clone()
+        status.to_owned()
     }
 }
 
@@ -632,7 +664,7 @@ impl Engine {
             return Ok(false);
         }
         orch_db::queries::access::bump_epoch(&mut *unit.conn).await?;
-        let Some(state) = runtime_rows::state(&mut *unit.conn, provider).await? else {
+        let Some(state) = resources::provider(&mut *unit.conn, provider).await? else {
             return Ok(true);
         };
         let managers =
@@ -648,7 +680,10 @@ impl Engine {
                 title: format!("{}: its credential needs attention", state.name),
                 body: reason.to_owned(),
                 data: json!({ "provider": provider, "path": format!("/providers/{provider}") }),
-                source: format!("{provider}:credential_refused:{}", state.revision),
+                source: format!(
+                    "{provider}:credential_refused:{}",
+                    state.observation_revision
+                ),
                 actor: None,
                 at: now,
             },
@@ -697,6 +732,19 @@ impl Engine {
         provider_id: Id,
         events: &[DeliveredEvent],
     ) -> Result<(), EngineError> {
+        // Public receipts bind the actual old recipient; a later environment move cannot erase paid work.
+        let mut public = std::collections::BTreeSet::new();
+        for delivered in events {
+            if delivered.kind == "lease.usage"
+                && let Ok(Event::LeaseUsage(usage)) =
+                    Event::decode(&delivered.kind, delivered.body.clone())
+                && self
+                    .retain_relay_usage(unit, machine, provider_id, &usage, delivered.at.get())
+                    .await?
+            {
+                public.insert(usage.lease_id);
+            }
+        }
         let Some(provider) = resources::provider(&mut *unit.conn, provider_id).await? else {
             tracing::warn!(%provider_id, "events of a provider that is not there");
             return Ok(());
@@ -709,8 +757,11 @@ impl Engine {
         for delivered in events {
             let event = match Event::decode(&delivered.kind, delivered.body.clone()) {
                 Ok(event) => event,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %delivered.kind, "an event of a provider does not read");
+                Err(_) => {
+                    tracing::warn!(
+                        sequence = delivered.seq,
+                        "an event of a provider does not read"
+                    );
                     continue;
                 }
             };
@@ -781,6 +832,9 @@ impl Engine {
                     }
                 }
                 Event::LeaseUsage(usage) => {
+                    if public.contains(&usage.lease_id) {
+                        continue;
+                    }
                     let ctx = UsageContext {
                         machine,
                         stream: &stream,
@@ -804,7 +858,10 @@ impl Engine {
                     }
                 }
                 _ => {
-                    tracing::debug!(kind = %delivered.kind, "an event of a provider the engine has nothing to do with");
+                    tracing::debug!(
+                        sequence = delivered.seq,
+                        "an event of a provider the engine has nothing to do with"
+                    );
                 }
             }
         }
@@ -2324,7 +2381,20 @@ impl Engine {
     async fn sync_provider_presence(&self) -> Result<(), EngineError> {
         let moves = {
             let mut conn = self.inner.db.acquire().await?;
-            keeper::sync_presence(&mut conn, self.inner.clock.now()).await?
+            orch_db::queries::provider_connections::synchronize(
+                &mut conn,
+                self.inner.clock.now(),
+                self.inner.config.sweep_batch,
+            )
+            .await?;
+            let restored = orch_db::queries::provider_connections::synchronize_presence(
+                &mut conn,
+                self.inner.clock.now(),
+            )
+            .await?;
+            let mut moves = keeper::sync_presence(&mut conn, self.inner.clock.now()).await?;
+            moves.back.extend(restored);
+            moves
         };
         for provider in moves.back {
             self.reevaluate_provider(provider).await?;
@@ -2482,6 +2552,17 @@ mod tests {
     use chrono::Utc;
     use orch_types::new_id;
     use serde_json::json;
+
+    #[test]
+    fn a_refused_provider_keeps_its_recorded_reason_or_uses_a_plain_fallback() {
+        let said = unavailable_words("error", Some("the key was revoked"));
+        assert_eq!(said, "the key was revoked");
+        assert_eq!(
+            unavailable_words("error", None),
+            "its credential was refused"
+        );
+        assert_eq!(unavailable_words("offline", Some("ignored")), "offline");
+    }
 
     fn row(key_machine: Option<Id>, machine: Option<Id>) -> StartRow {
         StartRow {

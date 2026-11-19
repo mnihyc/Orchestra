@@ -283,6 +283,22 @@ fn reported(turn: Id, tokens: i64) -> Event {
     })
 }
 
+/// A report of usage, and the wait until the engine has committed it: a case that says a turn is not stopped must
+/// look at the turn after the report has reached it, and not after some time that a loaded machine may not give.
+async fn reported_and_seen(world: &World, thread: Id, turn: Id, tokens: i64) {
+    world.say(thread, reported(turn, tokens)).await;
+    common::eventually("the usage report to be committed", || async {
+        let seen: Option<i64> = world
+            .scalar(
+                "SELECT (usage->>'total_tokens')::bigint FROM turns WHERE id = $1",
+                turn,
+            )
+            .await;
+        seen == Some(tokens)
+    })
+    .await;
+}
+
 async fn send(world: &World, who: Id, thread: Id, text: &str) -> orch_engine::inputs::Submitted {
     world
         .engine()
@@ -360,7 +376,7 @@ async fn a_shared_cap_whose_room_is_used_up_blocks_the_thread_says_which_and_a_c
     world.wait_state(thread, "idle").await;
 
     used(&world, thread, Some(world.ada), 1).await;
-    send(&world, world.ada, thread, "Second").await;
+    let queued = send(&world, world.ada, thread, "Second").await;
     world.wait_blocked(thread, "quota_exceeded").await;
     let detail = told(&world, thread).await;
     assert!(
@@ -371,6 +387,22 @@ async fn a_shared_cap_whose_room_is_used_up_blocks_the_thread_says_which_and_a_c
     );
     meanwhile(Wait::from_millis(300)).await;
     assert_eq!(world.turn_starts(thread).len(), 1);
+    world.engine().stop();
+    let observed = serde_json::to_value(world.sync(thread).await.thread.queue).unwrap();
+    assert_eq!(observed["eligibility"]["state"], "selected");
+    assert_eq!(
+        observed["eligibility"]["input_ref"],
+        queued.input.id.to_string()
+    );
+    assert_eq!(
+        observed["eligibility"]["safe_author"]["id"],
+        world.ada.to_string()
+    );
+    assert_eq!(
+        observed["eligibility"]["safe_authority"]["id"],
+        world.ada.to_string()
+    );
+    assert_eq!(observed["eligibility"]["blocking_reason"], "quota_exceeded");
 
     // Raising it takes effect at the next pre-flight.
     sqlx::query("UPDATE usage_caps SET amount = 5000, revision = revision + 1 WHERE id = $1")
@@ -378,6 +410,12 @@ async fn a_shared_cap_whose_room_is_used_up_blocks_the_thread_says_which_and_a_c
         .execute(world.pool.pool())
         .await
         .unwrap();
+    let stale = serde_json::to_value(world.sync(thread).await.thread.queue).unwrap();
+    assert_eq!(
+        stale["eligibility"]["state"], "unreported",
+        "reading never re-runs admission after a cap change"
+    );
+    world.restart_api().await;
     world.engine().room_may_have_been_made();
     let second = world.turn_start(thread, 1).await;
     assert_eq!(common::words_after_where(&second.text), "Second");
@@ -570,6 +608,13 @@ async fn a_persons_own_cap_holds_their_input_while_a_teammates_goes_ahead_and_it
     assert_eq!(
         (state.as_str(), detail.as_deref()),
         ("pending", Some("cap_reached"))
+    );
+    // The initial hold can change admission dependencies; an actual recheck publishes their settled verdict.
+    world.engine().preflight(thread).await.unwrap();
+    let none = serde_json::to_value(world.sync(thread).await.thread.queue).unwrap();
+    assert_eq!(
+        none["eligibility"]["state"], "none",
+        "a held first row is not a forecast of who can run"
     );
 
     // A teammate's input is not stopped by it.
@@ -837,12 +882,114 @@ async fn a_running_turn_is_stopped_when_a_report_of_its_usage_shows_the_cap_reac
     world.wait_blocked(thread, "quota_exceeded").await;
 }
 
+/// The engine notes that it looked at a thread's caps when it looks, inside the transaction of the report, and
+/// acts on a cap that is reached after the grace, by a look of its own at what has been committed. A transaction
+/// that is rolled back and a report that is applied again (a conflict does that) leaves the note without the
+/// report: the look of the first try found the usage of before, the second try finds the thread looked at, and a
+/// turn whose reports end there runs past its cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_report_applied_again_after_a_rolled_back_try_still_stops_the_turn_its_cap_covers() {
+    let clock = Arc::new(clock::manual());
+    let world = World::with_clock(clock.clone()).await;
+    let check_every = orch_engine::config::EngineConfig::default().cap_check;
+    world.set_config(|config| config.cap_check = check_every);
+    world.restart_api().await;
+    let thread = world.thread("Retried").await;
+    Cap::tokens(1_000).on(world.topic).make(&world).await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    world.say(thread, reported(start.turn_id, 400)).await;
+    common::eventually("the below-cap usage report to be committed", || async {
+        let reported: Option<i64> = world
+            .scalar(
+                "SELECT (usage->>'total_tokens')::bigint FROM turns WHERE id = $1",
+                start.turn_id,
+            )
+            .await;
+        reported == Some(400)
+    })
+    .await;
+    clock.advance(Duration::from_std(check_every).unwrap());
+    let event = reported(start.turn_id, 1_500);
+    let delivered = orch_link::streams::DeliveredEvent {
+        seq: 1_000,
+        at: orch_types::Time::new(world.clock.now()),
+        kind: event.kind().as_str().to_owned(),
+        body: event.body().unwrap(),
+    };
+    let stream = orch_link_contract::streams::Stream::Session {
+        thread_id: thread,
+        segment_id: world.segment_of(thread).await,
+    };
+    for attempt in 0..2 {
+        let mut tx = world.pool.begin().await.unwrap();
+        world
+            .engine()
+            .apply_stream_events(
+                &mut tx,
+                world.machine_id,
+                &stream,
+                std::slice::from_ref(&delivered),
+            )
+            .await
+            .unwrap();
+        if attempt == 0 {
+            tx.rollback().await.unwrap();
+            // The look at what is committed that the first try asked for has been made by now: it found 400.
+            meanwhile(Wait::from_millis(100)).await;
+        } else {
+            tx.commit().await.unwrap();
+        }
+    }
+    world.wait_turn(start.turn_id, "interrupted").await;
+    let code: String = world
+        .scalar(
+            "SELECT error->>'code' FROM turns WHERE id = $1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(code, "cap_reached");
+}
+
+/// The caps of a thread are looked at no more often than `cap_check_secs`; a report that comes inside that time
+/// is not looked at then. It must be looked at when the time has passed, with no further report: a turn that
+/// reports once more and then runs for minutes without a report must still be stopped at its cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_report_that_crosses_a_cap_inside_the_window_of_a_look_is_looked_at_when_the_window_ends()
+{
+    let clock = Arc::new(clock::manual());
+    let world = World::with_clock(clock.clone()).await;
+    let check_every = orch_engine::config::EngineConfig::default().cap_check;
+    world.set_config(|config| config.cap_check = check_every);
+    world.restart_api().await;
+    let thread = world.thread("Windowed").await;
+    Cap::tokens(1_000).on(world.topic).make(&world).await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    // The first report is looked at; the second comes while the window of that look is open.
+    reported_and_seen(&world, thread, start.turn_id, 400).await;
+    reported_and_seen(&world, thread, start.turn_id, 1_500).await;
+    assert_eq!(
+        world.turn_state(start.turn_id).await,
+        "running",
+        "not looked at inside the window"
+    );
+    clock.advance(Duration::from_std(check_every).unwrap());
+    // No further report comes: the window ends, and the look that was put off is made.
+    world.wait_turn(start.turn_id, "interrupted").await;
+    let code: String = world
+        .scalar(
+            "SELECT error->>'code' FROM turns WHERE id = $1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(code, "cap_reached");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cap_made_below_what_a_running_turn_has_used_stops_it_as_soon_as_the_engine_is_told() {
     let world = World::new().await;
     let thread = world.thread("Told").await;
     let (start, _) = world.running_turn(thread, "Go").await;
-    world.say(thread, reported(start.turn_id, 1_500)).await;
+    reported_and_seen(&world, thread, start.turn_id, 1_500).await;
     meanwhile(Wait::from_millis(300)).await;
     assert_eq!(
         world.turn_state(start.turn_id).await,
@@ -873,7 +1020,7 @@ async fn a_cap_that_lets_the_turn_finish_stops_nothing_and_holds_the_next_input(
         .make(&world)
         .await;
     let (start, _) = world.running_turn(thread, "Go").await;
-    world.say(thread, reported(start.turn_id, 1_500)).await;
+    reported_and_seen(&world, thread, start.turn_id, 1_500).await;
     meanwhile(Wait::from_millis(500)).await;
     assert_eq!(world.turn_state(start.turn_id).await, "running");
     world
@@ -994,7 +1141,8 @@ async fn an_admin_lets_a_turn_past_a_cap_that_is_reached_it_is_written_down_and_
         .await;
     assert_eq!(amount, "1000");
     world.say(thread, turn_began(start.turn_id)).await;
-    world.say(thread, reported(start.turn_id, 600)).await;
+    world.wait_turn(start.turn_id, "running").await;
+    reported_and_seen(&world, thread, start.turn_id, 600).await;
     meanwhile(Wait::from_millis(500)).await;
     assert_eq!(world.turn_state(start.turn_id).await, "running");
     // Another cap that is reached stops it.

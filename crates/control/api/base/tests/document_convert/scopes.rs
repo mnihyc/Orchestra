@@ -10,10 +10,7 @@ use orch_api_contract::{
     },
     threads::FILENAME_HEADER,
 };
-use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
-    testing::RawReply,
-};
+use orch_api_core::{middleware::authentication::token_hash, testing::RawReply};
 use orch_blob_contract::{
     range::ByteRange,
     store::{BlobError, BlobRead, BlobStore, ByteStream, Stored},
@@ -43,9 +40,10 @@ fn scope(rules: Vec<Json>) -> Json {
     json!(value)
 }
 async fn key(desk: &Desk, who: Id, rules: Vec<Json>) -> Key {
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
@@ -124,6 +122,7 @@ async fn wait(desk: &Desk, pid: i32, pattern: &str, task: &tokio::task::JoinHand
     tokio::time::timeout(WAIT,async{loop{assert!(!task.is_finished(),"actual native wait not reached");let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE $2)").bind(pid).bind(pattern).fetch_one(&desk.world.db.pool).await.unwrap();if blocked{break;}tokio::task::yield_now().await;}}).await.expect("observe the native query blocked by the literal PID");
 }
 struct Probe {
+    store: Arc<dyn BlobStore>,
     // Keep the actual test-owned upload directory alive for uploads made during the wait.
     inner: orch_api_core::blobs::Blobs,
     hash: Hash,
@@ -143,16 +142,26 @@ impl Probe {
 }
 #[async_trait::async_trait]
 impl BlobStore for Probe {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.store.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
+        publication.check(self.lifetimes(), hash)?;
         if *hash == self.hash {
             self.puts.fetch_add(1, Ordering::SeqCst);
         }
-        let stored = self.inner.store().put(hash, size, body).await;
+        let stored = self
+            .inner
+            .store()
+            .put_held(hash, size, body, publication)
+            .await;
         if *hash == self.hash && self.pause && !self.used.swap(true, Ordering::SeqCst) {
             self.reached.notify_one();
             self.release.notified().await;
@@ -171,14 +180,20 @@ impl BlobStore for Probe {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.store().size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.store().delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.store().delete_held(hash, retirement).await
     }
 }
 fn probe(desk: &mut Desk, pause: bool) -> Arc<Probe> {
     use orch_api_core::{registry::Registry, state::AppState, testing::TestApp};
     let old = desk.world.app.app.clone();
     let probe = Arc::new(Probe {
+        store: old.blobs.store(),
         inner: old.blobs.clone(),
         hash: Hash::of(&STANDARD.decode(PICTURE).unwrap()),
         pause,
@@ -198,6 +213,7 @@ fn probe(desk: &mut Desk, pause: bool) -> Arc<Probe> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(probe.clone(), probe.inner.uploads_dir()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });

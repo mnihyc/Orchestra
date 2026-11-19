@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web-e2e tests/e2e/admin.spec.ts tests/e2e/human-check-admin.spec.ts tests/e2e/human-check.spec.ts

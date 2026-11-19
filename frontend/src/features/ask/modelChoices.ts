@@ -2,9 +2,10 @@
 import type { TFunction } from 'i18next';
 import type { AskModelsReply } from '@/generated/api-types';
 import type { ModelEffortEntry } from '@/features/composer/ModelEffort';
+import { modelPurpose } from '@/features/models/purpose';
 
 export function configuredAskEntries(reply: AskModelsReply | undefined): ModelEffortEntry[] {
-  return (reply?.models ?? []).flatMap((entry, index) => entry.allowed && entry.provider !== null && entry.model !== null ? [{
+  return (reply?.models ?? []).flatMap((entry, index) => entry.allowed && entry.provider !== null && entry.model !== null && modelPurpose(entry.model, 'generation') !== 'unsupported' ? [{
     id: String(index), value: entry.selection, option: entry.model, providerName: entry.provider.name,
   }] : []);
 }
@@ -14,6 +15,8 @@ export function askModelExclusionText(reason: string, t: TFunction): string {
     case 'disabled': return t('ask.modelExclusion_disabled');
     case 'provider_unavailable': return t('ask.modelExclusion_provider_unavailable');
     case 'generation_unsupported': return t('ask.modelExclusion_generation_unsupported');
+    case 'shared_for_ask_only':return t('ask.modelExclusion_shared_for_ask_only');
+    case 'shared_for_other_work_only':return t('ask.modelExclusion_shared_for_other_work_only');
     case 'no_use': return t('ask.modelExclusion_no_use');
     case 'parameters_unavailable': return t('ask.modelExclusion_parameters_unavailable');
     case 'excluded_by_policy': return t('ask.modelExclusion_excluded_by_policy');
