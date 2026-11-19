@@ -192,6 +192,7 @@ impl Input {
                 Vec::new()
             },
             command: McpImport {
+                profile: None,
                 expected_fingerprint: None,
                 environment_id: None,
                 transfer: recipient.map(|(recipient, _)| McpSnapshotTransfer::Issue { recipient }),
@@ -999,6 +1000,7 @@ impl Command {
             scope: &json!(input.command.scope),
             directory: input.command.directory.as_deref(),
             name: &input.command.name,
+            origin: super::command_origin(&input.command),
         }
         .spec(reply, self.origin.user(), Time::new(now));
         let row = McpRow {

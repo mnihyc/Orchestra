@@ -541,6 +541,7 @@ pub(crate) async fn saved(
                 "A retained child already exists; another native child is not created.",
             ));
         }
+        let session_offer = command.session_offer.take();
         command = Outgoing::new(
             command.id,
             command.machine,
@@ -555,6 +556,7 @@ pub(crate) async fn saved(
                 }),
             },
         )?;
+        command.session_offer = session_offer;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         return Ok(command);
     }
@@ -580,6 +582,7 @@ pub(crate) async fn saved(
             "An unknown side history outcome cannot start another native conversation.",
         )
     })?;
+    let session_offer = command.session_offer.take();
     command = Outgoing::new(
         command.id,
         command.machine,
@@ -590,6 +593,7 @@ pub(crate) async fn saved(
             predecessor: None,
         },
     )?;
+    command.session_offer = session_offer;
     if let Some(old) = cut.artifacts.get(slot) {
         let old: Outgoing = serde_json::from_value(old.clone())?;
         if old.machine != command.machine

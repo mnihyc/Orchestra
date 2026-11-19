@@ -238,7 +238,7 @@ pub fn capabilities() -> Capabilities {
 }
 
 /// The approval modes the harness has here. The harness refuses to bypass permissions when it runs as the
-/// administrator, so `bypass` is declared only where it does not. Native auto review stays gated.
+/// administrator, so `bypass` is declared only where it does not. Orch checks Auto on the selected build.
 #[must_use]
 pub fn approval_modes(as_root: bool) -> Vec<ApprovalMode> {
     let mut modes = vec![ApprovalMode::Ask, ApprovalMode::OnRequest];
@@ -254,8 +254,7 @@ pub fn approval_modes(as_root: bool) -> Vec<ApprovalMode> {
 /// The feature a conformance case proves for Auto.
 const AUTO_FEATURE: &str = "approval_modes.auto";
 
-/// Whether the manifest has the conformance case that proves Auto's reviewer on a build. Without it Auto is not
-/// offered, whatever else says so.
+/// Whether this adapter declares an Auto conformance case. The build checker records its result.
 #[must_use]
 pub fn auto_proven() -> bool {
     manifest().proves(AUTO_FEATURE)
@@ -395,6 +394,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         direct_protocols: Vec::new(),
         credentials: credentials(),
         runtime_template: Some(runtime_template()),
+        approval_auto: None,
         approval_modes: approval_modes(as_root),
         sandbox_modes: vec![SandboxMode::Workspace, SandboxMode::Open],
         // Offered only once the exact loaded build's conformance proves every action path (plan-mode naming or
@@ -407,6 +407,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
             }
             declared
         },
+        features: Default::default(),
         parameters: definitions(),
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({

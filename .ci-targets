@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-adapter-claude-code --test conformance -- native_auto_classifier_stages_hooks_and_model_policy_are_observed --exact
+test -p orch-agent-programs --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-codex --lib -- review::tests::
+test -p orch-api-core --test harness_checks -- a_checked_claude_build_offers_auto_only_after_its_native_reviewer_case_passes --exact
+web typecheck
+web lint
+web test -- tests/component/composer-approval-mode.test.tsx tests/component/scope-mode-choices.test.tsx tests/component/settings-unavailable-choice.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts
