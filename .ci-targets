@@ -1,0 +1,1 @@
+test -p orch-api-core --test everything_scale -- page_budgets:: --test-threads=1

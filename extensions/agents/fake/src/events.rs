@@ -475,6 +475,7 @@ impl Emitter {
     pub async fn lost(&self, reason: &str) {
         self.request_ended("session_lost", None, false).await;
         self.send(SessionEvent::SessionLost(SessionLost {
+            uncertain: false,
             reason: reason.to_owned(),
         }))
         .await;

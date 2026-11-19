@@ -124,6 +124,8 @@ async fn raw_inspection_requires_its_manage_selection_and_current_thread_managem
         .keep(
             &mut conn,
             &orch_link_contract::events::RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 1,
                 direction: "in".into(),
                 payload: json!({"result":"Stored diagnostic"}),

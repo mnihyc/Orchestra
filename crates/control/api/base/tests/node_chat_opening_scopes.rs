@@ -388,6 +388,7 @@ async fn selected_provider(room: &Room) -> Id {
         .call(NodeSettingSet, &[&room.root, &"agent.default_provider_id"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(provider),
             locked: None,
             expected_revision: None,
@@ -1162,6 +1163,7 @@ async fn both_requested_org_provider_names_share_the_actual_selected_provider_re
             .call(NodeSettingSet, &[&room.root, &name])
             .token(&room.ada.token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value,
                 locked: None,
                 expected_revision: None,

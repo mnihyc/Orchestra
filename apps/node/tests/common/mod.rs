@@ -883,6 +883,7 @@ async fn start_api(
     link.start().await.unwrap();
     let app: App = Arc::new(AppState {
         builtin_sources: Default::default(),
+        metrics_listener_failed: Default::default(),
         host_ports: Default::default(),
         db: db.clone(),
         config: Arc::clone(config),

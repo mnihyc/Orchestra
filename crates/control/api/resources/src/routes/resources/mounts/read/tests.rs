@@ -486,7 +486,9 @@ async fn native_get_context_uses_actual_session_mode_and_the_same_principal_time
                     AND query LIKE $2 AND $1=ANY(pg_blocking_pids(pid)))",
             )
             .bind(blocker_pid)
-            .bind("%FOR KEY SHARE OF u FOR SHARE OF s, a%")
+            .bind(crate::testing::current_identity_query_pattern(
+                orch_api_contract::surface::HttpSurface::Browser,
+            ))
             .fetch_one(&world.db.pool)
             .await
             .unwrap();

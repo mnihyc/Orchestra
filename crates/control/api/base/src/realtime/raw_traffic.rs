@@ -55,9 +55,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use std::sync::Arc;
-/// Only the newest row is needed to mark the boundary, including after retention removed older rows.
-const BOUNDARY_ROWS: i64 = 1;
-
 /// The boundary before a delivery's raw frames were applied.
 pub struct Boundary {
     thread: Id,
@@ -84,10 +81,7 @@ pub async fn before(
     {
         return Ok(None);
     }
-    let n = orch_db::queries::raw_events::newest(conn, *segment_id, None, BOUNDARY_ROWS)
-        .await?
-        .first()
-        .map_or(0, |row| row.n);
+    let n = orch_db::queries::raw_events::last_change(conn, *segment_id).await?;
     Ok(Some(Boundary {
         thread: *thread_id,
         segment: *segment_id,
@@ -103,34 +97,35 @@ pub async fn after(db: &Db, boundary: Option<Boundary>, delivery: &Delivery) -> 
         else {
             return Ok(());
         };
-        let mut frames = Vec::new();
-        let mut before = None;
+        let through =
+            orch_db::queries::raw_events::last_change(&mut conn, boundary.segment).await?;
+        let mut after = boundary.n;
         loop {
-            let page = orch_engine::raw_events::page(
+            let page = orch_engine::raw_events::changed(
                 &mut conn,
                 &thread,
                 boundary.segment,
-                before,
+                after,
+                through,
                 orch_engine::raw_events::PAGE_MAX,
             )
             .await
             .map_err(Fail::other)?;
-            let done =
-                !page.has_older || page.events.last().is_none_or(|frame| frame.n <= boundary.n);
-            before = page.events.last().map(|frame| frame.n);
-            frames.extend(page.events.into_iter().filter(|frame| frame.n > boundary.n));
-            if done {
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map_or(after, |(revision, _)| *revision);
+            publish(
+                db,
+                boundary.thread,
+                boundary.segment,
+                page.into_iter().map(|(_, event)| event),
+            )
+            .await?;
+            if after >= through {
                 break;
             }
         }
-        drop(conn);
-        publish(
-            db,
-            boundary.thread,
-            boundary.segment,
-            frames.into_iter().rev(),
-        )
-        .await?;
     }
     if let Stream::Provider { provider_id: id } = &delivery.stream {
         for event in &delivery.events {
@@ -346,6 +341,7 @@ pub(crate) async fn begin(
     st.thread_projection = Some(projection.clone());
     st.raw_after = after;
     let frame = ServerFrame::Subscribed(SubscribedFrame {
+        personal_revision: None,
         raw: Some(RawSubscription {
             segment_id: segment,
             after,
