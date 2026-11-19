@@ -246,6 +246,19 @@ pub struct Arrangement {
 
 pub use crate::resources::HostRef;
 
+/// Independent locks on the four creation defaults; one never freezes an unrelated choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BindingDefaultLocks {
+    /// The default provider is fixed.
+    pub provider: bool,
+    /// The default agent profile is fixed.
+    pub agent: bool,
+    /// The model routing name is fixed.
+    pub model: bool,
+    /// The effort is fixed independently of the model.
+    pub effort: bool,
+}
+
 /// What settings choose when a thread is bound without being told.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BindingDefaults {
@@ -257,8 +270,26 @@ pub struct BindingDefaults {
     pub model_name: Option<String>,
     /// The effort.
     pub effort: Option<String>,
-    /// Whether a lock above holds these.
-    pub locked: bool,
+    /// The independently fixed defaults.
+    pub locks: BindingDefaultLocks,
+}
+
+/// The approval default this declared program would select, rechecked when the thread is created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalDefaultResolution {
+    pub preferred: String,
+    pub effective: Option<String>,
+    pub reason: Option<ApprovalDefaultReason>,
+    pub source: crate::settings::SettingSource,
+    /// Identifies the observed preference, source and declared modes; reserves nothing.
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDefaultReason {
+    NotDeclared,
+    NoOrdinaryMode,
 }
 
 /// An agent profile a provider offers, and the ways it can be placed.
@@ -279,6 +310,9 @@ pub struct BindingAgent {
     /// The current program report, only when the reader may inspect this provider's processes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_report: Option<BindingProgramReport>,
+    /// Present in a start proposal when the program declares its approval modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_resolution: Option<ApprovalDefaultResolution>,
     /// Each arrangement the adapter could support on that provider and the thread's environment,
     /// including ones that are unavailable or not permitted, each with its reason.
     pub arrangements: Vec<Arrangement>,
@@ -354,7 +388,8 @@ pub struct BindingEnvironment {
     pub usable: bool,
     /// Why not, when not.
     pub reason: Option<String>,
-    /// Whether it is the topic's default.
+    /// Whether it is the default of the threads started here: the environment the nearest setting of
+    /// `env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it.
     pub is_default: bool,
     /// How it is used at present, from the point of view of this topic.
     pub used: EnvironmentUse,
@@ -364,6 +399,18 @@ pub struct BindingEnvironment {
     pub topics_hidden: i64,
     /// The directory a thread would get there.
     pub directory: String,
+}
+
+/// The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BindingDefaultEnvironment {
+    /// The environment the setting names.
+    pub environment: Id,
+    /// The place whose setting it is, when that is not the place asked about itself: a project or org above it.
+    pub from: Option<NodeRef>,
+    /// Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,
+    /// or `environment_not_seen` when it is not among those the caller may see.
+    pub reason: Option<String>,
 }
 
 /// What `env.thread_default` resolves to.
@@ -413,6 +460,10 @@ pub struct BindingOptions {
     pub environments: Vec<BindingEnvironment>,
     /// What a new thread does about its environment unless told.
     pub environment_default: EnvironmentDefault,
+    /// The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use
+    /// it when they cannot; absent when no setting names one and when rebinding an existing thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_environment: Option<BindingDefaultEnvironment>,
     /// Safe resolved repository settings and the place supplying the repository address.
     pub source: BindingSource,
     /// The permission page that a thread created here would begin with.
@@ -529,15 +580,15 @@ pub struct NewEnvironment {
     /// The template; what its home resolves when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<Id>,
-    /// The host. When left out, whatever the home resolves; when `null`, the host with the most
-    /// room among those the caller may use.
+    /// A canonical host or host-pool target. Omission inherits the home; `null` explicitly chooses
+    /// Most room. An accepted creation retains its exact native host separately from this intent.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "absent_or_null"
     )]
-    #[schemars(with = "Option<Id>")]
-    pub host_id: Option<Option<Id>>,
+    #[schemars(with = "Option<orch_provider_contract::pools::Target>")]
+    pub host_id: Option<Option<orch_provider_contract::pools::Target>>,
     /// Values of its own for the keys whose scope is environment: mounts, storage, resources, what
     /// it needs, variables, idle stop, update, removal when unused, and what its exec node offers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -667,6 +718,16 @@ pub struct NodeBindingOptionsGetQuery {
     /// Judge the new-environment template rather than the topic's existing shared default; cannot be combined with environment_id.
     #[serde(default)]
     pub environment_new: bool,
+    /// The template of the new environment being assessed; requires environment_new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<Id>,
+    /// The chosen host must be usable for this template; omission inherits the place's host unless host_auto is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
+    /// Choose the scheduler's host rather than inheriting the place's configured host.
+    /// Requires environment_new and cannot be combined with host_id.
+    #[serde(default)]
+    pub host_auto: bool,
 }
 
 // Form queries carry strings. Keep this one structured preview input typed in Rust,

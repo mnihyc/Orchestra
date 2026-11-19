@@ -284,7 +284,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         RunError::Command(CommandFailure::Failed(refusal))
             if harness.is_some() && refusal.code == "conflict" =>
         {
-            ApiError::new(ErrorCode::ConflictStaleRevision, &refusal.detail)
+            ApiError::new(ErrorCode::ConflictConcurrentChange, &refusal.detail)
         }
         RunError::Command(CommandFailure::Failed(refusal))
             if harness.is_some()

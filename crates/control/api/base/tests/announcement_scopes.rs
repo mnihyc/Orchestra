@@ -383,6 +383,8 @@ async fn notice_sender(s: &Scene, recipient: Id) {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: s.cai.id(),
                     node: recipient,
                     provider: s.on.provider,
@@ -598,6 +600,8 @@ async fn announcement_input_waits_for_its_receiving_owner_model_use_without_beco
             .provider_use(
                 &mut *s.rig.world.conn().await,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: s.eve.id(),
                     node: recipient,
                     provider: s.on.provider,
