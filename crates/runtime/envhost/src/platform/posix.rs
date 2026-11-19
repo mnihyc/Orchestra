@@ -65,13 +65,82 @@ fn meta_of(stat: &rustix::fs::Stat) -> Meta {
         mtime_ns: unix_nanos(stat.st_mtime as i64, stat.st_mtime_nsec as i64),
         ctime_ns: unix_nanos(stat.st_ctime as i64, stat.st_ctime_nsec as i64),
         mode: u32::from(stat.st_mode as RawMode) & 0o7777,
-        ino: stat.st_ino as u64,
+        ino: super::FileNumber::from_u64(stat.st_ino as u64),
         dev: stat.st_dev as u64,
         nlink: stat.st_nlink as u64,
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct NamesCursor {
+    directory: rustix::fs::Dir,
+}
+
+#[cfg(target_os = "linux")]
+impl NamesCursor {
+    pub(crate) fn next_name(&mut self) -> io::Result<Option<OsString>> {
+        while let Some(entry) = self.directory.read() {
+            crate::error::check_cancelled().map_err(io::Error::other)?;
+            let entry = entry.map_err(io_error)?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                return Ok(Some(OsString::from_vec(name.to_vec())));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl Dir {
+    /// Opens a resolved policy root without following a replaced component on the way to it.
+    pub(crate) fn open_policy_root(path: &Path) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        let fd = rustix::fs::openat2(
+            CWD,
+            path,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        )
+        .map_err(io_error)?;
+        #[cfg(target_os = "macos")]
+        let fd = rustix::fs::openat(
+            CWD,
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW_ANY,
+            Mode::empty(),
+        )
+        .map_err(io_error)?;
+        Ok(Self {
+            fd,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Opens the final readable directory beneath this original policy root without reparsing.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_beneath(&self, path: &Path) -> io::Result<Self> {
+        let relative = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
+        let fd = rustix::fs::openat2(
+            &self.fd,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::BENEATH
+                | rustix::fs::ResolveFlags::NO_SYMLINKS
+                | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        )
+        .map_err(io_error)?;
+        Ok(Self {
+            fd,
+            path: self.path.join(path),
+        })
+    }
+
     /// Opens the directory at `path`, following links in the path: the root of a workspace, which
     /// is given by whoever set the environment up and is not a request's to name.
     pub fn open_path(path: &Path) -> io::Result<Self> {
@@ -124,6 +193,83 @@ impl Dir {
         rustix::fs::fstat(&self.fd)
             .map(|stat| meta_of(&stat))
             .map_err(io_error)
+    }
+
+    /// Pins one entry itself for metadata, including a symbolic link or special file.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_metadata(&self, name: &OsStr) -> io::Result<File> {
+        plain(name)?;
+        rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(io_error)
+    }
+
+    /// Another handle on this directory for native archive metadata.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn metadata_handle(&self) -> io::Result<File> {
+        self.fd.try_clone().map(File::from)
+    }
+
+    /// Links this pinned entry under a new name without looking up its old name.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn link_file(&self, file: &File, name: &OsStr) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        plain(name)?;
+        let source = format!("/proc/self/fd/{}", file.as_raw_fd());
+        rustix::fs::linkat(CWD, source, &self.fd, name, AtFlags::SYMLINK_FOLLOW).map_err(io_error)
+    }
+
+    /// Creates a native special entry without opening a pipe or device for data.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn make_special(
+        &self,
+        name: &OsStr,
+        kind: FileType,
+        device: rustix::fs::Dev,
+    ) -> io::Result<()> {
+        plain(name)?;
+        rustix::fs::mknodat(
+            &self.fd,
+            name,
+            kind,
+            Mode::from_bits_truncate(0o600),
+            device,
+        )
+        .map_err(io_error)
+    }
+
+    /// Creates a closed socket entry beneath this retained directory.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn make_socket(&self, name: &OsStr) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        plain(name)?;
+        // Only the temporary address goes through AF_UNIX's address representation.
+        // Linking the pinned socket inode gives the archive its full native filename.
+        loop {
+            crate::error::check_cancelled().map_err(io::Error::other)?;
+            let temporary =
+                OsString::from(format!(".orch-socket-{}", orch_types::new_id().simple()));
+            let path =
+                PathBuf::from(format!("/proc/self/fd/{}", self.fd.as_raw_fd())).join(&temporary);
+            match std::os::unix::net::UnixListener::bind(path) {
+                Ok(listener) => {
+                    drop(listener);
+                    let handle = self.open_metadata(&temporary)?;
+                    let linked = self.link_file(&handle, name);
+                    let cleaned = self.unlink(&temporary);
+                    linked?;
+                    cleaned?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// What the entry called `name` is, without following it.
@@ -239,6 +385,14 @@ impl Dir {
     }
 
     /// The names in this directory, without `.` and `..`, in no particular order.
+    /// One owned directory cursor permits whole-tree work without collecting its names.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn names_cursor(&self) -> io::Result<NamesCursor> {
+        Ok(NamesCursor {
+            directory: rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?,
+        })
+    }
+
     pub fn names(&self) -> io::Result<Vec<OsString>> {
         let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
         let mut names = Vec::new();
@@ -254,6 +408,23 @@ impl Dir {
     }
 
     /// Writes this directory's own changes to disk, where the system can.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
+        Ok(Box::new(std::iter::from_fn(move || {
+            loop {
+                let entry = match listing.read()? {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(io_error(error))),
+                };
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    return Some(Ok(OsString::from_vec(name.to_vec())));
+                }
+            }
+        })))
+    }
+
     /// Visits names directly from the directory stream; false stops without collecting or sorting the rest.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;

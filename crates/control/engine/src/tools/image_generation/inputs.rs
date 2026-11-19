@@ -190,11 +190,13 @@ impl Read {
         };
         let expected = match kind {
             "fs.stat" => serde_json::to_value(FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.proof.site.environment,
                 mount: None,
                 path: path.into(),
             })?,
             "fs.fetch" => serde_json::to_value(FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.proof.site.environment,
                 mount: None,
                 path: path.into(),
@@ -212,7 +214,7 @@ impl Read {
             .execute(&mut *conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.proof.site.machine)
             .execute(conn)
             .await
@@ -321,6 +323,7 @@ impl Read {
         self.current_issue_callers(
             conn,
             &link::NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

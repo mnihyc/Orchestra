@@ -4,6 +4,240 @@ use orch_api_contract::calls::CallRecoveryAction;
 use orch_link_contract::events::{Event, SessionLost};
 use serde_json::json;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_old_physical_sessions_opened_and_lost_reports_cannot_change_its_replacement() {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    use orch_link_contract::events::SessionOpened;
+    let world = World::new().await;
+    world.set(world.topic, "calls.repeat_limit", json!(0)).await;
+    let thread = world.thread("Only this physical session").await;
+    let turn = start(&world, thread, world.ada).await;
+    let segment = world.segment_of(thread).await;
+    let old = world.opening_of(thread).await;
+    let replacement = orch_types::new_id();
+    let original = world
+        .commands
+        .issued_commands("session.open")
+        .into_iter()
+        .find(|(_, command)| command.id == old)
+        .unwrap()
+        .1;
+    let mut conn = world.pool.acquire().await.unwrap();
+    insert_command(
+        &mut conn,
+        &NewCommand {
+            native_target: None,
+            id: replacement,
+            machine_id: world.machine_id,
+            kind: "session.open",
+            body: &original.body,
+            serial_key: None,
+            deadline_at: world.clock.now() + chrono::Duration::minutes(2),
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE segments SET native_session_ref=NULL WHERE id=$1")
+        .bind(segment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    world
+        .say_session_taken_in(
+            thread,
+            Event::SessionOpened(SessionOpened {
+                opening_id: old,
+                native_session_ref: "old physical conversation".into(),
+                resumed: true,
+            }),
+        )
+        .await;
+    world
+        .say_session_taken_in(
+            thread,
+            Event::SessionLost(SessionLost {
+                uncertain: false,
+                expected: false,
+                opening_id: old,
+                reason: "the earlier process finally reported its exit".into(),
+            }),
+        )
+        .await;
+    assert_eq!(world.state(thread).await.0, "running");
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM model_call_recovery WHERE node_id=$1",
+                thread
+            )
+            .await,
+        0
+    );
+    assert!(
+        world
+            .scalar::<Option<String>>(
+                "SELECT native_session_ref FROM segments WHERE id=$1",
+                segment
+            )
+            .await
+            .is_none()
+    );
+    let facts: Json = world
+        .scalar(
+            "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert_eq!(facts["opening_id"], json!(replacement));
+    assert_eq!(facts["live"], json!(true));
+    world
+        .say_session_taken_in(
+            thread,
+            Event::SessionOpened(SessionOpened {
+                opening_id: replacement,
+                native_session_ref: "replacement physical conversation".into(),
+                resumed: false,
+            }),
+        )
+        .await;
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT native_session_ref FROM segments WHERE id=$1",
+                segment
+            )
+            .await,
+        "replacement physical conversation"
+    );
+    world
+        .say_session_taken_in(
+            thread,
+            Event::SessionLost(SessionLost {
+                uncertain: false,
+                expected: false,
+                opening_id: replacement,
+                reason: "the actual current process ended".into(),
+            }),
+        )
+        .await;
+    world.wait_turn(turn, "failed").await;
+    let facts: Json = world
+        .scalar(
+            "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert_eq!(
+        facts["live"],
+        json!(false),
+        "a confirmed current loss withdraws its tool admission in the same commit"
+    );
+    let late = serde_json::json!({"native_session_ref":"replacement physical conversation"});
+    orch_db::queries::link::finish_command(
+        &mut world.pool.acquire().await.unwrap(),
+        replacement,
+        &orch_db::queries::link::Ending::Succeeded(&late),
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let delivered: Json = world
+        .scalar(
+            "SELECT delivered_resources FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert_eq!(
+        delivered["state"],
+        json!("closed"),
+        "a late acknowledgement cannot undo a physical loss fact"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_connector_restart_retires_the_old_tool_opening_without_an_error_and_reopens_the_retained_conversation()
+ {
+    let world = World::new().await;
+    let thread = world
+        .thread("A retained conversation gets a fresh physical opening")
+        .await;
+    let turn = start(&world, thread, world.ada).await;
+    world
+        .say(
+            thread,
+            crate::common::turn_ended(turn, orch_link_contract::events::TurnOutcome::Completed),
+        )
+        .await;
+    world.wait_state(thread, "idle").await;
+    let opening = world.opening_of(thread).await;
+    let segment = world.segment_of(thread).await;
+    let native = world
+        .scalar::<String>(
+            "SELECT native_session_ref FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    world
+        .say_session_taken_in(
+            thread,
+            Event::SessionLost(SessionLost {
+                uncertain: false,
+                opening_id: opening,
+                expected: true,
+                reason: "the connector restarted while the conversation was idle".into(),
+            }),
+        )
+        .await;
+    assert_eq!(world.state(thread).await.0, "idle");
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM items WHERE thread_id=$1 AND kind='error'",
+                thread
+            )
+            .await,
+        0
+    );
+    let facts: Json = world
+        .scalar(
+            "SELECT delivered_resources->'tool_admission' FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert_eq!(facts["live"], json!(false));
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT native_session_ref FROM segments WHERE id=$1",
+                segment
+            )
+            .await,
+        native
+    );
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Next message"))
+        .await
+        .unwrap();
+    let _ = world.turn_start(thread, 1).await;
+    assert_ne!(
+        world.opening_of(thread).await,
+        opening,
+        "resuming the retained conversation takes a newly admitted opening"
+    );
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT native_session_ref FROM segments WHERE id=$1",
+                segment
+            )
+            .await,
+        native
+    );
+}
+
 async fn start(world: &World, thread: Id, author: Id) -> Id {
     world
         .engine()
@@ -65,8 +299,11 @@ async fn a_lost_session_without_a_recorded_machine_does_not_borrow_the_environme
     let first = start(&world, thread, world.ada).await;
     let segment = world.segment_of(thread).await;
     let mut gate = world.pool.begin().await.unwrap();
-    sqlx::query("SELECT machine_id FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 FOR UPDATE")
-        .bind(world.provider).bind(world.agent).bind(world.machine_id).fetch_one(&mut *gate).await.unwrap();
+    sqlx::query("SELECT id FROM native_session_states WHERE id=$1 FOR UPDATE")
+        .bind(segment)
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *gate)
         .await
@@ -75,20 +312,28 @@ async fn a_lost_session_without_a_recorded_machine_does_not_borrow_the_environme
         .say(
             thread,
             Event::SessionLost(SessionLost {
+                expected: false,
+                opening_id: world.opening_of(thread).await,
+                uncertain: false,
                 reason: "The original process ended with no surviving source fact".into(),
             }),
         )
         .await;
     tokio::time::timeout(crate::common::PATIENCE, async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%UPDATE harnesses SET last_error_at%')")
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT delivered_resources#>>%' AND query LIKE '%FOR SHARE%')")
                 .bind(pid).fetch_one(world.pool.pool()).await.unwrap();
             if waiting { break; }
             tokio::task::yield_now().await;
         }
-    }).await.expect("the accepted loss waits at its actual harness error write before recovery reads the source");
-    // Reconstruct a missing legacy/corrupted source fact after the real report
-    // passes source authorization. No fixture report or broader actor fills it.
+    }).await.expect("the accepted loss waits at its physical source read after sender authorization");
+    // Remove the source only after the report passed sender authorization and before its physical
+    // facts are read. No fixture report or broader actor fills it from the environment.
+    sqlx::query("UPDATE native_session_states SET machine_id=NULL WHERE id=$1")
+        .bind(segment)
+        .execute(&mut *gate)
+        .await
+        .unwrap();
     sqlx::query("UPDATE segments SET machine_id=NULL WHERE id=$1")
         .bind(segment)
         .execute(&mut *gate)
@@ -147,6 +392,9 @@ async fn lost(world: &World, thread: Id, turn: Id) {
         .say(
             thread,
             Event::SessionLost(SessionLost {
+                expected: false,
+                opening_id: world.opening_of(thread).await,
+                uncertain: false,
                 reason: "The scripted native process ended".to_owned(),
             }),
         )
@@ -485,4 +733,81 @@ async fn an_unconfirmed_start_or_a_persons_stop_never_blindly_replays_a_lost_pro
             0
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn physical_loss_after_a_queued_close_finishes_the_delivered_facts_without_recovering_the_withdrawn_opening()
+ {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    let world = World::new().await;
+    let thread = world
+        .thread("The closed admission still receives its actual end")
+        .await;
+    let turn = start(&world, thread, world.ada).await;
+    world
+        .say(
+            thread,
+            crate::common::turn_ended(turn, orch_link_contract::events::TurnOutcome::Completed),
+        )
+        .await;
+    world.wait_state(thread, "idle").await;
+    let segment = world.segment_of(thread).await;
+    let opening = world.opening_of(thread).await;
+    let body = json!({"thread_id":thread,"segment_id":segment});
+    insert_command(
+        &mut world.pool.acquire().await.unwrap(),
+        &NewCommand {
+            native_target: None,
+            id: orch_types::new_id(),
+            machine_id: world.machine_id,
+            kind: "session.close.fenced",
+            body: &body,
+            serial_key: None,
+            deadline_at: world.clock.now() + chrono::Duration::minutes(2),
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    world
+        .say_session_taken_in(
+            thread,
+            Event::SessionLost(SessionLost {
+                uncertain: false,
+                opening_id: opening,
+                expected: false,
+                reason: "the already withdrawn physical opening ended".into(),
+            }),
+        )
+        .await;
+    let facts: Json = world
+        .scalar(
+            "SELECT delivered_resources FROM segments WHERE id=$1",
+            segment,
+        )
+        .await;
+    assert_eq!(
+        facts["state"],
+        json!("closed"),
+        "an admission withdrawal does not discard the later factual close"
+    );
+    assert_eq!(facts["tool_admission"]["live"], json!(false));
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM items WHERE thread_id=$1 AND kind='error'",
+                thread
+            )
+            .await,
+        0
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM model_call_recovery WHERE node_id=$1",
+                thread
+            )
+            .await,
+        0
+    );
 }

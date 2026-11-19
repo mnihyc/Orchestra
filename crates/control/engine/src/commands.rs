@@ -10,9 +10,13 @@
 
 pub mod authority;
 mod host_probe;
+pub mod host_unit;
 mod http_origin;
+mod input_facts;
+pub mod provider_unit;
 mod receipts;
 pub use http_origin::HttpCommand;
+pub use input_facts::{InputCommandFacts, retain_input_facts};
 pub use receipts::McpImportAck;
 mod machine_controls;
 mod terminal_creation;
@@ -20,8 +24,9 @@ pub(crate) mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
 pub use host_probe::HostPortsProbe;
 pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
+    HostPolicyAuthority, MachineDirectoryAuthority, MachineGatewayAuthority,
+    MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority, MachineRolesAuthority,
+    role_change_refusal,
 };
 pub use machine_controls::{
     PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,
@@ -46,6 +51,9 @@ pub(crate) const BUSY_RETRY_PAUSE: std::time::Duration = std::time::Duration::fr
 /// Why a command could not be sent, or its end not learned.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandsError {
+    /// Preserve the storage failure's class through queued command work.
+    #[error("the command's storage failed: {0}")]
+    Database(#[source] orch_db::DbError),
     /// The actual issuing writer's check failed immediately before its first queue insert.
     #[error("the command's current issuing boundary has ended: {0}")]
     BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
@@ -78,6 +86,14 @@ pub type BeforeCommand<'a> =
 /// A command to send to a machine.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outgoing {
+    /// A factual physical operand captured before deferred work; never permission evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_target: Option<orch_link_contract::commands::NativeTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_offer: Option<Box<crate::tools::catalogue::AcceptedOrchTools>>,
+    /// Private observations retained with first durable admission, never sent to a machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_facts: Option<Box<InputCommandFacts>>,
     /// Its identifier: a command asked for twice under one is made once.
     pub id: Id,
     /// The machine it is for.
@@ -134,6 +150,7 @@ impl Outgoing {
         body: &B,
     ) -> Result<Self, CommandsError> {
         Ok(Self {
+            native_target: None,
             id,
             machine,
             key,
@@ -142,7 +159,19 @@ impl Outgoing {
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
             deadline: None,
             authority: None,
+            input_facts: None,
+            session_offer: None,
         })
+    }
+
+    /// Keeps the physical operand already captured by a producer, rather than resolving it later.
+    #[must_use]
+    pub fn with_native_target(
+        mut self,
+        target: orch_link_contract::commands::NativeTarget,
+    ) -> Self {
+        self.native_target = Some(target);
+        self
     }
 
     /// Retains login-origin evidence until the durable link's first-send/retry checkpoint.
@@ -162,6 +191,18 @@ impl Outgoing {
         self
     }
 
+    #[must_use]
+    pub fn with_session_offer(mut self, offer: crate::tools::catalogue::AcceptedOrchTools) -> Self {
+        self.session_offer = Some(Box::new(offer));
+        self
+    }
+
+    #[must_use]
+    pub fn with_input_facts(mut self, facts: Option<InputCommandFacts>) -> Self {
+        self.input_facts = facts.map(Box::new);
+        self
+    }
+
     /// The same command with a deadline of its own.
     #[must_use]
     pub fn by(mut self, deadline: Time) -> Self {
@@ -178,6 +219,7 @@ pub(crate) async fn session_close(
     thread: Id,
     segment: Option<Id>,
 ) -> Result<Outgoing, crate::error::EngineError> {
+    let target = orch_db::queries::session_dependencies::target(conn, thread, segment).await?;
     if requires_fence(conn, thread).await? {
         let segment = segment.ok_or_else(|| {
             crate::error::EngineError::unreadable(
@@ -203,6 +245,7 @@ pub(crate) async fn session_close(
                 segment_id: segment,
             },
         )
+        .map(|command| command.with_native_target(target))
         .map_err(Into::into);
     }
     Outgoing::new(
@@ -211,6 +254,7 @@ pub(crate) async fn session_close(
         SerialKey::Thread(thread),
         &orch_link_contract::commands::SessionClose { thread_id: thread },
     )
+    .map(|command| command.with_native_target(target))
     .map_err(Into::into)
 }
 
@@ -363,6 +407,14 @@ pub trait Commands: Send + Sync {
     }
 
     /// Reads one frozen frame so a replay cannot borrow a different recipient, kind or serial lane.
+    /// The original admitted session offer, including when a queued command is replayed after restart.
+    async fn retained_session_offer(
+        &self,
+        _id: Id,
+    ) -> Result<Option<crate::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(None)
+    }
+
     async fn retained_command(&self, id: Id) -> Result<Option<RetainedCommand>, CommandsError> {
         if self.retained_body(id).await?.is_some() {
             return Err(CommandsError::Other(

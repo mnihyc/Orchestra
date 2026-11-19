@@ -142,7 +142,12 @@ impl Effect for Copy {
             let door = door::open_with_principal(ctx, conn, id, query.thread, actor).await?;
             door.may_write()?;
             let machine = live::require_live(ctx, conn, &door.env).await?;
-            let input = FileCopyInput::new(&door.env, machine, query.thread, from, to);
+            let input = FileCopyInput::new(&door.env, machine, query.thread, from, to).with_access(
+                orch_link_contract::commands::FsAccess {
+                    view: door.access.view.or(door.access.manage),
+                    manage: door.access.manage,
+                },
+            );
             Ok((
                 Prepared {
                     env: door.env,
@@ -211,6 +216,7 @@ impl ApplyOwned for Copy {
             dispatcher
                 .issue_stored_before(
                     crate::dispatch::StoredCommand {
+                        native_target: command.native_target.clone(),
                         id: Some(command.id),
                         machine: command.machine,
                         kind: command.kind.as_str().to_owned(),

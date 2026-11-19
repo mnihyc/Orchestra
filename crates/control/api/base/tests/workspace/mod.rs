@@ -253,6 +253,7 @@ pub async fn issue(app: &App, machine: Id, kind: CommandKind, body: &Json) -> Id
     command_rows::insert_command(
         &mut conn,
         &command_rows::NewCommand {
+            native_target: None,
             id,
             machine_id: machine,
             kind: kind.as_str(),
@@ -561,6 +562,7 @@ impl Disk {
         let media = orch_api_core::media::media_type(&entry.name, &[]).to_owned();
         let is_text = is_file && orch_api_core::media::is_text_by_name(&entry.name);
         Some(FileStat {
+            facts: None,
             entry,
             hash,
             media_type: if is_file {
@@ -635,6 +637,7 @@ impl Disk {
             .upload(self.machine, id, &file.bytes, PIECE)
             .await;
         Self::json(&FsFetchResult {
+            minimum_reach: orch_link_contract::policy::FileReach::Roots,
             hash,
             size: i64::try_from(file.bytes.len()).unwrap(),
             mtime_ns: file.mtime_ns,
@@ -981,6 +984,22 @@ impl Machine for Disk {
             }
             CommandKind::FsSearch => {
                 let search: FsSearch = serde_json::from_value(body).map_err(bad)?;
+                if search.scope == orch_api_contract::workspace::FileSearchIn::Names {
+                    let paths: Vec<_> = lock(&self.files)
+                        .keys()
+                        .filter(|path| path.to_lowercase().contains(&search.query.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    let names: Vec<_> = paths
+                        .iter()
+                        .filter_map(|path| self.stat_of(path))
+                        .map(|stat| stat.entry)
+                        .take(search.limit as usize)
+                        .collect();
+                    return Ok(
+                        json!({"names":names,"next_cursor":null,"observed_from":null,"as_of":null,"matches":[],"truncated":false,"searched":paths.len()}),
+                    );
+                }
                 let matches = self.matches_in(&search);
                 let limit = usize::try_from(search.limit).unwrap();
                 let truncated = matches.len() > limit;
@@ -1077,7 +1096,9 @@ impl Machine for Disk {
             CommandKind::GitDiff => {
                 let diff: GitDiff = serde_json::from_value(body).map_err(bad)?;
                 if let Some((text, truncated)) = lock(&self.diff).clone() {
-                    return Ok(json!({ "text": text, "truncated": truncated }));
+                    return Ok(
+                        json!({ "text": text, "truncated": truncated, "next_cursor":truncated.then_some("same-output") }),
+                    );
                 }
                 Ok(json!({
                     "text": format!("diff --git a/x b/x\n{}", if diff.staged == Some(true) { "staged" } else { "unstaged" }),
@@ -1471,6 +1492,7 @@ impl Site {
             "bytes_total": 1000, "rate_bps": null, "eta_seconds": null, "message": "reading"
         });
         let event = orch_link::streams::DeliveredEvent {
+            native_opening_id: None,
             seq: 1,
             at: Time::new(self.world.now()),
             kind: "job.progress".to_owned(),
@@ -1616,6 +1638,7 @@ impl Site {
             .upload(self.machine, nil, &written.bytes, PIECE)
             .await;
         let event = orch_link::streams::DeliveredEvent {
+            native_opening_id: None,
             seq: 1,
             at: Time::new(self.world.now()),
             kind: "env.manifest".to_owned(),
@@ -1673,6 +1696,7 @@ pub mod ask {
             .call(EnvironmentFileList, &[&site.environment])
             .token(&by.token)
             .query(&EnvironmentFileListQuery {
+                prefix: None,
                 thread: Some(site.thread),
                 path: path.to_owned(),
                 source,

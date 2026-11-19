@@ -144,6 +144,57 @@ pub struct EnvironmentNames<'a> {
     pub topics: &'a std::collections::BTreeSet<Id>,
 }
 
+/// Select the four public measurements together for the machines whose facts this reader may see.
+pub async fn machine_capacities(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    ids: &[Id],
+) -> ApiResult<std::collections::HashMap<Id, orch_api_contract::environment::MachineCapacity>> {
+    let mut capacity = std::collections::HashMap::new();
+    if ids.is_empty()
+        || principal
+            .caller()
+            .grant()
+            .is_some_and(|grant| grant.operation_scope().is_some())
+    {
+        return Ok(capacity);
+    }
+    let visible: Vec<_> = orch_authz::resources::holding(
+        conn,
+        principal,
+        ids,
+        orch_access_contract::permissions::Permission::MachineView,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .into_iter()
+    .map(|row| row.id)
+    .collect();
+    if visible.is_empty() {
+        return Ok(capacity);
+    }
+    let figures = sqlx::query_as::<_,(Id, Json)>(
+        "SELECT id,jsonb_build_object('cpus',facts->'cpus','memory_bytes',facts->'memory_bytes','data_volume_bytes',facts->'data_volume_bytes','capacity_refresh_secs',facts->'capacity_refresh_secs')
+         FROM machines WHERE id=ANY($1) AND deleted_at IS NULL AND facts ?| ARRAY['cpus','memory_bytes','data_volume_bytes']")
+        .bind(&visible).fetch_all(conn).await.map_err(orch_db::DbError::from)?;
+    for (id, report) in figures {
+        let reading = orch_api_contract::environment::MachineCapacity {
+            cpus: report["cpus"].as_i64(),
+            memory_bytes: report["memory_bytes"].as_i64(),
+            data_volume_bytes: report["data_volume_bytes"].as_i64(),
+            capacity_refresh_secs: report["capacity_refresh_secs"].as_u64(),
+        };
+        if reading.cpus.is_some()
+            || reading.memory_bytes.is_some()
+            || reading.data_volume_bytes.is_some()
+        {
+            capacity.insert(id, reading);
+        }
+    }
+    Ok(capacity)
+}
+
 impl PreparedEnvironments {
     pub async fn render(
         &self,
@@ -176,7 +227,15 @@ impl PreparedEnvironments {
             crate::routes::nodes::view::refs(conn, principal, &ids, Policy::default()).await?
         };
         let mut result = Vec::new();
-        for view in super::show_inventory_prepared(ctx, conn, principal, &self.inventory).await? {
+        let views = super::show_inventory_prepared(ctx, conn, principal, &self.inventory).await?;
+        let machine_ids: Vec<_> = views
+            .iter()
+            .filter(|v| v.base.placement == orch_api_contract::environment::Placement::Connected)
+            .filter_map(|v| v.machine.as_ref().map(|m| m.id))
+            .filter(|id| !limited || machines.contains(id))
+            .collect();
+        let capacity = machine_capacities(conn, principal, &machine_ids).await?;
+        for view in views {
             let id = view.base.id;
             let mut place = place_of(view);
             let source = self
@@ -199,6 +258,17 @@ impl PreparedEnvironments {
                         .get(&topic.id)
                         .cloned()
                         .ok_or_else(ApiError::not_found)?;
+                }
+            }
+            if place.environment.placement == orch_api_contract::environment::Placement::Connected {
+                place.capacity = place
+                    .machine
+                    .as_ref()
+                    .and_then(|m| capacity.get(&m.id))
+                    .cloned();
+                if let Some(reading) = &place.capacity {
+                    place.facts.cpus = reading.cpus;
+                    place.facts.memory_mb = reading.memory_bytes.map(|bytes| bytes / (1024 * 1024));
                 }
             }
             result.push(place);

@@ -27,6 +27,8 @@ pub use crate::browser::{
     BrowserAdopt, BrowserAdoptResult, BrowserClose, BrowserOpen, BrowserOpenResult,
     BrowserProfileCommand, BrowserProfileResult, ScreenLook, ScreenLookResult,
 };
+pub use crate::native_target::{NativeTarget, SessionTarget};
+
 use crate::events::{EnvironmentFacts, NodeCapacity, NodeStorage};
 use crate::foreign;
 use crate::policy::LocalPolicy;
@@ -345,7 +347,17 @@ pub fn resolve_reference_values<E>(
 
 /// A command, as it is sent to a machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(extend("required" = ["id", "k", "deadline", "authority_until", "b"]))]
 pub struct Cmd {
+    /// The original factual member set, never a grant or a later session lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_members: Option<Vec<crate::tool_sessions::ToolSessionMember>>,
+    /// The revision frozen with those original native facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_revision: Option<i64>,
+    /// The physical operand captured at acceptance; absent only for acts without a native target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_target: Option<crate::native_target::NativeTarget>,
     /// The command's identifier: the same every time it is sent.
     pub id: Id,
     /// Its kind.
@@ -354,11 +366,22 @@ pub struct Cmd {
     /// Its serial key; `null` for a command that waits for no other.
     #[serde(default)]
     pub key: Option<String>,
-    /// The moment after which it is not to be started.
+    /// The latest arrival time. Once accepted, admission and serial-key queue time are credited
+    /// to execution, including after a connector restart.
     pub deadline: Time,
+    /// The original credential/operation bound. Queue time never extends it; null is
+    /// explicitly unbounded and grants no permission. The server supplies this fact.
+    #[serde(deserialize_with = "explicit_authority_until")]
+    pub authority_until: Option<Time>,
     /// Its body, as its kind defines it.
     #[serde(rename = "b")]
     pub body: Json,
+}
+
+fn explicit_authority_until<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Time>, D::Error> {
+    Option::<Time>::deserialize(deserializer)
 }
 
 /// A live replacement of a retained session's forwarder ticket is never a durable command.
@@ -372,10 +395,34 @@ pub fn is_transport_rebind(kind: &str, body: &Json) -> bool {
     flag.and_then(Json::as_bool) == Some(true)
 }
 
+/// Actual serial-key ownership, independent of an accepted command's later upload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[repr(i16)]
+pub enum CommandKeyPhase {
+    /// Accepted, still waiting for its place in the serial line.
+    Queued = 0,
+    /// Running while it owns the key.
+    Running = 1,
+    /// Capture released the key; its result can still be uploading.
+    Released = 2,
+}
+
 /// A machine's acceptance: durable for ordinary commands, in memory for a live transport rebind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CmdAck {
     /// The command.
+    pub id: Id,
+    /// The machine's current ownership of its serial key.
+    pub key_phase: CommandKeyPhase,
+}
+
+/// A machine received the complete command, before any durable acceptance work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct CmdSeen {
+    /// The command that arrived whole.
     pub id: Id,
 }
 
@@ -549,6 +596,8 @@ error_codes! {
     WorkspaceConfiguration = "workspace_configuration";
     /// The machine's owner does not offer that directory.
     PolicyRootNotAllowed = "policy.root_not_allowed";
+    /// The requested native file target exceeds this command's admitted reach.
+    FileReachDenied = "files.reach_denied";
     /// The machine did not permit sign-in changes in a person's own harness home.
     PolicySignInNotAllowed = "policy.signin_not_allowed";
     /// The machine's owner does not let an agent work without asking.
@@ -925,18 +974,47 @@ pub use crate::browser_window::{DisplayOpen, DisplayOpenResult};
 pub use crate::display::{DisplayAdopt, DisplayAdoptResult, DisplayClose};
 pub use orch_api_contract::machine_programs::MachineProgramsCommand;
 
+/// The server's native program operation; browser input never supplies decision attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineProgramsRequest {
+    /// The original requested program act.
+    pub request: MachineProgramsCommand,
+    /// The recorded manager for ConfirmHarness; every other act carries none.
+    pub confirmation: Option<orch_agent_programs::confirmation::Confirmation>,
+}
+
+impl MachineProgramsRequest {
+    /// Confirmation attribution accompanies only an actual program confirmation.
+    #[must_use]
+    pub fn coherent(&self) -> bool {
+        match &self.request {
+            MachineProgramsCommand::ConfirmHarness { .. } => self
+                .confirmation
+                .is_some_and(|decision| !decision.by.is_nil()),
+            _ => self.confirmation.is_none(),
+        }
+    }
+}
+
 commands! {
     /// Reads what a machine is and has.
     MachineProbe = "machine.probe": ANY, Machine, 30, None, MachineProbe => MachineFacts;
+    /// Lists one admitted machine-root directory without attaching an environment.
+    MachineDirectoryList = "machine.directory.list": ANY, None, 15, None, MachineDirectoryList => orch_api_contract::resources::MachineDirectoryPage;
     /// Installs the recommended verified build after the server has fenced and drained hosted turns.
     /// Local update.auto is checked again on receipt and immediately before installation.
     MachineUpdateNow = "machine.update.now": ANY, Machine, 30, None, MachineUpdateNow => MachineUpdateNowResult;
+    /// Runs or observes only this installation's release updater on its bundled node.
+    NodeServerUpdate = "node.server.update": NODE, Machine, 60, None, NodeServerUpdate => orch_api_contract::admin::ServerUpdateObservation;
     /// Changes keys of a machine's local policy that its owner handed over.
     MachinePolicySet = "machine.policy.set": CONNECTED, Machine, 30, None, MachinePolicySet => MachinePolicySetResult;
     /// Changes or probes locally supervised programs, within the existing provider startup budget.
-    MachinePrograms = "machine.programs": ANY, Machine, 120, None, MachineProgramsCommand => MachineFacts;
+    MachinePrograms = "machine.programs": ANY, Machine, 120, None, MachineProgramsRequest => MachineFacts;
     /// Saves delegated connector roles, then reconnects through the native supervisor.
     MachineRolesSet = "machine.roles.set": ANY, Machine, 30, None, MachineRolesSet => MachineRolesSetResult;
+    /// Saves a primary choice within the same advertised installation, then reconnects after its durable reply.
+    MachineGatewaySet = "machine.gateway.set": ANY, Machine, 30, None, MachineGatewaySet => MachineGatewaySetResult;
     /// Runs one named command after a managed unit starts, keeping its result for this run.
     /// Its hour-long maximum plus thirty seconds allows bounded drain and durable result storage.
     UnitAfterUp = "unit.after_up": AFTER_UP_HOST, Runtime, 3630, None, UnitAfterUp => UnitAfterUpResult;
@@ -1013,7 +1091,7 @@ commands! {
     /// Adds an input to the turn that is running.
     TurnSteer = "turn.steer": AGENT, Thread, 30, Download, TurnSteer => Empty;
     /// Stops the turn that is running.
-    TurnInterrupt = "turn.interrupt": AGENT, Thread, 30, None, TurnInterrupt => Empty;
+    TurnInterrupt = "turn.interrupt": AGENT, None, 30, None, TurnInterrupt => Empty;
     /// Gives a harness the decision it asked for.
     ApprovalResolve = "approval.resolve": AGENT, Thread, 30, None, ApprovalResolve => Empty;
     /// Gives a harness the outcome of a call to one of the system's own tools.
@@ -1108,6 +1186,7 @@ commands! {
     FsMeasure = "fs.measure": ENVIRONMENT, Environment, 30, None, FsMeasure => FsMeasureResult;
     /// Writes the files of a list into a directory.
     FsMaterialize = "fs.materialize": ENVIRONMENT, Environment, 21600, Download, FsMaterialize => FsMaterializeResult;
+    FsMaterializeIfAbsent = "fs.materialize_if_absent": ENVIRONMENT, Environment, 21600, Download, FsMaterializeIfAbsent => FsDirectoryCopyResult;
     /// Reads the state of the repository in a workspace.
     GitStatus = "git.status": ENVIRONMENT, None, 15, None, GitStatus => foreign::GitStatus;
     /// Reads what changed in the repository of a workspace.
@@ -1137,7 +1216,7 @@ commands! {
     /// Reads verified recorded bytes instead of newer live workspace files.
     FsRecordRead = "fs.record.read": ENVIRONMENT, None, 21600, Upload, crate::source::FsRecordRead => crate::source::FsRecordReadResult;
     /// Releases expired file-state roots unless a running change pins them.
-    FsRecordPrune = "fs.record.prune": ENVIRONMENT, Environment, 1800, None, crate::source::FsRecordPrune => crate::source::FsRecordPruneResult;
+    FsRecordPrune = "fs.record.prune": ENVIRONMENT, None, 1800, None, crate::source::FsRecordPrune => crate::source::FsRecordPruneResult;
     /// Verifies carried roots, referenced objects and journals before source release.
     FsRecordVerify = "fs.record.verify": ENVIRONMENT, Environment, 21600, None, crate::source::FsRecordVerify => crate::source::FsRecordVerifyResult;
     /// Measures declared data roots before moving to any permitted machine.
@@ -1171,9 +1250,9 @@ commands! {
     /// Makes a unit for a runtime.
     NodeRuntimeCreate = "node.runtime.create": NODE, Runtime, 600, None, NodeRuntimeCreate => NodeRuntimeCreateResult;
     /// Starts a runtime's unit.
-    NodeRuntimeStart = "node.runtime.start": NODE, Runtime, 120, None, NodeRuntimeStart => Empty;
+    NodeRuntimeStart = "node.runtime.start": NODE, Runtime, 120, None, NodeRuntimeStart => NodeRuntimeStartResult;
     /// Stops a runtime's unit.
-    NodeRuntimeStop = "node.runtime.stop": NODE, Runtime, 120, None, NodeRuntimeStop => Empty;
+    NodeRuntimeStop = "node.runtime.stop": NODE, Runtime, 120, None, NodeRuntimeStop => NodeRuntimeStopResult;
     /// Removes a runtime's unit.
     NodeRuntimeRemove = "node.runtime.remove": NODE, Runtime, 120, None, NodeRuntimeRemove => Empty;
     /// Installs a runtime's network policy and retains its requested restriction before acknowledging.
@@ -1219,15 +1298,15 @@ commands! {
     /// Restores a carried owned volume before the target unit is created or started.
     NodeRuntimeVolumeImport = "node.runtime.volume.import": NODE, Runtime, 21600, Download, NodeRuntimeVolumeImport => Empty;
     /// Checks whole owned-volume carry support on the target before a plan can be confirmed.
-    NodeVolumeCarryCheck = "node.volume.carry-check": NODE, None, 25, None, NodeVolumeCarryCheck => NodeVolumeCarryCheckResult;
+    NodeVolumeCarryCheck = "node.volume.carry-check": DATA_MAKER, None, 25, None, NodeVolumeCarryCheck => NodeVolumeCarryCheckResult;
     /// Counts a mount's data where it is, before a copy of it is planned.
-    NodeMountMeasure = "node.mount.measure": NODE, None, 3600, None, NodeMountMeasure => orch_driver_contract::volumes::VolumeMeasure;
+    NodeMountMeasure = "node.mount.measure": DATA_MAKER, None, 3600, None, NodeMountMeasure => orch_driver_contract::volumes::VolumeMeasure;
     /// Fingerprints a mount's data in place without following links or changing it.
     NodeMountFingerprint = "node.mount.fingerprint": NODE, None, 3600, None, NodeMountFingerprint => NodeMountFingerprintResult;
     /// Archives a mount's data where it is, as checked parts in the content store, for a copy to another host.
-    NodeMountExport = "node.mount.export": NODE, Volume, 21600, Upload, NodeMountExport => VolumeArchive;
+    NodeMountExport = "node.mount.export": DATA_MAKER, Volume, 21600, Upload, NodeMountExport => VolumeArchive;
     /// Unpacks a copy of a mount's data into a volume made for that mount, which no unit uses.
-    NodeMountImport = "node.mount.import": NODE, Volume, 21600, Download, NodeMountImport => Empty;
+    NodeMountImport = "node.mount.import": DATA_MAKER, Volume, 21600, Download, NodeMountImport => Empty;
     /// Makes what a unit's file system comes from available on a host.
     NodeImageEnsure = "node.image.ensure": NODE, Image, 3600, Download, NodeImageEnsure => NodeImageEnsureResult;
     /// Proposes a template's spec from something a person already has.
@@ -1257,6 +1336,36 @@ impl std::fmt::Display for CommandKind {
     }
 }
 
+impl CommandKind {
+    /// Requests or answers of these kinds can outgrow a message's byte allowance.
+    /// They use the same parts transport with a wide logical length; each part still fits a frame.
+    #[must_use]
+    pub const fn is_paged(self) -> bool {
+        matches!(
+            self,
+            Self::MachineDirectoryList
+                | Self::AgentDiscoverSessions
+                | Self::AgentHistoryManage
+                | Self::AgentHistoryHomeCleanup
+                | Self::OrchToolResult
+                | Self::ProviderComplete
+                | Self::ProviderGenerate
+                | Self::ProviderService
+                | Self::ProviderEmbed
+                | Self::FsList
+                | Self::FsArchiveList
+                | Self::GitStatus
+                | Self::GitCommit
+                | Self::GitPush
+                | Self::FsRestorePlan
+                | Self::WorkspaceObserve
+                | Self::ProcList
+                | Self::NodeRuntimeStop
+                | Self::NodeResourcesList
+        )
+    }
+}
+
 impl Cmd {
     /// The frame for a command of the catalogue.
     pub fn new<B: CommandBody>(
@@ -1266,12 +1375,59 @@ impl Cmd {
         body: &B,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self {
+            authority_until: None,
+            native_target: None,
+            native_members: None,
+            native_revision: None,
             id,
             kind: B::KIND.as_str().to_owned(),
             key: key.wire(),
             deadline,
             body: serde_json::to_value(body)?,
         })
+    }
+
+    /// Copies only the accepted command's factual session operands to its wire header.
+    pub fn set_session_facts(&mut self, facts: &Json) -> Result<(), serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Nonce {
+            nonce: Id,
+        }
+        if let Some(target) = facts.get("native_target") {
+            self.native_target = Some(serde_json::from_value(target.clone())?);
+        }
+        if !matches!(
+            crate::native_target::session_action(&self.kind, &self.body),
+            Some(
+                crate::native_target::SessionAction::Open
+                    | crate::native_target::SessionAction::Model
+                    | crate::native_target::SessionAction::Mcp
+            )
+        ) {
+            self.native_members = None;
+            self.native_revision = None;
+            return Ok(());
+        }
+        self.native_revision = facts
+            .get("revision")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?;
+        self.native_members = facts
+            .get("members")
+            .map(|value| {
+                let members: BTreeMap<String, Nonce> = serde_json::from_value(value.clone())?;
+                Ok::<_, serde_json::Error>(
+                    members
+                        .into_iter()
+                        .map(|(member, value)| crate::tool_sessions::ToolSessionMember {
+                            member,
+                            nonce: value.nonce,
+                        })
+                        .collect(),
+                )
+            })
+            .transpose()?;
+        Ok(())
     }
 
     /// The command, when its kind is one of the catalogue and its body
@@ -1320,12 +1476,36 @@ pub struct Empty {}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct MachineProbe {}
 
+/// A bounded one-level read under the machine's current environment.roots policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineDirectoryList {
+    /// Whether to enumerate choices or inspect only this exact directory.
+    pub read_kind: orch_api_contract::resources::MachineDirectoryRead,
+    /// Exact policy entry selected by the reader.
+    pub root: String,
+    /// Directory relative to that root; empty selects the root itself.
+    pub path: String,
+    /// Only child directory names beginning with this text are returned.
+    pub prefix: String,
+    /// Recent child names affect order only after native containment checks.
+    pub recent: Vec<String>,
+    /// Same-directory, same-policy native continuation.
+    pub cursor: Option<String>,
+    /// Positive requested count, with no fixed count ceiling.
+    pub limit: u32,
+    /// Captured System workspace.directory_page_bytes allowance.
+    pub page_bytes: u64,
+}
+
 /// The server's idle grant for one physical program, never a runtime's connector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MachineUpdateNow {
     /// The same recommendation announced by ready.versions; no arbitrary download address is accepted.
     pub recommended: String,
+    /// True is an automatic drain grant; false retains a person's explicit Update choice.
+    pub automatic: bool,
 }
 
 /// What the physical program did with Update now.
@@ -1339,6 +1519,18 @@ pub struct MachineUpdateNowResult {
     pub recommended_version: String,
     /// Human-readable outcome; a refusal is a CommandError with its local command.
     pub detail: String,
+}
+
+/// A release selection, never a native path, executable, argument list or download URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeServerUpdate {
+    /// Positive preparation allowance from the accepted system setting, not a cap on the detached release job.
+    pub timeout_secs: u64,
+    /// The same durable job identity across API and node restarts.
+    pub job_id: orch_types::Id,
+    /// The exact validated semantic release selected at admission.
+    pub release: String,
 }
 
 /// The body of `machine.policy.set`.
@@ -1363,6 +1555,19 @@ pub struct MachineRolesSetResult {
     pub roles: Vec<String>,
     /// False for an idempotent request for the currently active roles.
     pub reconnecting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySet {
+    pub choice: crate::gateways::GatewayChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySetResult {
+    pub choice: crate::gateways::GatewayChoice,
+    pub changed: bool,
 }
 
 /// The result of `machine.policy.set`.
@@ -1799,9 +2004,8 @@ pub struct SessionOpenSkill {
 /// A tool server of the environment that the session is given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpenMcp {
-    /// Stable Orch membership, separate from the name a harness sees; absent on older commands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<Id>,
+    /// Stable Orch membership, separate from the name a harness sees.
+    pub server_id: Id,
     /// The name the server is offered under.
     pub name: String,
     /// The ticket that opens the tunnels to it.
@@ -1811,6 +2015,8 @@ pub struct SessionOpenMcp {
 /// The body of `session.open`: everything a session is set up with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpen {
+    /// Bytes retained for one native text output; resolved from the thread setting.
+    pub output_capture_bytes: u64,
     /// Current admitted model metadata and unchanged core capability resolutions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
@@ -1867,6 +2073,8 @@ pub struct SessionOpen {
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the selected program's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -1948,6 +2156,9 @@ pub enum SideReading {
 /// The result of `session.open`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpenResult {
+    /// Orch server names actually supplied to the program; absence leaves delivery unreported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<Vec<String>>,
     /// The harness's own name for the conversation.
     pub native_session_ref: String,
     /// Whether it is a conversation the harness already held.
@@ -2033,6 +2244,8 @@ pub struct SessionBackground {
     /// Continues the same bounded native snapshot, renewing its idle transfer deadline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// Current resolved transfer preferences, without a limit on complete roster length.
+    pub limits: crate::background::BackgroundReadLimits,
 }
 
 /// Reads the effective action mapping of the exact open native session generation.
@@ -2216,6 +2429,9 @@ pub struct ToolError {
     pub code: String,
     /// A sentence for the agent.
     pub message: String,
+    /// The actual refusal's retained allowance and reported wait, when captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<Box<orch_api_contract::threads::ToolRateLimit>>,
 }
 
 /// The body of `orch.tool_result`: one of `result` and `error`.
@@ -3143,6 +3359,60 @@ impl UnitAfterUpResult {
     }
 }
 
+/// Resolved workspace working allowances. Larger trees keep bounded incremental coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceLimits {
+    /// Folder rows in the default page. Explicit requests can choose another window.
+    pub directory_entries: u64,
+    /// File search rows in the default page. Explicit requests can choose another window.
+    pub search_results: u64,
+    /// Archive rows in the default page. Explicit requests can choose another window.
+    pub archive_results: u64,
+    /// Cached file entries.
+    pub index_entries: u64,
+    /// Indexing slice.
+    pub index_scan_secs: u64,
+    /// Exclusion parsing.
+    pub ignore_max_bytes: u64,
+    /// Cached exclusion rules.
+    pub ignore_cache_bytes: u64,
+    /// Folder continuation idle time.
+    pub directory_idle_secs: u64,
+    /// Folder observations.
+    pub directory_slots: u64,
+    /// Shared directory and file-read continuation bytes.
+    pub directory_cache_bytes: u64,
+    /// Folder metadata reads.
+    pub directory_builds: u64,
+    /// Folder page bytes.
+    pub directory_page_bytes: u64,
+    /// File search slice.
+    pub search_slice_secs: u64,
+    /// Diff bytes.
+    pub git_diff_bytes: u64,
+}
+
+impl Default for WorkspaceLimits {
+    fn default() -> Self {
+        Self {
+            directory_entries: 5000,
+            search_results: 200,
+            archive_results: 1000,
+            index_entries: 250000,
+            index_scan_secs: 10,
+            ignore_max_bytes: 1048576,
+            ignore_cache_bytes: 16777216,
+            directory_idle_secs: 300,
+            directory_slots: 256,
+            directory_cache_bytes: 1073741824,
+            directory_builds: 1,
+            directory_page_bytes: 2097152,
+            search_slice_secs: 20,
+            git_diff_bytes: 2097152,
+        }
+    }
+}
+
 /// The body of `env.attach`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvAttach {
@@ -3163,6 +3433,8 @@ pub struct EnvAttach {
     /// The root of its workspace; `null` where a driver made the unit
     /// and the connector uses what it was given.
     pub workspace_root: Option<String>,
+    /// Resolved working allowances from the workspace settings.
+    pub workspace: WorkspaceLimits,
     /// The patterns of what is left out of the workspace.
     pub ignore: Vec<String>,
     /// Whether a list of the whole tree is kept.
@@ -3280,6 +3552,9 @@ pub struct McpRestartResult {
 /// The body of `mcp.import`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpImport {
+    /// The exact native provider/profile selected by discovery, where one was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<orch_agent_contract::discovery::McpProfile>,
     /// When supplied, the native definition must still match before any protected copy is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_fingerprint: Option<Hash>,
@@ -3363,9 +3638,35 @@ pub struct McpStop {
 
 // ---------------------------------------------------------------- bodies: files
 
+/// Current native path bounds for this command, never inferred from a path's spelling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsAccess {
+    /// No value means no file read was admitted; a read does not imply a write.
+    pub view: Option<crate::policy::FileReach>,
+    /// No value means no mutation was admitted, even when the read reaches the machine.
+    pub manage: Option<crate::policy::FileReach>,
+}
+
+impl FsAccess {
+    /// Internal workspace operations retain their existing roots, never human machine authority.
+    #[must_use]
+    pub const fn roots() -> Self {
+        Self {
+            view: Some(crate::policy::FileReach::Roots),
+            manage: Some(crate::policy::FileReach::Roots),
+        }
+    }
+}
+
 /// The body of `fs.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsList {
+    /// Case-insensitive child-name prefix, filtered natively before paging; absent lists all names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// An attached mount to list in place of the workspace.
@@ -3403,9 +3704,9 @@ pub struct FsListPage {
 /// Immutable sorted metadata observed during the returned directory page's capture interval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsListPageResult {
-    /// Hash of sorted metadata, independent of page size.
+    /// Stable observation identity, independent of page size; a wide or changing folder continues its live reader.
     pub revision: Hash,
-    /// Null is the actual end of this snapshot.
+    /// Null is the actual end of this observation.
     pub next_cursor: Option<String>,
     /// When the metadata observation finished, not an instantaneous filesystem cut.
     pub as_of: Time,
@@ -3419,6 +3720,9 @@ pub struct FsListPageResult {
 /// The result of `fs.list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FsListResult {
+    /// Captured facts of this source observation, absent when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<orch_api_contract::workspace::FileSourceFacts>,
     /// The entries of the directory.
     pub entries: Vec<foreign::DirEntry>,
     /// Whether there are more than a listing returns.
@@ -3444,6 +3748,8 @@ pub struct FsUnwatch {
 /// The body of `fs.stat`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsStat {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// An attached mount to look in, in place of the workspace.
@@ -3465,6 +3771,8 @@ pub struct FileVersion {
 /// The body of `fs.fetch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsFetch {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// An attached mount to read from, in place of the workspace.
@@ -3487,6 +3795,8 @@ pub struct FsFetch {
 /// The result of `fs.fetch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsFetchResult {
+    /// Native geometry of the resolved bytes; retained content never loses this lower bound.
+    pub minimum_reach: crate::policy::FileReach,
     /// The hash of the file's content, which the system now holds.
     pub hash: Hash,
     /// Its size in bytes.
@@ -3539,6 +3849,8 @@ impl JsonSchema for ExpectedHash {
 /// The body of `fs.write`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsWrite {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// Progress and cooperative cancellation owned by a durable workspace write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<WorkReport>,
@@ -3560,6 +3872,8 @@ pub struct FsWrite {
 /// The body of `fs.mkdir`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsMkdir {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// The directory to make.
@@ -3569,6 +3883,8 @@ pub struct FsMkdir {
 /// The body of `fs.rename`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsRename {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// What is renamed.
@@ -3580,6 +3896,8 @@ pub struct FsRename {
 /// The body of `fs.remove`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsRemove {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// What is removed.
@@ -3591,6 +3909,8 @@ pub struct FsRemove {
 /// The body of `fs.copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsCopy {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// What is copied.
@@ -3602,6 +3922,14 @@ pub struct FsCopy {
 /// The body of `fs.archive.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsArchiveList {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
+    /// Match the displayed child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Continue the same open archive reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The environment.
     pub environment_id: Id,
     /// The archive.
@@ -3616,6 +3944,8 @@ pub struct FsArchiveList {
 /// The body of `fs.archive.read`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsArchiveRead {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// The archive.
@@ -3634,6 +3964,12 @@ pub struct FsArchiveReadResult {
 /// The body of `fs.search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsSearch {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
+    /// Names or text content, read incrementally from the live workspace.
+    pub scope: orch_api_contract::workspace::FileSearchIn,
+    /// The previous page of exactly this search; omitted starts a fresh traversal.
+    pub cursor: Option<String>,
     /// The environment.
     pub environment_id: Id,
     /// The directory to stay in.
@@ -3654,6 +3990,14 @@ pub struct FsSearch {
 /// The result of `fs.search`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FsSearchResult {
+    /// The names found; absent for content searches.
+    pub names: Option<Vec<foreign::DirEntry>>,
+    /// Continue this traversal, including when a time slice found no matches.
+    pub next_cursor: Option<String>,
+    /// When live traversal began; results cover the reported observation interval.
+    pub observed_from: Option<Time>,
+    /// When this page was observed.
+    pub as_of: Option<Time>,
     /// The lines that were found.
     pub matches: Vec<foreign::FileMatch>,
     /// Whether the search stopped before it had seen everything.
@@ -3703,6 +4047,8 @@ pub fn validate_selection_pattern(pattern: &str) -> Result<(), &'static str> {
 /// The body of `fs.manifest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsManifest {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// The part of the workspace to list.
@@ -3730,6 +4076,8 @@ pub const SNAPSHOT_SCAN_SECONDS: u64 = 10;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FsMeasure {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The attached environment that owns the workspace.
     pub environment_id: Id,
     /// Exactly the selection a snapshot would take, with ignore rules applied.
@@ -3783,6 +4131,8 @@ pub struct FsMeasureResult {
 /// The body of `fs.snapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsSnapshot {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The running job's reporting and configured time allowance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<WorkReport>,
@@ -3825,6 +4175,8 @@ pub enum MaterializePurpose {
 /// The body of `fs.materialize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsMaterialize {
+    /// The current read and mutation reach admitted for this command.
+    pub access: FsAccess,
     /// The running job's reporting and configured time allowance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<WorkReport>,
@@ -3853,10 +4205,52 @@ pub struct FsMaterializeResult {
     pub skipped: i64,
 }
 
+/// Publishes one complete directory only if its destination is absent, retaining one outcome per job and target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsMaterializeIfAbsent {
+    /// The immutable job allowance and live reporting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkReport>,
+    /// The original selected environment.
+    pub environment_id: Id,
+    /// The real durable job, never a synthetic child identity.
+    pub job_id: Id,
+    /// The complete source directory's manifest, relative to its own root.
+    pub manifest_blob: Hash,
+    /// The original destination directory.
+    pub target_root: String,
+}
+
+/// Positive outcomes of a conditional directory copy, not guesses from zero written files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryCopyOutcome {
+    /// The verified complete directory was published.
+    Copied,
+    /// A directory already there won; its contents were not changed.
+    TargetKept,
+}
+
+/// The first native directory decision and its verified counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FsDirectoryCopyResult {
+    /// The native outcome, including a directory that appeared while bytes were received.
+    pub outcome: DirectoryCopyOutcome,
+    /// Actual writes; kept directories are not counted as copied files.
+    pub counts: FsMaterializeResult,
+    /// When the native decision was recorded.
+    pub at: Time,
+    /// A changed or unavailable private stage was preserved instead of deleting uncertain work.
+    pub cleanup_pending: bool,
+}
+
 /// The body of `git.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitStatus {
+    /// The current path reach, also retained by a native watch or continuation.
+    pub access: FsAccess,
     /// The environment.
     pub environment_id: Id,
     /// The repository's directory, relative to the workspace; omitted means the root.
@@ -3871,6 +4265,14 @@ pub struct GitStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitDiff {
+    /// The current path reach, also retained by a native watch or continuation.
+    pub access: FsAccess,
+    /// Continue the same native Git output, rather than running it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Preferred bytes in this page; omitted uses the workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
     /// The environment.
     pub environment_id: Id,
     /// The path to keep to.
@@ -3884,6 +4286,9 @@ pub struct GitDiff {
 /// The result of `git.diff`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GitDiffResult {
+    /// Continue the same process's output; null means its actual end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// The differences, as a unified diff.
     pub text: String,
     /// Whether there was more than is returned.
@@ -4006,6 +4411,8 @@ pub struct NodeRuntimeCreate(pub foreign::RuntimeSpec);
 pub struct NodeRuntimeCreateResult {
     /// The driver's own reference for what it made.
     pub unit: foreign::UnitRef,
+    /// The original native unit/start this creation observed, retained through later preparation.
+    pub source: crate::native_target::RuntimeSource,
 }
 
 /// The body of `node.runtime.start`.
@@ -4013,6 +4420,45 @@ pub struct NodeRuntimeCreateResult {
 pub struct NodeRuntimeStart {
     /// The runtime.
     pub runtime_id: Id,
+}
+
+/// The actual original native start or unchanged running reuse confirmed by this command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeRuntimeStartResult {
+    /// Captured under the runtime's native effect lock; untracked never means absent.
+    pub source: crate::native_target::RuntimeSource,
+    /// Whether this exact physical unit was already running without a new start.
+    pub reused: bool,
+}
+
+/// Factual completion of an original native Stop, independent of its caller's permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NodeRuntimeStopResult {
+    /// This actual physical source is stopped (including an already stopped original).
+    Stopped {
+        source: crate::native_target::RuntimeSource,
+    },
+    /// These exact owned originals or admitted openings are known absent or closed.
+    /// This never means that an unknown current source was absent.
+    Absent { originals: Vec<Id> },
+}
+impl NodeRuntimeStopResult {
+    #[must_use]
+    pub fn coherent(&self) -> bool {
+        match self {
+            Self::Stopped { source } => source.incarnation.is_some_and(|id| !id.is_nil()),
+            Self::Absent { originals } => {
+                originals.iter().all(|id| !id.is_nil())
+                    && originals
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == originals.len()
+            }
+        }
+    }
 }
 
 /// The body of `node.network.apply`, supplied by the system to the registered host node.
@@ -4530,6 +4976,9 @@ pub struct NodeMountImport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkReport {
+    /// The system policy actually captured with this immutable command allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_policy: Option<foreign::JobWorkPolicy>,
     /// File count from the reviewed plan, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_total: Option<i64>,
@@ -5035,6 +5484,37 @@ mod tests {
         text.parse().unwrap()
     }
 
+    #[test]
+    fn a_native_command_retains_its_explicit_original_authority_deadline_separate_from_its_work_budget()
+     {
+        let mut command = Cmd::new(
+            id(COMMAND),
+            &SerialKey::Thread(id(THREAD)),
+            time("2026-10-08T17:09:05.000Z"),
+            &SessionClose {
+                thread_id: id(THREAD),
+            },
+        )
+        .unwrap();
+        let unbounded = serde_json::to_value(&command).unwrap();
+        assert!(unbounded.get("authority_until").is_some_and(Json::is_null));
+        assert_eq!(
+            serde_json::from_value::<Cmd>(unbounded.clone()).unwrap(),
+            command
+        );
+        let mut missing = unbounded;
+        missing.as_object_mut().unwrap().remove("authority_until");
+        assert!(
+            serde_json::from_value::<Cmd>(missing).is_err(),
+            "an omitted old form is not an unbounded authority fact"
+        );
+        command.authority_until = Some(time("2026-10-08T17:04:35.000Z"));
+        let saved = serde_json::to_value(&command).unwrap();
+        assert_eq!(saved["authority_until"], "2026-10-08T17:04:35.000Z");
+        assert_eq!(saved["deadline"], "2026-10-08T17:09:05.000Z");
+        assert_eq!(serde_json::from_value::<Cmd>(saved).unwrap(), command);
+    }
+
     /// Reads `example` as a `T`, writes it again and expects the same JSON.
     fn round_trip<T: Serialize + DeserializeOwned>(example: Json) -> T {
         let read: T = serde_json::from_value(example.clone()).unwrap();
@@ -5083,13 +5563,15 @@ mod tests {
     }
 
     #[test]
-    fn file_fetch_keeps_the_legacy_wire_shape_and_can_narrow_the_streamed_upload() {
-        let legacy: FsFetch = round_trip(json!({
+    fn a_file_fetch_names_its_root_bound_and_can_narrow_the_streamed_upload() {
+        let roots: FsFetch = round_trip(json!({
+            "access": FsAccess::roots(),
             "environment_id": ENVIRONMENT_ID,
             "path": "output/report.pdf"
         }));
-        assert_eq!(legacy.max_bytes, None);
+        assert_eq!(roots.max_bytes, None);
         let bounded: FsFetch = round_trip(json!({
+            "access": FsAccess::roots(),
             "environment_id": ENVIRONMENT_ID,
             "path": "output/empty.txt",
             "max_bytes": 0
@@ -5114,7 +5596,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
-            "background_wake": true,
+            "web_action_wait_secs": 120, "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",
@@ -5122,10 +5604,10 @@ mod tests {
                           "ticket": { "$ticket": { "kind": "llm" } } },
             "exec": { "executor": "orch-exec", "tool_set": "claude-code", "environment_id": ENVIRONMENT_ID,
                       "generation": 3, "ticket": { "$ticket": { "kind": "mcp" } } },
-            "mcp": [ { "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
+            "mcp": [ { "server_id": SECRET, "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
             "orch_tools": ["list_shared", "read_shared", "search_shared", "download_shared", "edit_document",
                            "send_message", "announce", "request_capability"],
-            "raw_events": true, "raw_after": 42
+            "output_capture_bytes":67108864, "raw_events": true, "raw_after": 42
         })
     }
 
@@ -5133,7 +5615,7 @@ mod tests {
     fn a_command_frame_reads_and_writes_as_the_protocol_has_it() {
         let cmd: Cmd = round_trip(json!({
             "id": COMMAND, "k": "turn.interrupt", "key": THREAD,
-            "deadline": "2026-10-08T17:04:35.000Z", "b": { "thread_id": THREAD, "turn_id": TURN }
+            "deadline": "2026-10-08T17:04:35.000Z", "authority_until": null, "b": { "thread_id": THREAD, "turn_id": TURN }
         }));
         assert_eq!(
             cmd.command().unwrap(),
@@ -5142,8 +5624,20 @@ mod tests {
                 turn_id: id(TURN)
             })
         );
-        round_trip::<CmdAck>(json!({ "id": COMMAND }));
+        round_trip::<CmdAck>(json!({ "id": COMMAND, "key_phase": "queued" }));
         round_trip::<CmdCancel>(json!({ "id": COMMAND }));
+    }
+
+    #[test]
+    fn a_native_session_tool_requires_its_registered_identity_alongside_its_name() {
+        let mut body = json!({"name":"files","ticket":"synthetic-session-ticket"});
+        assert!(serde_json::from_value::<SessionOpenMcp>(body.clone()).is_err());
+        body["server_id"] = json!(SECRET);
+        let member: SessionOpenMcp = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            serde_json::to_value(member).unwrap()["server_id"],
+            json!(SECRET)
+        );
     }
 
     #[test]
@@ -5176,7 +5670,7 @@ mod tests {
     #[test]
     fn a_kind_nobody_knows_still_leaves_a_frame_that_can_be_answered() {
         let cmd: Cmd = serde_json::from_value(json!({
-            "id": COMMAND, "k": "fs.teleport", "key": null, "deadline": "2026-10-08T17:04:35.000Z", "b": {}
+            "id": COMMAND, "k": "fs.teleport", "key": null, "deadline": "2026-10-08T17:04:35.000Z", "authority_until": null, "b": {}
         }))
         .unwrap();
         assert_eq!(cmd.id, id(COMMAND));
@@ -5391,11 +5885,13 @@ mod tests {
     fn a_write_may_expect_a_version_or_expect_nothing_to_be_there() {
         let hash = Hash::of(b"before");
         let write: FsWrite = round_trip(json!({
+            "access": FsAccess::roots(),
             "environment_id": ENVIRONMENT_ID, "path": "src/main.rs", "blob": Hash::of(b"after").to_string(),
             "expected_hash": hash.to_string()
         }));
         assert_eq!(write.expected_hash, Some(ExpectedHash::Is(hash)));
         let create: FsWrite = round_trip(json!({
+            "access": FsAccess::roots(),
             "environment_id": ENVIRONMENT_ID, "path": "src/new.rs", "blob": Hash::of(b"after").to_string(),
             "mode": 420, "expected_hash": "none"
         }));
@@ -5418,11 +5914,13 @@ mod tests {
         }));
         round_trip::<EnvAttach>(json!({
             "environment_id": ENVIRONMENT_ID, "workspace_root": null, "ignore": ["node_modules/"], "index": "full",
+            "workspace": WorkspaceLimits::default(),
             "mounts": null, "variables": { "CI": "1" }, "secrets": { "NPM_TOKEN": { "$sealed": "c2VhbGVk" } }
         }));
         round_trip::<FsSearch>(json!({
+            "access": FsAccess::roots(),
             "environment_id": ENVIRONMENT_ID, "path": "src", "query": "fn main", "regex": false, "case": true,
-            "glob": "*.rs", "limit": 200
+            "glob": "*.rs", "limit": 200, "scope": "content", "cursor": null
         }));
         round_trip::<ProcSignal>(json!({
             "environment_id": ENVIRONMENT_ID, "pid": 4711, "started_at": "2026-10-08T17:00:00.000Z", "signal": "TERM"
@@ -5452,6 +5950,7 @@ mod tests {
     #[test]
     fn a_frame_is_made_from_a_body_with_its_kind_and_its_key() {
         let body = FsStat {
+            access: crate::commands::FsAccess::roots(),
             environment_id: id(ENVIRONMENT_ID),
             mount: None,
             path: "README.md".into(),
@@ -5465,9 +5964,37 @@ mod tests {
         .unwrap();
         assert_eq!(
             serde_json::to_value(&cmd).unwrap(),
-            json!({ "id": COMMAND, "k": "fs.stat", "key": null, "deadline": "2026-10-08T17:04:20.000Z",
-                    "b": { "environment_id": ENVIRONMENT_ID, "path": "README.md" } })
+            json!({ "id": COMMAND, "k": "fs.stat", "key": null, "deadline": "2026-10-08T17:04:20.000Z", "authority_until": null,
+                    "b": { "access": {"view":"roots","manage":"roots"}, "environment_id": ENVIRONMENT_ID, "path": "README.md" } })
         );
+    }
+
+    #[test]
+    fn a_file_command_keeps_machine_read_separate_from_roots_only_writes() {
+        use orch_api_contract::workspace::FileReach;
+        let body = FsCopy {
+            access: FsAccess {
+                view: Some(FileReach::Machine),
+                manage: Some(FileReach::Roots),
+            },
+            environment_id: id(ENVIRONMENT_ID),
+            from: "/outside/report.txt".to_owned(),
+            to: "report.txt".to_owned(),
+        };
+        let command = Cmd::new(
+            id(COMMAND),
+            &SerialKey::Environment(id(ENVIRONMENT_ID)),
+            time("2026-10-08T17:04:20.000Z"),
+            &body,
+        )
+        .unwrap();
+        let Command::FsCopy(read) = command.command().unwrap() else {
+            panic!("a copy retains its actual source and destination limits");
+        };
+        assert_eq!(read.access.view, Some(FileReach::Machine));
+        assert_eq!(read.access.manage, Some(FileReach::Roots));
+        assert_eq!(read.from, "/outside/report.txt");
+        assert_eq!(read.to, "report.txt");
     }
 
     #[test]
@@ -5661,6 +6188,48 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_machine_can_measure_its_mount_data_without_a_node_role() {
+        for connected in [false, true] {
+            for role in [Role::Environment, Role::Node] {
+                assert!(
+                    CommandKind::NodeMountMeasure
+                        .addressee()
+                        .serves(&[role], connected)
+                );
+            }
+            for roles in [&[][..], &[Role::Agent][..], &[Role::Provider][..]] {
+                assert!(
+                    !CommandKind::NodeMountMeasure
+                        .addressee()
+                        .serves(roles, connected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_directory_data_maker_can_carry_mount_data_without_gaining_node_runtime_control() {
+        for kind in [
+            CommandKind::NodeVolumeCarryCheck,
+            CommandKind::NodeMountExport,
+            CommandKind::NodeMountImport,
+        ] {
+            assert!(kind.addressee().serves(&[Role::Environment], true));
+            assert!(kind.addressee().serves(&[Role::Node], false));
+            assert!(
+                !kind
+                    .addressee()
+                    .serves(&[Role::Agent, Role::Provider], true)
+            );
+        }
+        assert!(
+            !CommandKind::NodeRuntimeStart
+                .addressee()
+                .serves(&[Role::Environment], true)
+        );
+    }
+
+    #[test]
     fn only_a_machine_a_person_connected_has_a_policy_to_change() {
         let roles = [Role::Agent, Role::Environment];
         assert!(
@@ -5679,7 +6248,7 @@ mod tests {
     fn update_now_is_one_machine_serial_command_for_connector_and_node_with_a_typed_answer() {
         let decoded = Command::decode(
             "machine.update.now",
-            serde_json::json!({"recommended":"1.2.3"}),
+            serde_json::json!({"recommended":"1.2.3","automatic":false}),
         )
         .unwrap();
         assert_eq!(decoded.kind(), CommandKind::MachineUpdateNow);
@@ -5697,7 +6266,7 @@ mod tests {
         assert!(
             Command::decode(
                 "machine.update.now",
-                serde_json::json!({"recommended":"1.2.3","url":"https://elsewhere.test/program"})
+                serde_json::json!({"recommended":"1.2.3","automatic":false,"url":"https://elsewhere.test/program"})
             )
             .is_err()
         );
@@ -5783,5 +6352,45 @@ mod reported_cost_tests {
         );
         assert!(LeaseReportedCost::of(&RequestTiming::default()).is_none());
         assert_eq!(one("0", "USD").complete(1).unwrap().amount, "0");
+    }
+    #[test]
+    fn workspace_working_allowances_match_the_defaults_people_can_change() {
+        use orch_settings_contract::registry::{self, keys};
+        let limits = WorkspaceLimits::default();
+        for (key, expected) in [
+            (keys::WORKSPACE_INDEX_ENTRIES, limits.index_entries),
+            (keys::WORKSPACE_INDEX_SCAN_SECS, limits.index_scan_secs),
+            (keys::WORKSPACE_IGNORE_MAX_BYTES, limits.ignore_max_bytes),
+            (
+                keys::WORKSPACE_IGNORE_CACHE_BYTES,
+                limits.ignore_cache_bytes,
+            ),
+            (
+                keys::WORKSPACE_DIRECTORY_IDLE_SECS,
+                limits.directory_idle_secs,
+            ),
+            (keys::WORKSPACE_DIRECTORY_SLOTS, limits.directory_slots),
+            (
+                keys::WORKSPACE_DIRECTORY_CACHE_BYTES,
+                limits.directory_cache_bytes,
+            ),
+            (keys::WORKSPACE_DIRECTORY_BUILDS, limits.directory_builds),
+            (
+                keys::WORKSPACE_DIRECTORY_PAGE_BYTES,
+                limits.directory_page_bytes,
+            ),
+            (keys::WORKSPACE_SEARCH_SLICE_SECS, limits.search_slice_secs),
+            (keys::WORKSPACE_GIT_DIFF_BYTES, limits.git_diff_bytes),
+        ] {
+            assert_eq!(
+                registry::get(key)
+                    .unwrap()
+                    .default_value()
+                    .unwrap()
+                    .as_u64(),
+                Some(expected),
+                "{key}"
+            );
+        }
     }
 }

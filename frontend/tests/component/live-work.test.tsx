@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import { JobActivityLine } from '@/features/change/Progress';
+import { JobFacts } from '@/features/change/JobFacts';
 import { MeasurementReason, MeasurementSize, Measurements, countsOf, waitsForCount } from '@/features/change/Measurements';
 import { MountFates } from '@/features/change/MountFates';
 import { MigrationLine } from '@/features/admin/InstallationProgress';
@@ -14,7 +15,7 @@ import { formatSpan } from '@/lib/time';
 import { show } from './support';
 
 const state = vi.hoisted(() => ({ jobs: new Map<string, Job>(), stop: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(),
   jobQuery: (id: string) => ({ queryKey: ['live-work-job', id], queryFn: () => Promise.resolve(state.jobs.get(id)) }),
   cancelJob: state.stop,
@@ -28,8 +29,96 @@ function job(): Job {
       activity: { updated_at: '2026-10-24T10:00:05.000Z', stall_after_seconds: 30, directories_done: 9000, stopping: false } } };
 }
 const size = { reference: { job_id: 'count', measured_at: null }, measured: false, file_count: 0, total_bytes: 0 };
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps a quiet command's native deadline separate from a newer progress time (${locale})`, async () => {
+  await setLocale(locale);
+  const at = '2026-11-15T10:00:00.000Z', due = '2026-11-15T10:01:00.000Z';
+  const value = { ...job(), progress: { ...job().progress, activity: { ...job().progress.activity!, captured_deadline: {
+    command: 'current-command', accepted_at: at, at: due, seconds: 60, phase: 'measure', policy: null,
+  } } } };
+  const view = show(<JobActivityLine job={value} />);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  expect(body.querySelector(`time[datetime="${due}"]`)).not.toBeNull();
+  view.rerender(<JobActivityLine job={{ ...value, progress: { ...value.progress, activity: { ...value.progress.activity, updated_at: '2026-11-16T10:00:00.000Z' } } }} />);
+  expect(body.querySelector(`time[datetime="${due}"]`)).not.toBeNull();
+  view.rerender(<JobActivityLine job={{ ...value, progress: { ...value.progress, activity: { ...value.progress.activity, captured_deadline: null } } }} />);
+  expect(body.querySelector(`time[datetime="${due}"]`)).toBeNull();
+  expect(body).toHaveTextContent(locale === 'en' ? 'Not reported' : '尚未报告');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps a completed count's captured cache assessment in its size opening (${locale})`, async () => {
+  await setLocale(locale);
+  const measured = { ...size, measured: true, file_count: 1, total_bytes: 4096, reference: { ...size.reference,
+    measured_at: '2026-11-15T10:00:00.000Z', timing: { cache_valid_until: { state: 'at' as const, at: '2026-11-15T10:05:00.000Z' }, observer_grace_until: { state: 'not_applicable' as const },
+      assessed_at: '2026-11-15T10:00:01.000Z', cache_policy: null, observer_policy: null } } };
+  const view = show(<MeasurementSize size={measured} />);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  expect(body.querySelector('time[datetime="2026-11-15T10:05:00.000Z"]')).not.toBeNull();
+  expect(state.stop).not.toHaveBeenCalled();
+  view.rerender(<MeasurementSize size={{ ...measured, reference: { ...measured.reference, timing: null } }} />);
+  expect(body.querySelector('time[datetime="2026-11-15T10:05:00.000Z"]')).toBeNull();
+  expect(body).toHaveTextContent(locale === 'en' ? 'Not reported' : '尚未报告');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps carried context and the complete transcript separate from a new policy and an old missing receipt (${locale})`, async () => {
+  await setLocale(locale);
+  const value = { ...job(), kind: 'thread_fork', state: 'succeeded' as const, history_coverage: {
+    method:'file_handoff' as const, selected_range:{from:1,through:200}, actual_ranges:[{from:190,through:200}],
+    partial_turn:200, omitted_prefix:190, context_form:'verbatim' as const, transcript_coverage:'complete' as const,
+    context_allowance:{share:80,tokens:6400,source:'declared_model_window' as const}, at:'2026-10-24T10:00:00.000Z',
+  } };
+  const view = show(<JobFacts job={value} />);
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('common.details')}));
+  const body = await screen.findByRole('dialog',{name:i18n.t('common.details')});
+  expect(body).toHaveTextContent('190–200');
+  expect(body).toHaveTextContent(locale==='en'?'Complete':'完整');
+  expect(body).toHaveTextContent('80%');
+  const changed = {...value,progress:{...value.progress,message:'Current carry policy 95%'}};
+  view.rerender(<JobFacts job={changed}/>);
+  expect(body).not.toHaveTextContent('95%');
+  const older = {...changed,history_coverage:null};
+  view.rerender(<JobFacts job={older}/>);
+  await waitFor(()=>expect(body).not.toHaveTextContent('190–200'));
+  expect(body).toHaveTextContent(locale==='en'?'Not reported':'尚未报告');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`shows a cleanup's recorded retry and lease independently of a newer progress time (${locale})`, async () => {
+  await setLocale(locale);
+  const at = '2026-10-24T10:00:00.000Z', eligible = '2026-10-24T10:00:30.000Z', lease = '2026-10-24T10:01:00.000Z';
+  const value = { ...job(), kind: 'environment_remove', id: 'cleanup', lifecycle_wait: { phase: 'cleanup', recovering: true,
+    retry_eligible_at: { state: 'at' as const, at: eligible }, lease_recoverable_at: { state: 'at' as const, at: lease },
+    last_attempt_at: { state: 'at' as const, at }, reason: 'The machine is unavailable', observed_at: at } };
+  const view = show(<JobActivityLine job={value} />);
+  expect(screen.queryByText(value.lifecycle_wait.reason)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  for (const instant of [at, eligible, lease]) expect(body.querySelector(`time[datetime="${instant}"]`)).not.toBeNull();
+  expect(body).toHaveTextContent(value.lifecycle_wait.reason);
+  const changed = { ...value, progress: { ...value.progress, activity: { ...value.progress.activity!, updated_at: '2026-11-10T10:00:00.000Z' } } };
+  view.rerender(<JobActivityLine job={changed} />);
+  expect(body.querySelector('time[datetime="2026-11-10T10:00:00.000Z"]')).toBeNull();
+  const older = { ...changed, lifecycle_wait: null };
+  view.rerender(<JobActivityLine job={older} />);
+  await waitFor(() => expect(body).not.toHaveTextContent(value.lifecycle_wait.reason));
+  expect(body).toHaveTextContent(locale === 'en' ? 'Not reported' : '尚未报告');
+  expect(state.stop).not.toHaveBeenCalled();
+});
 const files = { home: { ...size, measurement: size.reference }, file_states: null, private_views: [] } as unknown as FilesPlan;
 const plan = { files, mounts: [], blockers: [] };
+
+for (const locale of ['en', 'zh-CN'] as const) it(`dates a reused count in its existing size slot without inventing freshness (${locale})`, async () => {
+  await setLocale(locale);
+  const measuredAt = '2026-10-24T10:00:05.000Z';
+  const measured = { ...size, measured: true, file_count: 12, total_bytes: 4096, reference: { ...size.reference, measured_at: measuredAt } };
+  const view = show(<MeasurementSize size={measured} />);
+  const row = view.container.querySelector('[data-measured-size]');
+  expect(row).toHaveTextContent(locale === 'en' ? 'Counted' : '统计于');
+  expect(row?.querySelector('time')).toHaveAttribute('datetime', measuredAt);
+  view.rerender(<MeasurementSize size={{ ...measured, reference: { ...measured.reference, measured_at: null } }} />);
+  expect(view.container.querySelector('[data-measured-size] time')).toBeNull();
+});
 const observation: MigrationObservation = { step: 'schema', migration: 16, description: 'Background counts', migrations_done: 2, migrations_total: 5,
   rows_done: 1204000, rows_total: null, detail: 'building index', elapsed_seconds: 130, retry_after_seconds: 1, updated_at: '2026-10-24T10:00:05.000Z' };
 
@@ -288,4 +377,16 @@ for (const locale of ['en','zh-CN'] as const) it(`names the host deletion's reco
   rendered=show(<JobActivityLine job={{...base,kind:'host_delete',progress:{...base.progress,phase:'cascades',activity:{...activity,waiting_for:{type:'machine',name:'host-2'}}}}}/>);
   expect(screen.getByText(t('liveWork.waitingFor',{machine:'host-2'}))).toBeVisible();
   rendered.unmount();
+});
+
+
+for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['mount_copy', 'environment_move'] as const) it(`keeps unfinished copy custody visible in the progress line and title for ${kind} in ${locale}`, async () => {
+  await setLocale(locale);
+  const message = 'mount_copy_custody_pending';
+  const value: Job = { ...job(), kind, progress: { ...job().progress, phase: 'copy', message } };
+  const shown = show(<JobActivityLine job={value} />);
+  const expected = i18n.t('liveWork.keepingCopies');
+  expect(shown.container.querySelector('[data-job-line]')).toHaveTextContent(expected);
+  expect(shown.container.querySelector('[data-job-activity]')).toHaveAttribute('title', expect.stringContaining(expected));
+  if (locale === 'zh-CN') expect(shown.container.querySelector('[data-job-activity]')?.getAttribute('title')).not.toContain('cleanup is waiting');
 });

@@ -4,6 +4,8 @@ import { importSource } from '@/features/people/importSource';
 import { ImportUploads, type ImportUploadProgress } from '@/features/people/importUploads';
 import { UploadTask, type UploadTransport } from '@/lib/uploads';
 
+const policy = { initial_piece_bytes: 1024, initial_requests: 1, min_piece_bytes: 1, max_piece_bytes: 1024, target_window_ms: 1000, window_rtts: 4, max_window_bytes: 4096, requests: 1 };
+const status = () => Promise.resolve({ received: 0, ranges: [], policy });
 function selected(files: File[]) {
   const source = importSource(files, false);
   if (source.fault !== null) throw new Error(`Invalid fixture: ${source.fault}`);
@@ -21,13 +23,13 @@ describe('an import upload', () => {
     const first = file('Notes/one.md', 'first');
     const second = file('Notes/two.md', 'second');
     let failure = true;
-    const begin = vi.fn((source: File) => Promise.resolve({ upload_id: source.name, chunk_bytes: 1024, expires_at: '2999-01-01T00:00:00Z' }));
+    const begin = vi.fn((source: File) => Promise.resolve({ upload_id: source.name, chunk_bytes: 1024, policy, expires_at: '2999-01-01T00:00:00Z' }));
     const put = vi.fn((id: string, offset: number, bytes: Blob) => {
       if (id === 'two.md' && failure) { failure = false; return Promise.reject(new Error('Connection lost')); }
       return Promise.resolve(offset + bytes.size);
     });
     const complete = vi.fn((id: string) => Promise.resolve({ blob: id, name: id, media_type: 'text/plain', size: id === first.name ? first.size : second.size }));
-    const transport: UploadTransport = { begin, put, complete };
+    const transport: UploadTransport = { begin, status, put, complete };
     const batch = new ImportUploads(selected([first, second]), (one) => new UploadTask(one, transport));
     const progress: ImportUploadProgress[] = [];
     const signal = new AbortController().signal;
@@ -47,7 +49,8 @@ describe('an import upload', () => {
     const release = vi.fn(() => Promise.resolve());
     const complete = vi.fn(() => Promise.resolve({ blob: 'blob', name: 'one.md', media_type: 'text/plain', size: 5 }));
     const transport: UploadTransport = {
-      begin: (source) => Promise.resolve({ upload_id: source.name, chunk_bytes: 1024, expires_at: '2999-01-01T00:00:00Z' }),
+      status,
+      begin: (source) => Promise.resolve({ upload_id: source.name, chunk_bytes: 1024, policy, expires_at: '2999-01-01T00:00:00Z' }),
       put: (id, offset, bytes, signal) => id === 'one.md' ? Promise.resolve(offset + bytes.size) : new Promise<number>((_resolve, reject) => {
           signal.addEventListener('abort', () => reject(signal.reason instanceof Error ? signal.reason : new DOMException('Upload cancelled', 'AbortError')), { once: true });
           begun();
