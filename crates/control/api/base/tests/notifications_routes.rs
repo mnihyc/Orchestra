@@ -10,12 +10,14 @@ mod places;
 mod support;
 
 use chrono::Duration;
+use orch_api_contract::auth::{MetaGet, SetupCreate, SetupCreateBody};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::{
     MeNotificationRouteDelete, MeNotificationRouteLinkCreate, MeNotificationRouteSet,
     MeNotificationRouteSetBody, MePushSubscriptionCreate, MePushSubscriptionCreateBody,
     NotificationChannel, NotificationChannelCreateBody, NotificationChannelDelete,
-    NotificationKind, NotificationRoute, NotificationRouteNeeds, PushSubscriptionKeys,
+    NotificationChannelList, NotificationChannelListQuery, NotificationKind, NotificationRoute,
+    NotificationRouteNeeds, PushSubscriptionKeys,
 };
 use orch_api_core::middleware::authentication::{ACCESS_TOKEN_PREFIX, new_token, token_hash};
 use orch_api_core::testing::Reply;
@@ -28,6 +30,64 @@ use places::Who;
 use serde_json::json;
 use sqlx::postgres::PgListener;
 use std::time::Duration as Wait;
+
+#[tokio::test]
+async fn first_setup_offers_browser_notifications_without_subscribing_the_administrator() {
+    outside::install();
+    orch_api_core::routes::notifications::install_push_public_key(
+        "synthetic-public-push-key".to_owned(),
+    );
+    let world = support::World::new().await;
+    let setup = world
+        .app
+        .call(SetupCreate, &[])
+        .body(&SetupCreateBody {
+            username: "root".to_owned(),
+            display_name: "Root".to_owned(),
+            password: support::PASSWORD.to_owned(),
+            email: None,
+            timezone: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let channels = world
+        .app
+        .call(NotificationChannelList, &[])
+        .token(&setup.access_token)
+        .query(&NotificationChannelListQuery::default())
+        .send()
+        .await
+        .ok();
+    let push = channels
+        .items
+        .iter()
+        .find(|channel| channel.kind == "push")
+        .unwrap();
+    assert!(push.enabled);
+    assert!(!push.route.enabled);
+    assert_eq!(push.route.needs, Some(NotificationRouteNeeds::Device));
+    assert!(
+        world
+            .app
+            .call(MetaGet, &[])
+            .send()
+            .await
+            .ok()
+            .push_public_key
+            .is_some()
+    );
+    for table in ["notification_routes", "push_subscriptions", "outbox"] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
 
 async fn set(
     o: &Outside,
@@ -858,4 +918,157 @@ async fn a_link_creation_key_reads_only_its_current_kept_generation_and_never_ro
             .contains(first["url"].as_str().unwrap())
     );
     assert!(!serde_json::to_string(&record).unwrap().contains(&next.url));
+}
+
+#[tokio::test]
+async fn own_delivery_facts_keep_an_abandoned_attempt_and_use_the_current_pause() {
+    use orch_db::queries::notifications::outbox;
+    let o = Outside::new().await;
+    let (channel, _far) = system_webhook(&o).await;
+    let route = set(&o, &o.ada, channel.id, &on()).await.ok();
+    let route = route.id.unwrap();
+    let now = o.world.now();
+    let id = new_id();
+    let mut conn = o.world.conn().await;
+    outbox::insert(
+        &mut conn,
+        &outbox::NewRow {
+            id,
+            channel: &channel.kind,
+            route_id: Some(route),
+            destination_id: None,
+            channel_id: None,
+            payload: &json!({"notifications":[]}),
+            at: now,
+        },
+    )
+    .await
+    .unwrap();
+    outbox::reserve_as(
+        &mut conn,
+        id,
+        new_id(),
+        new_id(),
+        now + Duration::minutes(5),
+        now,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    o.world.advance(Duration::minutes(6));
+    let list = o
+        .world
+        .app
+        .call(
+            orch_api_contract::notifications::MeNotificationRouteList,
+            &[],
+        )
+        .token(&o.ada.token)
+        .send()
+        .await
+        .ok();
+    let value = serde_json::to_value(&list).unwrap();
+    let fact = &value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(route))
+        .unwrap()["pending_delivery"];
+    assert_eq!(fact["acceptance"], "unknown");
+    assert_eq!(fact["attempts"], 1);
+    let first = fact["last_attempt_at"].clone();
+    let mut conn = o.world.conn().await;
+    outbox::recover_abandoned(&mut conn, now + Duration::minutes(6))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO notification_prefs(user_id,pause_until) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET pause_until=EXCLUDED.pause_until").bind(o.ada.id()).bind(now+Duration::minutes(10)).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let list = o
+        .world
+        .app
+        .call(
+            orch_api_contract::notifications::MeNotificationRouteList,
+            &[],
+        )
+        .token(&o.ada.token)
+        .send()
+        .await
+        .ok();
+    let value = serde_json::to_value(&list).unwrap();
+    let fact = &value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(route))
+        .unwrap()["pending_delivery"];
+    assert_eq!(fact["acceptance"], "unknown");
+    assert_eq!(fact["last_attempt_at"], first);
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(fact["next_eligible_at"].as_str().unwrap()).unwrap(),
+        now + Duration::minutes(10)
+    );
+    // A stored Retry-After can itself end inside a later quiet window.
+    let backoff = now
+        .date_naive()
+        .succ_opt()
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc();
+    let quiet_ends = backoff
+        .date_naive()
+        .and_hms_opt(23, 59, 0)
+        .unwrap()
+        .and_utc();
+    let mut conn = o.world.conn().await;
+    sqlx::query("UPDATE users SET timezone='UTC' WHERE id=$1")
+        .bind(o.ada.id())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE notification_prefs SET pause_until=NULL,quiet_start_minute=0,quiet_end_minute=1439 WHERE user_id=$1").bind(o.ada.id()).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE outbox SET next_attempt_at=$2 WHERE id=$1")
+        .bind(id)
+        .bind(backoff)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let next = o
+        .world
+        .app
+        .call(
+            orch_api_contract::notifications::MeNotificationRouteList,
+            &[],
+        )
+        .token(&o.ada.token)
+        .send()
+        .await
+        .ok();
+    let fact = next
+        .items
+        .iter()
+        .find(|r| r.id == Some(route))
+        .unwrap()
+        .pending_delivery
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        fact.next_eligible_at,
+        Some(orch_types::Time::new(quiet_ends))
+    );
+    assert_eq!(fact.attempts, 1);
+    let other = o
+        .world
+        .app
+        .call(
+            orch_api_contract::notifications::MeNotificationRouteList,
+            &[],
+        )
+        .token(&o.bea.token)
+        .send()
+        .await
+        .ok();
+    assert!(other.next_cursor.is_none());
+    assert!(other.items.iter().all(|r| r.id != Some(route)));
 }

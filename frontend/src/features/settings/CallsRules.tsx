@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Compact ordered recovery rows inside the existing inherited setting editor. */
 import { useQuery } from '@tanstack/react-query';
@@ -5,12 +6,13 @@ import { Ellipsis, Plus } from 'lucide-react';
 import { useCallback, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { agentsQuery, providerModelsQuery, providerQuery } from '@/api/resources';
+import { agentsQuery, providerQuery } from '@/api/resources';
 import type { CallRecovery } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
 import { ProviderDefaultChoice } from './ProviderChoice';
+import { ProviderModelChoice } from './ProviderModelChoice';
 import type { ValueControlProps } from './ValueControl';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
@@ -18,9 +20,9 @@ import { Input } from '@/ui/Input';
 import { IconButton } from '@/ui/IconButton';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { Select } from '@/ui/Select';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { Table } from '@/ui/Table';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { Combobox } from '@/ui/Combobox';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { profilesFor } from '@/features/change/RunsOn';
 import { holds } from '@/lib/permissions';
@@ -30,7 +32,6 @@ import { CallModel } from '@/features/calls/Model';
 import { candidateRoute, capabilityOfPurpose, routeChoices, type RouteChoice } from '@/features/calls/routes';
 import { CallHelp } from '@/features/calls/Help';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
-import { modelResource } from '@/features/resource-facts/facts';
 import { candidateProtocol, completionFallback } from '@/features/models/candidateProtocol';
 import { HelpHint } from '@/ui/HelpHint';
 
@@ -59,11 +60,14 @@ function stepSummary(step: Step, t: TFunction, locale: string): string {
 
 export function CallsSummary({ value }: { value: unknown }) {
   const { t } = useTranslation(); const format = useFormatContext();
-  return <span className="inline-flex min-w-0 flex-col gap-1">{rulesOf(value).map((rule) => <span key={rule.id} className="flex min-w-0 flex-wrap items-center gap-1 text-sm" title={ruleSummary(rule, t, format.locale)}><span>{ruleSummary({ ...rule, steps: [] }, t, format.locale)}</span><RuleSteps rule={rule} /></span>)}</span>;
+  const rules=rulesOf(value);
+  if(rules.length>10)return <span>{t('calls.ruleCount',{count:rules.length,number:formatNumber(rules.length,format.locale)})}</span>;
+  return <span className="inline-flex min-w-0 flex-col gap-1">{rules.map((rule) => <span key={rule.id} className="flex min-w-0 flex-wrap items-center gap-1 text-sm" title={ruleSummary(rule, t, format.locale)}><span>{ruleSummary({ ...rule, steps: [] }, t, format.locale)}</span><RuleSteps rule={rule} /></span>)}</span>;
 }
 
 function RuleSteps({ rule }: { rule: Rule }) {
   const { t } = useTranslation(); const format = useFormatContext();
+  if(rule.steps.length>10)return <span>{t('calls.stepCount',{count:rule.steps.length,number:formatNumber(rule.steps.length,format.locale)})}</span>;
   return rule.steps.map((step, index) => <span key={index} className="inline-flex min-w-0 max-w-full items-center gap-1"><span aria-hidden>→</span>{step.type === 'failover' ? candidateRoute(step.candidate) === null ? <CallModel providerId={step.candidate.provider_id} model={step.candidate.model} /> : <span>{t('calls.capabilityDestination')}</span> : <span>{stepSummary(step, t, format.locale)}</span>}</span>);
 }
 
@@ -83,15 +87,13 @@ export function CandidateEditor({ step, onChange, purpose, sourceProviderId }: {
     const changed = { ...candidate, provider_id: provider, model: '', ...(route === null ? {} : { route: { ...route, config: route.config, offering: { provider, offering: '' } } }) };
     onChange({ ...step, candidate: changed });
   }} />;
-  const [modelsOpen,setModelsOpen]=useState(false);
-  const models = useQuery({ ...providerModelsQuery(candidate.provider_id), enabled: candidate.provider_id !== '' && modelsOpen, retry: false });
   const provider=useQuery({...providerQuery(candidate.provider_id),enabled:candidate.provider_id!=='',retry:false});
   const source = useQuery({ ...providerQuery(sourceProviderId ?? ''), enabled: sourceProviderId !== undefined && sourceProviderId !== '', retry: false });
   const [preview, setPreview] = useState('');
   const agents=useQuery({...agentsQuery(),enabled:candidate.provider_id!=='',retry:false});
   const profiles=profilesFor(provider.data,agents.data??[]);
-  const failure=models.error??provider.error??agents.error;
-  const retry=models.error!==null?models.refetch:provider.error!==null?provider.refetch:agents.refetch;
+  const failure=provider.error??agents.error;
+  const retry=provider.error!==null?provider.refetch:agents.refetch;
   const formats = provider.data?.protocols ?? [];
   const actual = candidateProtocol(formats, source.data?.protocols, purpose);
   const choices = purpose === undefined ? ['native', ...formats] : formats;
@@ -118,7 +120,7 @@ export function CandidateEditor({ step, onChange, purpose, sourceProviderId }: {
   return <div className="flex min-w-0 flex-col gap-2">
     {destination}{providerChoice}
     <ResourcePicker pickerKey="settings.CallsRules.calls.profile" label={t('calls.profile')} value={candidate.agent_id??'\u0000current'} valueLabel={typeof candidate.agent_id==='string' && !profiles.some((agent)=>agent.id===candidate.agent_id)?t(agents.isFetching?'common.loading':'calls.managed'):undefined} options={[{value:'\u0000current',label:t('calls.keepProfile')},...profiles.map((agent)=>({value:agent.id,label:agent.name,...resourceChoice({kind:'agent',agent,provider:provider.data}),disabled:!holds(agent.access,'agent.use'),...(!holds(agent.access,'agent.use')?{description:t('calls.profileUseRequired')}:{})}))]} onValueChange={(agent_id)=>{const {agent_id:_old,...rest}=candidate;onChange({...step,candidate:{...rest,...(agent_id==='\u0000current'?{}:{agent_id})}});}} />
-    <Combobox label={t('calls.model')} onOpenChange={setModelsOpen} query={candidate.model} onQueryChange={(model) => onChange({ ...step, candidate: { ...candidate, model } })} loading={models.isFetching} groups={[{ id: 'models', label: t('calls.model'), options: (models.data ?? []).filter((model) => model.enabled).map((model) => ({ value: model.model_name, label: model.display_name || model.model_name, text: model.display_name || model.model_name, ...resourceChoice(modelResource(model,candidate.provider_id,{usage:provider.data?.choice_usage})) })) }]} onSelect={({ value: model }) => onChange({ ...step, candidate: { ...candidate, model } })} />
+    <ProviderModelChoice inspect allowTyped providerId={candidate.provider_id} value={candidate.model} label={t('calls.model')} usage={provider.data?.choice_usage} purpose={purpose === undefined ? null : purpose === 'embedding' ? 'embedding' : purpose === 'image_generation' ? 'image_generation' : 'generation'} onChange={(model) => onChange({ ...step, candidate: { ...candidate, model } })} />
     <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted"><span>{t('providerFields.parameterFormat')}</span><code>{actual === 'native' ? t('providerFields.agentParameters') : actual ?? t('providerFields.originalCall')}</code>
       <HelpHint term={t('providerFields.parameterFormat')} what={t('providerFields.protocolHelp', { fallback: fallback ?? '–' })} />
     </div>
@@ -146,6 +148,11 @@ interface RuleRow {rule:Rule;index:number}
 interface StepRow {step:Step;index:number;key:string}
 interface Draft {index:number;rule:Rule;keys:string[];next:number}
 
+function StepRows({items,visited,textOf,label,children}:{items:StepRow[];visited:ReadonlySet<string>;textOf:(row:StepRow)=>string;label:string;children:(rows:readonly StepRow[])=>ReactNode}) {
+  return <CompleteCollection label={label} items={items} pinned={items.filter((row)=>visited.has(row.key))} textOf={textOf}>{children}</CompleteCollection>;
+}
+
+
 export function CallsRules({ value, onChange, onEdited, disabled, error }: ValueControlProps) {
   const { t } = useTranslation();
   const format = useFormatContext();
@@ -157,8 +164,10 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
   const identity=useId();
   const rules = rulesOf(value);
   const [editing, setEditing] = useState<Draft | null>(null);
+  const [visited,setVisited]=useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState(false);
   const edit = (index: number, rule: Rule) => {
+    if(editing?.index!==index)setVisited(new Set());
     setEditing((held) => held?.index === index ? held : { index, rule: structuredClone(rule),keys:rule.steps.map((_,at)=>`${identity}:${index}:${at}`),next:rule.steps.length });
     setOpen(true);
   };
@@ -201,27 +210,36 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
     ];
   };
   return <SchemaDraftState.Provider value={reportDraft}><div className="flex min-w-0 max-w-full flex-col gap-2">
-    <Table boundedIdentity label={t('calls.rules')} rows={rules.map((rule,index)=>({rule,index}))} rowKey={({rule})=>rule.id} rowMenu={{label:ruleLabel,entries:ruleEntries}} columns={[
+    <CompleteCollection label={t('calls.rules')} items={rules.map((rule,index)=>({rule,index}))} textOf={({rule})=>`${rule.id} ${ruleSummary(rule,t,format.locale)}`}>{(rows)=><Table boundedIdentity label={t('calls.rules')} rows={rows} rowKey={({rule})=>rule.id} rowMenu={{label:ruleLabel,entries:ruleEntries}} columns={[
       {id:'name',header:t('calls.rules'),hideHeader:true,cell:({rule,index})=><span className="flex min-w-0 flex-wrap items-center gap-1"><Button variant="ghost" size="sm" className="max-w-full justify-start" aria-label={ruleSummary(rule,t,format.locale)} disabled={disabled} onClick={()=>edit(index,rule)}><span className="truncate">{ruleSummary({...rule,steps:[]},t,format.locale)}</span></Button><RuleSteps rule={rule} /></span>},
       {id:'actions',header:t('calls.action'),hideHeader:true,align:'end',cell:(row)=><Menu label={ruleLabel(row)} entries={ruleEntries(row)} trigger={<IconButton size="sm" label={ruleLabel(row)} icon={<Ellipsis aria-hidden />} />} />},
-    ]} />
+    ]} />}</CompleteCollection>
     <Button size="sm" variant="ghost" disabled={disabled} icon={<Plus aria-hidden />} onClick={()=>edit(rules.length,{id:t('calls.newRule',{ordinal:formatNumber(rules.length+1,format.locale)}),when:{},steps:[{type:'wait',until:'person'}]})}>{t('calls.addRule')}</Button>
     {error!==undefined && <ErrorAlert error={new Error(error)} />}
     {editing!==null && <Dialog open={open} title={t('calls.editRule')} size="sm" onOpenChange={setOpen} footer={<><Button size="sm" onClick={()=>{setEditing(null);setOpen(false);}}>{t('common.cancel')}</Button><Button size="sm" variant="primary" disabled={invalid} onClick={()=>{const next=[...rules];next[editing.index]=editing.rule;onChange(next);setEditing(null);setOpen(false);}}>{t('common.save')}</Button></>}>
       <div className="flex min-w-0 flex-col gap-3">
         <Input label={t('calls.name')} help={<CallHelp section="rules" />} value={editing.rule.id} onChange={(event)=>update({...editing.rule,id:event.target.value})} />
         <Select hideLabel={false} label={t('calls.reason')} value={editing.rule.when.reason??'any'} options={[{value:'any',label:t('calls.anyReason')},...(['cyber','safety','access','other'] as const).map((reason)=>({value:reason,label:t(`calls.reasons.${reason}`)}))]} onValueChange={(reason)=>{const {reason:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(reason==='any'?{}:{reason})}});}} />
-        <ProviderDefaultChoice shape={{type:'text',maxLength:null,pattern:null}} showLabel label={t('calls.provider')} placeholder={t('calls.anyProvider')} value={editing.rule.when.provider_id??''} onChange={(value)=>{const {provider_id:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(typeof value==='string'&&value!==''?{provider_id:value}:{})}});}} />
+        <ProviderDefaultChoice shape={{type:'text',maxLength:null,pattern:null}} showLabel label={t('calls.provider')} placeholder={t('calls.anyProvider')} value={editing.rule.when.provider_id??''} onChange={(value)=>{
+          const {provider_id:previous,model,...when}=editing.rule.when;const provider=typeof value==='string'&&value!==''?value:undefined;
+          // A model is one of a provider's own: another provider's model is not carried over to it.
+          const another=previous!==undefined&&provider!==undefined&&provider!==previous;
+          update({...editing.rule,when:{...when,...(provider===undefined?{}:{provider_id:provider}),...(model===undefined||another?{}:{model})}});}} />
         {editing.rule.when.provider_id!==undefined && <Button size="sm" variant="ghost" onClick={()=>{const {provider_id:_old,...when}=editing.rule.when;update({...editing.rule,when});}}>{t('calls.anyProvider')}</Button>}
         <Select label={t('calls.when')} value={editing.rule.when.kind??'any'} options={KINDS.map((kind)=>({value:kind,label:t(`calls.kinds.${kind}`)}))} onValueChange={(kind)=>update({...editing.rule,when:{...editing.rule.when,kind}})} />
         <Select label={t('calls.purpose')} value={editing.rule.when.purpose??'any'} options={(['any','agent','summary','embedding','review','web_search','page_fetch','image_generation'] as const).map((purpose)=>({value:purpose,label:t(`calls.purposes.${purpose}`)}))} onValueChange={(purpose)=>{const {purpose:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(purpose==='any'?{}:{purpose})}});}} />
-        <Input label={t('calls.model')} placeholder={t('calls.anyModel')} value={editing.rule.when.model??''} onChange={(event)=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{model:event.target.value})}});}} />
+        {editing.rule.when.provider_id!==undefined
+          ? <>
+            <ProviderModelChoice purpose={null} allowTyped providerId={editing.rule.when.provider_id} label={t('calls.model')} placeholder={t('calls.anyModel')} value={editing.rule.when.model??''} onChange={(model)=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(model===''?{}:{model})}});}} />
+            {editing.rule.when.model!==undefined && <Button size="sm" variant="ghost" onClick={()=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when});}}>{t('calls.anyModel')}</Button>}
+          </>
+          : <Input label={t('calls.model')} placeholder={t('calls.anyModel')} value={editing.rule.when.model??''} onChange={(event)=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{model:event.target.value})}});}} />}
         <Input label={t('calls.statusCode')} type="number" placeholder={t('calls.anyStatus')} value={editing.rule.when.status??''} onChange={(event)=>{const {status:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{status:Number(event.target.value)})}});}} />
         <Input label={t('calls.contains')} placeholder={t('calls.anyWords')} value={editing.rule.when.contains??''} onChange={(event)=>{const {contains:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{contains:event.target.value})}});}} />
         <Input label={t('calls.regex')} placeholder={t('calls.anyPattern')} value={editing.rule.when.regex??''} onChange={(event)=>{const {regex:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{regex:event.target.value})}});}} />
-        <Table boundedIdentity label={t('calls.steps')} rows={editing.rule.steps.map((step,index)=>({step,index,key:editing.keys[index]??`${identity}:missing:${index}`}))} rowKey={({key})=>key} rowMenu={{label:stepLabel,entries:stepEntries}} columns={[
-          {id:'name',header:t('calls.steps'),cell:(row)=><div className="flex min-w-0 flex-col gap-2"><div className="flex items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('calls.stepNumber',{step:formatNumber(row.index+1,format.locale)})}</span><Menu label={stepLabel(row)} entries={stepEntries(row)} trigger={<IconButton size="sm" label={stepLabel(row)} title={stepLabel(row)} icon={<Ellipsis aria-hidden />} />} /></div><StepEditor purpose={editing.rule.when.purpose} sourceProviderId={editing.rule.when.provider_id} step={row.step} onChange={(next)=>update({...editing.rule,steps:editing.rule.steps.map((held,at)=>at===row.index?next:held)})} /></div>},
-        ]} />
+        <StepRows key={editing.index} items={editing.rule.steps.map((step,index)=>({step,index,key:editing.keys[index]??`${identity}:missing:${index}`}))} visited={visited} textOf={({step,index})=>`${formatNumber(index+1,format.locale)} ${stepSummary(step,t,format.locale)}`} label={t('calls.steps')}>{(rows)=><Table boundedIdentity label={t('calls.steps')} rows={rows} rowKey={({key})=>key} rowMenu={{label:stepLabel,entries:stepEntries}} columns={[
+          {id:'name',header:t('calls.steps'),cell:(row)=><div className="flex min-w-0 flex-col gap-2"><div className="flex items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('calls.stepNumber',{step:formatNumber(row.index+1,format.locale)})}</span><Menu label={stepLabel(row)} entries={stepEntries(row)} trigger={<IconButton size="sm" label={stepLabel(row)} title={stepLabel(row)} icon={<Ellipsis aria-hidden />} />} /></div><div onFocusCapture={()=>setVisited((before)=>before.has(row.key)?before:new Set([...before,row.key]))}><StepEditor purpose={editing.rule.when.purpose} sourceProviderId={editing.rule.when.provider_id} step={row.step} onChange={(next)=>update({...editing.rule,steps:editing.rule.steps.map((held,at)=>at===row.index?next:held)})} /></div></div>},
+        ]} />}</StepRows>
         <Button size="sm" variant="ghost" icon={<Plus aria-hidden />} onClick={()=>changeSteps([...editing.rule.steps,{type:'wait',until:'person'}],[...editing.keys,`${identity}:${editing.index}:${editing.next}`],editing.next+1)}>{t('calls.addStep')}</Button>
       </div>
     </Dialog>}

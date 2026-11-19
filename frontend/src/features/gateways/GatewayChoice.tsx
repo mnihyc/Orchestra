@@ -15,6 +15,6 @@ export function GatewayChoice({ gateways, value, onChange, disabled = false }: {
     options={[
       { value: 'automatic', name: t('regionalGateways.automatic') },
       ...gateways.map((gateway) => ({ value: gateway.id, name: gateway.label, description: gateway.region === gateway.label ? undefined : gateway.region })),
-      ...(missing ? [{ value, name: t('regionalGateways.unavailable', { id: value }), disabled: true }] : []),
+      ...(missing ? [{ value, name: t('regionalGateways.unavailable'), disabled: true }] : []),
     ]} />;
 }

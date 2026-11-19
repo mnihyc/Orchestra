@@ -3,6 +3,7 @@ import { useMutation,useQuery,useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { EmptyState } from '@/ui/EmptyState';
 import { changeMachinePrograms,machineProgramsKey,machineProgramsQuery } from '@/api/machinePrograms';
 import { machineKey } from '@/api/resources';
@@ -81,7 +82,7 @@ function Declaration({entry}:{entry:MachineProgram}) {
       entry.kind==='provider_source' && descriptor.facts!==null && descriptor.facts!==undefined?t('machinePrograms.suppliesFacts'):null].filter((part)=>part!==null);
   return <>{summary.length>0 && <ul className="text-sm wrap-anywhere text-text-muted">{summary.map((line)=><li key={line}>{line}</li>)}</ul>}
     {models.length>2 && <span className="inline-flex items-center gap-1 text-sm text-text-muted">{t('machinePrograms.modelCount',{count:models.length})}
-      <HelpHint term={t('machinePrograms.modelCount',{count:models.length})} what={<ul className="max-h-64 overflow-y-auto">{models.map((name,index)=><li key={`${index}:${name}`} className="wrap-anywhere">{name}</li>)}</ul>}/></span>}
+      <HelpHint term={t('machinePrograms.modelCount',{count:models.length})} what={<CompleteCollection label={t('machinePrograms.modelCount',{count:models.length})} items={models} textOf={(name)=>name} scroll>{(page)=><ul>{page.map((name,index)=><li key={`${index}:${name}`} className="wrap-anywhere">{name}</li>)}</ul>}</CompleteCollection>}/></span>}
     {entry.detail!==null && <p className="text-sm wrap-anywhere text-text-muted">{entry.detail}</p>}</>;
 }
 
@@ -186,12 +187,12 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
     {nativeRelevant && <section aria-labelledby="machine-native-harnesses" className="flex flex-col gap-2">
       <h3 id="machine-native-harnesses" className="font-medium">{t('machinePrograms.nativeTitle')}</h3>
       {nativeRows.length===0?<StateLine compact message={t(facts.searchedHarnessKinds===null?'machinePrograms.nativeNotReported':facts.searchedHarnessKinds.length===0?'machinePrograms.nativeNotSearched':'machinePrograms.nativeEmpty')}/>:
-        <ul className="divide-y divide-border rounded-lg border border-border">{nativeRows.map(({harness,confirmed})=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-start gap-3 px-3 py-2">
+        <CompleteCollection label={t('machinePrograms.nativeTitle')} items={nativeRows} textOf={({harness})=>`${harnessTitle(harness.kind)} ${harness.version} ${harness.path}`} scroll>{(page)=><ul className="divide-y divide-border rounded-lg border border-border">{page.map(({harness,confirmed})=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-start gap-3 px-3 py-2">
           <div className="min-w-0 flex-1"><p className="flex min-h-(--control-sm) flex-wrap items-baseline gap-x-3 gap-y-1"><span className="font-medium">{harnessTitle(harness.kind)}</span>
             <span className="text-sm text-text-muted">{harness.version==='' || harness.version==='unknown'?t('machinePrograms.nativeUnknownVersion'):harness.version}</span>
             <span className="text-sm text-text-muted">{t(confirmed?'machinePrograms.nativeConfirmed':'machinePrograms.nativeFound')}</span></p><PathValue path={harness.path}/></div>
           {nativeManage && harness.path!=='' && <Button size="sm" disabled={apply.isPending} onClick={()=>confirmed?setUnconfirming(harness):apply.mutate({action:'confirm_harness',kind:harness.kind,path:harness.path})}>{t(confirmed?'machinePrograms.nativeRemove':'machinePrograms.nativeUse')}</Button>}
-        </li>)}</ul>}
+        </li>)}</ul>}</CompleteCollection>}
       {programs.can_manage && !nativeRole && <p className="text-sm text-text-muted">{t('machinePrograms.nativeRoleNeeded')}</p>}
       {programs.can_manage && nativeKept && <div className="flex flex-col gap-2 text-sm text-text-muted"><p>{t(facts.policy===null?'machinePrograms.nativeCommandNotReported':'machinePrograms.nativeKept')}</p>
         {facts.policy!==null && (actualPolicyCommand!==undefined && Array.isArray(currentHarnessPolicy)?<CommandBox command={policyCommand('agent.harnesses',currentHarnessPolicy,actualPolicyCommand,machine.platform_os==='windows')} label={t('machines.policy.copy')}/>:
@@ -201,8 +202,8 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
     {kinds.length===0 && !nativeRelevant && <EmptyState compact title={t(programs.capabilities.length===0 && !machine.roles.includes('node')?'machinePrograms.notReported':'machinePrograms.roleNeeded')}
       action={programs.can_manage?canChangeRoles?<Button asChild><Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'overview'}}>{t('machineRoles.edit')}</Link></Button>:<Button onClick={()=>setEnrolling(true)}>{t('machinePrograms.addConnector')}</Button>:undefined}/>}
     {programs.entries.length===0?(kinds.length===0?null:<EmptyState compact title={t('machinePrograms.empty')} />):
-      <ul aria-label={t('machinePrograms.title')} className="divide-y divide-border rounded-lg border border-border">
-        {programs.entries.map((entry)=>{
+      <CompleteCollection label={t('machinePrograms.title')} items={programs.entries} textOf={(entry)=>`${machineProgramName(entry)} ${entry.version??''} ${entry.command.join(' ')}`} scroll>{(page)=><ul aria-label={t('machinePrograms.title')} className="divide-y divide-border rounded-lg border border-border">
+        {page.map((entry)=>{
           const name=machineProgramName(entry);
           const contract=t(`machinePrograms.kinds.${entry.kind}.name`);
           const capability=programs.capabilities.find((capability)=>capability.kind===entry.kind);
@@ -222,7 +223,7 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
             </div>}
           </li>;
         })}
-      </ul>}
+      </ul>}</CompleteCollection>}
     {programs.entries.some((entry)=>entry.origin==='local') && <p className="text-sm text-text-muted">{t('machinePrograms.localEntry',{file:programs.config_file ?? t('machinePrograms.localConfiguration')})}</p>}
     {apply.isError && removing===null && unconfirming===null && <ProgramError error={apply.error}/>}
     {adding && <RegisterMachineProgram machineId={machine.id} kind={selected} onRegistered={()=>setAdding(false)} onClose={()=>setAdding(false)}/>}

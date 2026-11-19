@@ -499,6 +499,7 @@ impl Engine {
                 machine,
                 SerialKey::Environment(environment),
                 &FsManifest {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: environment,
                     selection: Selection {
                         include: selection.include.clone(),
@@ -680,6 +681,14 @@ impl Engine {
             }
         }
         let files = FilesPlan {
+            source_policy: live.then(crate::fork_source::workspace_copy_policy),
+            home_policy: home
+                .as_ref()
+                .filter(|home| home.measured)
+                .map(|_| crate::fork_source::owned_copy_policy()),
+            file_states_policy: file_states
+                .complete
+                .then(crate::fork_source::owned_copy_policy),
             file_states: Some(file_states),
             kept_image_bytes: kept_image.as_ref().map(|image| image.bytes),
             source: if live {
@@ -1001,6 +1010,7 @@ impl Moving {
                         machine,
                         SerialKey::Environment(self.environment()),
                         &FsSnapshot {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             work: None,
                             environment_id: self.environment(),
                             job_id: job.id(),
@@ -1086,6 +1096,7 @@ impl Moving {
                     machine,
                     SerialKey::Environment(self.environment()),
                     &FsMaterialize {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: self.environment(),
                         job_id: Some(job.id()),
@@ -1160,6 +1171,7 @@ impl Moving {
                         machine,
                         SerialKey::Environment(self.environment()),
                         &orch_link_contract::source::FsRecordVerify {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             environment_id: self.environment(),
                         },
                     )

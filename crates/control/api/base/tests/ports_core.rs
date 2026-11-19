@@ -1128,6 +1128,29 @@ async fn b3_a_refused_card_ends_its_opening_and_the_same_request_is_refused_agai
         "a refusal stands for an hour"
     );
     assert_eq!(replayed.opening.state, PortOpeningState::Refused);
+    let until: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT max(refused_until) FROM port_open_requests WHERE opening_id=$1")
+            .bind(replayed.opening.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&replayed.opening).unwrap()["refused_until"],
+        serde_json::to_value(orch_types::Time::new(until)).unwrap()
+    );
+    let history = world
+        .app
+        .call(orch_api_contract::approvals::ApprovalGet, &[&card.id])
+        .token(&manager.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&history).unwrap()["request"]["opening"]["refused_until"],
+        serde_json::to_value(orch_types::Time::new(until)).unwrap(),
+        "the settled request keeps the exact retry time"
+    );
+
     let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM approvals WHERE kind = 'port'")
         .fetch_one(&world.db.pool)
         .await
@@ -1768,7 +1791,7 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
             json!("bypass"),
         )
         .await;
-    world.set("requests.expiry_hours", json!(2)).await;
+    world.set("requests.expiry_minutes", json!(120)).await;
     let thread = asking_thread(&world, &manager, project, env).await;
     let made = world
         .app
@@ -1794,7 +1817,7 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
     let off = expires.get() - (world.now() + chrono::Duration::hours(2));
     assert!(
         off.num_seconds().abs() <= 1,
-        "requests.expiry_hours, not a port setting of its own: {off}"
+        "requests.expiry_minutes, not a port setting of its own: {off}"
     );
     world.advance(chrono::Duration::hours(2) + chrono::Duration::seconds(2));
     assert_eq!(reconcile(&world, env).await, vec![made.opening.id]);

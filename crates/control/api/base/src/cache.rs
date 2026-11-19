@@ -81,9 +81,26 @@ pub use orch_engine::manifest::ManifestError;
 /// compresses well and a bound on what it expands to is kept while it is read.
 pub const MANIFEST_MAX_STORED_BYTES: i64 = 512 * 1024 * 1024;
 
-/// How long an upload of a machine may have had no piece before it is taken for dead: a day, as
-/// long as an upload session of a person lives.
-pub const STALE_UPLOAD_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Captures the effective idle allowance once, when a machine transfer starts.
+pub(crate) async fn upload_retention(
+    conn: &mut orch_db::Conn,
+) -> Result<storage::UploadRetention, DbError> {
+    let view = orch_settings::resolve(conn, Place::System, "storage.machine_upload_idle_secs")
+        .await
+        .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
+    Ok(storage::UploadRetention {
+        seconds: view
+            .value()
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| {
+                DbError::Other(sqlx::Error::Decode(
+                    "the transfer retention is not an integer".into(),
+                ))
+            })?,
+        default_source: view.resolved.source.scope
+            == orch_settings_contract::provenance::SourceScope::Default,
+    })
+}
 
 /// How many rows a run of a job looks at in one statement.
 const BATCH: i64 = 500;
@@ -177,6 +194,8 @@ impl Samples {
 }
 
 struct CacheInner {
+    native_sessions: crate::collection::Snapshots<orch_api_contract::resources::NativeSession>,
+    archives: crate::archives::ArchiveReads,
     ports: crate::ports_runtime::PortRuntime,
     manifests: Mutex<VecDeque<(Id, Hash, Arc<Manifest>)>>,
     manifests_kept: usize,
@@ -198,6 +217,18 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
+    /// Native session discovery stays captured while its own source is searched and paged.
+    #[must_use]
+    pub fn native_sessions(
+        &self,
+    ) -> &crate::collection::Snapshots<orch_api_contract::resources::NativeSession> {
+        &self.inner.native_sessions
+    }
+
+    /// Shared live continuations of authorized immutable archive sources.
+    pub fn archive_reads(&self) -> &crate::archives::ArchiveReads {
+        &self.inner.archives
+    }
     /// Current port measurements and ephemeral admissions, never durable caller rows.
     #[must_use]
     pub fn ports(&self) -> &crate::ports_runtime::PortRuntime {
@@ -215,6 +246,8 @@ impl Cache {
         let samples = seconds / config.engine.stats_interval_secs.max(1);
         Self {
             inner: Arc::new(CacheInner {
+                native_sessions: crate::collection::Snapshots::default(),
+                archives: crate::archives::ArchiveReads::default(),
                 ports: crate::ports_runtime::PortRuntime::default(),
                 manifests: Mutex::new(VecDeque::new()),
                 manifests_kept: usize::try_from(config.limits.manifest_trees)
@@ -430,7 +463,7 @@ pub struct Collected {
 
 /// Removes the content nothing points at, no cached version of a file names, and nobody asked for
 /// during `[retention] blob_grace_hours`; and the uploads that were given up: the sessions of
-/// people that ran out, and the uploads of machines that no piece came to for a day.
+/// people that ran out, and machine transfers whose captured idle retention expired.
 pub async fn collect_garbage(
     db: &Db,
     blobs: &Blobs,
@@ -480,11 +513,28 @@ pub async fn collect_garbage(
         storage::end_session(&mut conn, session).await?;
         done.uploads += 1;
     }
-    let silent_since = now - ChronoDuration::from_std(STALE_UPLOAD_AGE).unwrap_or_default();
-    for hash in storage::stale_uploads(&mut conn, silent_since, BATCH).await? {
-        crate::blobs::discard(&blobs.part_of(&hash)).await;
-        storage::end_upload(&mut conn, &hash).await?;
-        done.uploads += 1;
+    let retention = upload_retention(&mut conn).await?;
+    let candidates = storage::stale_uploads(&mut conn, now, retention.seconds, BATCH).await?;
+    drop(conn);
+    for hash in candidates {
+        let mut tx = db.begin().await?;
+        if let Some(row) = storage::lock_upload(&mut tx, &hash).await?
+            && row.expired(now, retention.seconds)
+        {
+            // Piece writes hold this same row lock, including their disk write. A resumed
+            // transfer cannot have its new piece discarded by an older candidate list.
+            if let Err(error) = tokio::fs::remove_file(blobs.part_of(&hash)).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, %hash, "the expired transfer still owes temporary-file cleanup");
+                tx.rollback().await.map_err(DbError::from)?;
+                continue;
+            }
+            storage::expire_source_transfer(&mut tx, &row).await?;
+            storage::end_upload(&mut tx, &hash).await?;
+            done.uploads += 1;
+        }
+        tx.commit().await?;
     }
     Ok(done)
 }

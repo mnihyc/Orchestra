@@ -243,6 +243,11 @@ impl Launcher for FakeLauncher {
                             })),
                             "getAuthStatus" => handler(method, frame.get("params").unwrap_or(&Json::Null))
                                 .or_else(|_| Ok(json!({ "authMethod": null, "authToken": null, "requiresOpenaiAuth": true }))),
+                            "thread/unsubscribe" => handler(method, frame.get("params").unwrap_or(&Json::Null)).map(|answer| {
+                                if answer.get("status").is_some() { return answer; }
+                                state.notify("thread/closed", json!({"threadId":frame.pointer("/params/threadId")}));
+                                json!({"status":"unsubscribed"})
+                            }),
                             "config/read" => handler(method, frame.get("params").unwrap_or(&Json::Null))
                                 .ok()
                                 .filter(|read| read.get("config").is_some())

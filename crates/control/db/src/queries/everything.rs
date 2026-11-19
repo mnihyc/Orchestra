@@ -191,7 +191,7 @@ pub struct ResourceFilter<'a> {
     pub state: Option<&'a str>,
     /// An agent's harness.
     pub harness: Option<&'a str>,
-    /// Template kind or environment origin.
+    /// Template kind, environment origin, or system for an agent without a home.
     pub kind: Option<&'a str>,
     /// Apply the existing provider-scope policy projected into the grant.
     pub provider_scope: bool,

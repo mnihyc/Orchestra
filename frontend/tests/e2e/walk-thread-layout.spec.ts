@@ -18,7 +18,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const server = await fixture(page, [askSnapshot()]), t = await language(page, request, locale, theme);
     server.drafts.set(ASK_ID, threadDraft([{ type: 'text', text: 'A saved question' }]));
-    await page.route(`**/threads/${ACME.mainThread}/opening?**`, async (route) => {
+    await page.route(`**/threads/${ACME.mainThread}/opening**`, async (route) => {
       const response = await route.fetch(), opening = await response.json() as ThreadOpening;
       const thread = opening.sync.thread;
       if (thread.binding === null) throw new Error('This screen has an active binding');
