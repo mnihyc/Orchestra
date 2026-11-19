@@ -22,8 +22,11 @@ use orch_link_contract::streams::Stream;
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
 
-fn lost() -> Event {
+fn lost(opening_id: Id) -> Event {
     Event::SessionLost(SessionLost {
+        expected: false,
+        opening_id,
+        uncertain: false,
         reason: "the session closed".to_owned(),
     })
 }
@@ -152,7 +155,9 @@ async fn the_machine_that_hosts_a_session_can_report_its_end() {
     let world = World::new().await;
     let thread = world.thread("Its own session").await;
     let (start, _) = world.running_turn(thread, "Work on this").await;
-    world.say(thread, lost()).await;
+    world
+        .say(thread, lost(world.opening_of(thread).await))
+        .await;
     world.wait_turn(start.turn_id, "failed").await;
     assert_eq!(world.turn_state(start.turn_id).await, "failed");
     let error: Json = world
@@ -181,7 +186,10 @@ async fn another_authenticated_agent_machine_cannot_end_a_session_it_does_not_ho
         thread_id: thread,
         segment_id: segment,
     };
-    other.machine.publish(&stream, &lost()).await;
+    other
+        .machine
+        .publish(&stream, &lost(world.opening_of(thread).await))
+        .await;
     wait_ack(&world, other.id, &stream, 1).await;
     assert_eq!(world.turn_state(start.turn_id).await, "running");
     assert_eq!(cursor(&world, other.id, &stream).await, None);
@@ -212,6 +220,8 @@ fn tool(turn: Id, call_ref: &str) -> Event {
 
 fn raw() -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 1,
         direction: "in".to_owned(),
         payload: json!({"message":"a private harness frame"}),
@@ -250,7 +260,7 @@ async fn a_foreign_session_cannot_write_items_usage_raw_or_call_an_orch_tool_and
         message_done("injected-item", "injected private text"),
         usage(start.turn_id),
         tool(start.turn_id, &call_ref),
-        lost(),
+        lost(world.opening_of(thread).await),
         raw(),
     ];
     let before_usage: Json = world
@@ -265,6 +275,7 @@ async fn a_foreign_session_cannot_write_items_usage_raw_or_call_an_orch_tool_and
         .iter()
         .enumerate()
         .map(|(seq, event)| DeliveredEvent {
+            native_opening_id: None,
             seq: seq as i64 + 1,
             at: world.clock.time(),
             kind: event.kind().as_str().to_owned(),
@@ -332,7 +343,9 @@ async fn a_foreign_session_cannot_write_items_usage_raw_or_call_an_orch_tool_and
     let reported_usage: Json = world
         .scalar("SELECT usage FROM turns WHERE id=$1", start.turn_id)
         .await;
-    world.say(thread, lost()).await;
+    world
+        .say(thread, lost(world.opening_of(thread).await))
+        .await;
     world.wait_turn(start.turn_id, "failed").await;
     let error: Json = world
         .scalar("SELECT error FROM turns WHERE id=$1", start.turn_id)

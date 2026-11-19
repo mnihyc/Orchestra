@@ -6,6 +6,8 @@
 )]
 
 mod common;
+#[path = "environment_moves/history_write.rs"]
+mod history_write;
 mod hosting;
 
 use common::World;
@@ -1612,6 +1614,15 @@ async fn local_turn(
     let turn = found.unwrap();
     let segment = world.segment_of(thread).await;
     world.open_session_for_reports(thread, segment).await;
+    let producer = orch_testkit::doubles::sessions::first_turn_opening(
+        world.pool.pool(),
+        thread,
+        segment,
+        turn.turn_id,
+    )
+    .await
+    .unwrap()
+    .expect("the admitted local turn retains its original physical opening");
     let stream = orch_link_contract::streams::Stream::Session {
         thread_id: thread,
         segment_id: segment,
@@ -1625,13 +1636,41 @@ async fn local_turn(
             orch_link_contract::events::TurnOutcome::Completed,
         ),
     ] {
-        unit.added.machine.publish(&stream, &event).await;
+        unit.added
+            .machine
+            .publish_from(Some(producer), &stream, &event)
+            .await;
     }
     world.wait_turn(turn.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    let opened: std::collections::BTreeSet<_> = world
+        .ordered()
+        .into_iter()
+        .filter_map(|(_, command)| match command {
+            Command::LeaseOpen(body) if body.thread_id == thread => Some(body.lease_id),
+            _ => None,
+        })
+        .collect();
+    common::eventually(
+        "the earlier turn's actual opened leases are told to close",
+        || {
+            let closed: std::collections::BTreeSet<_> = world
+                .ordered()
+                .into_iter()
+                .filter_map(|(_, command)| match command {
+                    Command::LeaseClose(body) => Some(body.lease_id),
+                    _ => None,
+                })
+                .collect();
+            let done = opened.is_subset(&closed);
+            async move { done }
+        },
+    )
+    .await;
     turn
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_key_separated_agent_moves_with_its_home_and_requests_native_resume_or_carries_the_record_if_the_home_cannot_travel()
  {
     use orch_api_contract::forks::MoveThreadAction;
@@ -1669,6 +1708,8 @@ async fn a_key_separated_agent_moves_with_its_home_and_requests_native_resume_or
             .await
             .unwrap();
         local_turn(&f.world, &f.source_unit, thread, 0).await;
+        let bob = f.world.person("bob").await;
+        f.world.give(bob, "interactor").await;
         let old_segment = f.world.segment_of(thread).await;
         let native = orch_db::queries::threads::segment(
             &mut f.world.pool.acquire().await.unwrap(),
@@ -1824,6 +1865,7 @@ async fn a_key_separated_agent_moves_with_its_home_and_requests_native_resume_or
                 .any(|(id, action)| *id == thread && *action == MoveThreadAction::Reimport)
         );
         drop(conn);
+        let history_gate = (!carry).then(|| history_write::pause(thread));
         let mut tx = f.world.pool.begin().await.unwrap();
         let job =
             orch_engine::jobs::environment_move::queue(&mut tx, draft, None, f.world.clock.now())
@@ -1846,6 +1888,52 @@ async fn a_key_separated_agent_moves_with_its_home_and_requests_native_resume_or
                 }))
             });
         target.let_go();
+        if let Some((entered, release)) = history_gate {
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered)
+                .await
+                .expect("the actual recovery history writer reaches its gate")
+                .unwrap();
+            let caller = Caller::session(bob);
+            let sent = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                f.world.engine().submit_input(
+                    &caller,
+                    thread,
+                    common::queued("Work sent during history capture"),
+                ),
+            )
+            .await
+            .expect("the history file does not hold the row needed by another person's Send")
+            .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                f.world.engine().edit_input(
+                    &caller,
+                    thread,
+                    sent.input.id,
+                    Some(vec![orch_api_contract::threads::ContentPart::Text {
+                        text: "Edited during history capture".to_owned(),
+                    }]),
+                    None,
+                ),
+            )
+            .await
+            .expect("the history file does not hold the row needed by another person's Edit")
+            .unwrap();
+            // Remove only this test's new pending work before reviewing the recovered session's first turn.
+            let cancelled = f
+                .world
+                .engine()
+                .cancel_input(&caller, thread, sent.input.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                cancelled.state,
+                orch_api_contract::threads::InputState::Cancelled
+            );
+            assert!(format!("{:?}", cancelled.content).contains("Edited during history capture"));
+            release.send(()).unwrap();
+        }
         let result = wait_over(&f.world, job.id).await;
         assert_eq!(result.0, "succeeded", "{result:?}");
         let mut conn = f.world.pool.acquire().await.unwrap();

@@ -1,0 +1,4 @@
+clippy
+test -p orch-agent-contract -p orch-link-contract -p orch-api-contract -p orch-settings-contract -p orch-db -p orch-testkit -p orch-conformance -p orch-adapter-acp -p orch-adapter-claude-code -p orch-adapter-codex -p orch-adapter-fake --lib --test commands_in_line --test largest_messages --test harness_corpus --test suites --test harness --test turns --test sessions --test recorded_failures --test upgrade_notifications --test fake
+test -p orch-engine --test ingest --test background_wake --test cache_cleanup --test call_recovery --test failures --test foreign_machine_streams --test limits --test notifications
+test -p orch-engine --lib -- --skip history_pages::

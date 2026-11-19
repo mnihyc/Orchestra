@@ -1,5 +1,5 @@
 /** A different native MCP definition remains a proposal until its authorized manager selects that machine's version. */
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { McpOfferings } from '@/features/resources/mcp/Offerings';
@@ -11,6 +11,14 @@ vi.mock('@/api/resource-tools',()=>({mcpKey:(id:string)=>['mcp-server',id],selec
 const fingerprint='a'.repeat(64);
 const server=(allowed:boolean,state:'found'|'ready'='found')=>({id:'server',revision:8,offerings:[{machine:{id:'host-3',name:'host-3',online:true},state,reason:'different_definition',different_definition:true,definition_fingerprint:fingerprint,can_use_definition:allowed,offered_at:state==='ready'?'2026-10-24T00:00:00Z':null,seen_at:'2026-10-24T00:00:00Z'}]}) as unknown as McpServer;
 beforeEach(()=>{vi.clearAllMocks();useOffering.mockResolvedValue(server(true,'ready'));});
+it('opens an offering machine inside the current application document',()=>{
+  show(<McpOfferings server={server(true,'ready')}/>);
+  const link=screen.getByRole('link',{name:'host-3'});
+  expect(link).toHaveAttribute('href','/resources/machines/host-3');
+  const event=new MouseEvent('click',{bubbles:true,cancelable:true,button:0});
+  fireEvent(link,event);
+  expect(event.defaultPrevented).toBe(true);
+});
 it('records the reviewed source and fingerprint only after the manager chooses Use',async()=>{
   const user=userEvent.setup();show(<McpOfferings server={server(true)}/>);
   expect(screen.getByText(i18n.t('mcpOffering.noMachine'))).toBeVisible();expect(screen.getByText(i18n.t('mcpOffering.noMachine')).closest('[data-status-chip]')).not.toBeNull();expect(screen.getByText(i18n.t('mcpOffering.different',{name:'host-3'}))).toBeVisible();expect(useOffering).not.toHaveBeenCalled();

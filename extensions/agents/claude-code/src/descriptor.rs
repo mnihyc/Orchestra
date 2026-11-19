@@ -395,6 +395,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         direct_protocols: Vec::new(),
         credentials: credentials(),
         runtime_template: Some(runtime_template()),
+        approval_auto: None,
         approval_modes: approval_modes(as_root),
         sandbox_modes: vec![SandboxMode::Workspace, SandboxMode::Open],
         // Offered only once the exact loaded build's conformance proves every action path (plan-mode naming or
@@ -407,6 +408,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
             }
             declared
         },
+        features: Default::default(),
         parameters: definitions(),
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({

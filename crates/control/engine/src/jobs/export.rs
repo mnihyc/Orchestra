@@ -30,7 +30,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::documents::DocumentExport;
-use orch_api_contract::exports::{ExportCounts, ExportLeftOut, ExportRequest};
+use orch_api_contract::exports::{ExportCounts, ExportJobResult, ExportLeftOut, ExportRequest};
 use orch_api_contract::threads::{ContentPart, ExportFormat};
 use orch_authz::{Caller, Principal, TokenGrant};
 use orch_blob_contract::store::{BlobError, ByteStream};
@@ -430,6 +430,7 @@ fn hash_opened(mut file: std::fs::File) -> std::io::Result<(Hash, i64)> {
 
 /// The phased work of one job that writes an archive.
 pub struct Exporting {
+    source: orch_api_contract::package::PackageSource,
     engine: Engine,
     export: Id,
     user: Id,
@@ -438,10 +439,22 @@ pub struct Exporting {
     request: Option<crate::exports::operation::Request>,
     /// Whether the people of a package are named with their address.
     emails: bool,
+    /// Metadata already read or written by the recipe; reporting adds no database acquisition.
+    omitted_items: std::sync::Mutex<Option<i64>>,
 }
 
 fn text_id(plan: &Json, member: &str) -> Option<Id> {
     plan.get(member)?.as_str()?.parse().ok()
+}
+
+fn omitted_count(plan: &Json) -> Option<i64> {
+    plan.get("left_out")?
+        .as_array()?
+        .iter()
+        .try_fold(0_i64, |total, item| {
+            let count = item.get("count")?.as_i64()?;
+            (count >= 0).then_some(total.saturating_add(count))
+        })
 }
 
 impl Exporting {
@@ -465,7 +478,19 @@ impl Exporting {
                 (scopes, text_id(each, "subtree"))
             });
         Ok(Self {
+            source: serde_json::from_value(
+                row.plan
+                    .get("source")
+                    .cloned()
+                    .ok_or_else(|| missing("source"))?,
+            )?,
             engine,
+            omitted_items: std::sync::Mutex::new(
+                row.plan
+                    .get("manifest")
+                    .filter(|value| value.is_object())
+                    .and_then(|_| omitted_count(&row.plan)),
+            ),
             export: text_id(&row.plan, "export").ok_or_else(|| missing("archive"))?,
             user: text_id(&row.plan, "user").ok_or_else(|| missing("person"))?,
             node: text_id(&row.plan, "node").ok_or_else(|| missing("place"))?,
@@ -593,7 +618,11 @@ impl Phased for Exporting {
     }
 
     async fn result(&self, _job: &Job) -> Option<Json> {
-        Some(json!({ "export_id": self.export }))
+        let omitted_items = self.omitted_items.lock().ok().and_then(|count| *count);
+        Some(json!(ExportJobResult {
+            export_id: self.export,
+            omitted_items
+        }))
     }
 }
 
@@ -1741,6 +1770,9 @@ impl Exporting {
             files: tally.files,
         };
         let left_out: Vec<ExportLeftOut> = selected.left_out_told(&tally.left_out);
+        let omitted_items = left_out
+            .iter()
+            .fold(0_i64, |total, item| total.saturating_add(item.count));
         let by = {
             let mut conn = self.engine.inner.db.acquire().await?;
             if let Some(request) = &self.request {
@@ -1826,6 +1858,9 @@ impl Exporting {
             "manifest":manifest,
         }))
         .await?;
+        if let Ok(mut count) = self.omitted_items.lock() {
+            *count = Some(omitted_items);
+        }
         Ok(())
     }
 }

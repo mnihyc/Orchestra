@@ -584,6 +584,11 @@ impl Shells {
         if !setting(conn, place, keys::TERMINAL_ENABLED, true).await? {
             return Ok(Some(TerminalNotAllowedReason::DisabledByPolicy));
         }
+        if orch_authz::file_reach::machine_bound(conn, site.id).await?
+            != orch_access_contract::permissions::FileReach::Machine
+        {
+            return Ok(Some(TerminalNotAllowedReason::MachinePolicy));
+        }
         if !site.terminal {
             return Ok(Some(TerminalNotAllowedReason::EnvironmentSwitchOff));
         }
@@ -591,6 +596,9 @@ impl Shells {
             .await?
         {
             return Ok(Some(TerminalNotAllowedReason::MachinePolicy));
+        }
+        if site.stopping {
+            return Ok(Some(TerminalNotAllowedReason::EnvironmentStopping));
         }
         if site.status != "running"
             || site.machine_id.is_none()
@@ -1588,11 +1596,14 @@ impl Shells {
                 self.holds(&mut conn, &row).await?
             };
             if holding != Holding::Yes {
-                about(&row, Ending::REVOKED);
-                if let Some(done) = self
-                    .finish(row.id, Ending::REVOKED, &Origin::default())
-                    .await?
-                {
+                let ending =
+                    if holding == Holding::Gate(TerminalNotAllowedReason::EnvironmentStopping) {
+                        Ending::because(reason::ENVIRONMENT_STOPPED)
+                    } else {
+                        Ending::REVOKED
+                    };
+                about(&row, ending);
+                if let Some(done) = self.finish(row.id, ending, &Origin::default()).await? {
                     closed.push(done);
                 }
             }
