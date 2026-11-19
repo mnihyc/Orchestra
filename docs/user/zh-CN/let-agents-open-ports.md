@@ -1,7 +1,7 @@
 ---
 title: 让代理无需询问即可开放端口
 screens: /thread/$threadId, /resources/environments/$id, /resources/templates/$id, /topic/$topicId, /project/$projectId, /approvals
-keywords: 端口, 无需询问, port_place, port_host, port_link, capability.policy, ports.enabled, ports.max_open, ports.link_max_secs, requests.expiry_hours, network.allowed_hosts, 模板默认值
+keywords: 端口, 无需询问, port_place, port_host, port_link, capability.policy, ports.enabled, ports.max_open, ports.link_max_secs, requests.expiry_minutes, network.allowed_hosts, 模板默认值
 heading_id.选择接收范围: choose-the-audience
 heading_id.允许后续开放: allow-later-openings
 heading_id.把链接当作秘密: treat-links-as-secrets

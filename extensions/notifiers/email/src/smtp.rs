@@ -223,9 +223,9 @@ pub fn fields() -> Vec<Field> {
         ),
         text(
             "hello_name",
-            "Name for the greeting",
+            "EHLO name",
             false,
-            "The name this system gives the server when it greets it; the name of the machine where that is left out.",
+            "The host name given to the mail server when connecting. Empty: this machine's name.",
         ),
         tls_ca,
         timeout,
@@ -626,6 +626,22 @@ mod tests {
     fn with_secret(mut config: Config, name: &str, value: &str) -> Config {
         config.secrets.insert(name.to_owned(), Secret::new(value));
         config
+    }
+
+    #[test]
+    fn a_mail_operator_sees_the_smtp_greeting_name_and_its_machine_default() {
+        let greeting = fields()
+            .into_iter()
+            .find(|field| field.name == "hello_name")
+            .unwrap();
+        assert_eq!(greeting.label, "EHLO name");
+        assert_eq!(
+            greeting.help.as_deref(),
+            Some(
+                "The host name given to the mail server when connecting. Empty: this machine's name."
+            )
+        );
+        assert!(!greeting.required);
     }
 
     #[test]
