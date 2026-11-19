@@ -735,6 +735,7 @@ impl native::Selected for Report {
     type Query = api::StorageQuery;
     type Value = Ready;
     type Reply = api::StorageReport;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::REPORT;
     fn origin<'a>(_: &Self::Query, value: &'a Ready) -> Option<&'a CapturedOperation> {
         Some(&value.origin.origin)

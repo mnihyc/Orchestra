@@ -404,6 +404,7 @@ fn the_machine_opens_sessions_under_the_names_it_is_given(s: &Scene) -> Opens {
                 .unwrap()
                 .push((open.mode, open.native_session_ref.clone()));
             Ok(CommandResult::SessionOpen(SessionOpenResult {
+                mcp: None,
                 native_session_ref: open
                     .native_session_ref
                     .clone()

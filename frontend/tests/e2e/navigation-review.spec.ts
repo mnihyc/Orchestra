@@ -175,15 +175,9 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       await page.keyboard.press('Escape');
       await expect(page.getByRole('menu')).toHaveCount(0);
     }
-    if (width === 1440) {
-      const rail = page.locator('[data-visible-scrollbar="horizontal"]');
-      await expect(rail).toBeVisible(); expect((await rail.boundingBox())?.height).toBeGreaterThanOrEqual(10);
-      await viewport.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+    expect(await viewport.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    if (await table.getAttribute('data-table-layout') === 'wide') {
       await expect(table.getByRole('columnheader', { name: 'Kind', exact: true })).toBeVisible();
-      const viewportBounds = await viewport.boundingBox(), thumbBounds = await rail.locator(':scope > div').boundingBox();
-      if (viewportBounds === null || thumbBounds === null) throw new Error('The visible scrollbar thumb stays inside its frame');
-      expect(thumbBounds.x).toBeGreaterThanOrEqual(viewportBounds.x - 1);
-      expect(thumbBounds.x + thumbBounds.width).toBeLessThanOrEqual(viewportBounds.x + viewportBounds.width + 1);
       await expect(first.locator('.flat-field-label:visible')).toHaveCount(0);
     } else {
       await expect(first.getByText('Kind', { exact: true })).toBeVisible();
