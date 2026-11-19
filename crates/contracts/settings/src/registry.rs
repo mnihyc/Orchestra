@@ -94,6 +94,8 @@ words! {
         Provider = "provider",
         /// One host's own maintenance policy, after the system's values.
         Host = "host",
+        /// One resource pool, after its home values.
+        Pool = "pool",
     }
 }
 
@@ -103,7 +105,10 @@ impl Scope {
     /// a provider's runtime are the innermost and carry no lock.
     #[must_use]
     pub const fn has_rows(self) -> bool {
-        !matches!(self, Self::Environment | Self::Provider | Self::Host)
+        !matches!(
+            self,
+            Self::Environment | Self::Provider | Self::Host | Self::Pool
+        )
     }
 }
 
@@ -868,6 +873,8 @@ pub enum Writer {
     OnTheProvider,
     /// Whoever manages the host whose maintenance policy it is.
     OnTheHost,
+    /// The pool whose routing policy is changed.
+    OnThePool,
 }
 
 impl Writer {
@@ -882,6 +889,7 @@ impl Writer {
             }
             Self::OnTheProvider => Some(Permission::ProviderManage),
             Self::OnTheHost => Some(Permission::HostManage),
+            Self::OnThePool => Some(Permission::PoolManage),
         }
     }
 }
@@ -896,7 +904,7 @@ pub const fn locked_by(scope: Scope) -> Option<Writer> {
         Scope::Org | Scope::Project | Scope::Topic | Scope::Thread => {
             Some(Writer::OnTheNode(Permission::SettingsManage))
         }
-        Scope::Environment | Scope::Provider | Scope::Host => None,
+        Scope::Environment | Scope::Provider | Scope::Host | Scope::Pool => None,
     }
 }
 
@@ -956,6 +964,9 @@ impl SettingDef {
                 | keys::NOTIFICATIONS_PERSON_RATE_PER_HOUR
                 | keys::NOTIFICATIONS_PERSON_NOTE_CHARS
                 | keys::FILES_PREVIEW_CACHE_BYTES
+                | keys::DIAGNOSTICS_FRAME_BYTES
+                | keys::DIAGNOSTICS_FRAME_HEAD_BYTES
+                | keys::DIAGNOSTICS_FRAMES_PER_SEGMENT
         )
     }
 
@@ -990,6 +1001,7 @@ impl SettingDef {
             (Scope::Environment, _) => Writer::OnTheEnvironment,
             (Scope::Provider, _) => Writer::OnTheProvider,
             (Scope::Host, _) => Writer::OnTheHost,
+            (Scope::Pool, _) => Writer::OnThePool,
             (_, Class::Policy) => Writer::OnTheNode(Permission::SettingsManage),
             (Scope::Org, Class::Parameter) => Writer::OnTheNode(Permission::OrgManage),
             (Scope::Project, Class::Parameter) => Writer::OnTheNode(Permission::ProjectManage),
@@ -1040,6 +1052,13 @@ impl SettingDef {
     #[must_use]
     pub fn faults(&self, value: &Json) -> Vec<FieldError> {
         let mut faults = self.schema.faults(value);
+        if self.key == keys::POOLS_MEMBER_WEIGHT
+            && value
+                .as_str()
+                .is_none_or(|value| !orch_provider_contract::pools::valid_weight(value))
+        {
+            fault(&mut faults, "", "must be a positive decimal weight");
+        }
         if matches!(self.key, keys::RELATED_WEIGHTS | keys::RELATED_PLACE_SCORES) {
             for (name, value) in value.as_object().into_iter().flatten() {
                 if value
@@ -1115,7 +1134,7 @@ const fn rank(scope: Scope) -> u8 {
         Scope::Org => 1,
         Scope::Project => 2,
         Scope::Topic => 3,
-        Scope::Thread | Scope::Environment | Scope::Provider | Scope::Host => 4,
+        Scope::Thread | Scope::Environment | Scope::Provider | Scope::Host | Scope::Pool => 4,
     }
 }
 
@@ -1352,6 +1371,7 @@ fn message_faults(scope: Scope, value: &Json) -> Vec<FieldError> {
 }
 
 const SYSTEM: &[Scope] = &[Scope::System];
+const SYSTEM_TO_POOL: &[Scope] = &[Scope::System, Scope::Org, Scope::Project, Scope::Pool];
 const SYSTEM_HOST: &[Scope] = &[Scope::System, Scope::Host];
 const SYSTEM_ORG: &[Scope] = &[Scope::System, Scope::Org];
 const ORG_ONLY: &[Scope] = &[Scope::Org];
@@ -1608,6 +1628,7 @@ const RESOURCE_KIND: Schema = choice(&[
     "mcp_server",
     "mount",
     "skill",
+    "pool",
 ]);
 /// What a place gives its threads of one skill: nothing, its latest version, or one version by its
 /// identifier.
@@ -1916,6 +1937,17 @@ const WRITTEN_SUMMARY_OPTIONS: Schema = Schema::Object {
     members: &[],
     open: false,
 };
+/// The features of agent programs that are on while no scope says otherwise. A feature whose only purpose is to show what a manager
+/// of a provider has already switched on for a model is on: the access program of Codex, which a thread offers only on a model whose
+/// managers enabled it. A scope that does not want a program offered under it sets its feature off; the others stay as they are.
+/// What each generated target does while no scope sets it, written out in full. The settings page draws these as the values a
+/// target starts from, and the engine falls back to the same numbers (it reads them from this default), so the page and the work
+/// can never disagree: nothing is automatic; a thread keeps the shared trigger pacing (two minutes after a turn or a milestone), a topic
+/// follows its children at a quarter of an hour, a document waits for edits to settle for five minutes, chats and their titles collect
+/// messages for five minutes; each reads up to 32,000 tokens and writes up to 600 characters, 80 for the title of a chat.
+const SUMMARY_TARGETS_SHIPPED: DefaultOf = DefaultOf::Value(
+    r#"{"thread":{"automatic":false,"on":["turn_completed","milestone"],"min_interval_secs":120,"context_tokens":32000,"output_chars":600},"topic":{"automatic":false,"on":["child_changed"],"min_interval_secs":900,"context_tokens":32000,"output_chars":600},"document":{"automatic":false,"on":["content_changed"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat_title":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":80}}"#,
+);
 const SUMMARY_TARGETS: Schema = Schema::Object {
     members: &[
         optional("thread", SUMMARY_TARGET_OPTIONS),
@@ -2138,8 +2170,58 @@ const ASK_MODEL_ENTRY: Schema = Schema::Object {
     members: &[required("provider_id", Schema::Id), required("model", TEXT)],
     open: false,
 };
+const HOST_TARGET: Schema = Schema::OneOf {
+    any: &[
+        Schema::Object {
+            members: &[
+                required("type", choice(&["single"])),
+                required(
+                    "resource",
+                    Schema::Object {
+                        members: &[required("kind", choice(&["host"])), required("id", ID)],
+                        open: false,
+                    },
+                ),
+            ],
+            open: false,
+        },
+        Schema::Object {
+            members: &[
+                required("type", choice(&["pool"])),
+                required("kind", choice(&["host"])),
+                required("id", ID),
+            ],
+            open: false,
+        },
+    ],
+    says: "one host target or a host pool target",
+};
 
 registry! {
+    POOLS_MEMBER_PRIORITY = "pools.member_priority", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("0"), int(0, Unit::Count),
+        "Member priority", "The default priority tier of a pool member; lower tiers are tried first.";
+    POOLS_MEMBER_WEIGHT = "pools.member_weight", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("\"1\""), DECIMAL,
+        "Member weight", "The default positive decimal weight of a pool member; equal weights give equal shares.";
+    POOLS_MAX_DEPTH = "pools.max_depth", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("3"), int(0, Unit::Count),
+        "Pool depth", "Admitted nested pool depth, counting the outer pool as one; zero disables pool choices without hiding their definitions.";
+    POOLS_READ_BATCH_SIZE = "pools.read_batch_size", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("100"), int(1, Unit::Count),
+        "Pool read batch", "Member and candidate rows read together; larger pools continue in further pages.";
+    POOLS_LOAD_CEILING_PERCENT = "pools.load_ceiling_percent", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("90"), int(0, Unit::Percent),
+        "Pool load ceiling", "Measured ratio ceiling for Least loaded; zero is off and this never changes native host capacity policy.";
+    POOLS_LOAD_CEILING_COUNT = "pools.load_ceiling_count", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("0"), int(0, Unit::Count),
+        "Pool count ceiling", "Observed thread or process count ceiling for Least loaded; zero is off, with no invented percentage denominator.";
+    POOLS_COOLDOWN_MINUTES = "pools.cooldown_minutes", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("60"), int(0, Unit::Minutes),
+        "Pool cooldown", "Minutes of suppression after qualifying native evidence; zero adds no timed suppression and never overrides a vendor wait.";
+    POOLS_FAILURES_BEFORE_COOLDOWN = "pools.failures_before_cooldown", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("1"), int(1, Unit::Count),
+        "Failures before cooldown", "Qualifying failures within the failure window that begin suppression; local permission and policy refusals never count.";
+    POOLS_FAILURE_WINDOW_SECS = "pools.failure_window_secs", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("300"), int(1, Unit::Seconds),
+        "Pool failure window", "Seconds grouping qualifying native failures for this pool's threshold.";
+    POOLS_RECOVERY_TRIALS = "pools.recovery_trials", Automation, Parameter, SYSTEM_TO_POOL, Replace, value("1"), int(1, Unit::Count),
+        "Pool recovery trials", "Concurrent fenced native trials allowed against one failure scope; a page visit never starts a trial.";
+    POOLS_ATTEMPTS = "pools.attempts", Automation, Parameter, SYSTEM_TO_POOL, Replace, NULL, Schema::Nullable { of: &int(0, Unit::Count) },
+        "Pool attempts", "Automatic additional member attempts under call recovery; unset tries each eligible leaf once, zero permits none, and the caller's stricter guard still applies.";
+    POOLS_CHOICE_DETAIL_DAYS = "pools.choice_detail_days", Retention, Parameter, SYSTEM_TO_POOL, Replace, value("30"), int(0, Unit::Days),
+        "Pool choice details", "Days retaining detailed choice/skip facts; zero keeps them forever, and essential native receipts and active health facts remain.";
     ASK_MODELS = "ask.models", Automation, Policy, SYSTEM_ORG, Intersect, UNSET, Schema::List { items: &ASK_MODEL_ENTRY, unique: false },
         "Ask models", "Allowed API model identities for Ask. Child scopes only narrow the list; parent order is retained. The first usable identity is the default. Unset everywhere or empty blocks Ask.";
     ASK_PAID_BY = "ask.paid_by", Automation, Policy, SYSTEM_ORG, Replace, value("\"person\""), choice(&["person", "setter"]),
@@ -2153,15 +2235,19 @@ registry! {
     ASK_MAX_STEPS = "ask.max_steps", Automation, Policy, SYSTEM_ORG, Min, value("16"), int(1, Unit::Count),
         "Ask steps per turn", "The model steps allowed for one question before it asks the person to continue.";
     ASK_MAX_OUTPUT_TOKENS = "ask.max_output_tokens", Automation, Policy, SYSTEM_ORG, Min, value("4096"), int(1, Unit::Count),
-        "Ask answer tokens", "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.";
+        "Ask answer tokens", "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies.";
     ASK_CONTEXT_TOKENS = "ask.context_tokens", Automation, Policy, SYSTEM_ORG, Min, UNSET, int(1, Unit::Count),
-        "Ask context tokens", "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.";
+        "Ask context tokens", "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies.";
     ASK_MAX_TOOLS = "ask.max_tools", Automation, Policy, SYSTEM_ORG, Min, value("32"), int(1, Unit::Count),
         "Ask tools per turn", "The read operations allowed for one question before it asks the person to narrow the question.";
-    ASK_TOOL_BYTES = "ask.tool_bytes", Automation, Policy, SYSTEM_ORG, Min, value("65536"), int(1, Unit::Bytes),
-        "Ask source size", "The most bytes from one read result supplied to the model, with a canonical link to the full source.";
-    ASK_TURN_TOOL_BYTES = "ask.turn_tool_bytes", Automation, Policy, SYSTEM_ORG, Min, value("262144"), int(1, Unit::Bytes),
-        "Ask sources per turn", "The total read-result bytes supplied while answering one question.";
+    ASK_DOCS_HITS = "ask.docs_hits", Automation, Policy, SYSTEM_ORG, Min, value("5"), int(1, Unit::Count),
+        "Ask guide pages per search", "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match.";
+    ASK_DOCS_EXCERPT_TOKENS = "ask.docs_excerpt_tokens", Automation, Policy, SYSTEM_ORG, Min, value("1000"), int(1, Unit::Count),
+        "Ask guide excerpt size", "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it.";
+    ASK_MAX_OPERATIONS = "ask.max_operations", Automation, Policy, SYSTEM_ORG, Min, value("20"), int(1, Unit::Count),
+        "Ask operations per search", "The most read operations one Ask search of the read catalogue returns.";
+    ASK_MAX_LINKS = "ask.max_links", Automation, Policy, SYSTEM_ORG, Min, value("50"), int(1, Unit::Count),
+        "Ask links per source", "The most canonical source links Ask keeps from one read.";
     CALLS_RULES = "calls.rules", Automation, Policy, SYSTEM_TO_TOPIC, Replace, value(orch_provider_contract::calls::DEFAULT_RULES), Schema::List { items: &Schema::Any, unique: false },
         "Call recovery", "Ordered rules for retrying, continuing, failing over or waiting after a model call fails.";
     CALLS_REPEAT_LIMIT = "calls.repeat_limit", Automation, Policy, SYSTEM_TO_TOPIC, Min, value("3"), int(0, Unit::Count),
@@ -2205,9 +2291,16 @@ registry! {
         "Release mirror", "A URL that serves the vendors' release files where this server cannot reach them; empty reads the vendors directly.";
     AGENTS_PROMPT_CACHE_TTL = "agents.prompt_cache_ttl", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &choice(&["5m", "1h"]) },
         "Prompt cache lifetime", "An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it.";
-    AGENTS_SUBAGENTS_AT_ONCE = "agents.subagents_at_once", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("8"), int_between(1, 64, Unit::Count),
+    AGENTS_WEB_ACTION_WAIT_SECS = "agents.web_action_wait_secs", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("120"), int(1, Unit::Seconds),
+        "Web action wait", "Close a native web action that has not reported its end after this many seconds, with its reason. A later result can still update it. Applies when the session opens again.";
+    AGENTS_NATIVE_RESULT_WAIT_MS = "agents.native_result_wait_ms", Agent, Parameter, SYSTEM, Replace, value("2000"), int(0, Unit::Milliseconds),
+        "Native result wait", "How long an agent program may read retained native results before reporting unavailable evidence. Programs that declare this wait use it as their profile default, within the engine's interrupt window. Applies when the program starts again.";
+    // Eight MiB keeps a short burst for one session while its optional local evidence is read.
+    AGENTS_NATIVE_RESULT_BUFFER_BYTES = "agents.native_result_buffer_bytes", Agent, Parameter, SYSTEM, Replace, value("8388608"), int(0, Unit::Bytes),
+        "Native result buffer", "Pending native input retained for a session while its result evidence is read. When full, the optional read ends as unverified and all input continues. Programs that declare this buffer use it as their profile default. Applies when the program starts again.";
+    AGENTS_SUBAGENTS_AT_ONCE = "agents.subagents_at_once", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("8"), int(1, Unit::Count),
         "Sub-agents at once", "How many sub-agents the harness may run at once; the shortest value along the hierarchy wins. A harness without this control says it does not apply.";
-    AGENTS_SUBAGENT_DEPTH = "agents.subagent_depth", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("1"), int_between(1, 5, Unit::Count),
+    AGENTS_SUBAGENT_DEPTH = "agents.subagent_depth", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("1"), int(1, Unit::Count),
         "Sub-agent depth", "How many layers of sub-agents the harness may spawn; 1 allows no nesting. The shortest value along the hierarchy wins; a harness without this control says it does not apply.";
     AGENTS_SKILLS = "agents.skills", Agent, Parameter, ORG_TO_TOPIC, Map, EMPTY_MAP, by_id(&SKILL_CHOICE),
         "Skills", "Which skills the agents of threads here are given, by skill: off, its latest version, or a pinned version; a lower scope may change or switch off an inherited one.";
@@ -2235,6 +2328,8 @@ registry! {
         "Plan first", "Whether the composer's Plan switch starts on for a thread's first message: the agent proposes a plan and changes nothing until somebody proceeds. The approval mode stays as it is.";
     THREAD_PLAN_ANSWERED_BY = "thread.plan_answered_by", Collaboration, Policy, SYSTEM_TO_TOPIC, Stricter, value("\"writers\""), choice(&["writers", "managers"]),
         "Who answers plans", "Who may proceed with a plan an agent proposes, or keep it planning: whoever may write to the agent here, or only those who manage the thread.";
+    THREAD_SILENT_AFTER_SECS = "thread.silent_after_secs", Collaboration, Parameter, SYSTEM_TO_TOPIC, Replace, value("120"), int(1, Unit::Seconds),
+        "Silence notice", "How many seconds nothing may arrive from a running agent, with no tool running, before a thread's status line says how long nothing came.";
     THREAD_GOAL_MAX_TURNS = "thread.goal.max_turns", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, value("0"), int(0, Unit::Count),
         "Goal turns", "The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise a limit set above it. Reaching a limit stops the goal and says which.";
     THREAD_GOAL_MAX_MINUTES = "thread.goal.max_minutes", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, value("0"), int(0, Unit::Minutes),
@@ -2255,6 +2350,8 @@ registry! {
         "Allowed services", "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.";
     PROVIDERS_ALLOWED = "providers.allowed", Models, Policy, SYSTEM_TO_TOPIC, Intersect, UNSET, list(&TEXT),
         "Allowed providers", "Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here.";
+    MODELS_ADD_SWITCHES_ON = "models.add_switches_on", Models, Parameter, SYSTEM_ORG, Replace, value("\"all\""), choice(&["all", "basic", "nothing"]),
+        "Switched on when added", "Context, speeds and access enables reported context sizes, speeds and access programs. Efforts and context enables context sizes. Only what it states keeps the model's own window and efforts. Other model options are configured separately; larger contexts remain a per-thread choice.";
     COLLAB_ATTRIBUTION = "collab.attribution", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"auto\""), choice(&["auto", "always", "never"]),
         "Attribution", "Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers.";
     COLLAB_DEFAULT_DELIVERY = "collab.default_delivery", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"queue\""), choice(&["queue", "steer"]),
@@ -2269,8 +2366,8 @@ registry! {
         "Updates", "Whether an environment that is behind waits for somebody to update it, or is updated whenever it starts.";
     ENV_TEMPLATE_ID = "env.template_id", Environment, Parameter, UNIT_ENV_SCOPES, Replace, FROM_SEEDS, ID,
         "Template", "The template that a managed environment is made from.";
-    ENV_HOST_ID = "env.host_id", Environment, Parameter, UNIT_ENV_SCOPES, Replace, UNSET, ID,
-        "Host", "The host that a managed environment is made on; unset, the one with the most room.";
+    ENV_HOST_ID = "env.host_id", Environment, Parameter, UNIT_ENV_SCOPES, Replace, UNSET, HOST_TARGET,
+        "Host", "A host or host pool for a newly made environment; unset chooses Most room. An existing environment keeps its admitted host.";
     ENV_RUNTIME = "env.runtime", Environment, Parameter, UNIT_ENV_SCOPES, Replace, UNSET, TEXT,
         "Runtime", "The container runtime an environment is made under, among those its host offers; unset, its template's own.";
     ENVIRONMENTS_RUNTIMES = "environments.runtimes", Environment, Policy, SYSTEM_TO_TOPIC, Map, EMPTY_MAP, map(&RUNTIME_RULE),
@@ -2312,19 +2409,43 @@ registry! {
         "Tool calls a minute", "How many calls of Orch's tools one thread's agent may make in a minute.";
     ORCH_TOOLS_OWNER_READS = "orch_tools.owner_reads", Agent, Policy, SYSTEM_TO_THREAD, Replace, value("false"), BOOL,
         "Personal read tools", "Let this thread use its owner's current read access, including when shared. The audience banner shows who can see or act and warns that personal reads are visible there. Sharing earlier personally read results requires informed confirmation.";
+    ORCH_TOOLS_READ_BYTES = "orch_tools.read_bytes", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("20000"), int(1, Unit::Bytes),
+        "Shared read bytes", "Default UTF-8 bytes in a shared read or tool answer; explicit positive byte windows can differ.";
+    ORCH_TOOLS_LIST_DEPTH = "orch_tools.list_depth", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("1"), int_between(1, 4294967295, Unit::Count),
+        "Shared listing depth", "Default levels in a shared listing; continuation retains the remaining entries.";
+    ORCH_TOOLS_LIST_ROWS = "orch_tools.list_rows", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("50"), int(1, Unit::Count),
+        "Shared listing rows", "Default rows in a shared listing page; explicit positive windows can differ.";
     ORCH_TOOLS_SEARCH_QUERY_CHARS = "orch_tools.search_query_chars", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("1000"), int(1, Unit::Count),
         "Shared search query budget", "The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries.";
     ORCH_TOOLS_SEARCH_RESULTS = "orch_tools.search_results", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("200"), int(1, Unit::Count),
         "Shared search result budget", "The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation.";
     ORCH_TOOLS_SEARCH_CONTEXT = "orch_tools.search_context", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int(0, Unit::Count),
         "Shared search context budget", "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context.";
+    THREADS_OPENING_ITEMS = "threads.opening_items", Collaboration, Parameter, SYSTEM_TO_THREAD, Replace, value("40"), int_between(1, u32::MAX as i64, Unit::Count),
+        "Thread opening items", "Timeline items in the first screen. Older items remain available by scrolling; a reader may request another window size.";
     THREADS_OFFLINE_DEADLINE = "threads.offline_deadline", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &int(0, Unit::Seconds) },
         "Offline turn deadline", "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.";
+    THREADS_START_ACCEPTANCE_SECONDS = "threads.start_acceptance_seconds", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("60"), int(0, Unit::Seconds),
+        "Start acceptance wait", "Seconds an admitted native start may wait for acceptance. Zero expires immediately. Each admitted start keeps its policy and deadline.";
+    THREADS_START_CONFIRMATION_SECONDS = "threads.start_confirmation_seconds", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("60"), int(0, Unit::Seconds),
+        "Native start wait", "Seconds after the latest possible acceptance to wait for the native start event. Zero adds no wait. Later changes apply to later admissions.";
+    THREADS_START_EVENT_GRACE_SECONDS = "threads.start_event_grace_seconds", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("600"), int(0, Unit::Seconds),
+        "Start event ingestion grace", "Extra seconds while this session's native events are still being ingested. Zero adds no grace. Each admission freezes this allowance.";
+    THREADS_OUTPUT_CAPTURE_BYTES = "threads.output_capture_bytes", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("67108864"), int(1, Unit::Bytes),
+        "Retained command output", "Bytes of each native text output to retain, including its inline tail. Defaults to 64 MiB. Larger outputs keep the exact last bytes and show the missing original interval. Changes apply to the next session.";
+    THREADS_BACKGROUND_SNAPSHOT_SECONDS = "threads.background_snapshot_seconds", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("30"), int(1, Unit::Seconds),
+        "Roster retention", "Idle seconds to retain a native command snapshot and its reviewed End identities. Active page reads renew it; an expired read restarts transparently before confirmation.";
+    THREADS_BACKGROUND_PAGE_ITEMS = "threads.background_page_items", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("200"), int(1, Unit::Count),
+        "Native roster page", "Preferred commands in one native roster page. Every page is transferred; the complete roster has no row cap.";
+    THREADS_BACKGROUND_PAGE_BYTES = "threads.background_page_bytes", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("131072"), int(1, Unit::Bytes),
+        "Native roster page bytes", "Preferred bytes in one native roster page. One command can exceed this target; the negotiated transport allowance still applies.";
+    THREADS_BACKGROUND_PREVIEW_BYTES = "threads.background_preview_bytes", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("4096"), int(0, Unit::Bytes),
+        "Roster command preview", "Command bytes shown in each native roster preview. Longer commands retain an explicit preview-truncated fact; all command identities remain available.";
     THREADS_BACKGROUND_WAKE = "threads.background_wake", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("\"on\""), choice(&["on", "off"]),
         "Background wake", "Wake when background tasks or subagents finish. Off: results of background work arrive with the next input; a program that cannot keep background work without waking is not offered it. Changes apply to the next session.";
     THREADS_AGENT_SCHEDULES = "threads.agent_schedules", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("\"off\""), choice(&["on", "off"]),
         "Agent schedules", "Let this thread's agent schedule visible future inputs on its own thread. Off by default; current permissions and provider allowances still apply to every run.";
-    AGENTS_WEB_SEARCH_BACKEND = "agents.web_search_backend", Agent, Parameter, ORG_ONLY, Replace, NULL, WEB_SEARCH_BACKEND,
+    AGENTS_WEB_SEARCH_BACKEND = "agents.web_search_backend", Agent, Parameter, ORG_TO_THREAD, Replace, NULL, WEB_SEARCH_BACKEND,
         "Web search backend", "The provider and enabled native-search model, or enabled provider search/fetch services, used by Orch's managed web tools. Unset offers no paid service implicitly.";
     AGENTS_IMAGE_GENERATION_BACKEND = "agents.image_generation_backend", Agent, Parameter, ORG_TO_THREAD, Replace, NULL, CAPABILITY_BACKEND,
         "Image generation backend", "The exact declared route and enabled provider offering for Orch's image tool. Unset selects no paid service. Configuration contains adapter references, never provider credentials.";
@@ -2335,7 +2456,7 @@ registry! {
     THREADS_AGENT_ACCESS = "threads.agent_access", Agent, Parameter, SYSTEM_TO_TOPIC, Replace, value("{\"where\":\"topic\",\"parts\":{\"documents\":\"edit\"}}"), AGENT_ACCESS,
         "Agent access", "The initial access shown when creating a thread: reach and levels for documents, chats and other threads. The creator confirms what they may give. Changes apply to new threads, not existing grants.";
     THREADS_LET_VIEWERS_IN = "threads.let_viewers_in", Agent, Parameter, SYSTEM_TO_TOPIC, Replace, value("false"), BOOL,
-        "Let thread viewers in", "The initial choice to let a new thread's viewers use its environment. The creator confirms the choice; changing this default grants no access by itself.";
+        "Viewers can open the environment", "The initial choice to let a new thread's viewers look at its files, terminal and screens, without Use or permission to change them. The creator confirms the choice; changing this default grants no access by itself.";
     BROADCAST_CHAT_MESSAGES_PER_HOUR = "broadcast.chat_messages_per_hour", Collaboration, Policy, SYSTEM_TO_THREAD, Min, value("60"), int(0, Unit::Count),
         "Agent chat messages per hour", "Successful posts across all chats from one origin in a rolling hour; zero forbids posting.";
     SHARING_SNAPSHOT_MAX_BYTES = "sharing.snapshot_max_bytes", Collaboration, Policy, SYSTEM_TO_PROJECT, Min, value("67108864"), BYTES,
@@ -2351,9 +2472,37 @@ registry! {
     IMPORT_MAX_ITEMS = "import.max_items", Collaboration, Policy, SYSTEM_TO_PROJECT, Min, NULL, Schema::Nullable { of: &int(1, Unit::Count) },
         "Most things in an import", "How many places, document folders, documents, chats and threads one import into what lies here may hold; none follows the most things an export may hold.";
     WORKSPACE_IGNORE = "workspace.ignore", Workspace, Parameter, ORG_TO_TOPIC_ENV, Union, EMPTY_LIST, list(&TEXT),
-        "Ignored paths", "Patterns, written as in a gitignore file, for what the index of a workspace leaves out.";
+        "Ignored paths", "Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list.";
     WORKSPACE_INDEX = "workspace.index", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("\"full\""), choice(&["full", "live"]),
-        "Index", "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online.";
+        "Index", "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree.";
+    WORKSPACE_INDEX_ENTRIES = "workspace.index_entries", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("250000"), int(1, Unit::Count),
+        "Cached file entries", "Path metadata kept in the incremental working set; larger directories remain browsable and searchable live.";
+    WORKSPACE_INDEX_SCAN_SECS = "workspace.index_scan_secs", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("10"), int(1, Unit::Seconds),
+        "Indexing slice", "Seconds of initial indexing before retaining incremental coverage and continuing with live reads.";
+    WORKSPACE_IGNORE_MAX_BYTES = "workspace.ignore_max_bytes", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("1048576"), int(1, Unit::Bytes),
+        "Exclusion parsing", "Bytes allowed when parsing one local exclusion file; a file that cannot be applied reports its source and never exposes an unknown scope.";
+    WORKSPACE_IGNORE_CACHE_BYTES = "workspace.ignore_cache_bytes", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("16777216"), int(0, Unit::Bytes),
+        "Cached exclusion rules", "Source bytes and record metadata retained for parsed exclusion rules; older parses are read again when needed.";
+    WORKSPACE_DIRECTORY_IDLE_SECS = "workspace.directory_idle_secs", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("300"), int(1, Unit::Seconds),
+        "Folder continuation idle time", "Seconds an unused folder observation is kept before transparent renewal when the folder is unchanged.";
+    WORKSPACE_DIRECTORY_SLOTS = "workspace.directory_slots", Workspace, Parameter, SYSTEM, Replace, value("256"), int(1, Unit::Count),
+        "Folder observations", "Folder observations retained on one machine; unused observations are evicted before admitting another reader.";
+    WORKSPACE_DIRECTORY_CACHE_BYTES = "workspace.directory_cache_bytes", Workspace, Parameter, SYSTEM, Replace, value("1073741824"), int(1, Unit::Bytes),
+        "File read cache", "Shared working bytes for directory metadata and live file-read continuation buffers; existing work stays charged until it ends.";
+    WORKSPACE_DIRECTORY_BUILDS = "workspace.directory_builds", Workspace, Parameter, SYSTEM, Replace, value("1"), int(1, Unit::Count),
+        "Folder metadata reads", "Concurrent folder metadata builds on one machine; waiting readers retain their place.";
+    WORKSPACE_DIRECTORY_PAGE_BYTES = "workspace.directory_page_bytes", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("2097152"), int(1, Unit::Bytes),
+        "Folder page bytes", "Default metadata bytes in one folder page; continuation retains all remaining entries.";
+    WORKSPACE_DIRECTORY_ENTRIES = "workspace.directory_entries", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("5000"), int(1, Unit::Count),
+        "Folder rows", "Default rows in one page; an explicit window can differ and continuation keeps the rest.";
+    WORKSPACE_SEARCH_RESULTS = "workspace.search_results", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("200"), int(1, Unit::Count),
+        "File search rows", "Default rows in one page; an explicit window can differ and continuation keeps the rest.";
+    WORKSPACE_ARCHIVE_RESULTS = "workspace.archive_results", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("1000"), int(1, Unit::Count),
+        "Archive rows", "Default rows in one page; an explicit window can differ and continuation keeps the rest.";
+    WORKSPACE_SEARCH_SLICE_SECS = "workspace.search_slice_secs", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("20"), int(1, Unit::Seconds),
+        "File search slice", "Seconds of work in one file-search page; continuation resumes the remaining search.";
+    WORKSPACE_GIT_DIFF_BYTES = "workspace.git_diff_bytes", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("2097152"), int(1, Unit::Bytes),
+        "Diff bytes", "Default bytes in one diff read; continuation retains the rest of the selected diff.";
     SOURCE_REPOSITORY_URL = "source.repository_url", Workspace, Parameter, ORG_TO_TOPIC, Replace, NULL, Schema::Nullable { of: &REPOSITORY_ADDRESS },
         "Repository", "The repository prepared only when the thread's directory is missing; an existing directory keeps its own files.";
     SOURCE_BRANCH = "source.branch", Workspace, Parameter, ORG_TO_TOPIC, Replace, NULL, Schema::Nullable { of: &GIT_BRANCH },
@@ -2364,6 +2513,8 @@ registry! {
         "Keep turn files", "Days to keep complete turn and restore undo files in the environment; zero disables recording.";
     WORKSPACE_RECORD_MAX_BYTES = "workspace.record_max_bytes", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("1073741824"), int(1, Unit::Bytes),
         "Largest recorded directory", "The included file and link bytes eligible for whole-state recording; larger directories use per-file undo.";
+    WORKSPACE_RECORD_WAIT_SECS = "workspace.record_wait_secs", Workspace, Parameter, ORG_TO_TOPIC_ENV, Replace, value("5"), int(1, Unit::Seconds),
+        "Wait for turn files", "Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready.";
     BROADCAST_DELIVERY = "broadcast.delivery", Collaboration, Parameter, ORG_TO_TOPIC, Replace, value("\"steer\""), choice(&["interrupt", "steer", "next_turn"]),
         "Announcement delivery", "How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn.";
     BROADCAST_FALLBACK = "broadcast.fallback", Collaboration, Parameter, ORG_TO_TOPIC, Replace, value("\"next_turn\""), choice(&["next_turn", "interrupt"]),
@@ -2390,7 +2541,7 @@ registry! {
         "Wider ports", "The distinct port numbers with wider or pending audiences; zero leaves own use available.";
     PORTS_LINK_MAX_SECS = "ports.link_max_secs", Ports, Policy, SYSTEM_TO_TOPIC, Min, value("86400"), int(1, Unit::Seconds),
         "Link lifetime", "The longest link lifetime from creation, including later expiry changes.";
-    REQUESTS_EXPIRY_HOURS = "requests.expiry_hours", Confinement, Policy, SYSTEM_TO_TOPIC, Min, value("24"), int_between(1, 168, Unit::Hours),
+    REQUESTS_EXPIRY_MINUTES = "requests.expiry_minutes", Confinement, Policy, SYSTEM_TO_TOPIC, Min, value("1440"), int(1, Unit::Minutes),
         "Pending agent requests", "The longest pending boundary decision an agent requests; an earlier requested port-link lapse also ends it.";
     BROWSER_PRESET = "browser.preset", Browsers, Parameter, ORG_TO_TOPIC_ENV, Replace, value("\"headless\""), choice(&["headless", "window"]),
         "Browser preset", "How a browser is started where nobody says: headless, with no window and no display, or with a window on a display that Orch opens for it.";
@@ -2428,8 +2579,8 @@ registry! {
         "Idle stop", "Keep a managed provider's runtime running with 0, the shipped default. A positive number stops it after that many idle minutes without a session or a lease. Scheduled reads leave it stopped until a turn, sign-in, Start, Refresh or renewal starts it again.";
     RUNTIME_TEMPLATE_ID = "runtime.template_id", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, FROM_SEEDS, ID,
         "Template", "The provider template that a managed provider's runtime is made from.";
-    RUNTIME_HOST_ID = "runtime.host_id", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, UNSET, ID,
-        "Host", "The host that a managed provider's runtime is made on; unset, the one with the most room.";
+    RUNTIME_HOST_ID = "runtime.host_id", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Replace, UNSET, HOST_TARGET,
+        "Host", "A host or host pool for a newly made provider runtime; unset chooses Most room. Existing volumes stay on their admitted host.";
     RUNTIME_RESOURCES = "runtime.resources", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Map, EMPTY_MAP, ENVIRONMENT_LIMITS,
         "Limits", "Limits over the template's values: processor, memory, processes and disk; the driver declares which limits it enforces.";
     RUNTIME_STORAGE = "runtime.storage", ProviderRuntimes, Parameter, UNIT_RUNTIME_SCOPES, Map, EMPTY_MAP, STORAGE,
@@ -2468,7 +2619,7 @@ registry! {
         "Subscriptions allowed", "The kinds of harness whose subscription may be added as a provider here.";
     PROVIDERS_SUBSCRIPTION_SHARING = "providers.subscription_sharing", Providers, Policy, SYSTEM_ORG, Intersect, UNSET, set(&TEXT),
         "Subscriptions shared", "The kinds of harness whose subscription may be used by people other than its owner.";
-    RESOURCES_CREATED_BY_MEMBERS = "resources.created_by_members", Providers, Policy, SYSTEM_ORG, Intersect, value("[\"provider\",\"host\",\"template\",\"mcp_server\",\"mount\",\"skill\"]"), set(&RESOURCE_KIND),
+    RESOURCES_CREATED_BY_MEMBERS = "resources.created_by_members", Providers, Policy, SYSTEM_ORG, Intersect, value("[\"provider\",\"host\",\"template\",\"mcp_server\",\"mount\",\"skill\",\"pool\"]"), set(&RESOURCE_KIND),
         "Resources members may add", "The kinds of resource that any member may make in an org as their own.";
     SKILLS_MAX_BYTES = "skills.max_bytes", Providers, Policy, SYSTEM_ORG, Min, value("33554432"), int(1, Unit::Bytes),
         "Skill size", "The most bytes the files of one version of a skill hold together; a skill is instructions, scripts and small assets, and each version is read whole when it is made.";
@@ -2478,7 +2629,7 @@ registry! {
         "Sub-agent notices", "Whether the people who follow a thread are told when one of its sub-agents finishes, fails or is stopped, as they are told when a turn ends; the agent that started it is told by its program either way.";
     MESSAGE_BODY_MAX_CHARS = "message.body_max_chars", Collaboration, Policy, SYSTEM_ORG, Min, value("20000"), int(1, Unit::Count),
         "Message length", "How many characters an administrator message may contain; the default can be changed at the system or organization.";
-    NOTIFY_OPERATIONS = "notify.operations", Collaboration, Parameter, SYSTEM_TO_THREAD_ENV_PROVIDER, Replace, value("\"when_blocking\""), choice(&["when_blocking", "always", "never"]),
+    NOTIFY_OPERATIONS = "notify.operations", Collaboration, Parameter, SYSTEM_TO_THREAD_ENV_PROVIDER, Replace, value("\"never\""), choice(&["when_blocking", "always", "never"]),
         "Operation notices", "Whether Notify starts ticked in an operation: when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices.";
     BROADCAST_RATE_PER_HOUR = "broadcast.rate_per_hour", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, value("12"), int(0, Unit::Count),
         "Announcements an hour", "How many announcements one thread's agent may send in a rolling hour; default 12, 0 allows none. Thread messages have a separate limit.";
@@ -2486,8 +2637,8 @@ registry! {
         "Thread messages an hour", "How many messages to individual threads one sending thread's agent may send in a rolling hour; default 60, 0 allows none. Announcements have a separate limit.";
     CAPABILITY_RECREATE_GRACE_SECS = "capability.recreate_grace_secs", Confinement, Parameter, SYSTEM_TO_TOPIC_ENV, Replace, value("120"), int(0, Unit::Seconds),
         "Recreate grace", "How many seconds running turns may finish before a recreate interrupts them; 0 interrupts them immediately.";
-    ACCESS_REQUEST_EXPIRY_DAYS = "access.request_expiry_days", Access, Policy, SYSTEM, Replace, value("14"), int(1, Unit::Days),
-        "Access request expiry", "After how many days a request for access that nobody decided lapses.";
+    ACCESS_REQUEST_EXPIRY_MINUTES = "access.request_expiry_minutes", Access, Policy, SYSTEM, Replace, value("20160"), int(1, Unit::Minutes),
+        "Access request expiry", "After how many minutes a request for access that nobody decided lapses.";
     ACCESS_MAX_PENDING_REQUESTS = "access.max_pending_requests", Access, Policy, SYSTEM, Replace, value("10"), int(1, Unit::Count),
         "Pending requests", "How many requests for access one person may have waiting.";
     ACCESS_QUICK_GRANT_DURATIONS = "access.quick_grant_durations", Access, Policy, SYSTEM_ORG, Intersect, value("[\"1d\",\"7d\",\"30d\",\"always\"]"), set(&TEXT),
@@ -2521,7 +2672,7 @@ registry! {
         "Running turn", "What a switch, a move, a recreate or an update does with a turn that is running: wait for it, or interrupt it.";
     SWITCH_WAIT_MINUTES = "switch.wait_minutes", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, value("10"), int(0, Unit::Minutes),
         "Wait", "For how many minutes it waits for running turns to end before it gives up and leaves everything as it was; 0 does not wait.";
-    SWITCH_VERIFY_TIMEOUT_SECS = "switch.verify_timeout_secs", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, value("120"), int(10, Unit::Seconds),
+    SWITCH_VERIFY_TIMEOUT_SECS = "switch.verify_timeout_secs", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, value("120"), int(1, Unit::Seconds),
         "Health check time", "How many seconds the checks of the new side may take before everything is rolled back.";
     SWITCH_KEEP_PREVIOUS = "switch.keep_previous", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, FALSE, BOOL,
         "Keep the old side", "Whether the side that a switch or a move leaves behind is kept instead of scheduled for removal.";
@@ -2538,13 +2689,21 @@ registry! {
     SUMMARY_HANDOFF_INPUT_SHARE = "summary.handoff_input_share", Automation, Policy, SYSTEM_TO_TOPIC, Min, value("50"), int_between(1, 100, Unit::Percent),
         "Summary input share", "How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends; the newest turns first, older ones as their one-line index.";
     AUTO_SUMMARIZER = "auto.summarizer", Automation, Parameter, SYSTEM_TO_THREAD, Replace, UNSET, SUMMARIZER,
-        "Summarizer", "Which summarizer is used, and its configuration.";
+        "Summarizer", "Summarizer and model token allowances. Target character counts are separate.";
     AUTO_TRIGGERS = "auto.triggers", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("{\"on\":[\"turn_completed\",\"milestone\"],\"min_interval_secs\":120}"), TRIGGERS,
         "Triggers", "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.";
-    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, EMPTY_MAP, SUMMARY_TARGETS,
+    SUMMARY_RETRY_CEILING_SECS = "summary.retry_ceiling_secs", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("3600"), int(1, Unit::Seconds),
+        "Summary retry ceiling", "The longest backoff after failed automatic title or tag attempts. Call rules still decide whether another model call is allowed.";
+    SUMMARY_GOAL_TURN_ITEMS = "summary.goal_turn_items", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("2000"), int(1, Unit::Count),
+        "Goal helper turn items", "The most items of the reported turn read for an independent goal check. A larger turn is omitted whole; the condition and evidence remain.";
+    SUMMARY_GOAL_REASON_CHARS = "summary.goal_reason_chars", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("600"), int(1, Unit::Count),
+        "Goal helper reason characters", "The most characters kept from the independent helper's explanation. This is separate from the model's output token allowance.";
+    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, SUMMARY_TARGETS_SHIPPED, SUMMARY_TARGETS,
         "Summary targets", "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.";
     SUMMARY_FOLLOW_INTERVAL_SECS = "summary.follow_interval_secs", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int_between(1, 4_294_967_295, Unit::Seconds),
         "Summary follow interval", "Free reads while a summary is eligible or running; a scheduled future update is followed at its actual due time instead.";
+    SUMMARY_READ_REPEATS = "summary.read_repeats", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("3"), int_between(0, i64::MAX, Unit::Count),
+        "Summary read repeats", "Unpaid source rereads and prompt rebuilds before the first model call. A changing read or rebuild loop uses this limit; 0 makes no repeat. A source change after a model call never creates a paid retry.";
     SUMMARY_READ_BATCH_SIZE = "summary.read_batch_size", Automation, Parameter, SYSTEM, Replace, value("100"), int_between(1, 4_294_967_295, Unit::Count),
         "Summary read batch", "Distinct source targets read in one search-summary window; larger selections continue in further windows.";
     CAPABILITY_POLICY = "capability.policy", Confinement, Policy, SYSTEM_TO_TOPIC, Map, FROM_SEEDS, map(&CAPABILITY_DECISION),
@@ -2553,7 +2712,7 @@ registry! {
         "Owners share outside", "Whether the owners of a thing here may themselves name somebody from outside its root org on its page.";
     SHARING_ALLOW_COPY_OUT = "sharing.allow_copy_out", Collaboration, Policy, SYSTEM_TO_PROJECT, All, TRUE, BOOL,
         "Copies to other orgs", "Whether things here may be duplicated or moved into another org.";
-    SHARING_EXTERNAL_MAX_DAYS = "sharing.external_max_days", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, UNSET, int(1, Unit::Days),
+    SHARING_EXTERNAL_MAX_MINUTES = "sharing.external_max_minutes", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, UNSET, int(1, Unit::Minutes),
         "Outside entries end", "The longest an entry that names somebody from outside may last after it is written or renewed.";
     SHARING_ALLOW_HOLDERS = "sharing.allow_holders", Collaboration, Policy, SYSTEM_TO_TOPIC, All, TRUE, BOOL,
         "Holders share", "Whether somebody who holds a thing here without owning it or managing its page may share it, at most at their own level: name others on its page, give a role in a place, share it with agents. When off, sharing is with a thing's owners and whoever manages its page.";
@@ -2615,6 +2774,8 @@ registry! {
         "File size", "The largest one file a document here may hold, in bytes.";
     DOCS_FILES_MAX_BYTES = "docs.files_max_bytes", ChatDocuments, Policy, SYSTEM_TO_TOPIC, Min, value("1073741824"), BYTES,
         "Files together", "The most the files of one document here may come to together, in bytes.";
+    DOCUMENTS_README_BLOCKS = "documents.readme_blocks", ChatDocuments, Parameter, SYSTEM_TO_THREAD, Replace, value("12"), int(1, Unit::Count),
+        "README preview", "Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page.";
     DOCUMENTS_LINKS_SHOWN = "documents.links.shown", ChatDocuments, Policy, SYSTEM_TO_TOPIC, Replace,
         value("[\"referenced_by\",\"references\",\"related\",\"graph\"]"), set(&LINKS_TAB),
         "Links tabs", "The tabs of a document's Links section that its readers see; the document's owner can switch tabs off for one document.";
@@ -2632,6 +2793,8 @@ registry! {
         "Graph nodes", "The most nodes the Links graph draws.";
     CHAT_ATTACHMENT_MAX_BYTES = "chat.attachment_max_bytes", ChatDocuments, Policy, SYSTEM_ORG, Min, DefaultOf::SameAs("storage.max_blob_bytes"), BYTES,
         "Attachment size", "The largest file attached to a chat message, in bytes.";
+    SEARCH_TEXT_CHARS = "search.text_chars", ChatDocuments, Parameter, SYSTEM, Replace, value("20000"), int(1, Unit::Count),
+        "Conversation search text", "Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded.";
     // Fifty candidates oversample the twenty-row screen; a fourfold recent sample detects dense terms.
     SEARCH_WORD_RECENT_CANDIDATES = "search.word_recent_candidates", ChatDocuments, Parameter, SYSTEM_ORG, Replace, value("200"), int(1, Unit::Count),
         "Recent word sample", "Recent rows sampled before probing the text index.";
@@ -2645,6 +2808,8 @@ registry! {
         "Word retrieval", "Estimated rows below which word search uses native scoped reads. Missing field limits use Word candidates. Request windows defaults to one; further results use Show more.";
     SEARCH_PAGE_SIZE = "search.page_size", ChatDocuments, Parameter, SYSTEM_ORG, Replace, value("20"), int(1, Unit::Count),
         "Page size", "Results shown before Show more.";
+    NAVIGATION_TREE_PAGE_SIZE = "navigation.tree_page_size", Collaboration, Parameter, SYSTEM_ORG, Replace, value("50"), int(1, Unit::Count),
+        "Hierarchy page size", "Default rows in a hierarchy branch page. An explicit page request may be larger.";
     SEARCH_REORDER_WINDOW_SECS = "search.reorder_window_secs", ChatDocuments, Parameter, SYSTEM_ORG, Replace, value("5"), int(0, Unit::Seconds),
         "Reorder window", "How long new results may reorder the first screen.";
     SEARCH_MEANING_PAUSE_MS = "search.meaning_pause_ms", ChatDocuments, Parameter, SYSTEM_ORG, Replace, value("800"), int(0, Unit::Milliseconds),
@@ -2689,8 +2854,20 @@ registry! {
         "Mask secrets", "Whether the values of the secrets a thread was given are masked in stored text.";
     REDACTION_PATTERNS = "redaction.patterns", Redaction, Policy, SYSTEM_TO_TOPIC, Union, EMPTY_LIST, list(&REDACTION_PATTERN),
         "Patterns", "Further patterns to mask in stored text, each with a name.";
-    DIAGNOSTICS_RETENTION_DAYS = "diagnostics.retention_days", Retention, Policy, SYSTEM, Replace, value("14"), int_between(1, 365, Unit::Days),
+    DIAGNOSTICS_RETENTION_DAYS = "diagnostics.retention_days", Retention, Policy, SYSTEM, Replace, value("14"), int(1, Unit::Days),
         "Diagnostics kept", "For how many days diagnostics are kept.";
+    DIAGNOSTICS_FRAME_BYTES = "diagnostics.frame_bytes", Retention, Policy, SYSTEM, Replace, value("65536"), BYTES,
+        "Whole protocol frames", "Bytes of a masked protocol frame kept whole; larger frames keep a size note and the configured prefix. Zero keeps no complete frames.";
+    DIAGNOSTICS_FRAME_HEAD_BYTES = "diagnostics.frame_head_bytes", Retention, Policy, SYSTEM, Replace, value("4096"), BYTES,
+        "Protocol frame prefix", "Bytes kept from the start of an oversized masked protocol frame; zero keeps only its size note.";
+    DIAGNOSTICS_FRAMES_PER_SEGMENT = "diagnostics.frames_per_segment", Retention, Policy, SYSTEM, Replace, value("20000"), int(0, Unit::Count),
+        "Protocol frames kept", "Newest captured protocol frames kept for each native session; zero switches capture off. Captured omission counts remain available.";
+    DATABASE_RETRY_ATTEMPTS = "database.retry_attempts", System, Parameter, SYSTEM, Replace, value("8"), int(0, Unit::Count),
+        "Database repeats", "Transient repeats in one recovery burst; 0 makes no immediate repeat. Invalid data and program-limit refusals are never repeated.";
+    DATABASE_RETRY_INITIAL_MS = "database.retry_initial_ms", System, Parameter, SYSTEM, Replace, value("100"), int(0, Unit::Milliseconds),
+        "Database repeat pause", "Initial pause between transient database failures. It doubles within a bounded recovery burst.";
+    DATABASE_RECOVERY_SECS = "database.recovery_secs", System, Parameter, SYSTEM, Replace, value("60"), int(1, Unit::Seconds),
+        "Database recovery interval", "Pause after a recovery burst is exhausted and the interval between counted failure summaries. Pending work remains retained.";
     ORGS_PERSONAL_ENABLED = "orgs.personal_enabled", Joining, Policy, SYSTEM, Replace, TRUE, BOOL,
         "Personal organizations", "Whether a new human account gets a personal organization. Existing organizations keep their data and access when this is switched off.";
     ORGS_PERSONAL_CLOSED = "orgs.personal_closed", Joining, Policy, SYSTEM, Replace, TRUE, BOOL,
@@ -2707,16 +2884,50 @@ registry! {
         "Terms for people who join", "Markdown terms shown before joining this organization or accepting a guest invitation to its places or chats. The root organization's terms come first, then each nearer organization's own terms, separated by one blank line. Empty text adds no terms. Existing members are not asked to accept later edits.";
     INVITATIONS_FORMS = "invitations.forms", Joining, Policy, SYSTEM_ORG, Intersect, value("[\"link\",\"email\"]"), set(&INVITATION_FORM),
         "Invitation forms", "The forms of invitation that may be made for an org of this tree: a link to share, a personal link for one address, or both.";
-    INVITATIONS_DEFAULT_HOURS = "invitations.default_hours", Joining, Policy, SYSTEM_ORG, Replace, value("168"), int(1, Unit::Hours),
-        "Invitation life", "For how many hours an invitation is good when its inviter says nothing.";
-    INVITATIONS_MAX_HOURS = "invitations.max_hours", Joining, Policy, SYSTEM_ORG, Min, value("720"), int(1, Unit::Hours),
-        "Longest invitation", "The most hours an invitation may be good for.";
-    INVITATIONS_MAX_USES = "invitations.max_uses", Joining, Policy, SYSTEM_ORG, Min, value("100"), int_between(1, 1000, Unit::Count),
+    INVITATIONS_DEFAULT_MINUTES = "invitations.default_minutes", Joining, Policy, SYSTEM_ORG, Replace, value("10080"), int(1, Unit::Minutes),
+        "Invitation life", "For how many minutes an invitation is good when its inviter says nothing.";
+    INVITATIONS_MAX_MINUTES = "invitations.max_minutes", Joining, Policy, SYSTEM_ORG, Min, value("43200"), int(1, Unit::Minutes),
+        "Longest invitation", "The most minutes an invitation may be good for.";
+    // Invitation use counters are stored as signed 32-bit database integers.
+    INVITATIONS_MAX_USES = "invitations.max_uses", Joining, Policy, SYSTEM_ORG, Min, value("100"), int_between(1, 2_147_483_647, Unit::Count),
         "Uses of a shared link", "How many people one shared link may bring in at most.";
     MAIL_SHARED = "mail.shared", System, Policy, SYSTEM, Replace, TRUE, BOOL,
         "Shared mail server", "Whether a root org that has no mail server of its own sends its mail through the system's.";
     API_IDEMPOTENCY_WINDOW = "api.idempotency_window", System, Parameter, SYSTEM, Replace, value("24"), int(0, Unit::Hours),
         "Creation replay window", "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased.";
+    API_READ_REPEATS = "api.read_repeats", System, Parameter, SYSTEM, Replace, value("3"), int(0, Unit::Count),
+        "Repeated reads", "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.";
+    EDGE_TRANSPORT = "edge.transport", System, Parameter, SYSTEM, Replace, value("{\"session_cache_mib\":16,\"session_timeout_secs\":86400,\"session_tickets\":true,\"early_data\":true,\"http2\":true,\"http3\":true,\"alt_svc_secs\":86400,\"reload_secs\":1}"), Schema::Object { members: &[
+        required("session_cache_mib", int(0, Unit::Count)),
+        required("session_timeout_secs", int(1, Unit::Seconds)),
+        required("session_tickets", BOOL), required("early_data", BOOL),
+        required("http2", BOOL), required("http3", BOOL),
+        required("alt_svc_secs", int(0, Unit::Seconds)),
+        required("reload_secs", int(1, Unit::Seconds)),
+    ], open: false },
+        "HTTPS transport", "The built-in HTTPS edge's shared session cache in MiB (0 is off), resumption lifetime, tickets, early safe reads, HTTP/2 and HTTP/3, advertisement life and local reload interval. Committed edits reload gracefully; early writes are refused with 425 before any effect. An external TLS front has its own settings.";
+    INTERFACE_KEPT_CLOSED_TABS = "interface.kept_closed_tabs", System, Parameter, SYSTEM, Replace, value("10"), int(0, Unit::Count),
+        "Recently closed tabs", "How many recently closed views keep their local state in this page. Open tabs always keep theirs. Each person may override this default in Interface.";
+    INTERFACE_RECENT_MODELS = "interface.recent_models", System, Parameter, SYSTEM, Replace, value("5"), int(0, Unit::Count),
+        "Recent model choices", "How many suitable model choices appear in a person's Recent group. Zero hides the group without forgetting their private server history. This default can be increased.";
+    INTERFACE_PROGRESS_DELAY_MS = "interface.progress_delay_ms", System, Parameter, SYSTEM, Replace, value("200"), int(0, Unit::Milliseconds),
+        "Loading indication delay", "Milliseconds before a read shows a spinner. Each person may override this default in Interface.";
+    INTERFACE_CATCH_UP_ABOVE_ITEMS = "interface.catch_up_above_items", System, Parameter, SYSTEM, Replace, value("20"), int(0, Unit::Count),
+        "Automatic catch-up threshold", "Show the automatic catch-up card above this number of unread items. Each person may override this default in Interface; explicit catch-up remains available for any unread range.";
+    INTERFACE_READ_FRESHNESS_MS = "interface.read_freshness_ms", System, Parameter, SYSTEM, Replace, value("{\"directory\":60000,\"lookup\":15000,\"report\":60000,\"status\":5000}"), Schema::Object { members: &[
+        Member { name: "directory", schema: int(0, Unit::Milliseconds), required: false },
+        Member { name: "lookup", schema: int(0, Unit::Milliseconds), required: false },
+        Member { name: "report", schema: int(0, Unit::Milliseconds), required: false },
+        Member { name: "status", schema: int(0, Unit::Milliseconds), required: false },
+    ], open: false },
+        "Read freshness", "Milliseconds before returning readers revalidate directory listings, repeated lookups, reports and live status. Release catalogues stay for the page; ordinary mutable views revalidate when shown.";
+    INTERFACE_CONNECTION_QUALITY = "interface.connection_quality", System, Parameter, SYSTEM, Replace, value("{\"recent_samples\":3,\"usual_samples\":20,\"slow_increase_percent\":100,\"slow_extra_ms\":200}"), Schema::Object { members: &[
+        Member { name: "recent_samples", schema: int(1, Unit::Count), required: true },
+        Member { name: "usual_samples", schema: int(1, Unit::Count), required: true },
+        Member { name: "slow_increase_percent", schema: int(0, Unit::Percent), required: true },
+        Member { name: "slow_extra_ms", schema: int(0, Unit::Milliseconds), required: true },
+    ], open: false },
+        "Connection warning", "Compare the recent ping median with this person's preceding usual median. Warn only above both the percentage increase and the extra milliseconds. Sample windows and thresholds are defaults, not caps; a stable long line is normal.";
     RELEASE_CHECK_DAYS = "release.check_days", System, Policy, SYSTEM, Replace, value("0"), int(0, Unit::Days),
         "Look for a release", "Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing.";
     CLEANUP_RELEASE_KEEP_COUNT = "cleanup.release_keep_count", Retention, Policy, SYSTEM, Replace, value("3"), int(0, Unit::Count),
@@ -2741,12 +2952,66 @@ registry! {
         "Private hosts", "The hosts on private addresses that a channel or a destination of an org or a person may reach.";
     STORAGE_MAX_BLOB_BYTES = "storage.max_blob_bytes", System, Policy, SYSTEM, Replace, value("8589934592"), BYTES,
         "Largest file", "The largest single file that Orch stores, in bytes.";
+    STORAGE_TRANSFER_INITIAL_PIECE_BYTES = "storage.transfer_initial_piece_bytes", System, Policy, SYSTEM, Replace, value("65536"), BYTES,
+        "First transfer piece", "Bytes in each small initial bandwidth probe, before the line rate is known.";
+    STORAGE_TRANSFER_INITIAL_REQUESTS = "storage.transfer_initial_requests", System, Policy, SYSTEM, Replace, value("4"), int(1, Unit::Count),
+        "Transfer probes", "Small concurrent probes used to measure bandwidth without counting connection setup as data time, within the shared request and byte ceilings.";
+    STORAGE_TRANSFER_MIN_PIECE_BYTES = "storage.transfer_min_piece_bytes", System, Policy, SYSTEM, Replace, value("65536"), BYTES,
+        "Smallest transfer piece", "Smallest ordinary file piece; a final piece may be smaller.";
+    STORAGE_TRANSFER_MAX_PIECE_BYTES = "storage.transfer_max_piece_bytes", System, Policy, SYSTEM, Replace, value("16777216"), BYTES,
+        "Largest transfer piece", "Maximum bytes in one file piece. Each unfinished upload keeps its accepted policy.";
+    STORAGE_TRANSFER_TARGET_WINDOW_MS = "storage.transfer_target_window_ms", System, Policy, SYSTEM, Replace, value("1000"), int(1, Unit::Milliseconds),
+        "Transfer data duration", "Target data duration of the shared window, before adding measured round-trip headroom.";
+    STORAGE_TRANSFER_WINDOW_RTTS = "storage.transfer_window_rtts", System, Policy, SYSTEM, Replace, value("4"), int(1, Unit::Count),
+        "Transfer round trips ahead", "Round trips of data kept in flight ahead of acknowledgements, within the byte ceiling.";
+    STORAGE_TRANSFER_MAX_WINDOW_BYTES = "storage.transfer_max_window_bytes", System, Policy, SYSTEM, Replace, value("67108864"), BYTES,
+        "Transfer window", "Maximum in-flight file bytes shared by simultaneous files from one sender.";
+    STORAGE_TRANSFER_REQUESTS = "storage.transfer_requests", System, Policy, SYSTEM, Replace, value("5"), int(1, Unit::Count),
+        "Transfer requests", "Simultaneous piece requests shared by files. Five leaves one HTTP/1.1 connection for other work.";
+    STORAGE_MACHINE_UPLOAD_IDLE_SECS = "storage.machine_upload_idle_secs", System, Policy, SYSTEM, Replace, value("86400"), int(1, Unit::Seconds),
+        "Machine transfer retention", "How long an unfinished machine transfer may receive no piece before cleanup is eligible. Each transfer keeps the allowance accepted at its first piece.";
     STORAGE_ENV_CACHE_QUOTA_BYTES = "storage.env_cache_quota_bytes", Workspace, Policy, SYSTEM_TO_PROJECT, Min, value("21474836480"), BYTES,
         "File cache", "How many bytes of cached file contents are kept for one environment.";
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn summary_retry_and_goal_reading_limits_are_editable_defaults() {
+        use super::*;
+        use serde_json::json;
+        for (key, shipped, larger) in [
+            ("summary.retry_ceiling_secs", 3600, 7200),
+            ("summary.goal_turn_items", 2000, 8000),
+            ("summary.goal_reason_chars", 600, 2400),
+        ] {
+            let def = get(key).expect("the operational summary default is registered");
+            assert_eq!(def.default_value(), Some(json!(shipped)));
+            assert!(def.set_at(Scope::System) && def.set_at(Scope::Thread));
+            assert!(validate(key, &json!(larger)).is_ok());
+            assert!(validate(key, &json!(1)).is_ok());
+            assert!(validate(key, &json!(0)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_model_that_is_added_starts_with_everything_it_offers_unless_an_organization_narrows_it() {
+        use super::*;
+        use serde_json::json;
+        let setting = get(keys::MODELS_ADD_SWITCHES_ON).unwrap();
+        assert_eq!(setting.default_value(), Some(json!("all")));
+        assert!(matches!(setting.merge, Merge::Replace));
+        assert!(setting.set_at(Scope::System) && setting.set_at(Scope::Org));
+        assert!(!setting.set_at(Scope::Topic));
+        for word in ["all", "basic", "nothing"] {
+            assert!(
+                validate(keys::MODELS_ADD_SWITCHES_ON, &json!(word)).is_ok(),
+                "{word}"
+            );
+        }
+        assert!(validate(keys::MODELS_ADD_SWITCHES_ON, &json!("some")).is_err());
+    }
+
     #[test]
     fn messaging_defaults_keep_wake_explicit_and_hourly_budgets_separate() {
         use super::*;
@@ -3089,18 +3354,41 @@ mod tests {
     }
 
     #[test]
-    fn native_subagent_limits_have_bounded_values_at_every_place_and_explicit_shipped_defaults() {
-        for (key, maximum, shipped) in [
-            (keys::AGENTS_SUBAGENTS_AT_ONCE, 64, 8),
-            (keys::AGENTS_SUBAGENT_DEPTH, 5, 1),
+    fn protocol_capture_allowances_are_adjustable_defaults_with_explicit_zero_behavior() {
+        for (key, shipped) in [
+            (keys::DIAGNOSTICS_FRAME_BYTES, 65536_i64),
+            (keys::DIAGNOSTICS_FRAME_HEAD_BYTES, 4096_i64),
+            (keys::DIAGNOSTICS_FRAMES_PER_SEGMENT, 20000_i64),
+        ] {
+            let definition = get(key).unwrap();
+            assert_eq!(definition.scopes, SYSTEM);
+            assert!(definition.zero_disables());
+            assert_eq!(
+                serde_json::to_value(definition).unwrap()["default"],
+                json!(shipped)
+            );
+            assert!(validate(key, &json!(0)).is_ok());
+            assert!(validate(key, &json!(shipped + 1)).is_ok());
+            assert!(validate(key, &json!(i64::MAX)).is_ok());
+            assert!(validate(key, &json!(-1)).is_err());
+        }
+    }
+
+    #[test]
+    fn native_subagent_limits_accept_positive_represented_values_with_their_shipped_defaults() {
+        for (key, formerly_capped, shipped) in [
+            (keys::AGENTS_SUBAGENTS_AT_ONCE, 64_i64, 8),
+            (keys::AGENTS_SUBAGENT_DEPTH, 5_i64, 1),
         ] {
             let definition = get(key).unwrap();
             assert_eq!(definition.scopes, SYSTEM_TO_THREAD);
             assert_eq!(definition.merge, Merge::Min);
             assert!(validate(key, &json!(1)).is_ok());
-            assert!(validate(key, &json!(maximum)).is_ok());
+            assert!(validate(key, &json!(formerly_capped + 1)).is_ok());
+            assert!(validate(key, &json!(i64::MAX)).is_ok());
             assert!(validate(key, &json!(0)).is_err());
-            assert!(validate(key, &json!(maximum + 1)).is_err());
+            assert!(validate(key, &json!(-1)).is_err());
+            assert!(validate(key, &json!(u64::MAX)).is_err());
             assert_eq!(
                 serde_json::to_value(definition).unwrap()["default"],
                 json!(shipped),
@@ -3192,9 +3480,11 @@ mod tests {
     }
 
     #[test]
-    fn the_org_search_backend_is_explicit_nullable_and_never_inferred_from_a_vendor() {
+    fn each_thread_can_choose_its_search_backend_with_inherited_locks_and_no_implicit_vendor() {
         let def = get(keys::AGENTS_WEB_SEARCH_BACKEND).unwrap();
-        assert_eq!(def.scopes, ORG_ONLY);
+        assert_eq!(def.scopes, ORG_TO_THREAD);
+        assert_eq!(def.merge, Merge::Replace);
+        assert!(def.lockable());
         assert_eq!(serde_json::to_value(def).unwrap()["default"], Json::Null);
         let id = "0199abcd-1234-7000-8000-000000000001";
         for value in [
@@ -3256,6 +3546,23 @@ mod tests {
     }
 
     #[test]
+    fn configurable_counts_and_lifetimes_are_not_limited_by_their_shipped_defaults() {
+        for (key, old_maximum) in [
+            (keys::REQUESTS_EXPIRY_MINUTES, 10080),
+            (keys::DIAGNOSTICS_RETENTION_DAYS, 365),
+        ] {
+            assert!(validate(key, &json!(old_maximum + 1)).is_ok());
+            assert!(validate(key, &json!(i64::MAX)).is_ok());
+            assert!(validate(key, &json!(0)).is_err());
+        }
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(1001)).is_ok());
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(i32::MAX)).is_ok());
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(i64::from(i32::MAX) + 1)).is_err());
+        assert!(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(1)).is_ok());
+        assert!(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(0)).is_err());
+    }
+
+    #[test]
     fn an_unknown_key_is_refused() {
         assert_eq!(
             validate("agent.mood", &json!("calm")),
@@ -3276,14 +3583,8 @@ mod tests {
         assert_eq!(paths(validate(keys::HOSTS_FULL_PERCENT, &json!(101))), [""]);
         assert_eq!(paths(validate(keys::HOSTS_FULL_PERCENT, &json!(0))), [""]);
         assert_eq!(paths(validate(keys::DOCS_MAX_BYTES, &json!(65_535))), [""]);
-        assert_eq!(
-            paths(validate(keys::INVITATIONS_MAX_USES, &json!(1001))),
-            [""]
-        );
-        assert_eq!(
-            paths(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(9))),
-            [""]
-        );
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(1001)).is_ok());
+        assert!(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(1)).is_ok());
         assert!(
             validate(keys::ENV_IDLE_STOP_MINUTES, &json!(0)).is_ok(),
             "0 means never"
@@ -3307,12 +3608,35 @@ mod tests {
         assert_eq!(paths(validate(keys::AGENT_MODEL, &json!(7))), [""]);
         assert_eq!(paths(validate(keys::APPROVAL_MODE, &json!("always"))), [""]);
         assert_eq!(paths(validate(keys::ENV_HOST_ID, &json!("host-1"))), [""]);
-        assert!(validate(keys::ENV_HOST_ID, &json!(new_id())).is_ok());
+        assert!(
+            validate(
+                keys::ENV_HOST_ID,
+                &json!({"type":"single","resource":{"kind":"host","id":new_id()}})
+            )
+            .is_ok()
+        );
         assert_eq!(
             paths(validate(keys::AGENT_MODEL, &Json::Null)),
             [""],
             "a key is unset by taking its row away"
         );
+    }
+
+    #[test]
+    fn host_defaults_accept_one_typed_host_or_host_pool_without_an_old_identifier_alias() {
+        let id = new_id();
+        for key in [keys::ENV_HOST_ID, keys::RUNTIME_HOST_ID] {
+            assert!(
+                validate(
+                    key,
+                    &json!({"type":"single","resource":{"kind":"host","id":id}})
+                )
+                .is_ok()
+            );
+            assert!(validate(key, &json!({"type":"pool","kind":"host","id":id})).is_ok());
+            assert!(validate(key, &json!(id)).is_err());
+            assert!(validate(key, &json!({"type":"pool","kind":"environment","id":id})).is_err());
+        }
     }
 
     #[test]

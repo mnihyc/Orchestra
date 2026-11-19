@@ -311,6 +311,14 @@ pub enum SystemComponentName {
     Database,
 }
 
+/// A diagnosed operational issue of a service that can still answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemComponentIssue {
+    /// The optional metrics listener could not bind; the API continues serving.
+    MetricsListenerUnavailable,
+}
+
 /// How one part of the system fares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SystemComponent {
@@ -320,6 +328,9 @@ pub struct SystemComponent {
     pub ok: bool,
     /// What is wrong, where something is.
     pub detail: Option<String>,
+    /// A known operational issue, separate from the component's own diagnostic text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<SystemComponentIssue>,
     /// When it last reported.
     pub seen_at: Option<Time>,
 }
@@ -1251,6 +1262,39 @@ pub struct SemanticGeneration {
     pub document_prefix: String,
 }
 
+/// The actual next step chosen after an embedding batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRetryNext {
+    /// The same pieces were selected for an immediate smaller request.
+    Immediate,
+    /// Work waits for another indexer pass; no per-provider deadline was scheduled.
+    IndexerPass,
+    /// The retry's request finished; no next retry is promised.
+    Finished,
+}
+
+/// Batch and retry facts captured independently of later model or interval changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticIndexRetry {
+    /// Actual endpoint selected for this attempted batch.
+    pub provider_id: Id,
+    /// Model name selected for this attempted batch.
+    pub model_name: String,
+    /// Its embedding space, for matching the current index without displaying an identifier.
+    pub generation_id: Id,
+    /// Pieces selected for the batch, not a token allowance or admission promise.
+    pub batch_pieces: i64,
+    /// Recorded next-step decision.
+    pub next: SemanticRetryNext,
+    /// Only a captured immediate eligibility instant; a shared interval never fills this.
+    pub next_eligible_at: Option<Time>,
+    /// Safe native reason, never endpoint details or credentials.
+    pub reason: String,
+    /// When the outcome or next-step decision was observed.
+    pub observed_at: Time,
+}
+
 /// Where search by meaning stands for one root org.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SemanticSearchOrg {
@@ -1293,6 +1337,9 @@ pub struct SemanticSearchOrg {
     pub rebuild_bytes: Option<i64>,
     /// And the seconds it takes to make them at the measured rate.
     pub rebuild_seconds: Option<i64>,
+    /// Missing when no attempt facts were captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<SemanticIndexRetry>,
 }
 
 /// Search by meaning across the system.

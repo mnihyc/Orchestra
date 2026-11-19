@@ -38,7 +38,8 @@ pub use provider_owner::provider_owner_host_use;
 
 mod provider_creation;
 pub use provider_creation::{
-    provider_creation_host_use, provider_creation_hosts, provider_creation_template_use,
+    ProviderBirth, provider_creation_host_use, provider_creation_hosts,
+    provider_creation_template_use,
 };
 
 /// How many candidates are looked at in one round when a list is filtered by what the caller may
@@ -243,7 +244,9 @@ pub(crate) async fn assemble(
         }
     }
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &everything, &[])
+            .await?;
     let sees_anchor = frame.holds_any(anchor);
     let mut missing: Vec<orch_access_contract::decisions::MissingAccess> = Vec::new();
     for item in lacking {
@@ -335,8 +338,42 @@ pub async fn check(
     check_all(conn, principal, object, &[permission], policy).await
 }
 
-/// Uses the physical machine's resource page, or its host facade when that role is offered.
-/// View, Use and Manage have the same supplier for registration, moves and policy editing.
+/// Ordinary fixed-dependency facts return no requester, refusal names or transport authority.
+pub(crate) async fn holds_for_subject<S: crate::holders::FrameSubject>(
+    conn: &mut Conn,
+    subject: &S,
+    object: ObjectRef,
+    permission: Permission,
+    policy: Policy,
+) -> Result<bool, Error> {
+    let (graph, _, site) = site(conn, object).await?;
+    if let Some(closing) = subject.suspension().closing(&site.orgs) {
+        return Err(Error::Suspended { org: closing.org() });
+    }
+    if !subject.reaches(site.path.as_deref()) {
+        return Ok(false);
+    }
+    let frame = Frame::load(
+        conn,
+        subject,
+        policy,
+        graph,
+        std::slice::from_ref(&site),
+        &[permission],
+    )
+    .await?;
+    if frame.ways(&site, permission).is_empty() {
+        return Ok(false);
+    }
+    if let Some(node) = site.archived_node
+        && !archive_allows(permission, Act::Use)
+    {
+        return Err(Error::Archived { node });
+    }
+    Ok(true)
+}
+
+/// Uses the physical machine's resource page, or the host that governs its node or unit.
 pub async fn check_machine(
     conn: &mut Conn,
     principal: &Principal,
@@ -349,13 +386,18 @@ pub async fn check_machine(
 }
 
 /// Resolves the page and permission that govern a physical machine, including a host facade.
-/// Audience expansion uses this same supplier as the permission check.
+/// Audience expansion uses this same supplier as the permission check. A unit that a host runs
+/// has no page of its own: the host that runs it governs it, as it governs its own node.
 pub async fn machine_permission(
     conn: &mut Conn,
     machine: Id,
     permission: Permission,
 ) -> Result<(ObjectRef, Permission), Error> {
-    Ok(match rows::hosting::host_of_machine(conn, machine).await? {
+    // HostUse makes new work on a shared host. It does not let a person register credentials or
+    // change programs inside another person's existing unit; the host manager administers those.
+    let unit = permission == Permission::MachineUse
+        && rows::hosting::host_running(conn, machine).await?.is_some();
+    Ok(match rows::hosting::host_naming(conn, machine).await? {
         Some(host) => (
             ObjectRef {
                 kind: ObjectKind::Host,
@@ -363,6 +405,7 @@ pub async fn machine_permission(
             },
             match permission {
                 Permission::MachineView => Permission::HostView,
+                Permission::MachineUse if unit => Permission::HostManage,
                 Permission::MachineUse => Permission::HostUse,
                 Permission::MachineManage => Permission::HostManage,
                 other => other,
@@ -519,7 +562,9 @@ async fn decide(
             Vec::new(),
         )));
     }
-    let frame = Frame::load(conn, principal, policy, graph, &all_sites, &wanted).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &all_sites, &wanted, &[])
+            .await?;
     let mut through: Vec<Through> = Vec::new();
     let mut lacking: Vec<Lacking> = Vec::new();
     let mut unscoped = false;
@@ -715,6 +760,7 @@ pub fn use_permission(kind: ResourceKind) -> Option<Permission> {
         ResourceKind::McpServer => Some(Permission::McpUse),
         ResourceKind::Mount => Some(Permission::MountUse),
         ResourceKind::Skill => Some(Permission::SkillUse),
+        ResourceKind::Pool => Some(Permission::PoolUse),
         ResourceKind::Environment => None,
     }
 }
@@ -1147,7 +1193,7 @@ pub async fn may_change_policy_key(
     let Some(_) = orch_db::queries::environments::location_machine(conn, machine).await? else {
         return Ok(Keying::NoSuchMachine);
     };
-    if let Some(host) = rows::hosting::host_of_machine(conn, machine).await? {
+    if let Some(host) = rows::hosting::host_naming(conn, machine).await? {
         let decision = check(
             conn,
             principal,

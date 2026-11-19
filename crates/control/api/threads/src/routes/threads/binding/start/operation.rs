@@ -79,6 +79,7 @@ impl native::Selected for Options {
     type Query = NodeBindingOptionsGetQuery;
     type Value = Selected;
     type Reply = BindingOptions;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::OPTIONS;
     fn select<'a>(
         ctx: &'a Ctx,
@@ -195,7 +196,10 @@ impl native::Selected for Options {
                     let request = crate::routes::environments::places::prepare_request(
                         conn,
                         context.node.id,
-                        &orch_api_contract::environment::PlaceListQuery::default(),
+                        &orch_api_contract::environment::PlaceListQuery {
+                            template_id: query.template_id,
+                            ..Default::default()
+                        },
                     )
                     .await;
                     if let Ok(request) = request {

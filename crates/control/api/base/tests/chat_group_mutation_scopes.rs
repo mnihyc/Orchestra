@@ -355,6 +355,7 @@ async fn disabled_direct_sending_refuses_rename_add_but_keeps_native_leave_and_p
         .call(NodeSettingSet, &[&room.root, &"chat.direct"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!("off"),
             locked: None,
             expected_revision: None,
