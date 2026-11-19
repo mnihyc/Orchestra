@@ -20,6 +20,7 @@ import { Tooltip } from '@/ui/Tooltip';
 import { UserChip } from '@/ui/UserChip';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { Badge } from '@/ui/Badge';
+import { ConfigurationFacts } from './ConfigurationFacts';
 import { isolationToolWords } from '@/features/resources/executorNames';
 
 export function EnvironmentChip({ thread }: { thread: Thread }) {
@@ -96,6 +97,7 @@ export function BindingSummary({ thread }: { thread: Thread }) {
       <li className="inline-flex min-w-0 flex-wrap items-center gap-2">
         <ResourceName subject={{ kind: 'agent', agent: binding.agent }} hint={false} />
         <ResourceName subject={{ kind: 'provider', provider: binding.provider }} />
+        <ConfigurationFacts application={binding.configuration_application} />
       </li>
       <li>{thread.environment === null ? t('thread.environment.none') : <ResourceName subject={{ kind: 'environment', environment: thread.environment }} />}</li>
     </ul>

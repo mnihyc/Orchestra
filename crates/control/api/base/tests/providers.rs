@@ -2189,3 +2189,52 @@ async fn the_owner_row_of_a_new_provider_names_its_maker_and_a_choice_of_who_els
     assert!(names(&world, &c.stranger, None).await.is_empty());
     let _ = name_on_page; // naming people by hand is done in the other tests
 }
+
+#[tokio::test]
+async fn provider_deletion_tells_its_affected_people_only_when_this_operation_was_chosen() {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_api_contract::resource_facts::{
+        FactTarget, ResourceImpactRead, ResourceNotificationQuery,
+    };
+    let world = world().await;
+    let company = company(&world).await;
+    for notify in [false, true] {
+        let provider = make(
+            &world,
+            &company.boss,
+            &api_body("Retained provider", company.acme),
+        )
+        .await;
+        let id = provider.base.id;
+        let plan = world
+            .app
+            .call(ResourceImpactRead, &[])
+            .token(&company.boss.token)
+            .body(&FactTarget {
+                object: ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id,
+                },
+                model_id: None,
+            })
+            .send()
+            .await
+            .ok()
+            .notification
+            .unwrap();
+        assert!(!plan.default_on);
+        world
+            .app
+            .call(ProviderDelete, &[&id])
+            .token(&company.boss.token)
+            .query(&ResourceNotificationQuery {
+                notify: Some(notify),
+                notification_review: plan.preview_id,
+            })
+            .send()
+            .await
+            .ok();
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM notifications WHERE user_id=$1 AND data->'provider_ids' @> $2 AND data->>'operation_kind'='provider_delete'").bind(company.boss.id()).bind(json!([id])).fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(count, i64::from(notify));
+    }
+}
