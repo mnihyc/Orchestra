@@ -1,5 +1,6 @@
 /** Real generated reply shapes feed the shared strip; actions retain reader, native target and root. */
 import type * as Summaries from '@/api/summaries';
+import type * as Resources from '@/api/resources';
 import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { queryOptions } from '@tanstack/react-query';
@@ -8,8 +9,12 @@ import type { SummarySnapshot as Reply } from '@/generated/api-types';
 import { ResourceSummary } from '@/features/summaries/ResourceSummary';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
+import { planProvider } from '../unit/provider-plan-fixtures';
 
-const source = vi.hoisted(() => ({ reply: undefined as Reply | undefined, readFailures: 0, refresh: vi.fn(), ask: vi.fn() }));
+const source = vi.hoisted(() => ({ reply: undefined as Reply | undefined, readFailures: 0, refresh: vi.fn(), ask: vi.fn(), plan:vi.fn() }));
+vi.mock('@/api/resources', async (load)=>({...await load<typeof Resources>(),
+  providerQuery:(id:string)=>({queryKey:['summary-plan',id],queryFn:source.plan,retry:false}),
+}));
 vi.mock('@/features/ask/open', () => ({ openAskWithDraft: source.ask }));
 vi.mock('@/api/summaries', async (original) => ({ ...await original<typeof Summaries>(),
   resourceSummaryQuery: (target: { kind: string; id: string }) => queryOptions({ queryKey: ['native-summary-case', target.kind, target.id], queryFn: () => {
@@ -20,9 +25,44 @@ vi.mock('@/api/summaries', async (original) => ({ ...await original<typeof Summa
 }));
 const initial = (): Reply => ({ root_org_id: 'root-b', target: { kind: 'document', id: 'doc' }, inspecting: false, revision: 1, state: 'fresh', text: 'A readable source paragraph.',
   producer: { kind: 'model', title: 'Hidden supplier canary', provider: null, offering: null }, updated_at: '2026-11-08T10:00:00Z', route: null, input: null, manual_problem: null, wait: null, poll_after_ms: null, problem: null });
-afterEach(async () => { cleanup(); source.readFailures = 0; source.ask.mockClear(); source.refresh.mockReset(); await setLocale('en'); });
+afterEach(async () => { cleanup(); source.readFailures = 0; source.ask.mockClear(); source.refresh.mockReset(); source.plan.mockReset(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps the actual private subscription hidden when the default later changes to a readable provider (${locale})`, async () => {
+    await setLocale(locale);
+    const provider=planProvider();
+    source.plan.mockResolvedValue(provider);
+    source.reply={...initial(),program:{helper_id:null,actor:null,provider:null},route:{
+      capability:'summary',detail:null,item:'summary',ledger_unit:'tokens',mode:null,modes:[],
+      offering:'future-model',prices:{},program_default:false,provider:{id:provider.id,title:provider.name},
+      reason:null,route_view:{id:'summarizer-model.complete',kind:'service',orch_tool:null,disable_native:false},
+      setting:'auto.summarizer',title:'Summary',
+    }};
+    show(<ResourceSummary target={{kind:'document',id:'doc'}} reference="/doc/doc" />);
+    await screen.findByText('A readable source paragraph.');
+    await userEvent.click(screen.getByRole('button',{name:i18n.t('summaryBox.details')}));
+    expect(await screen.findByText(i18n.t('providerPlan.roomHidden'))).toBeVisible();
+    expect(screen.queryByText(i18n.t('timeline.capabilitySubscription'))).not.toBeInTheDocument();
+    expect(source.plan).not.toHaveBeenCalled();
+    expect(source.refresh).not.toHaveBeenCalled();
+  });
+  it(`shows a summary's readable subscription facts without disclosing a private helper or starting work (${locale})`, async () => {
+    await setLocale(locale);
+    const provider = planProvider();
+    source.plan.mockResolvedValue(provider);
+    source.reply = {...initial(),program:{helper_id:null,actor:null,provider:{id:provider.id,title:provider.name}}};
+    const page = show(<ResourceSummary target={{kind:'document',id:'doc'}} reference="/doc/doc" />);
+    await screen.findByText('A readable source paragraph.');
+    expect(source.plan).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button',{name:i18n.t('summaryBox.details')}));
+    expect(screen.queryByText(i18n.t('summaryBox.noRates'))).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText(i18n.t('timeline.capabilitySubscription')));
+    expect(await screen.findByRole('meter',{name:'Weekly window (Fable)'})).toHaveAttribute('aria-valuenow','81');
+    expect(page.container.querySelector('[data-capability-helper]')).toBeNull();
+    expect(source.refresh).not.toHaveBeenCalled();
+    expect(source.ask).not.toHaveBeenCalled();
+    expect(source.plan).toHaveBeenCalledTimes(1);
+  });
   it.each(['no_summarizer', 'fresh'] as const)(`distinguishes co-mounted summary subjects in %s (${locale})`, async (state) => {
     await setLocale(locale); source.reply = { ...initial(), state, producer: null, updated_at: null, text: state === 'fresh' ? 'A readable source paragraph.' : null };
     const configure = vi.fn();
@@ -56,6 +96,14 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(source.ask).toHaveBeenCalledTimes(3);
     for (const [index, { reference }] of targets.entries()) expect(source.ask).toHaveBeenNthCalledWith(index + 1, { root: 'root-b', text: [i18n.t('summaryBox.ask'), reference, ...(state === 'fresh' ? ['> A readable source paragraph.'] : [])].join('\n\n') });
     expect(source.refresh).not.toHaveBeenCalled(); expect(configure).not.toHaveBeenCalled();
+  });
+  it.each(['usage_measurement', 'plan_reserve'] as const)(`keeps the paragraph while automatic work waits for %s (${locale})`, async (reason) => {
+    await setLocale(locale);
+    source.reply = { ...initial(), state: 'scheduled', wait: { reason, until: '2026-11-09T02:00:00Z' }, poll_after_ms: 900_000 };
+    show(<ResourceSummary target={{ kind: 'document', id: 'doc' }} reference="/doc/doc" />);
+    expect(await screen.findByText(i18n.t(`summaryBox.wait.${reason}`))).toBeVisible();
+    expect(screen.getByText('A readable source paragraph.')).toBeVisible();
+    expect(source.refresh).not.toHaveBeenCalled();
   });
   it(`shows the actual scheduled time and reason while retaining the paragraph (${locale})`, async () => {
     await setLocale(locale); source.reply = { ...initial(), state: 'scheduled', wait: { reason: 'interval', until: '2026-11-09T02:00:00Z' }, poll_after_ms: 900_000 };

@@ -15,6 +15,9 @@ import { NetworkError } from '@/lib/requests';
 import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show, skipOverflowFallback } from './support';
 import { harnessName } from '../doubles/harness-names';
+import { detailHost } from './resource-detail-fixtures';
+
+const placementHost = { ...detailHost, access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } };
 
 skipOverflowFallback();
 
@@ -27,7 +30,7 @@ vi.mock('@/features/resources/HomePicker',()=>({
   HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose home</option><option value="org">Acme</option></select>,
   useHomeChoices:()=>({choices:[{id:'org',label:'Acme',personal:false,department:false}],pending:false,error:null}),
 }));
-vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),createProvider:vi.fn(),createTemplate:vi.fn(),createModel:vi.fn(),providerQuery:(id:string)=>({queryKey:['created-provider',id],queryFn:()=>readProvider(id)}),templatesQuery:()=>({queryKey:['local-templates'],queryFn:()=>Promise.resolve(localTemplates)}),providerSetupQuery:()=>({queryKey:['location-setup'],queryFn:()=>Promise.resolve(setup)})}));
+vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),createProvider:vi.fn(),createTemplate:vi.fn(),createModel:vi.fn(),providerQuery:(id:string)=>({queryKey:['created-provider',id],queryFn:()=>readProvider(id)}),hostsQuery:()=>({queryKey:['local-hosts'],queryFn:()=>Promise.resolve([placementHost])}),templatesQuery:()=>({queryKey:['local-templates'],queryFn:()=>Promise.resolve(localTemplates)}),providerSetupQuery:()=>({queryKey:['location-setup'],queryFn:()=>Promise.resolve(setup)})}));
 let localTemplates: Template[] = [];
 const keeper={id:'keeper',name:'Keeper',online:true,placement:'connected' as const,platform_os:'linux' as const};
 const runner={...keeper,id:'runner',name:'Runner'};
@@ -49,6 +52,22 @@ beforeEach(()=>{
   vi.mocked(createProvider).mockResolvedValue({...planProvider(),warning:null});
 });
 afterEach(async()=>{cleanup();await setLocale('en');});
+
+it('creates a provider on the host and template chosen through the shared placement fields', async () => {
+  localTemplates = [{ id: 'chosen-template', name: 'Chosen runtime', kind: 'provider', driver: detailHost.drivers[0]?.name ?? '', enabled: true,
+    description: '', access: { permissions: ['template.use'] } } as Template];
+  try {
+    const user = userEvent.setup();
+    show(<AddProviderDialog initialHome="org" onClose={vi.fn()} />);
+    await chooseLocation(user, i18n.t('providerCreation.examples'), 'Example API');
+    await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+    await chooseLocation(user, i18n.t('start.where.template'), 'Chosen runtime');
+    await chooseLocation(user, i18n.t('start.where.host'), detailHost.name);
+    await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+    await waitFor(() => expect(createProvider).toHaveBeenCalledOnce());
+    expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({ runtime_config: { 'runtime.host_id': detailHost.id, 'runtime.template_id': 'chosen-template' } });
+  } finally { localTemplates = []; }
+});
 
 async function chooseLocation(user:ReturnType<typeof userEvent.setup>,label:string,value:string) {
   await user.click(screen.getByRole('combobox',{name:label}));
@@ -354,7 +373,7 @@ it.each(['en', 'zh-CN'] as const)('keeps an unsupported admin draft out of the m
     await user.type(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true }), 'fixture-admin-private');
     await user.click(screen.getByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) }));
     await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
-    expect(screen.getByText(i18n.t('providerFill.adminSourceRequired'))).toBeVisible();
+    expect(screen.queryByRole('region', { name: i18n.t('providerFill.review') })?.textContent).toContain(i18n.t('providerFill.adminSourceRequired'));
     const save = screen.getByRole('button', { name: i18n.t('providerCreation.create') });
     expect(save).toHaveAttribute('aria-disabled', 'true');
     await user.click(save);

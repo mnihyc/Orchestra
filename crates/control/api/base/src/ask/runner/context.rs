@@ -15,6 +15,8 @@ pub struct Source {
     id: Id,
     call: String,
     hash: Hash,
+    /// The length in bytes the result was given to the model at: a refresh of it is cut to the same length.
+    len: usize,
 }
 
 #[derive(Clone)]
@@ -35,31 +37,44 @@ pub struct History {
     per_message: Vec<Vec<Source>>,
 }
 
+/// What bounds this turn's requests: the model's window, lowered by `ask.context_tokens` and by `learned`, a
+/// window below the one a provider's refusal of a request as too long has shown (zero while none has).
 pub(super) async fn budget(
     conn: &mut Conn,
     root: Id,
     parameters: &orch_provider_contract::models::ModelParameters,
     model: &str,
+    learned: i64,
 ) -> Result<Budget, EngineError> {
     let context = setting::<i64>(conn, Place::Node(root), "ask.context_tokens").await?;
     let output = setting::<i64>(conn, Place::Node(root), "ask.max_output_tokens")
         .await?
         .unwrap_or(4096);
-    let tools = setting::<i64>(conn, Place::Node(root), "ask.turn_tool_bytes")
-        .await?
-        .unwrap_or(262144);
+    let context = [context, (learned > 0).then_some(learned)]
+        .into_iter()
+        .flatten()
+        .min();
     // The request's own root is used, including for a kept built-in thread.
-    Budget::new(
-        parameters,
-        model,
-        context,
-        output,
-        usize::try_from(tools).map_err(failed)?,
-    )
+    Ok(Budget::new(parameters, model, context, output))
+}
+
+/// Where the whole source of a tool result is: the first canonical link among its citations.
+pub(super) fn first_link(value: &Json) -> Option<String> {
+    value
+        .get("citations")?
+        .as_array()?
+        .iter()
+        .find_map(|source| {
+            source
+                .get("url")
+                .and_then(Json::as_str)
+                .filter(|url| url.starts_with('/') && !url.starts_with("//"))
+        })
+        .map(str::to_owned)
 }
 
 pub(super) async fn refresh(
-    host: &Host,
+    origin: &Arc<tools::ReadOrigin>,
     row: &rows::ToolWitness,
 ) -> Result<Option<Json>, EngineError> {
     let trace = row
@@ -69,9 +84,9 @@ pub(super) async fn refresh(
         .map(|trace| serde_json::from_value::<tools::Trace>(trace.clone()))
         .transpose()?;
     Ok(match (trace, row.name.as_deref(), row.arguments.as_ref()) {
-        (Some(trace), _, _) => tools::refresh(&host.origin, &trace).await.ok(),
+        (Some(trace), _, _) => tools::refresh(origin, &trace).await.ok(),
         (None, Some(name @ ("docs" | "find_operation")), Some(arguments)) => {
-            tools::execute(&host.origin, name, arguments)
+            tools::execute(origin, name, arguments)
                 .await
                 .ok()
                 .map(|(value, _)| value)
@@ -84,7 +99,11 @@ fn hash(content: &str, error: bool) -> Result<Hash, EngineError> {
     Ok(Hash::of(&serde_json::to_vec(&(content, error))?))
 }
 
-async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
+async fn current(
+    host: &Host,
+    origin: &Arc<tools::ReadOrigin>,
+    sources: &[Source],
+) -> Result<bool, EngineError> {
     let mut conn = host.origin.source.app.db.acquire().await?;
     let ids: Vec<_> = sources.iter().map(|source| source.id).collect();
     let mut witnesses = HashMap::new();
@@ -100,12 +119,6 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
             }
         }
     }
-    let limit = usize::try_from(
-        setting::<i64>(&mut conn, Place::Node(host.origin.root), "ask.tool_bytes")
-            .await?
-            .unwrap_or(65536),
-    )
-    .map_err(failed)?;
     drop(conn);
     for source in sources {
         let row = witnesses
@@ -113,15 +126,20 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
             .and_then(Option::as_ref)
             .filter(|row| row.call_id.as_deref() == Some(source.call.as_str()));
         let value = match row {
-            Some(row) => refresh(host, row).await?,
+            Some(row) => refresh(origin, row).await?,
             None => None,
         };
-        let (mut text, error) = match value {
-            Some(value) => (serde_json::to_string(&value)?, false),
+        let (mut text, error) = match &value {
+            Some(value) => (serde_json::to_string(value)?, false),
             None => ("no longer available to you".to_owned(), true),
         };
-        if !error {
-            orch_engine::ask::bound_tool_result(&mut text, limit);
+        if let (false, Some(value)) = (error, &value) {
+            // Cut to the length it was given at, as `prepare` cuts it.
+            orch_engine::ask::bound_tool_result(
+                &mut text,
+                source.len,
+                first_link(value).as_deref(),
+            );
         }
         if hash(&text, error)? != source.hash {
             return Ok(false);
@@ -133,12 +151,16 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
 fn reusable(host: &Host, item: &threads::ItemRow) -> bool {
     item.payload.get("ask_origin").is_some_and(|origin| {
         origin
-            .get("provider")
-            .and_then(Json::as_str)
-            .and_then(|id| id.parse::<Id>().ok())
-            == Some(host.model.provider_id)
-            && origin.get("model").and_then(Json::as_str) == Some(host.model.model.as_str())
-            && origin.get("protocol").and_then(Json::as_str) == Some(host.protocol.as_str())
+            .get("backend")
+            .and_then(|raw| {
+                serde_json::from_value::<orch_provider_contract::capabilities::BackendRef>(
+                    raw.clone(),
+                )
+                .ok()
+            })
+            .as_ref()
+            == Some(&host.model.backend)
+            && origin.get("protocol").and_then(Json::as_str) == host.protocol.as_deref()
             && origin
                 .get("person")
                 .and_then(Json::as_str)
@@ -150,17 +172,23 @@ fn reusable(host: &Host, item: &threads::ItemRow) -> bool {
 }
 
 /// Two hundred is a page size, never a history window. Pin one selected lineage.
-pub(super) async fn load(host: &Host) -> Result<History, EngineError> {
+pub(super) async fn load(
+    host: &Host,
+    origin: &Arc<tools::ReadOrigin>,
+) -> Result<History, EngineError> {
     let mut conn = host.origin.source.app.db.acquire().await?;
     let view = threads::thread(&mut conn, host.thread)
         .await?
         .ok_or_else(|| failed("Ask was deleted"))?
         .active_continuation_id;
+    drop(conn);
     let mut pages = Vec::new();
     let mut before = None;
     let mut summary: Option<(api::AskSummary, String, Vec<Source>)> = None;
     loop {
+        let mut conn = host.origin.source.app.db.acquire().await?;
         let page = rows::items_in_view(&mut conn, host.thread, view, before, false, 200).await?;
+        drop(conn);
         if page.is_empty() {
             break;
         }
@@ -191,7 +219,7 @@ pub(super) async fn load(host: &Host) -> Result<History, EngineError> {
                 };
                 let metadata: api::AskSummary = serde_json::from_value(metadata.clone())?;
                 let sources: Vec<Source> = serde_json::from_value(sources.clone())?;
-                if !current(host, &sources).await? {
+                if !current(host, origin, &sources).await? {
                     continue;
                 }
                 let text = item
@@ -215,7 +243,6 @@ pub(super) async fn load(host: &Host) -> Result<History, EngineError> {
             break;
         }
     }
-    drop(conn);
     let mut history = History {
         view,
         messages: vec![],
@@ -324,6 +351,7 @@ impl History {
                             id: *id,
                             call: call_id.clone(),
                             hash,
+                            len: content.len(),
                         })),
                         _ => None,
                     })
@@ -370,7 +398,16 @@ impl History {
         let mut current = input.clone();
         current.messages = input.messages[self.older..].to_vec();
         if !budget.fits(&current)? {
-            return Err(refuse());
+            // What the person asked and what it read is too long by itself, and no summary of earlier messages
+            // helps: a narrower question or fewer sources does. Where Ask's own instructions and tools leave
+            // no room either, that is no question's fault and the earlier refusal stands.
+            let mut bare = current;
+            bare.messages.clear();
+            return Err(if budget.fits(&bare)? {
+                EngineError::AskTurnTooLong(model.to_owned())
+            } else {
+                refuse()
+            });
         }
 
         let mut request = input.clone();
@@ -378,6 +415,7 @@ impl History {
         request.tools.clear();
         request.messages.clear();
         let mut estimated = budget.estimate(&request)?;
+        let room = budget.room();
         let mut cut = 0;
         for (index, message) in input.messages.iter().take(self.older).enumerate() {
             let mut portable = GenerationInput {
@@ -388,7 +426,7 @@ impl History {
             };
             orch_engine::ask::portable_messages(&mut portable);
             estimated = estimated.saturating_add(budget.material(&portable.messages)?);
-            if estimated > budget.window - budget.output {
+            if room.is_some_and(|room| estimated > room) {
                 break;
             }
             let next = index + 1;
@@ -402,7 +440,7 @@ impl History {
         }
         request.messages = input.messages[..cut].to_vec();
         orch_engine::ask::portable_messages(&mut request);
-        if !budget.fits_summary(&request)? {
+        if !budget.fits(&request)? {
             return Err(refuse());
         }
         let mut sources = self.sources.clone();

@@ -2641,6 +2641,11 @@ BEGIN
       last_seq=GREATEST(thread_history_turn_counts.last_seq,EXCLUDED.last_seq),
       changed_seq=GREATEST(thread_history_turn_counts.changed_seq,EXCLUDED.changed_seq);
   ELSE
+    -- Deleting the continuation cascades its whole projection. An item removed
+    -- by that same cascade no longer has a live count to maintain.
+    IF NOT EXISTS(SELECT 1 FROM thread_continuations WHERE id=p_owner) THEN
+      RETURN;
+    END IF;
     IF p_turn IS NULL THEN
       UPDATE thread_history_turn_counts c SET item_count=c.item_count-1,payload_bytes=c.payload_bytes-p_size,
         changed_seq=GREATEST(c.changed_seq,p_changed)

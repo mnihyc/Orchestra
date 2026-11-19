@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-engine --test call_recovery -- auxiliary::an_administrative_stop_is_not_a_failure_and_its_author_can_be_continued_explicitly
+test -p orch-api-core --test ask -- subscription::
+test -p orch-api-core --test ask -- backend_reserve::
+test -p orch-api-core --test ask -- retention_is_clamped_and_expiry_has_no_second_delete_window
+test -p orch-api-core --test ask -- deleting_a_governing_root_removes_its_ask_nodes_without_touching_personal_asks
+test -p orch-api-core --test trace_history
+test -p orch-engine --lib -- ask::

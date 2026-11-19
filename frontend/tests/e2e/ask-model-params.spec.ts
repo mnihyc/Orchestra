@@ -2,7 +2,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { AskModelsReply, ProviderModel, ResolvedSetting, SettingDef } from '../../src/generated/api-types';
 import { RUNS_ON } from '../doubles/fixtures';
-import { askConversation, askModels, askSnapshot } from '../unit/ask-fixtures';
+import { apiAskModel, askConversation, askModels, askSnapshot } from '../unit/ask-fixtures';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { fixture, language, openAsk } from './ask-support';
 import { ACME, scenario, supplyDefaults } from './support';
@@ -16,7 +16,7 @@ function choices(): AskModelsReply {
   if (first === undefined) throw new Error('The configured fixture needs a native entry');
   if (first.provider === null || first.model === null) throw new Error('The configured fixture needs native provider and model details');
   return { ...reply, models: [first, { ...first, is_default: false,
-    selection: { provider_id: first.provider.id, model: 'ask-second' },
+    selection: apiAskModel(first.provider.id, 'ask-second'),
     request_option_schema: schema,
     model: { ...first.model, model_name: 'ask-second', display_name: 'Second API model',
       parameters: { efforts: ['low', 'high'], default_effort: 'low' }, option_constraints: { 'openai-responses': schema } },
@@ -33,6 +33,12 @@ async function modelMetadata(page: Page, reply: AskModelsReply) {
   const provider = planProvider({ id: RUNS_ON.openAiKey, name: 'Team API', kind: 'api', protocols: ['openai-responses'] });
   await page.route((url) => url.pathname === `/api/v1/providers/${provider.id}`, (route) => route.fulfill({ json: provider }));
   await page.route((url) => url.pathname === `/api/v1/providers/${provider.id}/models`, (route) => route.fulfill({ json: providerModels(reply) }));
+  await page.route((url) => url.pathname === `/api/v1/providers/${provider.id}/capability-backends`, (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const rows = reply.models.filter((row) => row.selection.backend.offering?.offering === query.get('offering'));
+    return route.fulfill({ json: { items: rows.map((row) => ({ backend: row.selection.backend, eligible: row.allowed,
+      offering_name: row.model?.display_name, reason: row.unavailable_reason, route_text: { en: 'API', 'zh-CN': 'API' } })), next_cursor: null } });
+  });
   return provider;
 }
 
@@ -63,10 +69,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const picker = page.getByRole('dialog', { name: t('ask.model'), exact: true });
     await expect(picker.getByRole('menuitemradio').first()).toHaveAccessibleName(t('ask.defaultModel'));
     await expect(picker.getByRole('menuitemradio', { name: 'Excluded API model', exact: true })).toHaveCount(0);
-    await expect(picker.getByRole('group', { name: t('composer.model.efforts', { model: 'Readable API model' }) })).toHaveCount(0);
-    await picker.getByRole('group', { name: t('composer.model.efforts', { model: 'Second API model' }) })
-      .getByRole('menuitemradio', { name: t('choiceCatalog.effort.high.name'), exact: true }).click();
+    // The efforts are the effort control's, never rows of the model list: the model that does not list one has no effort control.
+    await expect(panel.getByRole('button', { name: new RegExp(`^${t('composer.effort.title')}`) })).toHaveCount(0);
+    await picker.getByRole('menuitemradio', { name: 'Second API model', exact: true }).click();
     await expect(trigger).toContainText('Second API model');
+    await panel.getByRole('button', { name: new RegExp(`^${t('composer.effort.title')}`) }).click();
+    await page.getByRole('menuitemradio', { name: t('choiceCatalog.effort.high.name'), exact: true }).click();
     if (!await picker.isVisible()) await trigger.click();
     const temperature = picker.getByRole('spinbutton', { name: 'Temperature' });
     await expect(temperature).toHaveAttribute('min', '0'); await expect(temperature).toHaveAttribute('max', '1');
@@ -84,7 +92,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await page.keyboard.press('Escape');
     await box.fill('Read this organization using my selected parameters'); await box.press('Enter');
     await expect.poll(() => server.sends.length).toBe(1);
-    expect(server.sends[0]?.model).toEqual({ provider_id: RUNS_ON.openAiKey, model: 'ask-second', params: { effort: 'high', temperature: 0.5 } });
+    expect(server.sends[0]?.model).toEqual({ ...apiAskModel(RUNS_ON.openAiKey, 'ask-second'), params: { effort: 'high', temperature: 0.5 } });
   });
 
   for (const writable of [false, true]) test(`Ask blocks an empty configured list with the native writable hint ${writable} (${locale}/${theme})`, async ({ page, request }, info) => {
@@ -150,7 +158,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const title = locale === 'en' ? 'Ask models' : '问一问模型列表';
     const def: SettingDef = { key: 'ask.models', title, description: title, class: 'policy', group: 'automation', scopes: ['system', 'org'],
       merge: 'intersect', default: null, example: null, text_key: null, keywords: [], schema: { type: 'array', uniqueItems: true,
-        items: { type: 'object', required: ['provider_id', 'model'], additionalProperties: false, properties: { provider_id: { type: 'string' }, model: { type: 'string' } } } } };
+        items: { type: 'object', required: ['backend'], additionalProperties: false, properties: { backend: { type: 'object' } } } } };
     let current: ResolvedSetting = { key: 'ask.models', value: initial, own: system ? { value: initial, revision: 1, locked: false } : null,
       writable: true, source: { scope: 'system', node: null }, locked_by: null, parts: [] };
     const path = system ? '/api/v1/admin/settings' : `/api/v1/nodes/${ACME.org}/settings`;
@@ -192,10 +200,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const up = row.getByRole('button', { name: t('modelList.moveUp', { model: secondName }), exact: true });
       await up.click(); await up.press('Control+Enter');
       await expect.poll(() => writes.length).toBe(1); expect(writes[0]).toEqual([initial[1], initial[0]]);
-      expect(catalogues).not.toEqual([]);
+      expect(catalogues).toEqual([]);
     } else {
       await expect(row.getByText(t('ask.modelsFromAbove'), { exact: true })).toBeVisible();
-      await expect(row.getByRole('button', { name: firstName, exact: true })).toBeDisabled();
+      await expect(list.getByRole('combobox')).toHaveCount(0);
       await expect(row.getByRole('button', { name: t('modelList.add'), exact: true })).toHaveCount(0);
       await expect(row.getByRole('button', { name: t('modelList.moveUp', { model: secondName }), exact: true })).toHaveCount(0);
       await row.getByRole('button', { name: t('modelList.remove', { model: firstName }), exact: true }).click();
