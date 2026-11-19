@@ -23,6 +23,90 @@ use std::time::Duration;
 const KEY: &str = "sk-orch-test-rows";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_request_zeroes_do_not_alias_another_request_or_lose_their_exact_tool_associations()
+{
+    for forwarded in [false, true] {
+        let world = if forwarded {
+            World::on_a_key(KEY).await
+        } else {
+            World::new().await
+        };
+        let thread = world.thread("Distinct native request identities").await;
+        let (turn, _) = world.running_turn(thread, "Begin").await;
+        for (native, upstream) in [
+            ("native\0request", "upstream\0request"),
+            ("native�request", "upstream�request"),
+        ] {
+            let mut request = UsageRequest {
+                id: native.to_owned(),
+                provider_request_id: Some(upstream.to_owned()),
+                model: Some(MODEL.to_owned()),
+                asked: Some(world.clock.time()),
+                end: Some(world.clock.time()),
+                tool_refs: Some(vec!["tool\0id".to_owned(), "tool�id".to_owned()]),
+                tokens: RequestTokens {
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    total_tokens: Some(2),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            request.finish("done", None, None);
+            if forwarded {
+                world
+                    .say_of_provider(Event::LeaseUsage(LeaseUsage {
+                        lease_id: world.open_lease_of(thread).await,
+                        model: MODEL.to_owned(),
+                        usage: request.tokens.usage(),
+                        request_ref: Some(upstream.to_owned()),
+                        timing: Some(request.measured()),
+                    }))
+                    .await;
+            }
+            world
+                .say(
+                    thread,
+                    Event::ModelRequest(ModelRequest {
+                        turn_id: turn.turn_id,
+                        request,
+                    }),
+                )
+                .await;
+        }
+        common::eventually("both exact native associations to be stored", || async {
+            let rows = world.ledger_of(turn.turn_id).await;
+            rows.len() == 2
+                && rows
+                    .iter()
+                    .all(|row| row.measurement_states["_adapter_request_ref"].is_string())
+        })
+        .await;
+        let rows = world.ledger_of(turn.turn_id).await;
+        for (native, upstream) in [
+            ("native\0request", "upstream\0request"),
+            ("native�request", "upstream�request"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row.provider_request_id.as_deref() == Some(upstream))
+                .unwrap();
+            assert_eq!(row.measurement_states["_adapter_request_ref"], native);
+            assert_eq!(
+                row.measurement_states["_tool_refs"],
+                json!(["tool\0id", "tool�id"])
+            );
+            assert_eq!(row.total_tokens, 2);
+        }
+        world
+            .say(thread, turn_ended(turn.turn_id, TurnOutcome::Completed))
+            .await;
+        world.wait_turn(turn.turn_id, "completed").await;
+        world.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ending_a_turn_closes_a_missing_request_report_without_inventing_times_or_counts() {
     let world = World::new().await;
     let thread = world.thread("Abandoned request").await;

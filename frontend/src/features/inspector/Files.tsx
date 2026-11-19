@@ -8,7 +8,7 @@
  * the menu of a row and in the toolbar, for whoever may write the thread's files, and switched off with
  * the reason for those who may not.
  */
-import { ArrowUp, ChevronsDownUp, FilePlus, FolderPlus, Folder as FolderIcon, Info, MoreHorizontal, RefreshCw, Search, X } from 'lucide-react';
+import { ArrowUp, ChevronsDownUp, FilePlus, FolderPlus, Folder as FolderIcon, MoreHorizontal, RefreshCw, Search, X } from 'lucide-react';
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
@@ -24,7 +24,6 @@ import { Banner } from '@/ui/Banner';
 import { EmptyState } from '@/ui/EmptyState';
 import { IconButton } from '@/ui/IconButton';
 import { Menu, type MenuEntry } from '@/ui/Menu';
-import { Tooltip } from '@/ui/Tooltip';
 import { toast } from '@/ui/Toast';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { carriesFiles, draggedFileCount } from '@/lib/drop';
@@ -32,6 +31,8 @@ import { useFileDrops } from '@/features/composer/FileDrops';
 import { UploadHelp } from '@/features/composer/UploadHelp';
 import { formatNumber } from '@/lib/format';
 import { cx } from '@/ui/cx';
+import { FileSourceDisclosure } from '../files/FileFacts';
+import { RelativeTime } from '@/ui/RelativeTime';
 import { StatusDot } from '@/ui/StatusDot';
 import { Button } from '@/ui/Button';
 import { ErrorState } from '@/ui/ErrorState';
@@ -45,6 +46,7 @@ import { useFileActions, whyNoWrite } from '../files/FileMenu';
 import { NO_SEARCH, SearchBox, SearchResults, type SearchState } from '../files/SearchInFiles';
 
 import { liveIndexReason } from '../files/indexWords';
+import { PathBar } from '../files/PathBar';
 export { liveIndexReasonKey } from '../files/indexWords';
 
 interface RetainedSource {
@@ -136,6 +138,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
   const [admitted, setAdmitted] = useState(!paused);
   if (!paused && !admitted) setAdmitted(true);
   const [root, setRoot] = useState(access.directory);
+  const [pathError, setPathError] = useState<unknown>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [focused, setFocused] = useState<string | null>(null);
   const [dropDirectory, setDropDirectory] = useState<string | null>(null);
@@ -143,7 +146,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
   const [search, setSearch] = useState<SearchState>(NO_SEARCH);
   const [searchOpen, setSearchOpen] = useState(false);
   const searching = searchOpen && search.text.trim() !== '';
-  const { tree, directories, expanded, capacity } = useDirectoryTree(door, root, binding, admitted);
+  const { tree, directories, expanded, capacity } = useDirectoryTree(door, root, binding, admitted && pathError === null);
   const anchor = useRef<string | null>(null);
   const rowsNow = useRef<readonly FileRow[]>([]);
   const acceptRows = useCallback((rows: readonly FileRow[]) => {
@@ -167,6 +170,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
   const actions = useFileActions({
     access: paused ? { ...access, mayView: false, mayManage: false, mayWatchProcesses: false, mayShell: false } : access,
     environment,
+    policy: directory?.facts?.policy,
     open,
     collapseAll: () => tree.collapse(),
     search: (under) => { setSearch({ ...NO_SEARCH, mode: 'content', under }); setSearchOpen(true); },
@@ -202,6 +206,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
 
   const openFolder = (path: string) => {
     if (!current.current) return;
+    setPathError(null);
     setSearch(NO_SEARCH);
     setSearchOpen(false);
     setRoot(path); setSelected(new Set()); setFocused(null); anchor.current = null;
@@ -219,22 +224,22 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
     [actions.entriesFor, t],
   );
 
-  const why = whyNoWrite(access, environment, t);
+  const why = whyNoWrite(access, environment, t, directory?.facts?.policy);
   const others = environment === undefined ? 0 : environment.threads.filter((one) => one.thread.id !== door.threadId).length + environment.threads_hidden;
   const liveOnly = environment?.index === 'live';
   const cached = directory?.source === 'cached';
   const asOf = directory?.asOf ?? null;
-  const heading = root === '' ? access.environment.name : t('files.panel.heading', { directory: `${root}/`, environment: access.environment.name });
-  const showSearch = () => { if (liveOnly) setSearch((before) => ({ ...before, mode: 'content' })); setSearchOpen(true); };
+  const heading = root === '' ? access.environment.name : t('files.panel.heading', { directory: root.endsWith('/') ? root : `${root}/`, environment: access.environment.name });
+  const showSearch = () => { setSearchOpen(true); };
   const panelEntries: MenuEntry[] = [
     ...actions.emptyEntries(folderOfFocus()).map((entry) => entry.id === 'refresh' ? { id: 'refresh', label: t('files.panel.refresh'), icon: <RefreshCw aria-hidden />, onSelect: refresh } : entry),
     { id: 'search', label: t('files.search.label'), icon: <Search aria-hidden />, onSelect: showSearch },
-    ...(root === '' ? [] : [{ id: 'up', label: t('files.panel.up'), icon: <ArrowUp aria-hidden />, onSelect: () => openFolder(parentOf(root)) }]),
+    ...(root === '' || parentOf(root) === root ? [] : [{ id: 'up', label: t('files.panel.up'), icon: <ArrowUp aria-hidden />, onSelect: () => openFolder(parentOf(root)) }]),
     ...(root === access.directory ? [] : [{ id: 'thread-directory', label: t('files.panel.backToDirectory'), icon: <FolderIcon aria-hidden />, onSelect: () => openFolder(access.directory) }]),
   ];
 
   if (environment === undefined && failed !== null && failed !== undefined) return <ErrorState compact error={failed} />;
-  if (directory?.watch === 'refused') return <ErrorState compact error={directory.error} />;
+
 
   const folderUnderPointer = (target: EventTarget): string | null => {
     if (!(target instanceof HTMLElement) || target.closest('[data-testid="file-tree"]') === null) return null;
@@ -289,13 +294,16 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
         <IconButton size="sm" label={t('files.search.label')} icon={<Search aria-hidden />} pressed={searchOpen} onClick={() => searchOpen ? setSearchOpen(false) : showSearch()} />
         <Menu label={t('files.menu.labelEmpty')} entries={panelEntries} trigger={<IconButton size="sm" label={t('files.menu.labelEmpty')} icon={<MoreHorizontal aria-hidden />} />} />
       </div>
+      {environment !== undefined && <PathBar key={root} door={door} environment={environment} path={root} disabled={paused}
+        navigate={openFolder} openFile={(path) => { if (current.current) openFile({ environmentId: door.environmentId, threadId: door.threadId ?? '', path, permanent: false }); }}
+        refuse={(path, error) => { if (current.current) { setRoot(path); setPathError(error); setSelected(new Set()); setFocused(null); } }} />}
       {cached && (
         <Banner tone="warning">
           {asOf === null ? t('files.panel.cachedNoTime') : t('files.panel.cached', { time: formatDateTime(asOf, format) })}
         </Banner>
       )}
       {searchOpen && <div className="shrink-0 border-b border-border pt-1" onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setSearchOpen(false); } }}>
-        <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} namesAvailable={!liveOnly} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
+        <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} {...(liveOnly ? { reason: liveIndexReason(t, environment.index_reason, environment.facts) } : {})} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
       </div>}
       {why !== false && <p className="px-2 py-1 text-xs text-text-muted" data-testid="why-read-only">{why}</p>}
       {(capacity !== null || directory?.capacity !== null && directory?.capacity !== undefined) && <div className="shrink-0 border-b border-border px-2 py-1 text-xs text-text-muted" role="status">
@@ -304,7 +312,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
           ? <Button size="sm" variant="ghost" onClick={() => openFolder(capacity.path)}>{t('files.pages.openHere')}</Button>
           : <Button size="sm" variant="ghost" onClick={() => tree.navigate(root, 'restart')}>{t('common.tryAgain')}</Button>}
       </div>}
-      {searching ? (!paused &&
+      {pathError !== null || directory?.watch === 'refused' ? <ErrorState compact className="flex-1" error={pathError ?? directory?.error} /> : searching ? (!paused &&
         <SearchResults
           door={door}
           state={search}
@@ -346,10 +354,11 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
       )}
       {!paused && <div className="max-h-[30dvh] shrink-0 overflow-auto px-2">{fileDrops.progress}{actions.progress}</div>}
       <div className="flex shrink-0 flex-wrap items-center gap-x-2 border-t border-border px-2 py-1 text-xs text-text-muted">
-        <StatusDot tone={allLive ? 'success' : 'idle'} label={allLive ? t('files.panel.live') : t('files.panel.snapshot')} showLabel />
+        <StatusDot tone={allLive ? 'success' : 'idle'} label={allLive ? t(liveOnly ? 'files.panel.liveFolders' : 'files.panel.live') : t(liveOnly ? 'files.panel.snapshotFolders' : 'files.panel.snapshot')} showLabel />
+        {!paused && directory?.status === 'ready' && <FileSourceDisclosure facts={directory.facts} asOf={directory.asOf} door={door} />}
+        {!allLive && !cached && asOf !== null && <span>{t('files.panel.observed')} <RelativeTime at={asOf} /></span>}
         {directory !== undefined && <DirectoryPager window={directory} path={root} navigate={(path, action) => { if (current.current) tree.navigate(path, action); }} />}
         {others > 0 && <span className="min-w-0 flex-1 truncate" title={t('files.panel.shared', { name: access.environment.name, count: others })}>{t('files.panel.sharedCount', { count: others })}</span>}
-        {liveOnly && <Tooltip content={`${liveIndexReason(t, environment.index_reason, environment.facts)} ${t('largeTree.liveCost')} ${t('largeTree.mountSuggestion')}`}><span tabIndex={0} className="ml-auto inline-flex" aria-label={liveIndexReason(t, environment.index_reason, environment.facts)}><Info aria-hidden /></span></Tooltip>}
       </div>
       {!paused && actions.picking}
       {!paused && actions.dialogs}

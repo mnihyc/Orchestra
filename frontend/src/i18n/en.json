@@ -1,4 +1,64 @@
 {
+  "fileFacts": {
+    "watchMode": "Watch",
+    "nativeNotifications": "Native notifications",
+    "fallbackOnly": "Fallback refresh",
+    "watchScope": "Watch scope",
+    "wholeTreeWatch": "Whole tree",
+    "notShared": "Not shared",
+    "configuredRules": "Configured Orch rules",
+    "searchRules": "Search rule sources",
+    "noLocalRules": "No local rules",
+    "source": "Source",
+    "readOnlyMount": "Read-only mount",
+    "ownedWhole": "Owned data · Whole root",
+    "workspace": "Workspace",
+    "workspaceExclusions": "Workspace exclusions",
+    "applied": "Applied",
+    "wholeRoot": "Whole root",
+    "writes": "Writes",
+    "requiresPermission": "Subject to permission",
+    "readOnly": "Read-only",
+    "orchExclusions": "Orch exclusions",
+    "ruleSource": "Rule source",
+    "appliesTo": "Applies to",
+    "appliesToOrch": "Applies to Orch",
+    "nativeAccess": "Native agent access",
+    "nativeSeparate": "Native agent access is separate",
+    "precedence": "Precedence",
+    "deeperRules": "Deeper local rules override · Excluded parents prevent traversal",
+    "fallbackRefresh": "Fallback refresh",
+    "machineConfiguration": "Machine configuration",
+    "transfer": "Transfer",
+    "lastPiece": "Last piece",
+    "transferExpiry": "Transfer expires",
+    "idleRetention": "Idle retention",
+    "transferExpires": "Transfer expires {{at}}",
+    "actual": "Measured",
+    "imageDelivery": "Image delivery",
+    "nativeImageBytes": "Native image bytes",
+    "resolvedAt": "Resolved",
+    "previewExceeded": "Preview allowance exceeded",
+    "allowance": "Allowance",
+    "imageByPath": "Sent by path · Image allowance exceeded",
+    "imagesUsePaths": "Images use paths",
+    "transferState": {
+      "transferring": "Transferring",
+      "interrupted": "Interrupted",
+      "expired": "Expired"
+    },
+    "allowanceKind": {
+      "decoded_source_bytes": "Decoded source bytes",
+      "pixels": "Pixels",
+      "encoded_preview_bytes": "Encoded preview bytes",
+      "viewer_bytes": "Viewer read bytes"
+    },
+    "imageRoute": {
+      "native": "Sent as image",
+      "path": "Sent by path",
+      "unavailable": "Not delivered"
+    }
+  },
   "modelList": {
     "add": "Add model",
     "entry": "Model {{number}}",
@@ -39,7 +99,9 @@
     "waitForFiles": "Wait for the uploads, then close this view",
     "modelExclusion_disabled": "Disabled by the provider",
     "modelExclusion_provider_unavailable": "The provider is unavailable",
-    "modelExclusion_generation_unsupported": "The provider has no generation interface",
+    "modelExclusion_generation_unsupported": "Text generation unavailable",
+    "modelExclusion_shared_for_ask_only": "Shared for Ask only",
+    "modelExclusion_shared_for_other_work_only": "Shared for other work only",
     "modelExclusion_no_use": "Your provider access does not include this model",
     "modelExclusion_parameters_unavailable": "The model’s default parameters are unavailable here",
     "modelExclusion_excluded_by_policy": "Excluded by this organization’s policy",
@@ -82,6 +144,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -90,8 +153,7 @@
     "older": "Load earlier messages",
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
-    "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
+    "expires": "Permanent deletion",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,8 +161,10 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
-    "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
+    "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread.",
+    "turnTooLong": "This question and what it read are too long for {{model}}; ask a narrower question or start with fewer sources.",
+    "copyRoot": "Search and governance",
+    "destinationRootUnknown": "Destination organization not reported"
   },
   "viewWindow": {
     "floating": "Open in a floating window",
@@ -116,8 +180,8 @@
     "accept": "I accept the terms of {{org}}",
     "unavailable": "Terms could not be read",
     "changed": "Terms changed · review and accept again",
-    "accepted": "Accepted the terms",
-    "preview": "Preview",
+    "accepted": "Accepted when joining",
+    "preview": "Current joining terms",
     "none": "No terms"
   },
   "linkSharing": {
@@ -203,7 +267,7 @@
     "enableHere": "Switch on here",
     "notOwner": "Only the machine owner can import",
     "policyOff": "MCP import is off on this machine",
-    "found": "Found in the agents’ own configuration",
+    "found": "Program MCP servers",
     "empty": "No MCP servers found",
     "fromMachine": "Import from a machine",
     "create": "New server",
@@ -221,7 +285,15 @@
     "shape": {
       "stdio": "Name, command and argument structure",
       "http": "Name, URL and connection structure"
-    }
+    },
+    "configurationNotReported": "Configuration not reported",
+    "definitionNotReported": "Definition not reported",
+    "state": "State",
+    "noMatches": "No configured servers match",
+    "notReported": "State not reported",
+    "usingNative": "Using native configuration",
+    "usingOrch": "Using Orch definition",
+    "search": "Search configured servers"
   },
   "linkCards": {
     "sharing": "Sharing: {{access}}",
@@ -257,14 +329,13 @@
     "failed": "{{environment}} could not start.",
     "filesFailed": "Files for {{environment}} could not be prepared.",
     "retrying": "Retrying {{environment}}…",
+    "lifecycle": "{{environment}} · {{state}}",
     "unavailable": "{{environment}} is unavailable.",
     "held": "Your message is kept.",
     "failedChoice": "Unavailable after a failed start; choose another environment or retry it from its page.",
     "environmentManager": "Ask {{who}} or an environment manager"
   },
   "switchChoice": {
-    "picker": "Agent and provider",
-    "option": "{{agent}} on {{provider}}",
     "modelUnavailable": "Waiting for a usable model",
     "hold": "New messages wait while the switch runs.",
     "approvalMode": "Approval: {{mode}}"
@@ -362,8 +433,6 @@
     },
     "currentEnvironment": "{{name}} · keep files",
     "sharedEnvironment": "{{name}} · share files",
-    "currentModel": "Current model",
-    "currentEffort": "Current effort",
     "startActions": "Thread actions",
     "automatic": "Automatic",
     "automaticHost": "Automatic · {{host}}",
@@ -411,13 +480,16 @@
     "hint": "Short address: {{address}}. Use it to find this environment."
   },
   "componentUpdates": {
+    "automatic": "Automatic update pending",
+    "pending": "Update pending",
+    "automaticUpdating": "Updating automatically",
     "available": "Update available",
     "versions": "Update available: {{recommended}} (this machine runs {{running}})",
     "action": "Update now",
     "updating": "Updating…",
     "idle": "Installs the server’s verified build after the last running turn ends, then reconnects. New turns wait until the update finishes.",
     "copyCommand": "Copy the local update command",
-    "offline": "This machine must reconnect before it can be asked to update.",
+    "offline": "Queues the update until this machine next contacts the server.",
     "failed": "The update could not be requested. Try again.",
     "latestRelease": "Latest release",
     "runningServer": "Running server version",
@@ -591,20 +663,6 @@
       "environment": {
         "name": "Environments",
         "description": "Set defaults for environments made inside this place."
-      }
-    },
-    "workDetail": {
-      "steps": {
-        "name": "Steps",
-        "description": "Show the main steps of the agent's work."
-      },
-      "summary": {
-        "name": "Summary",
-        "description": "Show a compact summary of the work."
-      },
-      "everything": {
-        "name": "Everything",
-        "description": "Show all available work detail."
       }
     },
     "navigationShow": {
@@ -1201,7 +1259,7 @@
         "description": "Who may register, how people prove who they are, and the identity providers they may use."
       },
       "email": {
-        "name": "Channels",
+        "name": "Email and channels",
         "description": "The system's own ways out of the application: mail, a bot, push and webhooks."
       },
       "hosts": {
@@ -1987,8 +2045,8 @@
     },
     "attribution": {
       "auto": {
-        "name": "Automatic",
-        "description": "Name people in Orch-composed text when the conversation needs that context."
+        "name": "Auto · names after another contributor",
+        "description": "Name people once another person’s input is delivered."
       },
       "always": {
         "name": "Always",
@@ -2917,6 +2975,20 @@
         "description": "Nobody has said what this data is."
       }
     },
+    "modelAddSwitches": {
+      "all": {
+        "name": "Context, speeds and access",
+        "description": "Efforts, the window and offered context sizes, speeds and access programs; other options need separate setup"
+      },
+      "basic": {
+        "name": "Efforts and context",
+        "description": "Efforts, the window and every context size; speeds and access programs stay on offer"
+      },
+      "nothing": {
+        "name": "Only what it states",
+        "description": "The model's window and efforts; the rest stays on offer until a manager switches it on"
+      }
+    },
     "operationNotices": {
       "when_blocking": {
         "name": "When work is blocked",
@@ -3232,10 +3304,6 @@
           "name": "Size",
           "description": "Stored data and known resource requirements."
         },
-        "admin_access": {
-          "name": "As admin",
-          "description": "Show how this session’s administrator reach makes the item available."
-        },
         "my_access": {
           "name": "My access",
           "description": "What you may do here, including steps shown only as a path."
@@ -3405,6 +3473,32 @@
     "section": "Who may make projects, topics and threads"
   },
   "settingRegistry": {
+    "interface": {
+      "kept_closed_tabs": {
+        "title": "Recently closed tabs",
+        "description": "How many recently closed views keep their local state in this page. Open tabs always keep theirs. Each person may override this default in Interface."
+      },
+      "progress_delay_ms": {
+        "title": "Loading indication delay",
+        "description": "Milliseconds before a read shows a spinner. Each person may override this default in Interface."
+      },
+      "read_freshness_ms": {
+        "title": "Read freshness",
+        "description": "Milliseconds before returning readers revalidate directory listings, repeated lookups, reports and live status. Release catalogues stay for the page; ordinary mutable views revalidate when shown."
+      },
+      "connection_quality": {
+        "title": "Connection warning",
+        "description": "Compare the recent reply median with this person’s preceding usual median. Warn only above both the percentage increase and the extra milliseconds. Sample windows and thresholds are adjustable defaults; a stable long line is normal."
+      },
+      "catch_up_above_items": {
+        "title": "Automatic catch-up threshold",
+        "description": "Show the automatic catch-up card above this number of unread items. Each person may override this default in Interface; explicit catch-up remains available for any unread range."
+      },
+      "recent_models": {
+        "title": "Recent model choices",
+        "description": "How many suitable model choices appear in a person's Recent group. Zero hides the group without forgetting their private server history. This default can be increased."
+      }
+    },
     "org": {
       "terms": {
         "title": "Terms for people who join",
@@ -3415,6 +3509,10 @@
       "idempotency_window": {
         "title": "Creation replay window",
         "description": "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased."
+      },
+      "read_repeats": {
+        "title": "Repeated reads",
+        "description": "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat."
       }
     },
     "message": {
@@ -3473,6 +3571,18 @@
       "web_search_backend": {
         "title": "Web search backend",
         "description": "Choose an enabled provider and native-search model, or that provider's search and fetch services. Unset offers no paid service automatically."
+      },
+      "native_result_wait_ms": {
+        "title": "Native result wait",
+        "description": "How long an agent program may read retained native results before reporting unavailable evidence. Programs that declare this wait use it as their profile default, within the engine's interrupt window. Applies when the program starts again."
+      },
+      "native_result_buffer_bytes": {
+        "title": "Native result buffer",
+        "description": "Pending native input retained for a session while its result evidence is read. When full, the optional read ends as unverified and all input continues. Programs that declare this buffer use it as their profile default. Applies when the program starts again."
+      },
+      "web_action_wait_secs": {
+        "title": "Web action wait",
+        "description": "Close a native web action that has not reported its end after this many seconds, with its reason. A later result can still update it. Applies when the session opens again."
       },
       "prompt_cache_ttl": {
         "title": "Prompt cache lifetime",
@@ -3572,6 +3682,10 @@
         "title": "Who answers plans",
         "description": "Who may proceed with a plan an agent proposes, or keep it planning."
       },
+      "silent_after_secs": {
+        "title": "Silence notice",
+        "description": "How many seconds nothing may arrive from a running agent, with no tool running, before the status line says how long nothing came."
+      },
       "goal": {
         "max_turns": {
           "title": "Goal turns",
@@ -3607,6 +3721,10 @@
       "allowed": {
         "title": "Allowed models",
         "description": "Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list."
+      },
+      "add_switches_on": {
+        "title": "Switched on when added",
+        "description": "Context, speeds and access enables reported context sizes, speeds and access programs. Efforts and context enables context sizes. Only what it states keeps the model's own window and efforts. Other model options are configured separately; larger contexts remain a per-thread choice."
       }
     },
     "providers": {
@@ -3801,6 +3919,18 @@
       "search_context": {
         "title": "Shared search context budget",
         "description": "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context."
+      },
+      "read_bytes": {
+        "title": "Shared read bytes",
+        "description": "Default UTF-8 bytes in a shared read or tool answer; explicit positive byte windows can differ."
+      },
+      "list_depth": {
+        "title": "Shared listing depth",
+        "description": "Default levels in a shared listing; continuation retains the remaining entries."
+      },
+      "list_rows": {
+        "title": "Shared listing rows",
+        "description": "Default rows in a shared listing page; explicit positive windows can differ."
       }
     },
     "sharing": {
@@ -3820,7 +3950,7 @@
         "title": "Owners share outside",
         "description": "Whether the owners of a thing here may themselves name somebody from outside its root org on its page."
       },
-      "external_max_days": {
+      "external_max_minutes": {
         "title": "Outside entries end",
         "description": "The longest an entry that names somebody from outside may last after it is written or renewed."
       },
@@ -3876,11 +4006,55 @@
     "workspace": {
       "ignore": {
         "title": "Ignored paths",
-        "description": "Patterns, written as in a gitignore file, for what the index of a workspace leaves out."
+        "description": "Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list."
       },
       "index": {
         "title": "Index",
-        "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online."
+        "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree."
+      },
+      "index_entries": {
+        "title": "Cached file entries",
+        "description": "Path metadata kept in the incremental working set; larger directories remain browsable and searchable live."
+      },
+      "index_scan_secs": {
+        "title": "Indexing slice",
+        "description": "Seconds of initial indexing before retaining incremental coverage and continuing with live reads."
+      },
+      "ignore_max_bytes": {
+        "title": "Exclusion parsing",
+        "description": "Bytes allowed when parsing one local exclusion file; a file that cannot be applied reports its source and never exposes an unknown scope."
+      },
+      "ignore_cache_bytes": {
+        "title": "Cached exclusion rules",
+        "description": "Source bytes and record metadata retained for parsed exclusion rules; older parses are read again when needed."
+      },
+      "directory_idle_secs": {
+        "title": "Folder continuation idle time",
+        "description": "Seconds an unused folder observation is kept before transparent renewal when the folder is unchanged."
+      },
+      "directory_slots": {
+        "title": "Folder observations",
+        "description": "Folder observations retained on one machine; unused observations are evicted before admitting another reader."
+      },
+      "directory_cache_bytes": {
+        "title": "File read cache",
+        "description": "Shared working bytes for directory metadata and live file-read continuation buffers; existing work stays charged until it ends."
+      },
+      "directory_builds": {
+        "title": "Folder metadata reads",
+        "description": "Concurrent folder metadata builds on one machine; waiting readers retain their place."
+      },
+      "directory_page_bytes": {
+        "title": "Folder page bytes",
+        "description": "Default metadata bytes in one folder page; continuation retains all remaining entries."
+      },
+      "search_slice_secs": {
+        "title": "File search slice",
+        "description": "Seconds of work in one file-search page; continuation resumes the remaining search."
+      },
+      "git_diff_bytes": {
+        "title": "Diff bytes",
+        "description": "Default bytes in one diff read; continuation retains the rest of the selected diff."
       },
       "record_days": {
         "title": "Keep turn files",
@@ -3889,6 +4063,22 @@
       "record_max_bytes": {
         "title": "Largest recorded directory",
         "description": "The included file and link bytes eligible for whole-state recording; larger directories use per-file undo."
+      },
+      "record_wait_secs": {
+        "title": "Wait for turn files",
+        "description": "Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready."
+      },
+      "directory_entries": {
+        "title": "Folder rows",
+        "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest."
+      },
+      "search_results": {
+        "title": "File search rows",
+        "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest."
+      },
+      "archive_results": {
+        "title": "Archive rows",
+        "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest."
       }
     },
     "source": {
@@ -3968,7 +4158,7 @@
       }
     },
     "requests": {
-      "expiry_hours": {
+      "expiry_minutes": {
         "title": "Pending agent requests",
         "description": "The longest pending boundary decision an agent requests; an earlier requested port-link lapse also ends it."
       }
@@ -4064,10 +4254,6 @@
       }
     },
     "access": {
-      "request_expiry_days": {
-        "title": "Access request expiry",
-        "description": "After how many days a request for access that nobody decided lapses."
-      },
       "max_pending_requests": {
         "title": "Pending requests",
         "description": "How many requests for access one person may have waiting."
@@ -4075,6 +4261,10 @@
       "quick_grant_durations": {
         "title": "Quick access durations",
         "description": "Durations offered for giving access in one click: a positive number of days followed by d, or always."
+      },
+      "request_expiry_minutes": {
+        "title": "Access request expiry",
+        "description": "After how many minutes a request for access that nobody decided lapses."
       }
     },
     "nodes": {
@@ -4148,7 +4338,7 @@
       },
       "summarizer": {
         "title": "Summarizer",
-        "description": "Which summarizer is used, and its configuration."
+        "description": "Summarizer and model token allowances. Target character counts are separate."
       },
       "triggers": {
         "title": "Triggers",
@@ -4244,6 +4434,10 @@
       }
     },
     "documents": {
+      "readme_blocks": {
+        "title": "README preview",
+        "description": "Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page."
+      },
       "links": {
         "shown": {
           "title": "Links tabs",
@@ -4276,6 +4470,10 @@
       }
     },
     "search": {
+      "text_chars": {
+        "title": "Conversation search text",
+        "description": "Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded."
+      },
       "semantic": {
         "enabled": {
           "title": "Semantic search",
@@ -4371,6 +4569,32 @@
       "retention_days": {
         "title": "Diagnostics kept",
         "description": "For how many days diagnostics are kept."
+      },
+      "frame_bytes": {
+        "title": "Whole protocol frames",
+        "description": "Bytes of a masked protocol frame kept whole; larger frames keep a size note and the configured prefix. Zero keeps no complete frames."
+      },
+      "frame_head_bytes": {
+        "title": "Protocol frame prefix",
+        "description": "Bytes kept from the start of an oversized masked protocol frame; zero keeps only its size note."
+      },
+      "frames_per_segment": {
+        "title": "Protocol frames kept",
+        "description": "Newest captured protocol frames kept for each native session; zero switches capture off. Captured omission counts remain available."
+      }
+    },
+    "database": {
+      "retry_attempts": {
+        "title": "Database repeats",
+        "description": "Transient repeats in one recovery burst; 0 makes no immediate repeat. Invalid data and program-limit refusals are never repeated."
+      },
+      "retry_initial_ms": {
+        "title": "Database repeat pause",
+        "description": "Initial pause between transient database failures. It doubles within a bounded recovery burst."
+      },
+      "recovery_secs": {
+        "title": "Database recovery interval",
+        "description": "Pause after a recovery burst is exhausted and the interval between counted failure summaries. Pending work remains retained."
       }
     },
     "orgs": {
@@ -4395,6 +4619,10 @@
       "order": {
         "title": "Order of the tree",
         "description": "The order in which the org's tree is shown to whoever follows the org's own: as somebody arranged it, the newest first, the most recently changed first, or by name. An owner or admin of the org saves it from the order they see."
+      },
+      "tree_page_size": {
+        "title": "Hierarchy page size",
+        "description": "Default rows in a hierarchy branch page. An explicit page request may be larger."
       }
     },
     "registration": {
@@ -4412,13 +4640,13 @@
         "title": "Invitation forms",
         "description": "The forms of invitation that may be made for an org of this tree: a link to share, a personal link for one address, or both."
       },
-      "default_hours": {
+      "default_minutes": {
         "title": "Invitation life",
-        "description": "For how many hours an invitation is good when its inviter says nothing."
+        "description": "For how many minutes an invitation is good when its inviter says nothing."
       },
-      "max_hours": {
+      "max_minutes": {
         "title": "Longest invitation",
-        "description": "The most hours an invitation may be good for."
+        "description": "The most minutes an invitation may be good for."
       },
       "max_uses": {
         "title": "Uses of a shared link",
@@ -4480,9 +4708,45 @@
         "title": "Largest file",
         "description": "The largest single file that Orch stores, in bytes."
       },
+      "machine_upload_idle_secs": {
+        "title": "Machine transfer retention",
+        "description": "How long an unfinished machine transfer may receive no piece before cleanup is eligible. Each transfer keeps the allowance accepted at its first piece."
+      },
       "env_cache_quota_bytes": {
         "title": "File cache",
         "description": "How many bytes of cached file contents are kept for one environment."
+      },
+      "transfer_initial_piece_bytes": {
+        "title": "First transfer piece",
+        "description": "Bytes in each small initial bandwidth probe, before the line rate is known."
+      },
+      "transfer_min_piece_bytes": {
+        "title": "Smallest transfer piece",
+        "description": "Smallest ordinary file piece; a final piece may be smaller."
+      },
+      "transfer_max_piece_bytes": {
+        "title": "Largest transfer piece",
+        "description": "Maximum bytes in one file piece. Each unfinished upload keeps its accepted policy."
+      },
+      "transfer_target_window_ms": {
+        "title": "Transfer data duration",
+        "description": "Target data duration of the shared window, before adding measured round-trip headroom."
+      },
+      "transfer_window_rtts": {
+        "title": "Transfer round trips ahead",
+        "description": "Round trips of data kept in flight ahead of acknowledgements, within the byte ceiling."
+      },
+      "transfer_max_window_bytes": {
+        "title": "Transfer window",
+        "description": "Maximum in-flight file bytes shared by simultaneous files from one sender."
+      },
+      "transfer_requests": {
+        "title": "Transfer requests",
+        "description": "Simultaneous piece requests shared by files. Five leaves one HTTP/1.1 connection for other work."
+      },
+      "transfer_initial_requests": {
+        "title": "Transfer probes",
+        "description": "Small concurrent probes used to measure bandwidth without counting connection setup as data time, within the shared request and byte ceilings."
       }
     },
     "skills": {
@@ -4576,7 +4840,7 @@
       },
       "operations": {
         "title": "Operation notices",
-        "description": "Whether Notify starts ticked in an operation: when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices."
+        "description": "Whether Notify starts ticked in an operation: when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices. Off by default."
       }
     },
     "files": {
@@ -4656,9 +4920,25 @@
         "title": "Summary follow interval",
         "description": "Free reads while a summary is eligible or running; future work waits until its due time."
       },
+      "read_repeats": {
+        "title": "Summary read repeats",
+        "description": "Unpaid source rereads and prompt rebuilds before the first model call. Each changing read or rebuild loop uses this limit; zero makes no repeat. A source change after a model call never creates a paid retry."
+      },
       "read_batch_size": {
         "title": "Summary read batch",
         "description": "Distinct source targets in one stored search-summary window; further targets continue."
+      },
+      "retry_ceiling_secs": {
+        "title": "Summary retry ceiling",
+        "description": "The longest backoff after failed automatic title or tag attempts. Call rules still decide whether another model call is allowed."
+      },
+      "goal_turn_items": {
+        "title": "Goal helper turn items",
+        "description": "The most items of the reported turn read for an independent goal check. A larger turn is omitted whole; the condition and evidence remain."
+      },
+      "goal_reason_chars": {
+        "title": "Goal helper reason characters",
+        "description": "The most characters kept from the independent helper’s explanation, separate from the model’s output token allowance."
       }
     },
     "threads": {
@@ -4695,13 +4975,49 @@
           "唤醒"
         ]
       },
+      "opening_items": {
+        "title": "Thread opening items",
+        "description": "Timeline items in the first screen. Scroll to read older items."
+      },
       "offline_deadline": {
         "title": "Offline turn deadline",
         "description": "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with."
       },
       "let_viewers_in": {
-        "title": "Let thread viewers in",
-        "description": "The initial choice to let a new thread’s viewers use its environment. Confirmed when the thread is created; changing this default grants no access by itself."
+        "title": "Viewers can open the environment",
+        "description": "The initial choice to let a new thread’s viewers look at its files, terminal and screens, without Use or permission to change them. Confirmed when the thread is created; changing this default grants no access by itself."
+      },
+      "background_snapshot_seconds": {
+        "title": "Roster retention",
+        "description": "Idle seconds to retain a command snapshot and reviewed End identities. Active reads renew it; expired reads restart before confirmation."
+      },
+      "background_page_items": {
+        "title": "Native roster page",
+        "description": "Preferred commands per native page. Every page transfers; complete lists have no row cap."
+      },
+      "background_page_bytes": {
+        "title": "Native roster page bytes",
+        "description": "Preferred bytes per native page. One command can exceed this target; transport limits still apply."
+      },
+      "background_preview_bytes": {
+        "title": "Roster command preview",
+        "description": "Command preview bytes. Longer previews are marked truncated; all identities remain available."
+      },
+      "output_capture_bytes": {
+        "title": "Retained command output",
+        "description": "Bytes retained for each native text output, including its inline tail. Larger outputs show the missing original byte interval. Applies to the next session."
+      },
+      "start_acceptance_seconds": {
+        "title": "Start acceptance wait",
+        "description": "Seconds an admitted start waits for native acceptance. Zero expires immediately; each admission keeps its own deadline."
+      },
+      "start_confirmation_seconds": {
+        "title": "Native start wait",
+        "description": "Seconds after the latest possible acceptance to wait for the native start event. Zero adds no wait. Changes apply to later admissions."
+      },
+      "start_event_grace_seconds": {
+        "title": "Start event ingestion grace",
+        "description": "Extra seconds while this session’s native events are still being ingested. Zero adds no grace; each admission keeps this allowance."
       }
     },
     "gateways": {
@@ -4739,27 +5055,41 @@
         "title": "Ask tools per turn",
         "description": "The read operations allowed for one question before it asks the person to narrow the question."
       },
-      "tool_bytes": {
-        "title": "Ask source size",
-        "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source."
+      "docs_hits": {
+        "title": "Ask guide pages per search",
+        "description": "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match."
       },
-      "turn_tool_bytes": {
-        "title": "Ask sources per turn",
-        "description": "The total read-result bytes supplied while answering one question."
+      "docs_excerpt_tokens": {
+        "title": "Ask guide excerpt size",
+        "description": "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it."
+      },
+      "max_operations": {
+        "title": "Ask operations per search",
+        "description": "The most read operations one Ask search of the read catalogue returns."
+      },
+      "max_links": {
+        "title": "Ask links per source",
+        "description": "The most canonical source links Ask keeps from one read."
       },
       "max_output_tokens": {
         "title": "Ask answer tokens",
-        "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies."
+        "description": "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies."
       },
       "context_tokens": {
         "title": "Ask context tokens",
-        "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies."
+        "description": "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies."
       }
     },
     "services": {
       "allowed": {
         "title": "Allowed services",
         "description": "Patterns for enabled provider services allowed here. Every scope that sets a list must allow the service."
+      }
+    },
+    "edge": {
+      "transport": {
+        "title": "HTTPS transport",
+        "description": "Shared session cache, resumption, early safe reads and HTTP/2 or HTTP/3 on the built-in HTTPS edge. Committed changes reload gracefully; early writes wait for the handshake."
       }
     }
   },
@@ -4884,7 +5214,7 @@
     "commandAttachTiming": "Run after each attachment, before the runtime is ready. A failure stops that start; it does not replace the machine's other processes.",
     "commandsUnsupported": "This runtime does not support commands after start.",
     "commandsPolicyOff": "This machine does not allow commands after start. Its managers can enable them.",
-    "commandOutput": "Command output",
+    "commandOutput": "Command output preview",
     "values": "Unit configuration",
     "remove": "Remove",
     "commands": "Commands after start",
@@ -4932,6 +5262,13 @@
       "executor": "Environment runner"
     },
     "effects": {
+      "threadCount_one": "{{count}} thread uses this environment",
+      "threadCount_other": "{{count}} threads use this environment",
+      "workspace": "On receipt by the machine, or at its next attachment",
+      "recording": "At the next workspace recording",
+      "cleanup": "At the next lifecycle check",
+      "browser": "When the next browser starts",
+      "display": "When the next display opens",
       "start": "Next unit start",
       "attach": "Next attachment",
       "update": "After a reviewed update",
@@ -5010,6 +5347,9 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "notReported": "Context window not reported",
+      "labelWindow": "Context window {{window}}",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -5131,7 +5471,7 @@
     "requested": "Restart requested"
   },
   "placeReview": {
-    "observedDeleted": "The place is retained after deletion; revision {{revision}}. This read is not an Undo receipt.",
+    "observedDeleted": "The place is retained after deletion. This read is not an Undo receipt.",
     "undone": "Undone",
     "private": "Private place",
     "privateEnvironment": "Private environment",
@@ -5202,8 +5542,8 @@
     "skipped": "Not applied",
     "partial": "Some rows did not succeed. Each result below stands on its own.",
     "uncertainAbout": "The write may have happened. Read the current state; this does not invent a confirmation or an Undo receipt.",
-    "observedArchive": "Current archive state: {{state}}; revision {{revision}}.",
-    "observedParent": "Current parent: {{parent}}; revision {{revision}}.",
+    "observedArchive": "Current archive state: {{state}}.",
+    "observedParent": "Current parent: {{parent}}.",
     "notReadable": "The place is not currently readable. That alone does not prove a delete succeeded.",
     "undoChanged": "A newer revision prevents Undo. Nothing was overwritten.",
     "newReviewRequired": "The place or its consequences changed. Review again before applying."
@@ -5239,7 +5579,7 @@
     "system": "System",
     "notAllowed": "This share is not allowed.",
     "changed": "The page changed during review. Go back and review again.",
-    "observed": "Current permission page, revision {{revision}}. This read is not a confirmation of the lost write."
+    "observed": "Current permission page. This read is not a confirmation of the lost write."
   },
   "backupRestore": {
     "none": "No verified restore list",
@@ -5260,6 +5600,7 @@
     "inspect_other": "{{count}} environments need inspection",
     "noLocations": "No locations enumerated in this category.",
     "location": "Recorded location",
+    "identifiers": "Identifiers",
     "unknownLocation": "Location not reported",
     "copy": "Separate backup copy",
     "uninspectedCopy": "Availability not checked",
@@ -5294,13 +5635,15 @@
     "title": "Kept installed files",
     "lead": "Owned layers kept for each environment, including archived environments. Shared base-image bytes are excluded; flattening makes a complete owned filesystem.",
     "environment": "Environment",
-    "generation": "Generation",
+    "which": "Layer",
+    "latest": "Latest",
+    "earlier": "Earlier",
     "size": "Kept layers",
     "carried": "Installed programs and files are carried too: {{size}} of kept layers. The image archive also carries its base layers."
   },
   "runtimeChanges": {
     "takesEffect": "Takes effect",
-    "driverUnknown": "The current driver's change declaration is unavailable.",
+    "driverUnknown": "It is unknown whether this can change while running",
     "pendingResources": "Pending: current limits remain in force",
     "liveResources": "Supported CPU, memory, swap, process and block IO changes apply now; fixed disk limits and unsupported changes need a recreate.",
     "recreateResources": "These limits need a recreate on this driver.",
@@ -5425,7 +5768,9 @@
     "warnAfter_other": "Warn after {{count}} days",
     "warningUnknown": "Warning age not reported",
     "checkingRecords": "Reading current installation records; these are the last facts read.",
-    "lastRead": "Last read"
+    "lastRead": "Last read",
+    "edgeAddress": "Web address",
+    "httpEdge": "No certificate at this address · slower over long lines"
   },
   "agentReach": {
     "arrangements": {
@@ -5772,6 +6117,7 @@
   },
   "source": {
     "restore": {
+      "gitignore": ".gitignore leaves files out of recordings only; they remain in Files.",
       "open": "Restore files…",
       "review": "Review and undo files…",
       "titleTurn": "Restore files to before this turn",
@@ -5823,13 +6169,18 @@
       "done": "The files were restored.",
       "rolledBack": "Nothing was left half-written: the files are as they were before.",
       "why": {
+        "indexing": "Whole recording was not ready while the directory was being indexed.",
+        "cancelled": "Recording was cancelled.",
         "notRecorded": "Files of this turn were not recorded.",
         "expired": "The files recorded before this turn are no longer kept.",
         "recording": "The files of this turn are still being recorded.",
         "liveTree": "Files of this turn were not recorded: the workspace is live.",
         "notReady": "Files were not recorded yet when this turn began.",
+        "timeout": "The files were not ready in time when this turn began, so only the files the agent changes can be put back.",
         "storeUnavailable": "The file store could not provide a complete copy of this turn.",
         "tooLarge": "The files were too large to record as a whole.",
+        "changedDuring": "Files were still changing when this turn began, so they could not be recorded as a whole.",
+        "unreadable": "Some files could not be read when this turn began, so they could not be recorded as a whole.",
         "recordingOff": "File recording was switched off when this turn began.",
         "offline": "File recording could not reach the machine.",
         "missing_one": "{{count}} recorded file is missing.",
@@ -5841,7 +6192,9 @@
         "interruptNotAllowed": "You may not interrupt the turn that writes here. Choose Wait instead.",
         "preimage": "The complete earlier contents of {{path}} were not retained.",
         "other": "This restore cannot be carried out as it stands."
-      }
+      },
+      "recoverableUntil": "Recoverable until",
+      "expiredAt": "Recording expired"
     },
     "job": {
       "queued": "Waiting to start",
@@ -5933,9 +6286,26 @@
       "preparing": "Preparing the source",
       "failed": "The source could not be prepared",
       "again": "Prepare again",
+      "details": "Details",
+      "detailsTitle": "Source preparation",
       "held": "The first message waits until the source is ready.",
       "writeDisabled": "This environment or its machine does not allow Orch to write files here. Its managers can enable remote writes in the environment and machine policy, then prepare again.",
       "failureReason": "Preparation failed. Review the job's error and prepare again; existing files are kept.",
+      "stopped": "The source could not be prepared. {{reason}}",
+      "reasons": {
+        "timeout": "Source preparation did not finish in time. Review the job's progress, then choose Prepare again.",
+        "busy": "This environment is busy with other work. Choose Prepare again in a moment.",
+        "notFound": "The directory or the repository was not found. Check the address, then choose Prepare again.",
+        "conflict": "The destination already exists and is not a directory. Choose another directory, then prepare again.",
+        "restoreUnavailable": "The current files could not be recorded as a whole, so a worktree cannot start from them. Choose a commit instead.",
+        "offline": "The machine went offline. Choose Prepare again when it is back.",
+        "tooLarge": "The repository is larger than this machine allows. Its managers can raise the limit; then choose Prepare again.",
+        "credential": "The credential for the repository could not be used. Check it, then choose Prepare again.",
+        "changed": "The directory changed while it was being prepared. Choose Prepare again.",
+        "internal": "The change could not be saved. Choose Prepare again.",
+        "expired": "The machine did not take the work up in time. Choose Prepare again when it is online.",
+        "unsupported": "This machine cannot prepare a source. Choose another environment."
+      },
       "choice": "Clone the topic's repository into a new directory",
       "existing": "Using existing files in {{directory}}.",
       "workspace": "the workspace",
@@ -6235,6 +6605,13 @@
     }
   },
   "usageAdmin": {
+    "source": "Source",
+    "fetchSourceMissing": "Set a catalogue URL first",
+    "nothingNew": "Nothing new",
+    "fetched_one": "Fetched {{total}} family",
+    "fetched_other": "Fetched {{total}} families",
+    "updated_one": "Updated {{total}} family",
+    "updated_other": "Updated {{total}} families",
     "system": "System",
     "systemCard": "System rate card",
     "systemHelp": "These pattern rates apply where a place has no more specific rate. They do not change earlier ledger records.",
@@ -6445,6 +6822,17 @@
       "passedWho": "Who let turns past this limit",
       "passedNone": "Nobody is named for it.",
       "passedLast": "Last by",
+      "personalPriority": "Personal allowance takes priority",
+      "largestPriority": "Largest matching allowance",
+      "everyoneAllowance": "Everyone allowance",
+      "replacedBy": "Replaced by",
+      "anotherAllowance": "Another allowance applies",
+      "policy": "{{consequence}} · {{measurement}}",
+      "stopAtLimit": "Stop at limit",
+      "finishCurrent": "Finish current turn",
+      "unmeasuredBlocked": "Unmeasured use blocked",
+      "unmeasuredAllowed": "Unmeasured use allowed",
+      "recheckAtStart": "Rechecked at turn start",
       "waiting_one": "{{count}} waiting",
       "waiting_other": "{{count}} waiting",
       "waitingList": "Waiting for room, in the order they will run",
@@ -7048,7 +7436,7 @@
       "credits": "Credits",
       "summary": "A summary of the topic",
       "embeddings": "Embeddings",
-      "turn": "turn {{id}}",
+      "turn": "turn {{number}}",
       "prompt": "The prompt was {{tokens}} tokens",
       "noRate": "This model had no rate, so its credits are not counted.",
       "prices": "Counted at {{input}} / {{cached}} / {{output}} credits per million tokens (input / cached input / output)",
@@ -7452,7 +7840,8 @@
       "auto": "$t(composer.mode.labels.auto)",
       "bypass": "$t(composer.mode.labels.bypass)"
     },
-    "help": {}
+    "help": {},
+    "notConfirmed": "{{name}} on {{machine}} is not confirmed. The machine’s owner can confirm it on the machine’s page."
   },
   "sandboxReadiness": {
     "summary": "Environment access",
@@ -7500,10 +7889,15 @@
     }
   },
   "threadConfinement": {
-    "approvalNotAllowed": "This approval mode is not allowed here. Choose a mode permitted by approval.allowed_modes, or ask a manager to change that setting.",
-    "approvalUnsupported": "This agent does not support the selected approval.mode. Choose another approval mode or agent.",
-    "sandboxUnsupported": "This agent and environment cannot provide the requested tool access. Choose another agent or environment, or ask a manager to change sandbox.mode and the sandbox.max or agent.max_sandbox limits.",
-    "agentRefused": "Check the agent's provider and settings, then retry: {{detail}}"
+    "approvalNotAllowed": "This approval mode is not allowed here",
+    "approvalUnsupported": "This approval mode is not supported by this agent",
+    "sandboxUnsupported": "The requested tool access is not available with this agent and environment",
+    "agentRefused": "Check the agent's provider and settings, then retry: {{detail}}",
+    "autoNotProven": "Auto: Not proven on this machine yet.",
+    "autoCheckFailed": "Auto: Failed its check on this machine.",
+    "autoCheckUnavailable": "Auto: No Auto check is available for this program.",
+    "approvalNotAllowedMode": "Approval mode “{{mode}}” is not allowed here",
+    "approvalUnsupportedMode": "Approval mode “{{mode}}” is not supported by this agent"
   },
   "providerRuntime": {
     "kept": "Kept",
@@ -7511,7 +7905,6 @@
     "directHelp": "Runtime variables and sealed secrets override the agent profile at the next start or attachment. Commands follow the machine's policy.",
     "configure": "Where it runs",
     "reviewHelp": "Save the desired host and variables, then review the runtime update. Existing sign-ins stay in the persistent volume.",
-    "secretSet": "A value is set; it is never returned.",
     "secretMissing": "No value is set.",
     "autoHost": "Choose a host with room",
     "review": "Review update",
@@ -7570,7 +7963,18 @@
     "savedModels": "Saved models",
     "availability": "Availability",
     "deleteTitle": "Delete this provider?",
-    "delete": "Delete provider"
+    "delete": "Delete provider",
+    "trialReserved": "Trial reserved",
+    "trialState": "State",
+    "trialFor": "Reserved for",
+    "trialHidden": "Not shared",
+    "trialAt": "Recorded",
+    "trialStates": {
+      "reserved": "Reserved",
+      "running": "Running",
+      "consumed": "Used",
+      "not_reserved": "Not reserved"
+    }
   },
   "notificationBell": {
     "place": "Notifications for this place",
@@ -7587,7 +7991,9 @@
     "scope": {
       "chat": "Chat",
       "discussion": "Comments"
-    }
+    },
+    "auto": "Auto",
+    "contributed": "Auto-followed because you contributed · {{level}}"
   },
   "notificationExceptions": {
     "title": "Exceptions",
@@ -7760,8 +8166,6 @@
   "providerSources": {
     "needsAdminKey": "Not offered · needs an admin key",
     "adminKeyHelp": "Used only by this facts source. Model calls keep their own credential.",
-    "removeSavedKey": "Remove saved key",
-    "keyWillBeRemoved": "Removed when saved",
     "described": "Described",
     "creationLead": "The defaults follow the credential and endpoints. Choose another registered program or address here when its details come from elsewhere.",
     "defaultModels": "The credential’s keeper or endpoints list models when they offer discovery; models can always be added by name.",
@@ -7796,7 +8200,6 @@
     "auth": {},
     "header": "Header name",
     "secret": "Authorization value",
-    "setReplace": "Set; replace",
     "writeOnly": "Write only; the saved value is never shown again.",
     "sendKey": "Send this provider’s key to this address",
     "noSignIn": "A sign-in stays with its harness and is never sent to an address.",
@@ -7909,8 +8312,7 @@
       "history": "History",
       "refused": "You need a current browser sign-in and provider.manage. Ask a provider manager.",
       "review": "Review again",
-      "windowsMissing": "Affected windows not reported",
-      "receipt": "This request: {{id}}"
+      "windowsMissing": "Affected windows not reported"
     },
     "recovery": {
       "refused": "The vendor refused this provider’s sign-in.",
@@ -7947,7 +8349,6 @@
       "tokenLink": "Manage API tokens",
       "failed": "Sign-in failed",
       "expired": "The sign-in request expired",
-      "request": "POST /providers/{{id}}/login · method: {{method}}",
       "status": "Sign-in state: {{state}}"
     }
   },
@@ -8028,9 +8429,23 @@
     "confirmDetail_other": "Ends only these {{count}} reviewed tasks. Tasks started afterwards are kept. Each task's actual result is shown. Orch sends no model prompt; the harness may tell the model the work ended."
   },
   "largeTree": {
-    "liveTitle": "Live file listing",
-    "liveCost": "Directory listings are read from disk when requested. Whole-directory restore is unavailable; Restore files can still use the files the agent changed.",
+    "recordingIndexing": "Indexing {{files}} files · {{percent}} %",
+    "recordingIndexingUnknown": "Not ready",
+    "recordingPreparing": "Preparing recording · {{files}} files indexed",
+    "recordingDetails": "File recovery",
+    "recordingAtStart": "At start",
+    "wholeRecording": "Whole recording",
+    "recoverableFiles": "Recoverable files",
+    "recordingFileTools": "Files changed with file tools",
+    "recordingPolicy": "Setting",
+    "recordingUnavailable": "Whole recording unavailable",
+    "recordingWait": "Recording wait",
+    "recordingTooLarge": "Directory exceeds the recording limit",
+    "recordingLive": "Complete directory coverage unavailable",
+    "recordingSetting": "Recording limit",
+    "indexing": "Indexing {{files}} files, {{percent}} %",
     "reasons": {
+      "unreadable": "Some workspace metadata could not be indexed; folders are still read live.",
       "entriesWithLimit": "This tree crossed the file-index entry limit ({{count}}). Files are listed live; no complete file index is kept.",
       "chosen": "Files are listed live because this workspace was set to use live listing. No complete file index is kept.",
       "entries": "This tree crossed the file-index entry limit. Files are listed live; no complete file index is kept.",
@@ -8038,10 +8453,10 @@
       "scan_time": "Scanning this tree took too long. Files are listed live; no complete file index is kept.",
       "unknown": "Files are listed live; the machine has not reported why no complete file index is kept."
     },
-    "mountSuggestion": "For a large dataset shared by environments, consider a mount. Choose explicit paths before a snapshot, fork or move.",
     "gitSlow": "Git is too slow or its output too large for this repository. Use the shell to inspect it.",
     "gitCut": "This Git difference was cut at its output limit. Use the shell for the rest.",
-    "openShell": "Open shell"
+    "openShell": "Open shell",
+    "openFolders": "Open folders only"
   },
   "mountPlan": {
     "fingerprints": {
@@ -8175,7 +8590,15 @@
     "alwaysFile": "Always as a file",
     "alwaysInline": "Always in the message",
     "contextShare": "Share of remaining context",
-    "sendAsFile": "Send as a file"
+    "sendAsFile": "Send as a file",
+    "pasteReason": {
+      "chosen": "Chosen for this paste",
+      "alwaysInline": "Always inline here",
+      "alwaysFile": "Always a file here",
+      "unknown": "Context estimate unavailable",
+      "fits": "Fits the context share estimate",
+      "over": "Exceeds the context share estimate"
+    }
   },
   "firstSteps": {
     "title": "First steps",
@@ -8268,9 +8691,15 @@
     "copied": "Copied",
     "copyRefused": "The browser did not allow copying",
     "linkCopied": "Link copied",
-    "refresh": "Refresh"
+    "copyId": "Copy ID",
+    "idCopied": "ID copied",
+    "refresh": "Refresh",
+    "reason": "Reason"
   },
   "ui": {
+    "sectionNav": {
+      "search": "Find a section"
+    },
     "read": {
       "retrying": "Taking longer than usual · retrying",
       "failed": "Could not load"
@@ -8356,6 +8785,11 @@
       "reviewAccess": "Review access",
       "requestRefused": "The server refused this request. Check the values before trying again.",
       "operationFailed": "The operation stopped before it finished. Retry it from its controls.",
+      "subscriptionCapacity": "Live update capacity reached",
+      "silenceResponse": "No response for {{duration}}",
+      "silenceBody": "Transfer stalled for {{duration}}",
+      "networkResponse": "Connection failed before a response",
+      "networkBody": "Connection failed during transfer",
       "contextLimit": "This conversation is too long for the model. Compact it or start a new thread.",
       "modelBusy": "The model is busy. Try again shortly.",
       "providerSignIn": "The provider's sign-in was refused. Check its sign-in and keys.",
@@ -8365,6 +8799,7 @@
       "imageResultUnavailable": "The returned image could not be retained.",
       "nativeWebActionFailed": "The web action failed.",
       "nativeWebActionUnproven": "The web action could not be verified.",
+      "nativeWebNoEnd": "The web action did not report its end within the configured wait. A later result can still update it.",
       "cancelled": "The operation was cancelled.",
       "afterStart": "The environment's startup command failed. Review that command before starting again.",
       "mcpStopped": "The MCP server stopped. Check its failure reason and restart that server.",
@@ -8389,7 +8824,8 @@
       "modelRerouted": "The agent program ran this turn on another model than the one chosen. The turn’s usage names the model that ran.",
       "harnessDiverged": "The program reported behavior or settings that differ from Orch’s request. Review its change in this thread.",
       "mcpServerFailedNamed": "MCP server {{server}} could not start. Check its connection and sign-in settings.",
-      "modelReroutedNamed": "The agent program ran this turn on {{to}} instead of {{from}}."
+      "modelReroutedNamed": "The agent program ran this turn on {{to}} instead of {{from}}.",
+      "historyNotCarried": "History could not be carried. The original conversation is kept."
     },
     "toast": {
       "label": "Notice"
@@ -8492,11 +8928,11 @@
     "densityCompact": "Compact"
   },
   "network": {
-    "offline": "You are offline. Check your connection and try again.",
-    "silent": "The server has not answered for a while. Try again.",
-    "failed": "The server could not be reached. Try again.",
-    "malformed": "Something answered that is not this system: a proxy, perhaps. If it goes on, tell an administrator.",
-    "aborted": "The request was called off."
+    "offline": "Offline",
+    "silent": "Request stalled",
+    "failed": "Connection failed",
+    "malformed": "Unexpected server response",
+    "aborted": "Request cancelled"
   },
   "egress": {
     "outboundTunnel": "A program here can publish itself through its own outbound tunnel without a request in Orch; restricted egress prevents this.",
@@ -8562,7 +8998,8 @@
     "request": {
       "invalid": "Something in this request is not valid. Check what you entered and try again.",
       "value_refused": "A value in this request is not one that can be kept. Check what you entered and try again.",
-      "too_large": "This is larger than the server accepts. Choose less content and try again."
+      "too_large": "This is larger than the server accepts. Choose less content and try again.",
+      "too_early": "The secure connection must finish before this action. Nothing was changed; try again."
     },
     "admin": {
       "risk_not_acknowledged": "This change carries a risk that has to be acknowledged first. Tick the acknowledgement and try again.",
@@ -8609,6 +9046,26 @@
     },
     "authz": {
       "denied": "You do not have access to this. Ask somebody who manages it."
+    },
+    "ask": {
+      "not_in_list": "This model is not on this organization’s Ask list. Choose one of the listed models.",
+      "model_disabled": "This model is switched off. Choose another model.",
+      "provider_unavailable": "This model’s provider is not available. Choose another model or ask whoever manages the provider.",
+      "no_interface": "This model’s provider offers no way to hold a conversation. Choose another model.",
+      "options_refused": "The options chosen for this model are not allowed. Change them or use the model’s defaults.",
+      "model_not_allowed": "This organization’s policy does not allow this model. Choose another model.",
+      "provider_not_allowed": "This organization’s policy does not allow this model’s provider. Choose another model.",
+      "payer_unset": "Ask is set to be paid for by whoever set it, and that person is no longer known. Ask an administrator to set who pays.",
+      "no_use": "You may not use this model’s provider in this organization. Ask whoever manages it to let you.",
+      "identity_not_usable": "Your access to this provider does not cover this model’s default options. Choose another model.",
+      "use_excludes": "Your access to this provider does not allow Ask with this model and effort. Request access or choose another model.",
+      "payer_no_use": "The person who pays for Ask here may not use this provider in this organization. Ask an administrator.",
+      "payer_excludes": "The person who pays for Ask here does not have Ask access with this model and effort. Choose another.",
+      "no_keeper": "This provider has no machine that keeps its key. Ask whoever manages it to set one.",
+      "keeper_offline": "The machine that keeps this provider’s key is offline. Try again shortly or choose another model.",
+      "cap_reached": "A usage limit for Ask has been reached. Try again after it resets, or ask an administrator.",
+      "other_organization": "This page belongs to another organization. Ask in that organization.",
+      "root_refused": "You cannot open this organization as yourself. Ask answers as you are here, not as an administrator, so As admin does not open it. Use an organization you belong to."
     },
     "org": {
       "suspended": "Your access to this org is suspended. Ask one of its admins.",
@@ -8691,6 +9148,7 @@
     },
     "conflict": {
       "stale_revision": "Somebody changed this in the meantime. Look at how it stands now and try again.",
+      "concurrent_change": "A concurrent change interrupted this operation. Try again.",
       "exists": "That name or value is taken already. Choose another.",
       "idempotency_mismatch": "This request was repeated in a different form. Reload and try again.",
       "confirmation_required": "This needs your confirmation first. Review what it will share or change, then confirm."
@@ -8760,7 +9218,7 @@
       "in_use": "This is still in use and cannot be deleted. Free it first."
     },
     "upload": {
-      "offset": "The upload stopped at a different position. Retry it from the server's last saved position."
+      "offset": "This piece differs from bytes already received, or the file is still incomplete. Retry the upload."
     },
     "route": {
       "not_ready": "This channel cannot reach you yet. Finish setting it up first."
@@ -8778,6 +9236,9 @@
       "invalid": "This is not an Orch package or files that can be imported. Check the file and try again.",
       "undone": "This import was taken back already, or is being taken back."
     },
+    "summary": {
+      "nothing_new": "There is nothing new here to summarize, so no summary was asked for. Try again when something has been written or posted."
+    },
     "gone": "This link was used already or has expired. Ask for a new link.",
     "rate_limited": "Too many requests in a short time. Wait a little and try again.",
     "internal": "The server could not complete this request. Try again.",
@@ -8793,6 +9254,9 @@
     },
     "tunnel": {
       "gateway_unreachable": "The machines cannot reach a shared gateway. Check their network connections and try again."
+    },
+    "files": {
+      "reach_denied": "This path is outside your allowed file reach."
     }
   },
   "auth": {
@@ -8837,7 +9301,14 @@
       "alreadyDone": "This system has its administrator already. Sign in instead."
     },
     "login": {
-      "sessionEnded": "Your session ended. Sign in again.",
+      "sessionEnded": "Session ended",
+      "sessionEnd": {
+        "expired": "Session expired",
+        "revoked": "Session revoked",
+        "accountUnavailable": "Account unavailable",
+        "ended": "Ended",
+        "reason": "Reason"
+      },
       "title": "Sign in",
       "submit": "Sign in",
       "wrong": "Wrong name or password.",
@@ -9019,7 +9490,8 @@
       "reconnecting": "Reconnecting… what you see may be out of date.",
       "newVersion": "A new version is available.",
       "reload": "Reload",
-      "arrangementReset": "This screen's saved layout used an older version and was reset."
+      "arrangementReset": "This screen's saved layout used an older version and was reset.",
+      "checkFailed": "Could not bring your account up to date."
     },
     "small": {
       "home": "Home",
@@ -9386,6 +9858,8 @@
     },
     "notMarkedRead": "Not everything could be marked as read",
     "resources": {
+      "search": "Find resources",
+      "noMatches": "No resources match",
       "title": "Resource navigation",
       "about": "The kinds of resource there are, each with how many you may see and the things of that kind.",
       "tree": "Kinds of resource and what each holds",
@@ -9422,7 +9896,13 @@
     "recentAllItems": "All recent items",
     "showInTree": "Show in tree",
     "openEverything": "Open in Everything",
-    "noActivity": "No recent activity"
+    "noActivity": "No recent activity",
+    "pages": {
+      "previous": "Previous",
+      "next": "Next",
+      "waitingForLive": "Waiting for live updates",
+      "snapshot": "Snapshot"
+    }
   },
   "views": {
     "screen": {
@@ -9491,6 +9971,12 @@
     "diagnostics": {}
   },
   "workbench": {
+    "openLinks": {
+      "label": "Open links in",
+      "automatic": "Automatic",
+      "this": "This view",
+      "new": "A new view"
+    },
     "workspace": {
       "findTab": "Find an open tab",
       "noMatchingTabs": "No matching tabs",
@@ -9874,7 +10360,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9930,7 +10420,6 @@
       "connected": "Connected",
       "connectedHint": "Live updates are connected.",
       "checked": "{{fact}} · Checked {{time}}",
-      "openEnvironment": "Environment: {{name}}",
       "openChanges": "Workspace: {{workspace}}. Open Changes",
       "limitNear": "{{name}} nearly full",
       "limitReached": "{{name}} reached",
@@ -9941,11 +10430,12 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
-      "slow": "Slow connection · {{ms}} ms",
-      "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
+      "slow": "Connection slower · {{ms}} ms",
+      "slowHint": "Usually {{ms}} ms"
     },
     "tabInstance": "{{name}} · View {{number}}"
   },
@@ -10049,7 +10539,10 @@
       "custom": "Custom",
       "back": "Back to {{place}}’s rules",
       "about": "Owners and people added keep their own access. The general choice decides everyone else’s access.",
-      "letIn": "Let them into the environment",
+      "letIn": "Viewers can open the environment",
+      "environmentViewHelp": "Viewers can read files, terminals, browsers and displays. This grants no Use or permission to change them.",
+      "environmentManageHelp": "They can view the environment, edit its files and open a terminal. Use of the environment is granted separately.",
+      "environmentOffHelp": "When off, people keep only their existing environment access. Existing Use and Manage access is unchanged.",
       "cannotLetIn": "The thread’s access changed, but you cannot give its readers access to {{name}}. Ask its managers.",
       "changing": "Changing general access",
       "title": "Change general access to {{choice}}?",
@@ -10110,7 +10603,8 @@
       "notLoaded": "Could not load the people",
       "everyoneHere": "Everyone here",
       "gave": "by {{name}}, {{date}}",
-      "gaveLong": "Given by {{name}} on {{date}}"
+      "gaveLong": "Given by {{name}} on {{date}}",
+      "expired": "Expired access {{date}}"
     },
     "owners": {
       "label": "Owners",
@@ -10625,6 +11119,16 @@
       "duration": "How long do you need access?",
       "untilRemoved": "Until removed",
       "chooseDate": "Choose a date",
+      "customLength": "Custom duration",
+      "askInChat": "Ask in chat",
+      "length": "Duration",
+      "lengthUnit": "Unit",
+      "lengthRule": "Enter a duration in whole minutes within the allowed lifetime",
+      "units": {
+        "minutes": "Minutes",
+        "hours": "Hours",
+        "days": "Days"
+      },
       "endsOn": "End date",
       "futureDate": "Choose a future date",
       "requestedUntil": "Requested until",
@@ -10667,6 +11171,7 @@
     },
     "readOnly": "You can read this page; you cannot change it. {{reason}}",
     "options": {
+      "purposes": "Uses",
       "title": "{{holder}} on {{permission}}",
       "lead": "An entry may end on a day, and on a resource it may narrow what its holder gets.",
       "saving": "Saving the entry of {{holder}} on {{permission}}",
@@ -10691,12 +11196,14 @@
       "disk_gb": "Disk, in GiB",
       "services": "Services",
       "servicesHint": "Use service names, families or @groups. Leave empty to include every enabled service.",
+      "noPurposes": "No purposes",
       "where": "Where",
       "anywhere": "Anywhere",
       "addName": "Add…",
       "whereAdd": "Add to {{what}}",
       "whereRemove": "Remove {{name}}",
       "beyond": {
+        "purposes": "This allows more uses than any one entry of yours does.",
         "models": "This allows more models than any one entry of yours does.",
         "services": "This allows more services than any one entry of yours does.",
         "efforts": "This allows more efforts than any one entry of yours does.",
@@ -10713,7 +11220,13 @@
         "environment": "Environments",
         "host": "Hosts",
         "machine": "Machines"
-      }
+      },
+      "purposeNames": {
+        "ask": "Ask",
+        "work": "Other work"
+      },
+      "noUses": "None",
+      "reach": "Reach"
     },
     "who": {
       "title": "Who may use it",
@@ -10935,7 +11448,7 @@
       },
       "changing": "Changing its files and opening a shell there is given on its page.",
       "decides": "{{name}} decides: people can ask from the thread.",
-      "letIn": "Let them into {{name}}",
+      "letIn": "Let them view {{name}}",
       "askFor": "Ask {{owner}} for them",
       "reason": "Let {{names}} look into {{name}}, so that they see the files that “{{thread}}” works on.",
       "waiting": "{{names}} wait for {{owner}} to let them into {{name}}.",
@@ -11276,12 +11789,6 @@
       "topics_one": "{{count}} topic",
       "topics_other": "{{count}} topics"
     },
-    "duration": {
-      "days_one": "{{count}} day",
-      "days_other": "{{count}} days",
-      "hours_one": "{{count}} hour",
-      "hours_other": "{{count}} hours"
-    },
     "invite": {
       "alreadyCreated": "Invitation already created",
       "revokeAndAnother": "Revoke and make another",
@@ -11495,6 +12002,8 @@
       "actions": "Actions"
     },
     "topic": {
+      "findThreads": "Find threads",
+      "noMatchingThreads": "No threads match",
       "sections": "Sections of this topic",
       "statusLabel": "Status",
       "changeStatus": "Change status: {{status}}",
@@ -11555,6 +12064,7 @@
   },
   "documents": {
     "referenceReadFailed": "Could not load places and documents.",
+    "referencesMore": "Show more",
     "pdf": {
       "invalidBundle": "The document export could not be read. Try exporting it again.",
       "tooBig": "This document is too large to typeset here. Print it or export its source instead.",
@@ -11574,6 +12084,8 @@
       "writeBelow": "Write below",
       "untitled": "Untitled",
       "titleLabel": "Title",
+      "titleFailed": "Title not saved",
+      "descriptionFailed": "Description not saved",
       "descriptionLabel": "Description",
       "descriptionPlaceholder": "Add a description",
       "saved": "Saved",
@@ -11804,7 +12316,7 @@
       "file_added": "Added {{name}}",
       "file_replaced": "Replaced {{name}}",
       "file_removed": "Removed {{name}}",
-      "empty": "Nothing has been written yet",
+      "empty": "No history entries",
       "detail": "What this entry changed",
       "layout": "Layout",
       "difference": "Blocks that differ",
@@ -11818,8 +12330,17 @@
       "putBackAbout": "The document becomes what it was in this version (“{{title}}”). The present state is kept as a version first, so nothing is lost.",
       "showingVersion": "You are reading version {{version}}, as it stood then.",
       "showPresent": "Show the present",
-      "foot": "Kept: {{count}} versions · {{size}} · back to {{since}}",
-      "footNone": "No version has been kept yet."
+      "foot_one": "Loaded {{number}} version",
+      "foot_other": "Loaded {{number}} versions",
+      "retention": {
+        "oldest": "Oldest restorable",
+        "allowance": "Retention",
+        "observed": "Observed",
+        "versions_one": "{{number}} version",
+        "versions_other": "{{number}} versions",
+        "none": "None",
+        "notShared": "Not shared"
+      }
     },
     "since": {
       "line": "Changed since you were here: {{who}}",
@@ -11867,7 +12388,9 @@
     },
     "readme": {
       "label": "README: {{title}}",
-      "more": "Read more",
+      "preview": "Preview",
+      "open": "Open document",
+      "unavailable": "README preview unavailable",
       "use": "Use as this place's README",
       "stop": "Stop using as README",
       "used": "Shown at the top of {{place}}",
@@ -12056,8 +12579,9 @@
     "destinationOrg": "Destination org",
     "createCopy": "Create document",
     "reviewCurrent": "Review the current changes before putting a block back.",
-    "copyPrivateLabel": "Private copy: only you",
-    "copyFollowsLabel": "Private copy off: destination access",
+    "copyPrivateLabel": "Private copy",
+    "copyPrivateHint": "Only you can read this copy",
+    "copyFollowsHint": "Follows destination access",
     "copySource": "Current source: {{title}}",
     "templates": "Start from a document",
     "readFirst": "Read first",
@@ -12143,7 +12667,7 @@
     "agentFor": "Agent for",
     "next": "Next run",
     "state": "State",
-    "runs": "{{done}} / {{total}} runs",
+    "runs": "{{done}} / {{total}} runs · {{remaining}} left",
     "until": "Until",
     "empty": "No schedules for this thread",
     "woken": "Woken by its schedule",
@@ -12351,7 +12875,9 @@
       "readOnly": "You can read this chat.",
       "disabled": "Chats are off for this {{kind}}.",
       "archived": "Archived · read-only",
-      "closed": "{{name}} is no longer here."
+      "closed": "{{name}} is no longer here.",
+      "groupDisabled": "Group chats off for this organization",
+      "directDisabled": "Direct chats off for this organization"
     },
     "new": {
       "asGroup": "Group",
@@ -12373,7 +12899,8 @@
       "none": "Nobody with that name",
       "guestChip": "guest",
       "guestHint": "Somebody from outside the org joins as a guest: they see this chat and nothing else of the org.",
-      "until": "Until"
+      "until": "Until",
+      "memberUntil": "Member until"
     },
     "pinned": {
       "label": "Pinned messages",
@@ -12566,6 +13093,8 @@
     "label": "Conversation",
     "loadingEarlier": "Loading earlier messages…",
     "earlierFailed": "Earlier messages could not be loaded.",
+    "itemUnavailable": "This item is unavailable in this view.",
+    "exactTime": "Exact time",
     "newLine": "New",
     "jump": "Jump to latest",
     "newBelow_one": "{{count}} new below",
@@ -12694,23 +13223,35 @@
       },
       "orch": "Orch tool {{tool}}"
     },
-    "work": {
-      "read_one": "read {{count}} file",
-      "read_other": "read {{count}} files",
-      "searched_one": "searched {{count}} time",
-      "searched_other": "searched {{count}} times",
-      "ran_one": "ran {{count}} command",
-      "ran_other": "ran {{count}} commands",
-      "edited_one": "edited {{count}} file",
-      "edited_other": "edited {{count}} files",
-      "fetched_one": "fetched {{count}} page",
-      "fetched_other": "fetched {{count}} pages",
-      "subagents_one": "started {{count}} sub-agent",
-      "subagents_other": "started {{count}} sub-agents",
-      "tools_one": "used {{count}} other tool",
-      "tools_other": "used {{count}} other tools",
-      "separator": ", ",
-      "nothing": "Worked"
+    "group": {
+      "working": "Working",
+      "workedFor": "Worked for {{time}}",
+      "worked": "Worked",
+      "failedAfter": "Failed after {{time}}",
+      "failed": "Failed",
+      "stoppedAfter": "Stopped after {{time}}",
+      "stopped": "Stopped",
+      "stoppedBy": "by {{name}}",
+      "commands_one": "{{count}} command",
+      "commands_other": "{{count}} commands",
+      "edited_one": "{{count}} file edited",
+      "edited_other": "{{count}} files edited",
+      "read_one": "{{count}} file read",
+      "read_other": "{{count}} files read",
+      "searched_one": "{{count}} search",
+      "searched_other": "{{count}} searches",
+      "fetched_one": "{{count}} page fetched",
+      "fetched_other": "{{count}} pages fetched",
+      "subagents_one": "{{count}} sub-agent",
+      "subagents_other": "{{count}} sub-agents",
+      "tools_one": "{{count}} other tool call",
+      "tools_other": "{{count}} other tool calls"
+    },
+    "figures": {
+      "title": "Turn {{ordinal}}",
+      "input": "Input {{tokens}}",
+      "cached": "Cached input {{tokens}}",
+      "output": "Output {{tokens}}"
     },
     "command": {
       "in": "Ran in {{directory}}",
@@ -12721,7 +13262,10 @@
       "tailOnly": "The end of the output ({{size}}) is shown.",
       "partial": "{{size}} of {{total}} shown.",
       "showAll": "Show all ({{size}})",
-      "showMore": "Show more"
+      "showMore": "Show more",
+      "showRetained": "Read retained output",
+      "outputMissing": "Output from byte {{from}} to before byte {{to}} was not retained.",
+      "retainedUnknown": "The original byte range of this retained output is unavailable."
     },
     "change": {
       "add": "created",
@@ -12779,9 +13323,7 @@
       "empty": "No child activity has been reported yet.",
       "unavailable": "This sub-agent is no longer available here.",
       "panelTitle": "Sub-agent",
-      "panelAbout": "The sub-agent’s reported activity, read-only.",
-      "running": "Running sub-agents",
-      "jump": "Show {{name}}'s activity"
+      "panelAbout": "The sub-agent’s reported activity, read-only."
     },
     "raw": {
       "tool": "Tool",
@@ -12792,19 +13334,20 @@
       "copyOutput": "Copy raw output",
       "copyInputShown": "Copy shown input",
       "copyOutputShown": "Copy shown output",
+      "readFailure": "The call as the harness made it could not be read.",
       "fullInput": "Full input",
       "fullOutput": "Full output",
-      "cut": "Only part of this is held.",
       "error": "The agent program marked this result as an error.",
       "running": "Nothing has come back yet.",
-      "noOutput": "No output was recorded."
+      "noOutput": "No output was recorded.",
+      "retainedInput": "Retained input",
+      "retainedOutput": "Retained output",
+      "missingRange": "Bytes {{from}} to before {{to}} were not retained."
     },
     "status": {
-      "compacting": "Compacting the conversation for {{time}}",
-      "starting": "Starting {{name}} for {{time}}",
-      "waitingApproval": "Waiting for an answer for {{time}}",
       "retrying": "Retrying the model call",
-      "retryingAttempt": "Retrying the model call · attempt {{attempt}}"
+      "retryingAttempt": "Retrying the model call · attempt {{attempt}}",
+      "silent": "Nothing new from {{name}} for {{time}}"
     },
     "footer": {
       "failed": "Failed",
@@ -12816,9 +13359,12 @@
       "tokens_other": "{{tokens}} tokens",
       "effort": "Effort: {{effort}}",
       "effortDefault": "Default effort",
-      "changed_one": "{{count}} file changed (+{{added}} −{{removed}})",
-      "changed_other": "{{count}} files changed (+{{added}} −{{removed}})",
       "retry": "Retry this turn"
+    },
+    "start": {
+      "line": "Started with {{agent}} on {{provider}}",
+      "created": "Created by {{by}}",
+      "open": "Show how this thread began"
     },
     "catchup": {
       "title": "Since you were last here",
@@ -12885,6 +13431,17 @@
       "compacted": "Compacted the conversation",
       "compactedIn": "Compacted the conversation · {{duration}}",
       "instructionsDeferred": "{{program}} keeps this session's original instructions; changes apply to the next new session.",
+      "sessionReopened": {
+        "unknown": "The session was opened again: it was not known to be open, because the server or the program started again.",
+        "instructions": "The session was opened again: the instructions changed.",
+        "limits": "The session was opened again: the limits on its sub-agents changed.",
+        "configuration": "The session was opened again: a setting that only a new session takes changed.",
+        "mcp": "The session was opened again: the MCP servers it is offered changed.",
+        "tools": "The session was opened again: the Orch tools it is offered changed.",
+        "skills": "The session was opened again: the skills it is given changed.",
+        "programReloads": "The session was opened again: this program reads the directory's files each time a session opens, so it opens one for every turn.",
+        "sideHistory": "The session was opened again: the history of this side thread was read from its parent again."
+      },
       "limitBypassed": "{{by}} let a turn past a limit: {{limits}}",
       "archived": "{{by}} archived {{node}}",
       "unarchived": "{{by}} took {{node}} out of the archive",
@@ -12942,6 +13499,22 @@
     "chatRefs": {
       "label_one": "{{count}} chat message quotes this item",
       "label_other": "{{count}} chat messages quote this item"
+    },
+    "storage": {
+      "details": "Output storage details",
+      "repaired": "Text repaired",
+      "incomplete": "Output incomplete",
+      "failed": "Part of the output could not be stored. The recorded gap keeps its reason; later work can continue.",
+      "replacements": "Replacements applied",
+      "reason": "Database refusal",
+      "event": "Event number"
+    },
+    "masking": {
+      "address": "Address masked; the captured content remains available",
+      "path": "Path masked; the original file address is private",
+      "pending": "Text hidden until its native stream ends",
+      "unclassified": "Text hidden; native continuity is unknown",
+      "incomplete": "Text hidden; matching context is incomplete"
     }
   },
   "approvals": {
@@ -13136,11 +13709,12 @@
       "deny": "Deny selected",
       "finished": "All requests decided",
       "unavailable": "Request no longer available"
-    }
+    },
+    "decisionUntil": "Decision until",
+    "whileAgentWaits": "While the agent waits"
   },
   "composer": {
     "row": {
-      "provider": "Provider: {{name}}",
       "archived": "Thread archived",
       "sideBinding": "Change the parent thread’s binding",
       "label": "Message controls",
@@ -13153,7 +13727,9 @@
       "empty": "Write a message or attach a file first.",
       "tooLong": "Shorten the message before sending.",
       "filesWaiting": "Wait for the attachments to finish.",
-      "waitingForTurn": "The running turn is still being loaded."
+      "waitingForTurn": "The running turn is still being loaded.",
+      "runsWith": "What this thread runs with",
+      "agentName": "Agent"
     },
     "mode": {
       "title": "Approval mode",
@@ -13194,19 +13770,16 @@
       "loading": "Reading…"
     },
     "model": {
-      "change": "Model and effort: {{model}}. Change",
-      "current": "Model and effort: {{model}}",
-      "efforts": "Efforts of {{model}}",
       "find": "Find a model",
       "list": "Models",
-      "noEffort": "This agent takes no effort setting.",
       "none": "No model set",
       "notAllowed": "Not allowed here",
       "readOnly": "Changing the model is for whoever manages this thread: {{who}}",
-      "title": "Model and effort",
       "reason": {
         "not_on_provider": "{{provider}} does not offer it",
         "disabled": "It is switched off",
+        "shared_for_ask_only": "Shared for Ask only",
+        "shared_for_other_work_only": "Shared for other work only",
         "excluded_by_entry": "Not included in your access to {{provider}}",
         "excluded_by_policy": "A policy does not allow it here"
       },
@@ -13214,7 +13787,6 @@
       "exampleLarge": "Large example model",
       "exampleSmall": "Small example model",
       "example": "Example model",
-      "runsWith": "What this thread runs with",
       "conflict": {
         "title": "This choice changed",
         "model": "{{name}} switched to {{model}} just now. Choose again to apply your choice.",
@@ -13300,8 +13872,11 @@
         "context": "Choose the context size, such as /context 400k",
         "done": "{{what}}: {{value}}",
         "notOpen": "{{what}} “{{given}}” is not open for this model. Open: {{list}}.",
-        "sizeInvalid": "Write a size such as 400K, 1M or 400000."
-      }
+        "sizeInvalid": "Write a size such as 400K, 1M or 400000.",
+        "fast": "Switch the fast speed on or off"
+      },
+      "chip": "Model",
+      "window": "{{size}} context"
     },
     "label": "Message to the agent",
     "placeholder": "Message {{agent}}…",
@@ -13309,6 +13884,8 @@
     "send": "Send",
     "stop": "Stop",
     "escAgain": "Press Esc again to stop",
+    "stopping": "Stopping…",
+    "stoppingTime": "Stopping… {{time}}",
     "counter": "{{count}} / {{max}}",
     "attach": "Attach files",
     "deliveryMenu": "More ways to send",
@@ -13333,7 +13910,9 @@
     },
     "draft": {
       "saving": "Saving the draft…",
-      "failed": "The draft could not be saved"
+      "failed": "The draft could not be saved",
+      "kept": "Draft kept in this session",
+      "failedNamed": "Draft for “{{name}}” could not be saved"
     },
     "queue": {
       "title_one": "Queued ({{count}})",
@@ -13377,9 +13956,9 @@
       "dragCancelled": "Reordering cancelled.",
       "moveRowUp": "Move queued message {{number}} up",
       "moveRowDown": "Move queued message {{number}} down",
-      "heldCap": "Waiting for {{name}}'s allowance",
-      "heldOwner": "Waiting: {{owner}}, whose thread this is, can't use {{provider}}",
-      "heldSecondStep": "Waiting for {{name}} to set up a second step",
+      "heldCap": "Allowance reached · other messages may pass · resumes automatically",
+      "heldOwner": "Needs access to {{provider}} · other messages may pass · resumes automatically",
+      "heldSecondStep": "Second step needed · other messages may pass · resumes automatically",
       "theSender": "the sender",
       "steering": "Steering…",
       "steered": "Steered",
@@ -13401,17 +13980,19 @@
       "heldCommandPermission": "Waiting for {{name}}: they may not run its command",
       "heldCommandArguments": "Waiting for {{name}}: its command's arguments are not valid",
       "heldCommandUnavailable": "Waiting for {{name}}: its command is not available in this session",
-      "heldModel": "Waiting for someone who may use {{model}}",
-      "heldUse": "Waiting for someone who may use {{model}} and {{environment}}",
+      "heldModel": "Needs {{model}} access · other messages may pass · resumes automatically",
+      "heldUse": "Needs {{model}} and {{environment}} access · other messages may pass · resumes automatically",
       "runIt": "Run it",
       "runItLabel": "Run message {{number}} on your access"
     },
     "plan": {
-      "placeDefault": "Plan default",
+      "placeDefault": "First message default",
       "label": "Plan",
       "on": "Planning: the agent proposes a plan and changes nothing until somebody proceeds. The approval mode stays as it is.",
       "off": "Plan first: the agent proposes a plan and changes nothing until somebody proceeds.",
-      "checking": "Checking the place’s Plan default…"
+      "checking": "Checking the place’s Plan default…",
+      "slash": "Work the next message in plan mode, such as /plan the task",
+      "unsupported": "This agent program does not offer Plan"
     },
     "confinement": {
       "placeDefault": "Sandbox default",
@@ -13419,9 +14000,154 @@
       "label": "Sandbox: {{mode}}",
       "readOnly": "Changing the sandbox is for whoever manages this thread: {{who}}",
       "notOffered": "The agent program has not offered a sandbox choice here."
+    },
+    "pick": {
+      "find": "Search",
+      "nothing": "Nothing matches",
+      "provider": {
+        "ask": "Ask for access",
+        "off": "Unavailable",
+        "why": {
+          "needs_setup": "needs a model",
+          "ready": "ready",
+          "exhausted": "at its limit",
+          "error": "reports an error",
+          "offline": "offline",
+          "disabled": "stopped",
+          "notAllowed": "not allowed here",
+          "noUse": "no access"
+        }
+      },
+      "agent": {
+        "off": "Does not work with {{provider}}",
+        "only": "The only agent that works with this provider",
+        "open": "Open agent",
+        "changed": "Agent changed to {{agent}}: {{was}} does not work with {{provider}}",
+        "why": {
+          "unreported": "not reported yet",
+          "error": "reports an error",
+          "disabled": "switched off",
+          "noUse": "no access",
+          "unavailable": "unavailable"
+        }
+      }
+    },
+    "chip": {
+      "value": "{{what}}: {{value}}",
+      "unset": "Not set",
+      "startsWith": "Where threads start"
+    },
+    "effort": {
+      "title": "Effort",
+      "default": "Default"
+    },
+    "slash": {
+      "fork": "Fork this thread into a new one",
+      "directory": "Choose the directory the thread works in"
+    },
+    "where": {
+      "label": "Works in {{where}}. Change"
+    },
+    "withheld": {
+      "agent": "{{agent}} does not offer it",
+      "access": "Only while the credential stays with the provider",
+      "placement": "Not offered in this kind of environment",
+      "providerKind": "Not offered with this kind of provider",
+      "feature": "Switched off in Agent features",
+      "provider": "The provider leaves it out for this model",
+      "condition": "Not offered here",
+      "act": {
+        "feature": "Switch on in Agent features",
+        "access": "Change how it runs",
+        "placement": "Change where it runs"
+      }
+    },
+    "wake": {
+      "allowed": "Wake allowed",
+      "blocked": "Wake blocked",
+      "requested": "Wake requested",
+      "notRequested": "No wake requested"
+    },
+    "requirements": {
+      "required": "Required",
+      "chosen": "Chosen",
+      "notApplied": "Not applied",
+      "unavailable": "Unavailable · {{requirement}} required",
+      "without": "Without {{requirement}}",
+      "managed": "Managed environment",
+      "connected": "Connected machine",
+      "api": "API key provider",
+      "subscription": "Subscription provider",
+      "native": "Provider-native model access",
+      "forwarded": "Credential kept with provider",
+      "shared": "Credential shared into environment",
+      "handover": "Credential handed to environment",
+      "webSearch": "Model web search",
+      "efforts": "Model effort choices",
+      "speeds": "Model speed choices",
+      "programs": "Model access programs",
+      "images": "Model image input",
+      "context": "Larger model context",
+      "modelValue": "Model choice {{value}}",
+      "version": "Agent version {{range}}",
+      "agent": "Agent support",
+      "feature": "Enabled feature",
+      "provider": "Provider permission",
+      "fast": "Fast",
+      "actual": "Current"
+    },
+    "approvalUnavailable": {
+      "reviewer": "Reviewer unavailable",
+      "reviewerAccess": "Reviewer access required",
+      "policy": "Not allowed here",
+      "isolation": "Required isolation unavailable",
+      "build": "Build support required",
+      "autoNotProven": "Not proven on this machine yet.",
+      "autoCheckFailed": "Failed its check on this machine.",
+      "autoCheckUnavailable": "No Auto check is available for this program."
+    },
+    "approvalRequirements": {
+      "reviewer": "Native permission reviewer",
+      "reviewerUse": "Reviewer model Use",
+      "policy": "Allowed approval mode",
+      "isolation": "Driver-declared isolation",
+      "build": "Compatible agent build"
+    },
+    "toolRate": {
+      "refused": "Tool call refused · Allowance reached",
+      "wait": "Reported wait",
+      "allowance": "Allowance",
+      "calls_one": "{{number}} call per {{period}}",
+      "calls_other": "{{number}} calls per {{period}}",
+      "source": "Source",
+      "observed": "Recorded"
+    },
+    "callRoute": {
+      "using": "Using",
+      "failover": "Failover",
+      "active": "Active route",
+      "original": "Original",
+      "return": "Return",
+      "whenReady": "When ready on a later turn",
+      "stay": "Stay on failover",
+      "returning": "Returning",
+      "observed": "Observed"
     }
   },
   "thread": {
+    "moveOut": {
+      "chooseDestination": "Choose a destination topic",
+      "action": "Move to another org…",
+      "title": "Move {{name}} to another org",
+      "about": "Copy the full conversation, then delete the original.",
+      "confirm": "Move",
+      "progress": "Moving the conversation",
+      "done": "The conversation moved to the new org. The original was deleted.",
+      "original": "The original thread",
+      "open": "Open moved thread",
+      "searchSides": "Search side threads",
+      "openSides": "Open side threads"
+    },
     "audience": {
       "kinds": {
         "role_one": "{{number}} role",
@@ -13492,9 +14218,19 @@
       "more": "More turn actions"
     },
     "turnFiles": {
+      "reported_one": "Changes reported by tools: {{count}} file",
+      "reported_other": "Changes reported by tools: {{count}} files",
+      "toolLines": "Lines from tools: +{{added}} −{{removed}}",
+      "reviewReported": "Review reported edits",
       "list": "Files changed in this turn",
+      "find": "Find files",
+      "noMatches": "No matching files",
       "review": "Review",
-      "thisTurn": "This turn"
+      "thisTurn": "This turn",
+      "changed_one": "{{count}} file changed",
+      "changed_other": "{{count}} files changed",
+      "known_one": "Known changes: {{count}} file",
+      "known_other": "Known changes: {{count}} files"
     },
     "pinnedApprovals": "Waiting for approval",
     "now": {
@@ -13503,25 +14239,17 @@
       "approvalFor": "Waiting for approval: {{target}}",
       "running": "Running {{command}}",
       "writing": "Writing {{path}}",
-      "thinking": "Thinking",
+      "thinking": "Thinking…",
       "answering": "Writing the answer",
       "starting": "Starting the turn",
       "working": "Working",
-      "approvals_one": "{{count}} approval waiting",
-      "approvals_other": "{{count}} approvals waiting"
+      "needsInput": "Needs your input"
     },
     "viewModes": {
       "label": "Detail",
-      "focused": "Focused",
-      "full": "Full",
-      "live": "Live",
-      "focusedAbout": "Keep inputs, answers and waiting approvals visible; fold the other work.",
-      "fullAbout": "Show the work step by step, with tool output closed until opened.",
-      "liveAbout": "Open current tool output as it arrives and follow the latest work until you scroll up.",
-      "toolCalls_one": "{{count}} tool call",
-      "toolCalls_other": "{{count}} tool calls",
-      "files_one": "{{count}} file changed",
-      "files_other": "{{count}} files changed"
+      "normal": "Normal",
+      "verbose": "Verbose",
+      "diagnostics": "Diagnostics"
     },
     "agent": {
       "context": "Context {{percent}} % used"
@@ -13563,11 +14291,39 @@
     },
     "summary": {},
     "usage": {},
+    "stopping": {
+      "line": "Stopping"
+    },
     "starting": {
       "none": "Starting",
       "environment": "Waking the environment",
+      "environmentMaking": "Its environment is being made",
       "source": "Preparing the source",
-      "files": "Preparing the environment",
+      "files": "Writing the attached files",
+      "recording": "Recording the files before the turn",
+      "behind": "{{what}} · waiting behind {{other}} on this environment",
+      "work": {
+        "fsStat": "Looking at the directory",
+        "fsMkdir": "Making the directory",
+        "gitPrepare": "Cloning the repository",
+        "gitWorktree": "Making the worktree",
+        "fsRecord": "Recording the files before the turn",
+        "fsMaterialize": "Writing the attached files",
+        "sessionOpen": "Opening the session",
+        "fsNotesCopy": "Copying notes"
+      },
+      "other": {
+        "fsRecord": "a file recording",
+        "gitPrepare": "a clone",
+        "gitWorktree": "a worktree being made",
+        "fsMaterialize": "files being written",
+        "fsSnapshot": "a file snapshot",
+        "fsMkdir": "a directory being made",
+        "fsWrite": "a file being written",
+        "envAttach": "the environment starting",
+        "work": "other work",
+        "fsNotesCopy": "a notes copy"
+      },
       "provider": "Starting {{provider}}'s runtime",
       "harness": "Starting {{agent}}",
       "credential": "Getting a credential from {{provider}}",
@@ -13579,7 +14335,7 @@
       "unbound": "Choose an agent and provider to start.",
       "agent_offline": "{{machine}} is offline. Messages will be delivered when it returns.",
       "agent_disabled": "{{agent}} was disabled.",
-      "binding_invalid": "This thread's current agent setup is no longer allowed here{{detail}}",
+      "binding_invalid": "Agent setup unavailable{{detail}}",
       "secondStep": "The messages that wait are held until their senders set up the second step this org requires, in Settings → Security.",
       "provider_exhausted": "{{provider}} has reached its limit{{detail}}",
       "provider_unavailable": "{{provider}} is not ready{{detail}}",
@@ -13596,7 +14352,7 @@
       "error": "The thread stopped because of an error{{detail}}",
       "proceed": "Proceed anyway…",
       "manager": "Whoever manages this thread can change this: {{who}}",
-      "offlineDeadline": "If the machine stays offline, this turn ends at {{when}}.",
+      "nativeEnd": "Native turn end unconfirmed · queued work waits",
       "offlineDeadlineDuration": "This turn ends after {{seconds}} seconds offline, counted from {{since}}.",
       "offlineDeadlineBeyondCalendar": "The configured deadline extends beyond the calendar. This outage began {{since}}."
     },
@@ -13614,6 +14370,7 @@
       "quota_exceeded": "usage cap reached",
       "attachments": "files not delivered",
       "workspace_trust": "workspace configuration to answer for",
+      "source_failed": "source preparation failed",
       "switching": "being switched",
       "error": "error"
     },
@@ -13632,7 +14389,6 @@
     "header": {
       "shareThread": "Share thread",
       "label": "Thread",
-      "quickActions": "Thread actions",
       "importedHistory": "Imported history",
       "needsSetup": "Needs setup",
       "chooseAgentProvider": "Choose agent and provider…",
@@ -13702,6 +14458,51 @@
     "passive": {
       "more_one": "Show {{count}} more",
       "more_other": "Show {{count}} more"
+    },
+    "frame": {
+      "changesCounts": "Changes: {{added}} lines added, {{removed}} removed",
+      "changesUnknown": "Changes: counts not loaded"
+    },
+    "sent": {
+      "waiting": "Sent, waiting for the agent to take it"
+    },
+    "messages": {
+      "loading": "Loading messages…",
+      "changesUnknown": "Changes have not been read for this turn",
+      "title": "Messages",
+      "keys": "Previous or next message",
+      "arrows": "Move between messages",
+      "previous": "Previous message",
+      "next": "Next message",
+      "noEarlier": "No earlier message",
+      "noLater": "No later message",
+      "goTo": "Go to the message: {{line}}",
+      "place": "{{at}} of {{total}}",
+      "search": "Search the messages",
+      "list": "The people’s messages",
+      "none": "Nobody has written yet",
+      "noMatch": "No message matches"
+    },
+    "agents": {
+      "loading": "Loading agents…",
+      "search": "Search agents",
+      "noMatch": "No agents found",
+      "title": "Agents",
+      "count_one": "{{count}} agent",
+      "count_other": "{{count}} agents",
+      "main": "Main",
+      "active": "Active",
+      "done": "Done",
+      "tokens": "{{value}} tokens out",
+      "dot": {
+        "waiting": "Needs a person",
+        "working": "Working",
+        "failed": "One failed"
+      },
+      "backTo": "Back to {{name}}",
+      "open": "Open conversation",
+      "readOnly": "Read-only: {{name}}",
+      "backToMain": "Back to Main"
     }
   },
   "implicitAvailability": {
@@ -13763,9 +14564,8 @@
       "arrangement": "No way of placing this agent works here."
     },
     "provider": {
-      "title": "Provider",
       "none": "There is no provider you can run work on yet. Somebody who manages providers has to add one, or give you the use of one.",
-      "locked": "A place above fixes the provider for new threads here.",
+      "locked": "Provider fixed above",
       "notYours": "you may not use it; ask {{owner}}",
       "status": {
         "needs_setup": "it needs a credential or a model before it can be used",
@@ -13786,10 +14586,7 @@
     },
     "model": {
       "model": "Model",
-      "effort": "Effort",
-      "pickProvider": "Choose a provider first.",
-      "none": "This provider lists no model you can choose yet.",
-      "closed": "it cannot be used here"
+      "none": "This provider lists no model you can choose yet."
     },
     "where": {
       "title": "Where it runs",
@@ -13808,27 +14605,15 @@
       "chooseFileThread": "Choose a thread",
       "useFiles": "Use these files",
       "clearFiles": "Start empty",
-      "choice": "Environment setup",
       "useExisting": "Use existing",
       "createNew": "Create new",
       "noExisting": "No existing environment",
       "noHost": "No host can make the default environment here",
       "chooseExisting": "Choose an environment",
-      "more": "More…",
-      "moreTitle": "More environments",
-      "search": "Find an environment…",
       "noMatches": "No matching environment",
-      "used": {
-        "project": "In this project",
-        "elsewhere": "Elsewhere",
-        "unused": "Not used"
-      },
       "machineTitle": "A directory on one of your machines",
-      "machineAbout": "Registering a directory makes it an environment of yours, which this thread then joins. Whoever runs a machine can read what is on it.",
       "allOffline": "Your machines are all offline.",
       "machine": "Machine",
-      "root": "Directory on that machine",
-      "rootHint": "An absolute path; the machine checks it against its own policy.",
       "envName": "Name of the environment",
       "use": "Use this directory",
       "directory": "Directory in that environment",
@@ -13841,19 +14626,47 @@
       "directoryNew": "Will be created",
       "directoryIsFile": "This is not a directory",
       "closed": "It cannot be used now.",
-      "hosts": "Where it would be made",
-      "hostChosen": "chosen unless you pick",
       "hostClosed": "cannot be used",
+      "hostGone": "This host is no longer available",
+      "templateGone": "This template is no longer available",
+      "hostDefault": "Default host",
+      "manageThread": "Manage Thread required",
+      "threadArchived": "Thread archived",
+      "review": "Review change",
       "makeOne": "New environment…",
       "mayNotMake": "You may not make an environment here",
-      "threads_one": "{{count}} thread",
-      "threads_other": "{{count}} threads",
-      "alsoUsedBy": "also used by {{names}}",
-      "alsoUsedByMore_one": "also used by {{names}} and {{count}} other",
-      "alsoUsedByMore_other": "also used by {{names}} and {{count}} others",
       "directoryIs": "Where in the environment this thread works. Left empty, it is {{directory}}.",
       "canUse": "Can use",
-      "askAccess": "Ask for access"
+      "askAccess": "Ask for access",
+      "newRow": "New environment…",
+      "newName": "New environment",
+      "unavailable": "Unavailable",
+      "default": "Default",
+      "defaultFrom": "Default environment, set on {{place}}",
+      "defaultFromAbove": "Default environment, set on a place above this one",
+      "defaultUnusable": "The default environment {{name}} cannot be used: {{why}}.",
+      "defaultUnusableUnnamed": "The default environment cannot be used: {{why}}.",
+      "unavailableShort": "{{name}} unavailable · {{why}}",
+      "unavailableShortUnnamed": "Default environment unavailable · {{why}}",
+      "noFreshShort": "New environment unavailable",
+      "defaultSetOn": "It is set on {{place}}.",
+      "defaultFresh": "Threads here get an environment of their own (the New threads setting), so the default environment {{name}} is not used.",
+      "defaultFreshUnnamed": "Threads here get an environment of their own (the New threads setting), so no default environment is used.",
+      "insteadNew": "A new environment is used instead.",
+      "insteadNamed": "{{name}} is used instead.",
+      "insteadChoose": "Choose where it runs.",
+      "cannotRun": "{{agent}} cannot run in {{where}}:",
+      "aNewEnvironment": "a new environment",
+      "using": "{{agent}} is used instead.",
+      "allowVersions": "Allow other versions",
+      "askOwner": "Ask {{name}} to allow it on the environment’s Tools tab.",
+      "openTools": "Open its tools",
+      "openMachine": "Open the machine",
+      "host": "Host",
+      "hostAuto": "Most room",
+      "hostAutoNamed": "Most room ({{host}})",
+      "template": "Template",
+      "templateDefault": "This place’s template"
     },
     "arrangement": {
       "asChosen": "As its place and the provider decide",
@@ -13881,9 +14694,9 @@
     },
     "access": {},
     "options": {
+      "nameDefault": "Automatic title",
       "title": "Options",
-      "name": "Name",
-      "nameHint": "Left empty, the thread is named by itself once there is something to name it by."
+      "name": "Name"
     },
     "message": {
       "title": "First message"
@@ -13908,7 +14721,11 @@
       "not_on_provider": "the provider does not list it",
       "excluded_by_entry": "the entry you use the provider through leaves it out",
       "excluded_by_policy": "a policy of this place leaves it out",
-      "not_allowed_where": "the entry you use the provider through does not allow it in this environment"
+      "not_allowed_where": "the entry you use the provider through does not allow it in this environment",
+      "environment_lost": "it was declared lost",
+      "environment_failed": "its last start failed",
+      "environment_use_required": "you need its Use first",
+      "environment_not_seen": "you cannot see it"
     },
     "made": {
       "topic": "The topic {{name}} was made.",
@@ -13951,9 +14768,6 @@
       "model": "No model is chosen for new threads in {{place}}.",
       "environment": "You manage no environment here and may not make one.",
       "arrangement": "{{agent}} cannot be placed on {{provider}} here: {{why}}",
-      "pickProvider": "Choose a provider",
-      "pickAgent": "Choose an agent",
-      "pickModel": "Choose a model",
       "keepFor": "Default for",
       "scope": {
         "topic": "This topic",
@@ -13978,7 +14792,25 @@
       "reasonHint": "Optional, up to {{max}} characters. Those who can give it read it."
     },
     "refusedWhy": "{{what}} Reason: {{why}}.",
-    "refusedEffort": "This effort is not allowed for this model here. Choose another effort."
+    "refusedEffort": "This effort is not allowed for this model here. Choose another effort.",
+    "instructions": {
+      "edited": "Edited"
+    },
+    "locks": {
+      "agent": "Agent fixed above",
+      "model": "Model fixed above",
+      "effort": "Effort fixed above",
+      "effortValue": "Requires the fixed {{effort}} effort"
+    },
+    "approvalFacts": {
+      "preferred": "Preferred",
+      "effective": "Will use",
+      "reason": "Reason",
+      "source": "Source",
+      "notDeclared": "Program does not offer the preferred mode",
+      "noOrdinary": "Program offers no ordinary approval mode",
+      "replaced": "{{mode}} · Default unavailable"
+    }
   },
   "resources": {
     "landing": {
@@ -14255,13 +15087,17 @@
     "compact": {
       "enabledCount": "Enabled: {{count}}",
       "disabledCount": "Disabled: {{count}}",
-      "contents": "Contents",
       "moreValues": "+{{count}} more",
       "saved": "Saved",
       "undone": "Undone",
       "undo": "Undo",
       "undoNamed": "Undo the change to {{name}}",
-      "aboveStricter": "The setting above is stricter. Your value is saved.",
+      "ceilingRefusal": "Enter {{limit}} or less ({{place}}).",
+      "aboveMaximum": "Enter a value at or below the inherited maximum.",
+      "inheritedMaximum": "Maximum: {{value}}",
+      "aboveStricter": "Stricter above",
+      "effectiveValue": "In force",
+      "onlyInheritedHere": "Only inherited here",
       "undoStale": "This value changed again. Review its current value before making another change.",
       "invalidValue": "Check this value before it can be saved.",
       "example": "Example",
@@ -14286,6 +15122,12 @@
       "readOnly": "Read only",
       "draft": "Unsaved changes",
       "setOn": "Set in {{place}}",
+      "asPlace": "As {{place}} decides",
+      "asSystem": "As the system decides",
+      "asHost": "As the host decides",
+      "asEnvironment": "As the environment decides",
+      "here": "Here",
+      "choiceFor": "Choice for {{name}}",
       "lockedOn": "Locked at {{place}}",
       "hiddenSource": "Set above",
       "editValue": "Edit {{name}}",
@@ -14303,7 +15145,6 @@
     },
     "place": {
       "separator": " / ",
-      "group": "Places",
       "none": "No place matches what you typed.",
       "placeholder": "Type part of a name…",
       "clear": "Take away {{path}}",
@@ -14345,10 +15186,11 @@
         }
       },
       "device": {
+        "find": "Find device data",
+        "otherData": "Other device data",
         "title": "On this device",
         "lead": "These stay in this browser and are never sent anywhere. Forgetting them changes nothing on your other devices.",
         "none": "This device keeps nothing for you.",
-        "other": "{{name}}",
         "screens": {
           "org": "org",
           "project": "project",
@@ -14372,6 +15214,16 @@
         },
         "layout": "Layout of the {{screen}} screen",
         "commentDrafts": "Unsent document comments"
+      },
+      "reading": {
+        "title": "Reading",
+        "recent": "Recently closed tabs",
+        "delay": "Loading delay (ms)",
+        "nonnegative": "Enter a nonnegative whole number.",
+        "catchUp": "Unread items before catch-up",
+        "ownChoice": "Your Interface choice",
+        "automaticAfter_one": "Automatic catch-up after {{amount}} unread item",
+        "automaticAfter_other": "Automatic catch-up after {{amount}} unread items"
       }
     },
     "org": {
@@ -14388,7 +15240,7 @@
         "service-accounts": "Service accounts",
         "audit": "Audit",
         "everything": "Everything",
-        "channels": "Channels",
+        "channels": "Email and channels",
         "destinations": "Send elsewhere"
       }
     },
@@ -14793,6 +15645,8 @@
       "nameHint": "How members will know it, beside the kind.",
       "nameMissing": "A channel needs a name.",
       "fieldMissing": "This is needed.",
+      "ehloName": "EHLO name",
+      "ehloHelp": "The host name given to the mail server when connecting. Empty: this machine's name.",
       "keepSecret": "A value is set. Leave this empty to keep it.",
       "lastOk": "Last delivered",
       "neverSent": "Nothing has been sent through it yet.",
@@ -15166,7 +16020,7 @@
       "unknown": "An unknown browser",
       "thisOne": "This browser",
       "lastUsed": "Last used",
-      "ends": "Ends {{time}}",
+      "ends": "Idle expiry {{time}}",
       "end": "Sign out",
       "endTitle": "Sign {{browser}} out?",
       "endConfirm": "Sign it out",
@@ -15404,6 +16258,7 @@
       "noMatch": "No machine matches that."
     },
     "add": {
+      "nameDefault": "Computer name",
       "title": "Add machine",
       "rolesTitle": "Roles",
       "roleChoices": {
@@ -15531,7 +16386,6 @@
       "noHarness": "No supported agent program was found here.",
       "harnessOption": "{{harness}} {{version}}",
       "name": "Name",
-      "nameHint": "Left empty it is called “{{proposed}}”.",
       "nameEmpty": "Give it a name.",
       "proposed": "{{harness}} on {{machine}}",
       "submit": "Register profile",
@@ -15585,7 +16439,7 @@
       "unreportedOffer": "The machine no longer reports this saved offer. Keep it or clear it.",
       "executorSummaryUnknown": "The executor has not reported a description.",
       "source": {
-        "local": "Kept locally",
+        "local": "Physical machine operator",
         "orch": "From Orch",
         "manager": "Machine managers"
       },
@@ -15786,6 +16640,10 @@
         "policy_delegated": {
           "title": "Handed over to Orch",
           "meaning": "The limits that may be changed from Orch instead of on the machine."
+        },
+        "environment_files_reach": {
+          "title": "File reach",
+          "meaning": "The widest path reach this machine permits for human file access and unconfined shells"
         }
       },
       "driverFaults": {
@@ -15799,7 +16657,11 @@
         "list": "The list does not meet the required length or uniqueness",
         "rule": "The value does not meet this configuration rule",
         "schema": "The driver reported an invalid configuration schema"
-      }
+      },
+      "find": "Find setting",
+      "noMatches": "No matching settings",
+      "findValue": "Find value",
+      "noMatchingValues": "No matching values"
     },
     "edit": {
       "reportedWhy": "The machine reports it itself, and it changes when the machine does.",
@@ -15842,7 +16704,7 @@
       "lapsed": "Ended",
       "ends": "Ends",
       "renewal": "Renewal",
-      "renewsByItself": "The connector renews it by itself"
+      "renewsByItself": "Automatic · reconnects when idle"
     }
   },
   "providers": {
@@ -15991,6 +16853,12 @@
       "renew": "Started to renew at",
       "updates": "What it is behind in",
       "update": "{{name}}: {{from}} → {{to}}",
+      "toolAdded": "{{name}} {{release}} is added",
+      "toolRebuilt": "{{name}}: a newer build of {{release}}",
+      "tools": {
+        "connector": "Orch connector",
+        "executor": "Orch tools"
+      },
       "lastProgramError": "Last program error"
     },
     "models": {
@@ -16048,6 +16916,7 @@
       "suggestions": "Suggestions",
       "suggestionsNote": "Only models listed here can be used. Suggestions are detected best-effort.",
       "noSuggestions": "The endpoint suggests no model that is not listed.",
+      "suggestionsReadFailure": "The list of suggested models could not be read.",
       "addSelected": "Add selected",
       "addAll": "Add all",
       "suggestionsAdded_one": "{{count}} model was added",
@@ -17478,12 +18347,12 @@
       "system": "The system's answer"
     },
     "capacity": {
-      "title": "Capacity",
-      "lead": "Full is counted from what the environments here declare they need, not from what they use now. A declaration reserves nothing, so it can pass the whole.",
+      "title": "Promised to environments",
+      "lead": "What the environments here say they need, added up. It reserves nothing, and it is not what the host uses or has free. Whether a host counts as full is decided from it.",
       "cpu": "Processor",
       "memory": "Memory",
       "disk": "Disk",
-      "declared": "{{declared}} declared of {{capacity}}",
+      "declared": "{{declared}} promised of {{capacity}}",
       "over": "More is declared than the host has.",
       "unknown": "The host reports no capacity."
     },
@@ -17522,7 +18391,7 @@
       "labelsHint": "Separated by commas.",
       "save": "Save settings",
       "changed": "Somebody changed this host first",
-      "changedLead": "It was read again; it is now at revision {{revision}}. Look at what changed, then save again."
+      "changedLead": "It was read again, and it has changed. Look at what changed, then save again."
     },
     "runtimes": {
       "title": "What runs on it",
@@ -17532,7 +18401,7 @@
       "unit": "Unit",
       "state": "State",
       "driver": "Driver",
-      "machine": "Machine",
+      "unowned": "A container with no owner",
       "active": "Last busy",
       "never": "Never",
       "actions": "Actions",
@@ -17907,7 +18776,7 @@
         "which": "To keep a page to a few people: make it private and name them. To go back to what the place decides: choose the place’s name."
       },
       "goes-environment": {
-        "title": "Let them into the environment",
+        "title": "Viewers can open the environment",
         "what": "A thread runs in an environment, and its files, processes, browsers and displays are that environment’s, given on its own page. This names the people just added there to look, and with Can manage of the thread to change files and open a shell too."
       },
       "goes-model": {
@@ -18308,6 +19177,7 @@
     "here": "On {{name}}",
     "words": {
       "go": "go open show",
+      "email": "SMTP mail server email",
       "make": "new create add make",
       "thread": "new create start thread conversation",
       "document": "new create document page note",
@@ -18337,6 +19207,11 @@
     "view": {}
   },
   "search": {
+    "coverage": {
+      "label": "Indexed text only",
+      "about": "Conversation search covers messages, visible reasoning summaries, plans and named tools and paths, up to {{number}} characters per masked item. Changed allowances apply to new text and rebuilt items.",
+      "omitted": "Raw calls, command output, hidden reasoning, side threads and text whose masking inputs cannot be opened are not indexed. Chats and documents use their stored text projections."
+    },
     "order": {
       "label": "Order",
       "newest": {
@@ -18364,7 +19239,8 @@
       "files": "Files"
     },
     "more": "Show more",
-    "end": "That is everything that was found.",
+    "end": "End of current results",
+    "continuationEnded": "Search continuation ended",
     "filters": {
       "regex": "Regex",
       "whereGroup": "Where",
@@ -18465,6 +19341,7 @@
       "indexed": "Type one more character, or search inside one topic",
       "indexedAbout": "A search of everything needs three characters. Choose a topic or a thread under Where to search with two.",
       "nothing": "Nothing found for “{{query}}”",
+      "nothingIndexed": "No matches in indexed text for “{{query}}”",
       "nothingAbout": "Try other words, or fewer of them.",
       "nothingNarrow": "Try other words, or clear the filters to look everywhere."
     },
@@ -18536,10 +19413,25 @@
       "unavailable": "Org unavailable",
       "outsidePlace": "This place is outside the search org",
       "clearPlace": "Clear place"
+    },
+    "sources": {
+      "notShared": "Not shared",
+      "meaning": "Meaning",
+      "count_one": "{{number}} index",
+      "count_other": "{{number}} indexes",
+      "indexes": "Serving indexes",
+      "indexFor": "Index for",
+      "model": "Serving model",
+      "usage": "Usage for",
+      "cached": "Cached vector · No new request",
+      "observed": "Observed",
+      "reason": "Reason",
+      "find": "Find an index"
     }
   },
   "export": {
     "downloadButton": "Download",
+    "downloadPartialButton": "Download partial",
     "chatMenu": "Actions for this chat",
     "menu": {
       "export": "Export…",
@@ -18697,6 +19589,7 @@
       "things_one": "{{formatted}} thing of {{max}}",
       "things_other": "{{formatted}} things of {{max}}",
       "kept_one": "kept for you for {{formatted}} hour",
+      "fileLimit": "Files up to {{max}} · server",
       "kept_other": "kept for you for {{formatted}} hours",
       "overBytes": "About {{size}}: {{over}} more than the {{max}} allowed here.",
       "overItems_one": "{{formatted}} thing: {{over}} more than the {{max}} allowed here.",
@@ -18718,6 +19611,8 @@
     },
     "job": {
       "started": "Making the archive of {{place}}…",
+      "partial": "{{place}}: partial export · report included",
+      "readyUnknown": "{{place}}: ready · omission count unavailable",
       "cancelled": "Export cancelled",
       "ready": "{{place}}: export ready",
       "failed": "{{place}}: export failed",
@@ -18739,6 +19634,10 @@
       "runningHint": "Archives are being written for you. Open your exports to see how far each has come.",
       "ready": "{{place}}: export ready",
       "readyMany": "{{count}} exports ready",
+      "partial": "Partial export of {{place}} · {{number}} omitted",
+      "readyWithPartial": "{{number}} exports ready · includes partial exports",
+      "readyUnknown": "{{place}}: ready · omission count unavailable",
+      "readyWithUnknown": "{{number}} exports ready · omission counts unavailable",
       "readyHint": "An archive is ready to download.",
       "failed_one": "Export failed",
       "failed_other": "{{count}} exports failed",
@@ -18777,6 +19676,10 @@
       "preparing": "Starting",
       "progress": "{{percent}}% written",
       "ready": "Ready",
+      "partial": "Partial · report included",
+      "report": "Omission report",
+      "reportOf": "Download omission report for {{name}}",
+      "downloadPartialOf": "Download partial export of {{name}}",
       "failed": "Failed",
       "cancelled": "Cancelled",
       "removed": "Deleted",
@@ -18888,7 +19791,10 @@
       "sharedCount_other": "{{count}} other threads",
       "refresh": "Refresh",
       "treeLabel": "Files of {{directory}}",
-      "inEnvironment": "Files · {{name}}"
+      "inEnvironment": "Files · {{name}}",
+      "liveFolders": "Live · open folders only",
+      "snapshotFolders": "Open folders · last listing",
+      "observed": "Observed"
     },
     "search": {
       "label": "Search the files",
@@ -18905,12 +19811,17 @@
       "tooShort_one": "Type at least {{count}} character.",
       "tooShort_other": "Type at least {{count}} characters.",
       "none": "Nothing found.",
-      "notIndexed": "Searching by name is not available: this workspace is too large to index.",
-      "offline": "Searching inside files needs the environment online.",
+      "offline": "Live file search needs the environment online.",
       "results": "Search results",
       "summary_one": "{{count}} line in {{files}} files; {{searched}} files looked through.",
       "summary_other": "{{count}} lines in {{files}} files; {{searched}} files looked through.",
-      "cut": "The list is cut at its limit."
+      "more": "Continue search",
+      "continues": "Search can continue.",
+      "liveNames_one": "Live search; {{count}} entry checked.",
+      "liveNames_other": "Live search; {{count}} entries checked.",
+      "cachedNames": "From the last complete file index.",
+      "retry": "Retry search",
+      "restart": "Restart search"
     },
     "tree": {
       "count_one": "{{count}} entry",
@@ -18922,7 +19833,8 @@
       "failed": "Could not read this directory",
       "changed": "This directory changed.",
       "reload": "Reload directory",
-      "cached": "Kept on Orch: it opens while the machine is away"
+      "cached": "Cached",
+      "needsMachine": "Needs machine"
     },
     "menu": {
       "otherWorkspace": "These items belong to another workspace.",
@@ -19009,8 +19921,6 @@
     "none": {
       "size": "Size",
       "type": "Type",
-      "hash": "Hash",
-      "copyHash": "Copy the hash",
       "openAsText": "Open as text"
     },
     "edit": {
@@ -19071,17 +19981,20 @@
       "kind": "{{format}}, {{compression}}",
       "none": "no compression",
       "encrypted": "This archive asks for a password: its names are listed and nothing in it is opened.",
-      "truncated_one": "There are more than the {{count}} entry listed.",
-      "truncated_other": "There are more than the {{count}} entries listed.",
       "tooLarge": "This entry is too large to open here.",
       "noPreview": "This entry is not text or a picture.",
-      "entryLabel": "{{name}} in the archive"
+      "entryLabel": "{{name}} in the archive",
+      "filter": "Filter this folder",
+      "more": "Continue listing",
+      "retry": "Retry listing",
+      "restart": "Restart listing"
     },
     "difference": {
       "label": "Difference in {{name}}",
       "tab": "{{name}} (changes)",
       "unknown": "This tab does not name a difference.",
-      "gone": "This change is not recorded any more."
+      "gone": "This change is not recorded any more.",
+      "more": "Continue difference"
     },
     "link": {
       "open": "Open {{path}}"
@@ -19091,6 +20004,24 @@
       "manage": "Manage Files",
       "terminalView": "View Shells",
       "terminalManage": "Manage Shells"
+    },
+    "exclusions": {
+      "line": "{{path}}, line {{line}}",
+      "linked": "the rules file is a link",
+      "notFile": "the rules path is not a regular file",
+      "tooLarge": "the rules exceed the parsing allowance",
+      "encoding": "the text encoding is invalid",
+      "pattern": "a pattern is invalid",
+      "changed": "the rules changed while being read",
+      "unreadable": "the rules could not be read",
+      "problem": "Cannot apply exclusions in {{where}}: {{reason}}."
+    },
+    "paths": {
+      "path": "Path",
+      "roots": "Roots",
+      "open": "Open path",
+      "machineRequired": "Machine file access required",
+      "unavailable": "Unavailable"
     }
   },
   "finderTags": {
@@ -19140,9 +20071,8 @@
   },
   "resourceDetails": {
     "copyPath": "Copy path",
-    "copyId": "Copy ID",
+    "copyValue": "Copy value",
     "copyCommand": "Copy command",
-    "unitGeneration": "Runtime {{generation}}",
     "definitionChanged": "Runtime configuration changed",
     "resourceLimitsChanged": "Resource limits changed",
     "homeChanged": "Workspace or home storage changed",
@@ -19215,7 +20145,6 @@
         "variables": "Secret variables",
         "variableNames": "Variable names (one per line)",
         "token": "Token",
-        "keepSecret": "Leave blank to keep the saved value",
         "advanced": "Advanced",
         "json": "Definition (JSON)",
         "nameInvalid": "Use 2–32 lowercase letters, digits, - or _, starting with a letter.",
@@ -19264,7 +20193,6 @@
       "shared": "Shared and writable",
       "private": "Private view",
       "mode": "Attachment mode",
-      "changeHelp": "Changes reach an attachment in place at once, and a placed attachment when its environment is recreated.",
       "locations": "Locations",
       "addLocation": "Add location…",
       "locationStatusUnknown": "Location details have not been reported.",
@@ -19527,6 +20455,31 @@
       "frames": "Protocol frames",
       "empty": "No matching frames.",
       "frame": "Frame {{n}}",
+      "facts": {
+        "incomplete": "Capture incomplete",
+        "retainedClosed": "Retained range: {{range}}",
+        "retained": "Retained range",
+        "observedRange": "Observed range",
+        "omissions": "Frames omitted",
+        "omitted_one": "{{number}} frame omitted",
+        "omitted_other": "{{number}} frames omitted",
+        "oversized": "Oversized frames",
+        "shortened": "Shortened frames",
+        "earlier": "Earlier capture",
+        "observed": "Observed",
+        "decision": "Capture decision",
+        "frameBytes": "Whole frame bytes",
+        "headBytes": "Frame prefix bytes",
+        "frames": "Frames kept",
+        "retention": "Retention",
+        "captureOff": "Capture off",
+        "maskingUnavailable": "Masking inputs unavailable",
+        "allowanceReached": "Capture allowance reached",
+        "retentionElapsed": "Retention elapsed",
+        "none": "None",
+        "off": "Off",
+        "notShared": "Not shared"
+      },
       "segment": "Segment",
       "noMatchingSegments": "No segments match this search.",
       "noSegments": "This thread has no agent segments yet.",
@@ -19664,6 +20617,7 @@
         "week": "1 week",
         "never": "Never stops when idle",
         "notRunning": "It is not running.",
+        "working": "Work keeps it awake",
         "stopsAt": "Stops when idle at {{time}}",
         "menu": "How long it may stand idle",
         "change": "Change…",
@@ -20000,6 +20954,8 @@
       "off": "Nothing"
     },
     "quiet": {
+      "zoneProblem": "Quiet hours are waiting for a recognized time zone",
+      "invalidZone": "Quiet hours are waiting because “{{zone}}” is not a recognized time zone.",
       "title": "Quiet hours",
       "switch": "Hold what is sent outside Orch during quiet hours",
       "hint": "Every way out holds its messages until the hours end; what was held goes then, together. In your time zone, {{zone}}.",
@@ -20087,7 +21043,6 @@
       "addressWrong": "This is not a web address.",
       "secret": "Secret",
       "secretHint": "Signs what is posted. It is kept and never shown again.",
-      "secretKept": "A secret is set. Leave this empty to keep it, or type a new one.",
       "addConfirm": "Add the webhook",
       "saveConfirm": "Save",
       "added": "Added {{name}}",
@@ -20656,13 +21611,17 @@
     "restoreStopped": "Restoration returns Stopped. Starting it and restoring its thread are separate acts.",
     "purge": "Delete permanently",
     "openEnvironment": "Open environment",
-    "removalKept": "Its files are kept until {{day}} ({{size}}).",
+    "removalKept": "Owned files kept until {{day}} ({{size}})",
     "removalEstimate": "This is the earliest promised day. A delayed unit removal extends it.",
     "removalConnected": "Only its registration is removed; its files stay on this machine.",
     "removalUnit": "Deletes the unit. Its owned volumes are deleted after the retention window.",
     "removalUnitZero": "Deletes the unit and its owned volumes without a recovery window.",
     "removalKindUnknown": "The machine has not reported how this environment runs. Reconnect it to review what will be deleted.",
-    "removalIncludes": "Workspace, home, state and private views are included. Mounts are kept separately.",
+    "removalIncludes": "State and private views follow this window · Mounts kept separately",
+    "rootKept": "Kept with owned data",
+    "rootExisting": "Left in place",
+    "rootRemoved": "Removed without retention",
+    "rootUnknown": "Not reported",
     "removalUnknown": "No retention day is recorded. Its files follow the current retention policy.",
     "lockedBy": "The retention window is controlled by {{place}}.",
     "hostMeasured_one": "Measured {{size}} across {{count}} kept environment",
@@ -20802,7 +21761,6 @@
     "about": "Listeners, openings and connections of this environment.",
     "exposed": "Open outside",
     "exposedReason": "People beyond Ports holders may enter this port",
-    "generation": "Generation {{generation}}",
     "observed": "Observed",
     "refresh": "Refresh",
     "old": "Old observation",
@@ -20926,6 +21884,7 @@
     },
     "carrierHint": "A browser carries HTTP only. The helper forwards raw TCP or UDP on its own device.",
     "noBrowserName": "No browser address. The helper remains available.",
+    "stableDomainMissing": "Stable address needs a ports domain",
     "hostForm": {
       "title": "Host ports",
       "edit": "Edit ports…",
@@ -20997,7 +21956,9 @@
     "manageMeaning": "They let more people in, make a link or publish a host port where policy allows.",
     "viewPermission": "View Ports",
     "managePermission": "Manage Ports",
-    "inEnvironment": "Ports · {{name}}"
+    "inEnvironment": "Ports · {{name}}",
+    "previouslyRefused": "Previously refused",
+    "askAgainAfter": "Ask again after"
   },
   "actions": {
     "home": {
@@ -21467,9 +22428,6 @@
     "folder": "folder",
     "archiveFolder": "Archive folder"
   },
-  "craftFiles": {
-    "readOnly": "Files are read-only on a phone."
-  },
   "craftPath": {},
   "craftMessages": {
     "onlyYou": "Only you are in this org. Create a team org to message a teammate."
@@ -21545,6 +22503,7 @@
       "links": "Links",
       "import-review": "Import review",
       "import-report": "Import reports",
+      "file-viewers": "File viewers",
       "usage": "Usage",
       "thread": "Threads",
       "org": "Orgs",
@@ -21559,7 +22518,9 @@
       "provider-endpoints": "Provider endpoints",
       "chat": "Chat",
       "help": "Help",
-      "search": "Search"
+      "search": "Search",
+      "everything": "Everything",
+      "view-window": "Windows"
     },
     "keys": {
       "tab": "Reading tab",
@@ -21681,10 +22642,12 @@
       "contextBoth": "Context {{window}}, up to {{largest}}",
       "contextLargest": "Context up to {{largest}}",
       "offered": "Offered, not switched on: {{list}}",
-      "suggestionsOffer": "What a suggestion offers (speeds, access programs, a larger context) is kept as offered. None of it is switched on by adding the model.",
+      "offers": "Offers: {{list}}",
+      "suggestionsOffer": "Adding a model switches on what it offers (efforts, context sizes, speeds, access programs), unless the organization's settings say otherwise. Narrow it afterwards under Edit options…",
       "edit": "Edit options…"
     },
     "editor": {
+      "imagesUnknown": "Image support not reported",
       "title": "What this model can be run with here",
       "lead": "{{name}} ({{routing}}) on {{provider}}. Models differ in all of this, and the same model differs between two providers.",
       "theEndpoint": "the endpoint",
@@ -21694,6 +22657,8 @@
       "defaultSpeed": "Starting speed",
       "defaultProgram": "Starting access program",
       "defaultContext": "Starting context",
+      "fromCatalogue": "{{value}} from the catalogue",
+      "none": "none",
       "standard": "Standard",
       "noProgram": "None",
       "typedIn": "Typed in here: {{source}} does not list it",
@@ -21789,7 +22754,6 @@
     "chooseColumns": "Columns",
     "columns": {
       "name": "Name",
-      "admin_access": "As admin",
       "kind": "Kind",
       "owner": "Owner",
       "created": "Created",
@@ -21925,7 +22889,7 @@
         "lead": "Who may register, how people prove who they are, and the identity providers they may use."
       },
       "email": {
-        "title": "Channels",
+        "title": "Email and channels",
         "lead": "The system's own ways out of the application: mail, a bot, push and webhooks."
       },
       "hosts": {
@@ -22013,6 +22977,11 @@
       "failing": "Not answering",
       "lastHeartbeat": "Last heartbeat",
       "noHeartbeat": "It has not reported yet.",
+      "metricsUnavailable": "Metrics listener unavailable",
+      "resolution": {
+        "minute": "From minute data",
+        "hour": "From hourly data"
+      },
       "nowTitle": "Right now",
       "machines": "Machines online",
       "threads": "Threads running",
@@ -22047,7 +23016,7 @@
         "free": "Free on the disk"
       },
       "other": "Everything else",
-      "nothingStored": "Nothing is stored for this span yet.",
+      "nothingStored": "No readings in this range",
       "chartsFailed": "Could not load the charts",
       "chartTable": "Values as a table",
       "chartTime": "Time",
@@ -22233,8 +23202,8 @@
         "lead": "Settings of the whole system. An org may hold itself to more than they say, and never to less."
       },
       "verify": {
-        "label": "Ask new people to confirm their address",
-        "hint": "Somebody who registers is mailed a link and cannot sign in until they have used it.",
+        "label": "Require a confirmed address to sign in",
+        "hint": "System administrators and people without an email address can sign in without confirmation. Existing sessions stay signed in.",
         "noMail": "This system has no mail server, so no address can be confirmed by mail."
       },
       "password": {
@@ -22298,7 +23267,6 @@
       "clientRule": "Give the client id the provider made for this system.",
       "secret": "Client secret",
       "secretHint": "Written here once; it is never shown again.",
-      "secretKept": "One is set. Leave this empty to keep it, or write a new one.",
       "secretRule": "Give the client secret.",
       "scopes": "Scopes",
       "scopesHint": "Separated by spaces. The provider needs to give a name and an address.",
@@ -22730,13 +23698,12 @@
         "cap": "Usage cap reached",
         "machine": "Machine offline",
         "extension": "pgvector missing",
-        "choice": "New model",
+        "choice": "Space for both indexes required",
         "error": "Error",
         "provider_disabled": "Provider switched off",
         "provider_removed": "Provider removed"
       },
       "done": "Done",
-      "pending": "{{tokens}} tokens left",
       "left": "~{{time}} left",
       "diskOf": "Disk {{used}} of {{allowed}} allowed",
       "diskUsed": "Disk {{used}}",
@@ -22748,6 +23715,21 @@
       "newSet": "New index: {{size}}",
       "newSetTime": "New index: {{size}} · ~{{time}}",
       "noActive": "No active index",
+      "retryEligible": "Index retry eligible",
+      "servingIndex": "Serving index",
+      "replacement": "Replacement",
+      "none": "None",
+      "factReason": "Reason",
+      "batch": "Batch",
+      "pieces_one": "{{number}} piece",
+      "pieces_other": "{{number}} pieces",
+      "attemptModel": "Attempt model",
+      "nextRetry": "Next retry",
+      "nextPass": "Next indexing pass",
+      "retryTimeout": "Request timed out",
+      "observed": "Observed",
+      "modelComparison": "Configured: {{selected}} · Current index: {{current}}",
+      "indexedOf": "~{{indexed}} / ~{{total}} tokens indexed",
       "unavailable": "Semantic search unavailable",
       "absent": "pgvector missing",
       "notPermitted": "pgvector setup not permitted",
@@ -22757,9 +23739,35 @@
     },
     "audit": {
       "export": {}
+    },
+    "configuration": {
+      "running": "Running values",
+      "runningService": "{{service}} running values",
+      "runningValue": "Running value",
+      "acquire": "Database connection acquisition",
+      "requestStatement": "Database request statements",
+      "backgroundStatement": "Database background statements",
+      "idleTransaction": "Database idle transactions",
+      "noDeadline": "No deadline",
+      "restart": "Takes effect after restart",
+      "live": "Applies while running",
+      "search": "Search running values",
+      "noMatch": "No matching running values",
+      "origins": {
+        "compiled": "Compiled default",
+        "file": "Configuration file",
+        "environment": "Environment override"
+      },
+      "services": {
+        "api": "API",
+        "gateway": "Gateway",
+        "worker": "Worker",
+        "database": "Database"
+      }
     }
   },
   "change": {
+    "modelApplies": "Applies next turn",
     "steps": {
       "label": "Steps",
       "plan": "Plan",
@@ -22806,11 +23814,9 @@
       "made": "The plan was older than 15 minutes and has been made again. Look it over, then confirm."
     },
     "runs": {
-      "modelUnknown": "Model not reported",
       "unavailable": {
         "profileDisabled": "Profile disabled",
-        "keeper": "Provider requires its keeper profile",
-        "modelDisabled": "Disabled at provider"
+        "keeper": "Provider requires its keeper profile"
       },
       "automatic": {
         "profile": {
@@ -22843,7 +23849,6 @@
       "model": "Model",
       "effort": "Effort",
       "arrangement": "How agent and provider are placed",
-      "providerNow": "{{name}} (now)",
       "providerCurrent": "{{name}} (current provider)",
       "providerSelected": "{{name}} (selected provider)"
     },
@@ -22859,11 +23864,10 @@
       },
       "place": "Place",
       "noHost": "No host takes a new environment now",
-      "declared": "{{declared}} of {{capacity}} GB declared",
       "hostReason": {
         "unschedulable": "{{name}} takes no new environments",
-        "full": "Full, and {{name}} takes nothing more when it is: {{declared}} of {{capacity}} GB declared",
-        "no_room": "Too little room, and {{name}} takes nothing more then: {{declared}} of {{capacity}} GB declared",
+        "full": "Full, and {{name}} takes nothing more when it is",
+        "no_room": "Too little room, and {{name}} takes nothing more then",
         "driver": "Cannot run this template",
         "source": "Does not build images, and this template is a Dockerfile",
         "labels": "Does not have the labels this template needs",
@@ -22873,7 +23877,7 @@
         "template_not_allowed": "Its owner does not allow this template there"
       },
       "hostWarning": {
-        "full": "Full: what runs there declares {{declared}} of {{capacity}} GB",
+        "full": "Full: what runs there says it needs most of what it has",
         "no_room": "Little room: only part of what this needs is free"
       },
       "name": "Name",
@@ -22885,11 +23889,21 @@
       "mode": {},
       "modeAbout": {},
       "upTo": "Last turn to take",
+      "useTurn": "Use turn {{n}}",
       "from": "First turn",
       "to": "Last turn",
       "turn": "Turn {{n}}",
+      "moreToSearch": "No match in the loaded turns. Load earlier turns.",
       "turnSaid": "Turn {{n}} · {{text}}",
-      "how": {},
+      "how": {
+        "same_session": "Same session",
+        "native_fork": "Agent session fork",
+        "native_transplant": "Agent history transfer",
+        "neutral_import": "Conversation import",
+        "file_handoff": "Recent turns + transcript file",
+        "summary_handoff": "Summary handoff + transcript file",
+        "none": "No history"
+      },
       "badge": {
         "lossless": "Lossless",
         "structured": "Structured",
@@ -23036,6 +24050,7 @@
       "thisThread": "this thread"
     },
     "progress": {
+      "thread": "Thread progress",
       "queued": "Waiting for its turn",
       "bytes": "{{done}} of {{total}}",
       "phases": "Phases",
@@ -23235,7 +24250,6 @@
       },
       "plan": {
         "recreate": "A new unit, with nothing new in it",
-        "update": "{{name}}: {{from}} → {{to}}",
         "staysOwners": "Stays {{name}}’s, with the page it has",
         "rollback": {
           "unit": "The old unit of {{name}} comes back as it was",
@@ -23295,6 +24309,8 @@
       "skipped_one": "{{count}} more is left out (archived or gone).",
       "skipped_other": "{{count}} more are left out (archived or gone).",
       "plans": "A plan for each thread",
+      "find": "Find thread",
+      "noMatches": "No matching threads",
       "rowMoves": "{{from}} → {{to}}",
       "rowBlocked": "Blocked",
       "rowReady": "Ready",
@@ -23396,6 +24412,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -23452,6 +24471,8 @@
       "closedUnknown": "{{name}} · closed",
       "closed_one": "{{name}} · {{count}} turn · closed",
       "closed_other": "{{name}} · {{count}} turns · closed",
+      "closedIdle_one": "{{name}} · {{turns}} turn · closed after inactivity",
+      "closedIdle_other": "{{name}} · {{turns}} turns · closed after inactivity",
       "beforeFirst": "Asked before the first turn.",
       "fromTurn": "Asked from turn {{number}}; read earlier messages to see it there."
     },
@@ -23550,11 +24571,22 @@
       "enableDelivery": "Enable delivery"
     },
     "builtin": {
+      "threads": {
+        "opening_items": {
+          "title": "Thread opening items",
+          "description": "Timeline items in the first screen. Scroll to read older items."
+        }
+      },
       "navigation": {
         "order": {
           "title": "Order of the tree",
           "description": "The order in which the org's tree is shown to whoever follows the org's own: as somebody arranged it, the newest first, the most recently changed first, or by name.",
           "keywords": "order sort arrange tree"
+        },
+        "tree_page_size": {
+          "title": "Hierarchy page size",
+          "description": "Default rows in a hierarchy branch page. An explicit page request may be larger.",
+          "keywords": "hierarchy tree branch page rows"
         }
       },
       "orgs": {
@@ -23606,7 +24638,7 @@
       "workspace": {
         "ignore": {
           "title": "Ignored paths",
-          "description": "Patterns excluded from the workspace index.",
+          "description": "Paths to hide in the workspace: absent from its file lists, search and recorded turn files.",
           "keywords": "Ignored paths"
         }
       },
@@ -23697,14 +24729,14 @@
           "description": "The forms of invitation that may be made for an org of this tree.",
           "keywords": "Invitation forms"
         },
-        "default_hours": {
+        "default_minutes": {
           "title": "Invitation life",
-          "description": "For how many hours an invitation is good when its inviter says nothing.",
+          "description": "For how many minutes an invitation is good when its inviter says nothing.",
           "keywords": "Invitation life"
         },
-        "max_hours": {
+        "max_minutes": {
           "title": "Longest invitation",
-          "description": "The most hours an invitation may be good for.",
+          "description": "The most minutes an invitation may be good for.",
           "keywords": "Longest invitation"
         },
         "max_uses": {
@@ -23777,6 +24809,60 @@
           "title": "Allowed services",
           "description": "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.",
           "keywords": "services search fetch images allowed"
+        }
+      },
+      "interface": {
+        "kept_closed_tabs": {
+          "title": "Recently closed tabs",
+          "description": "How many recently closed views keep their local state in this page. Open tabs always keep theirs. Each person may override this default in Interface.",
+          "keywords": [
+            "tabs",
+            "recent",
+            "memory"
+          ]
+        },
+        "progress_delay_ms": {
+          "title": "Loading indication delay",
+          "description": "Milliseconds before a read shows a spinner. Each person may override this default in Interface.",
+          "keywords": [
+            "loading",
+            "spinner",
+            "delay"
+          ]
+        },
+        "read_freshness_ms": {
+          "title": "Read freshness",
+          "description": "Milliseconds before returning readers revalidate directory listings, repeated lookups, reports and live status. Release catalogues stay for the page; ordinary mutable views revalidate when shown.",
+          "keywords": [
+            "freshness",
+            "cache",
+            "reading"
+          ]
+        },
+        "connection_quality": {
+          "title": "Connection warning",
+          "description": "Compare the recent reply median with this person’s preceding usual median. Warn only above both the percentage increase and the extra milliseconds. Sample windows and thresholds are adjustable defaults; a stable long line is normal.",
+          "keywords": [
+            "connection",
+            "usual",
+            "latency",
+            "warning"
+          ]
+        },
+        "catch_up_above_items": {
+          "title": "Automatic catch-up threshold",
+          "description": "Show the automatic catch-up card above this number of unread items. Each person may override this default in Interface; explicit catch-up remains available for any unread range.",
+          "keywords": [
+            "catch-up",
+            "unread",
+            "reading"
+          ]
+        }
+      },
+      "edge": {
+        "transport": {
+          "title": "HTTPS transport",
+          "description": "Shared session cache, resumption, early safe reads and HTTP/2 or HTTP/3 on the built-in HTTPS edge. Committed changes reload gracefully; early writes wait for the handshake."
         }
       }
     }
@@ -23929,7 +25015,7 @@
     "switching": "Switching provider",
     "returning": "Returning to the thread’s choice",
     "needsAttention": "{{kind}} · needs attention",
-    "repeatStopped": "{{kind}} · {{occurrences}} times in {{window}}",
+    "repeatStopped": "Stopped · {{kind}} · {{occurrences}} times in {{window}}",
     "attempt": "attempt {{attempt}} of {{total}}",
     "timeline": "{{action}} after {{kind}} · attempt {{attempt}} · {{rule}}",
     "automatic": "Sent automatically by a rule",
@@ -24012,8 +25098,8 @@
     "continueIn": "{{kind}} · continuing in {{time}}",
     "timelineReturn": "Returned to {{model}} · {{rule}}",
     "timelineSkipped": "Skipped {{model}} · {{reason}} · {{rule}}",
-    "repeatStopped_other": "{{kind}} · {{occurrences}} times in {{window}}",
-    "repeatStopped_one": "{{kind}} · {{occurrences}} time in {{window}}",
+    "repeatStopped_other": "Stopped · {{kind}} · {{occurrences}} times in {{window}}",
+    "repeatStopped_one": "Stopped · {{kind}} · {{occurrences}} time in {{window}}",
     "menuOf": "Actions for {{name}}",
     "timelineFailoverChip": "Failing over after {{kind}} · <model/> · attempt {{attempt}} · <rule/>",
     "timelineReturnChip": "Returned to <model/> · <rule/>",
@@ -24097,8 +25183,6 @@
     "offline": "Offline",
     "offlineSince": "Offline since {{time}}",
     "full": "Full",
-    "memoryPercent": "{{percent}} memory",
-    "declaredPercent": "{{percent}} declared",
     "free": "{{size}} free",
     "hostOffline": "Host offline",
     "idleFor": "idle {{time}}",
@@ -24115,7 +25199,6 @@
     "price": "Price",
     "priceValue": "{{input}} in · {{output}} out credits / 1M",
     "applies": "Applies",
-    "nextTurn": "Applies from the next turn",
     "runningEnvironments": "Running environments",
     "stoppedEnvironments": "Stopped environments",
     "mine": "Mine",
@@ -24124,7 +25207,6 @@
     "no": "No",
     "memoryNow": "Memory now",
     "cpu": "CPU now",
-    "declaredMemory": "{{used}} of {{total}} declared",
     "host": "Host",
     "threads": "Threads",
     "threadCounts": "{{running}} running · {{idle}} idle · {{blocked}} blocked",
@@ -24163,7 +25245,7 @@
     "enabledAt": "Enabled in",
     "kind": "Used for",
     "image": "Image",
-    "imageDigest": "Digest",
+    "imagePinned": "Pinned",
     "usedByLabel": "Used by",
     "program": "Program",
     "provider": "Provider",
@@ -24184,7 +25266,10 @@
       "draft": "Draft",
       "copy": "Copy"
     },
-    "environmentState": "Environment · {{state}}"
+    "environmentState": "Environment · {{state}}",
+    "memoryFree": "{{free}} free of {{total}} memory",
+    "memoryTotal": "{{total}} memory",
+    "diskFree": "{{free}} of {{total}} GB disk free"
   },
   "statusItems": {
     "textEstimateHint": "Estimated from text length until the usage row arrives",
@@ -24200,7 +25285,7 @@
     "region": "{{place}} status items",
     "generating": "Generating",
     "speed": "{{value}} tok/s",
-    "tokens": "{{value}} tokens",
+    "usage": "Usage",
     "context": "Context {{value}}",
     "cpu": "CPU {{value}}",
     "memory": "Memory {{value}}",
@@ -24223,7 +25308,7 @@
       "phase": "Generating",
       "speed": "Output speed",
       "elapsed": "Elapsed time",
-      "tokens": "Turn tokens",
+      "usage": "Turn usage",
       "turn_cost": "Turn cost",
       "thread_cost": "Thread cost",
       "context": "Context fill",
@@ -24235,11 +25320,12 @@
     },
     "turnCostValue": "Turn {{value}} {{unit}}",
     "threadCostValue": "Thread {{value}} {{unit}}",
-    "outputTokens": "{{value}} out"
+    "cached": "Cached input"
   },
   "liveWork": {
     "counting": "Counting…",
     "countingLabel": "Counting",
+    "countedAt": "Counted",
     "copying": "Copying",
     "files_one": "{{value}} file",
     "files_other": "{{value}} files",
@@ -24336,7 +25422,8 @@
     "retryIn": "Retrying in {{time}}",
     "continueIn": "Continuing in {{time}}",
     "failoverIn": "Switching in {{time}}",
-    "waitIn": "Waiting {{time}}"
+    "waitIn": "Waiting {{time}}",
+    "lastReported": "Last reported: {{state}}"
   },
   "programVersions": {
     "refused": "Refused",
@@ -24417,6 +25504,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -24457,7 +25547,8 @@
       "neutralCarry": "Switches carry history as items, or in the handoff notice when it will not fit",
       "handoff": "Switches carry recent history in the handoff notice, with the full conversation as a file",
       "handoffWithoutNative": "Without native carry, switches use the handoff notice"
-    }
+    },
+    "unknownCheckWhy": "The origin of this installed program is unknown, so its build check cannot be identified."
   },
   "uploadHelp": {
     "messageTitle": "Attachments",
@@ -24582,9 +25673,9 @@
         "failed": "Move failed · {{name}}"
       },
       "host_delete": {
-        "running": "Removing {{name}}",
-        "done": "{{name}} removed",
-        "failed": "Removal failed · {{name}}"
+        "running": "Host removal · {{name}}",
+        "done": "Host removed · {{name}}",
+        "failed": "Host removal failed · {{name}}"
       },
       "switch": {
         "running": "Switching threads",
@@ -24595,10 +25686,31 @@
         "running": "Re-creating {{name}}",
         "done": "{{name}} re-created",
         "failed": "Re-creation failed · {{name}}"
+      },
+      "provider_disable": {
+        "running": "Pausing {{name}}",
+        "done": "{{name}} paused",
+        "failed": "Pause failed · {{name}}"
+      },
+      "provider_delete": {
+        "running": "Removing {{name}}",
+        "done": "{{name}} removed",
+        "failed": "Removal failed · {{name}}"
+      },
+      "mcp_delete": {
+        "running": "Removing {{name}}",
+        "done": "{{name}} removed",
+        "failed": "Removal failed · {{name}}"
+      },
+      "mount_delete": {
+        "running": "Removing {{name}}",
+        "done": "{{name}} removed",
+        "failed": "Removal failed · {{name}}"
       }
     },
     "more": "More",
-    "actions": "Actions"
+    "actions": "Actions",
+    "findPeople": "Find people"
   },
   "mcpOffering": {
     "noMachine": "No machine",
@@ -25020,6 +26132,7 @@
       "running": "Cleaning up",
       "results": "Cleanup results",
       "outcome": "Outcome",
+      "itemUnknown": "A kept item",
       "manageRequired": "Manage required",
       "choices": {
         "keep": "Keep",
@@ -25086,7 +26199,21 @@
     "enabled": "{{name}} enabled",
     "stopping": "Waiting for the accepted stop to finish",
     "enableMany": "Enable {{number}} resources?",
-    "enabledMany": "{{number}} resources enabled"
+    "enabledMany": "{{number}} resources enabled",
+    "noNames": "No affected items match",
+    "applicationIncomplete": "Some application times are not reported",
+    "application": {
+      "nowThreads_one": "Calls refused now · {{number}} thread",
+      "nowThreads_other": "Calls refused now · {{number}} threads",
+      "nextTurnThreads_one": "Before the next turn · {{number}} thread",
+      "nextTurnThreads_other": "Before the next turn · {{number}} threads",
+      "updatedEnvironments_one": "When updated · {{number}} environment",
+      "updatedEnvironments_other": "When updated · {{number}} environments",
+      "updatedProviders_one": "When updated · {{number}} provider",
+      "updatedProviders_other": "When updated · {{number}} providers"
+    },
+    "disableTitle": "Disable {{name}}?",
+    "search": "Search affected items"
   },
   "hostCustody": {
     "declared": "{{name}} declared lost",
@@ -25443,7 +26570,8 @@
       "waiting": "Waiting for you",
       "paused": "Paused",
       "met": "Met",
-      "stopped": "Stopped"
+      "stopped": "Stopped",
+      "unchecked": "Not checked"
     },
     "waiting": {
       "approval": "A question or an approval is waiting",
@@ -25462,7 +26590,8 @@
       "credits": "Reached {{limit}} credits",
       "access": "Whoever set it can no longer drive this thread",
       "archived": "The thread was archived",
-      "unknown": "Stopped"
+      "unknown": "Stopped",
+      "unchecked": "The completion report needs a person's decision"
     },
     "line": {
       "label": "Goal",
@@ -25473,9 +26602,8 @@
       "turnsOf_other": "{{count}} of {{max}} turns",
       "tokens": "{{tokens}} tokens",
       "credits": "{{credits}} credits",
-      "byAgent": "on the agent's report",
-      "noReports": "This program cannot report on a goal: it goes on until a limit or until you pause it",
-      "byHelper": "checked by the summary model"
+      "byPerson": "confirmed by a person",
+      "noReports": "This program cannot report on a goal: it goes on until a limit or until you pause it"
     },
     "act": {
       "pause": "Pause",
@@ -25487,7 +26615,9 @@
       "driveOnly": "Only people who can drive this thread",
       "archived": "Unarchive this thread to set a goal",
       "sideThread": "Goals are unavailable in side threads",
-      "failed": "The goal could not be changed"
+      "failed": "The goal could not be changed",
+      "accept": "Mark met",
+      "continue": "Keep working"
     },
     "menu": {
       "set": "Set a goal…"
@@ -25539,12 +26669,13 @@
       "resumed": "{{by}} resumed the goal",
       "met_other": "Goal met after {{count}} turns",
       "met_one": "Goal met after {{count}} turn",
-      "metAgent_other": "Goal met (the agent's report) after {{count}} turns",
-      "metAgent_one": "Goal met (the agent's report) after {{count}} turn",
+      "metPerson_other": "A person marked the goal met after {{count}} turns",
+      "metPerson_one": "A person marked the goal met after {{count}} turn",
       "evidenceMore": "Show the evidence",
       "evidenceLess": "Hide the evidence",
       "stopped": "Goal stopped: {{reason}}",
-      "cleared": "{{by}} cleared the goal"
+      "cleared": "{{by}} cleared the goal",
+      "pausedUnchecked": "The goal report is unchecked and waits for a person's decision"
     }
   },
   "threadSetup": {
@@ -25700,7 +26831,8 @@
       "notification": "Notification",
       "system": "System-level operations"
     },
-    "byId": "Use an exact ID without reading its name",
+    "byId": "Use an exact ID",
+    "unnamedTarget": "Name not available",
     "removeUnavailable": "Remove these selections",
     "removeUnavailableFor": "Remove unavailable selections for {{operation}}",
     "activity": {
@@ -25728,6 +26860,7 @@
     "removeRule": "Remove rule"
   },
   "providerFields": {
+    "find": "Find an option",
     "protocol": "Request format",
     "parameterFormat": "Parameter format",
     "agentParameters": "Agent parameters",
@@ -25786,6 +26919,8 @@
     }
   },
   "providerOptions": {
+    "formatsSet": "{{figure}} formats configured",
+    "fieldsSet": "{{figure}} fields set",
     "title": "Request options",
     "fixedByProvider": "Fixed by the provider",
     "fixedValue": "Fixed value",
@@ -25827,7 +26962,7 @@
     "measurements": "Measured round trips",
     "measured": "Measured",
     "milliseconds": "{{value}} ms",
-    "unavailable": "Unavailable ({{id}})",
+    "unavailable": "Unavailable gateway",
     "toolConnection": "Tool connection",
     "unreachable": "$t(errors.tunnel.gateway_unreachable)",
     "attempted": "Attempted gateways",
@@ -25838,7 +26973,6 @@
       "unavailable": "Unavailable",
       "unknown": "Not reported"
     },
-    "revision": "Revision {{revision}}",
     "edit": "Edit",
     "editTitle": "Edit gateways",
     "empty": "No gateways advertised",
@@ -25928,7 +27062,7 @@
     "attempt": "Attempt",
     "tools": "Tool calls",
     "toolTime": "Tool time",
-    "providerId": "Provider request ID",
+    "providerId": "Provider's request",
     "adapterId": "Request reference",
     "owner": "Thread owner",
     "reasons": {
@@ -25966,6 +27100,7 @@
     "expand": "Expand {{name}}",
     "sharingPolicy": "Sharing policy",
     "from": "From",
+    "fromContainer": "From the container on <host/>",
     "current": "Group by: {{name}}",
     "noOwner": "Owner unavailable",
     "selectionUnavailable": "Selection unavailable",
@@ -25997,6 +27132,9 @@
     "machineHomeNamed": "Machine home: {{name}}"
   },
   "harnessChanges": {
+    "warning": "{{program}}: {{message}}",
+    "diffUpdated": "{{program}} updated the changed files.",
+    "diffUnreadable": "Orch could not read {{program}}'s updated diff. Earlier changed files were kept.",
     "environmentConnected": "connected",
     "environmentDisconnected": "disconnected",
     "bufferingVisible": "notice shown",
@@ -26142,7 +27280,8 @@
     "closed": "{{program}} closed the session.",
     "resumed": "Resumed {{program}}.",
     "unrecognized": "Unrecognized {{program}} event {{name}}",
-    "unrecognizedCount": "Unrecognized {{program}} event {{name}} · {{number}}"
+    "unrecognizedCount": "Unrecognized {{program}} event {{name}} · {{number}}",
+    "mcpConfiguration": "{{program}} MCP configuration supplied"
   },
   "startImplicit": {
     "origin": {
@@ -26151,8 +27290,6 @@
       "last_used": "Last used",
       "shared_default": "Shared default"
     },
-    "effort": "Effort {{value}}",
-    "name": "Name {{value}}",
     "message": "Message {{value}}",
     "sourceUnreported": "Source not reported",
     "viewerDefault": "Default · {{key}} · {{source}}",
@@ -26164,7 +27301,9 @@
     "catalogueFailed": "Access choices could not be loaded",
     "chooseAccess": "Choose available access",
     "checkAccessEnd": "Check the access expiry",
-    "grantedSelected": "Access granted · selected"
+    "grantedSelected": "Access granted · selected",
+    "savedSetup": "Saved with your account",
+    "savedSetupReadFailed": "Unable to read saved setup"
   },
   "harnessFailures": {
     "session_lost": "The agent program lost its session. Let recovery finish; if the thread stays stopped, continue it.",
@@ -26192,6 +27331,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
@@ -26201,7 +27342,11 @@
     "rateCacheWrite": "Cache writes",
     "rateOutput": "Output",
     "title": "Summary",
-    "catchUp": "Catch up",
+    "catchUp": "Since you last read",
+    "nothingNew": {
+      "chat": "Nothing new",
+      "other": "Nothing to summarize yet"
+    },
     "catchUpActions": {
       "details": "Catch-up details",
       "ask": "Ask about catch-up",
@@ -26227,14 +27372,44 @@
     "empty": "No summary yet",
     "written": "Written",
     "refresh": "Refresh summary",
+    "summarizeAgain": "Summarize again",
+    "changed": {
+      "source_changed": "Source changed while writing · Result discarded · Usage still counted",
+      "content_changing": "Content kept changing before writing",
+      "settings_changed": "Summary settings changed before completion"
+    },
     "choose": "Choose summarizer",
     "ask": "Ask about this",
     "askResults": "Ask about these results",
     "wait": {
-      "interval": "Minimum interval",
+      "interval": "Next update",
       "recovery": "Waiting to retry",
       "queue": "Waiting for a worker"
-    }
+    },
+    "failure": {
+      "kept": "Previous paragraph kept",
+      "nothing_new": "There is nothing new to summarize.",
+      "asker_ended": "The sign-in or key that asked for this summary has ended. Refresh it again.",
+      "source_gone": "What this summary describes is gone.",
+      "source_unreadable": "Whoever asked can no longer read what this summary describes. Ask someone who can read it to refresh it.",
+      "no_summarizer": "No summarizer is chosen for this place. Choose one, then refresh.",
+      "provider_gone": "The provider that writes this summary was removed. Choose another provider for summaries.",
+      "provider_not_ready": "The provider that writes this summary is switched off or not ready. Switch it on or choose another.",
+      "no_interface": "The provider that writes this summary cannot generate text. Choose another provider.",
+      "model_off": "The model that writes this summary is switched off or no longer offered. Switch it on or choose another model.",
+      "model_not_allowed": "This place does not allow the model that writes this summary. Choose another model or allow this one.",
+      "provider_forbidden": "This place does not allow the provider that writes this summary. Choose another provider or allow this one.",
+      "not_allowed": "Whoever pays for this summary may not use its provider. Give them use of it or choose another provider.",
+      "effort_not_offered": "The reasoning effort chosen for this summary is not available. Choose another effort.",
+      "no_keeper": "No machine keeps the key of the provider that writes this summary. Give the provider a machine.",
+      "keeper_offline": "The machine that keeps the provider's key is offline. Bring it online, then refresh.",
+      "cap_no_room": "A usage limit leaves no room for summaries. Wait for it to reset or raise it.",
+      "output_cut": "Output allowance reached · Answer discarded · Usage still counted",
+      "model_failed": "The model did not answer. Try again in a moment.",
+      "unusable_answer": "Unusable answer discarded · Usage still counted",
+      "unexpected": "Something went wrong while writing the summary. Try again in a moment."
+    },
+    "lastUpdated": "Last updated"
   },
   "capabilityRoutes": {
     "title": "Capabilities",
@@ -26709,7 +27884,16 @@
       "ambiguous": "Choose which clock occurrence",
       "weekdays": "Choose at least one weekday"
     },
-    "authorOnly": "Only the author can resume"
+    "authorOnly": "Only the author can resume",
+    "plan": "Plan",
+    "work": "Work",
+    "delivery": "Delivery",
+    "deliveryModes": {
+      "queue": "Queue",
+      "steer": "Steer",
+      "interrupt": "Interrupt"
+    },
+    "searchLoadedRuns": "Search loaded runs"
   },
   "machineData": {
     "title": "Data directory",
@@ -26753,5 +27937,693 @@
     "allowance": "Allowance: {{window}}",
     "resets": "Resets <time/>",
     "example": "A provider and its declared route"
+  },
+  "settingsEditors": {
+    "params": {
+      "chooseModel": "Choose a default provider and model to edit their parameters.",
+      "chooseAgent": "Choose an agent profile to edit its declared parameters.",
+      "other": "Other parameters",
+      "remove": "Remove {{name}}"
+    },
+    "draft": {
+      "discard": "Discard",
+      "nothingToSave": "Nothing has changed.",
+      "fixMarked": "Fix what is marked before it can be saved."
+    },
+    "leave": {
+      "title": "Leave without saving?",
+      "confirm": "Leave",
+      "about": "A setting you were editing has not been saved. Leaving drops it."
+    },
+    "secret": {
+      "set": "Set",
+      "replace": "Replace",
+      "keep": "Keep",
+      "remove": "Remove",
+      "removed": "Removed when saved",
+      "keepSaved": "Keep it"
+    },
+    "targets": {
+      "label": "Summary targets",
+      "automatic": "Automatic",
+      "when": "When",
+      "whenFor": "{{name}}: when to refresh",
+      "defaultEvents": "Default",
+      "useDefault": "Use the default for {{name}}",
+      "min_interval_secs": "At most every (seconds)",
+      "context_tokens": "Reads up to (tokens)",
+      "output_chars": "Writes up to (characters)",
+      "least": "At least {{least}}",
+      "summaryOff": "Not automatic",
+      "summaryOn": "Automatic for {{names}}",
+      "automaticOn": "Automatic on",
+      "automaticOff": "Automatic off"
+    },
+    "summarizer": {
+      "none": "None here",
+      "model": "A model",
+      "kind": "Kind",
+      "noneHere": "Nothing is chosen here; what a place above chose applies.",
+      "useForm": "Use the form",
+      "editJson": "Edit as JSON",
+      "provider": "Provider",
+      "modelName": "Model",
+      "chooseProvider": "Choose a provider",
+      "chooseModel": "Choose a model",
+      "providerFirst": "Choose a provider first",
+      "cannotUse": "You cannot use this provider.",
+      "noModels": "This provider has no enabled models.",
+      "modelNotOffered": "This provider does not offer {{model}}.",
+      "atLeastOne": "At least 1",
+      "answerTokens": "Answer tokens",
+      "contextTokens": "Context tokens",
+      "requestOptions": "Request options",
+      "instructions": "Instructions per field",
+      "builtInText": "Empty keeps the built-in text",
+      "summary": "A model · {{provider}} · {{model}}",
+      "fields": {
+        "summary": "Summary",
+        "title": "Title",
+        "description": "Description",
+        "tags": "Tags",
+        "rollup": "Roll-up",
+        "handoff": "Hand-off"
+      }
+    },
+    "thing": {
+      "gone": "No longer exists",
+      "goneAbout": "This {{kind}} no longer exists.",
+      "clear": "Clear",
+      "kinds": {
+        "environment": "environment",
+        "agent": "agent profile"
+      },
+      "needsManage": "You need to manage this environment to choose it.",
+      "needsUse": "You need to use this {{kind}} to choose it.",
+      "attachedAs": "How {{name}} is attached",
+      "remove": "Remove {{name}}",
+      "addMount": "Choose a mount",
+      "addDocument": "Add a document",
+      "searchDocuments": "Search documents by name",
+      "examples": {
+        "environment": "An environment you manage",
+        "agent": "An agent profile you can use",
+        "mount": "A mount and how it is attached",
+        "document": "Documents you can read"
+      }
+    },
+    "features": {
+      "label": "Agent features",
+      "none": "No installed agent program has a feature to switch.",
+      "unknown": "No installed agent program names this feature",
+      "on": "On",
+      "off": "Off",
+      "remove": "Remove {{name}}",
+      "useDefault": "Use the default for {{name}}",
+      "summaryOne": "{{name}} ({{state}})",
+      "programDefault": "Program default",
+      "fromHere": "Set here",
+      "fromAbove": "Inherited"
+    },
+    "model": {
+      "use": "Use “{{name}}”",
+      "choose": "Choose a model or type its name",
+      "name": "Type a model name"
+    },
+    "order": {
+      "search": "Find a place",
+      "by": "Order by",
+      "groups": "Arranged groups",
+      "arrange": "Arrange a group",
+      "arrangePlaceholder": "Choose a place whose contents to arrange",
+      "nothingToArrange": "Nothing left to arrange",
+      "add": "Add a place to {{name}}",
+      "addPlaceholder": "Add a place",
+      "gone": "No longer exists",
+      "removeGroup": "Stop arranging {{name}}",
+      "up": "Move {{name}} up in {{group}}",
+      "down": "Move {{name}} down in {{group}}",
+      "remove": "Remove {{name}} from {{group}}",
+      "useForm": "Use the form",
+      "editJson": "Edit as JSON"
+    }
+  },
+  "scheduleOccurrence": {
+    "coalesced_one": "{{n}} earlier occurrence coalesced",
+    "coalesced_other": "{{n}} earlier occurrences coalesced",
+    "previousPending": "Previous input still pending",
+    "gap": "Time does not exist in {{zone}}",
+    "ended": "Schedule ended"
+  },
+  "factDisclosure": {
+    "notReported": "Not reported",
+    "groups": {
+      "lastResult": "Last result",
+      "nextRefresh": "Next refresh",
+      "currentSetting": "Current setting",
+      "recordedOutcome": "Recorded outcome"
+    }
+  },
+  "summaryFacts": {
+    "producer": "Producer:",
+    "usageOwner": "Usage for",
+    "inputAllowance": "Input allowance:",
+    "outputAllowance": "Output allowance:",
+    "inputEstimate": "Input estimate:",
+    "lastTurn": "Last turn:",
+    "captured": "Captured:",
+    "outputChanges": "Output:",
+    "recordedUsage": "Recorded usage:",
+    "total": "Total",
+    "reasoning": "Reasoning",
+    "nextRefresh": "Next refresh:",
+    "notShared": "Not shared",
+    "helperChecked": "Helper checked",
+    "notChecked": "Not checked",
+    "shortened": "Shortened",
+    "adjusted": "Adjusted",
+    "answerDiscarded": "Answer discarded",
+    "resultDiscarded": "Result discarded",
+    "whitespace": "Whitespace normalized",
+    "firstLine": "First nonempty line kept",
+    "wholeHandoff": "Whole handoff rejected",
+    "charactersRemoved_one": "{{number}} character removed",
+    "charactersRemoved_other": "{{number}} characters removed",
+    "unknownTags_one": "{{number}} unknown tag omitted",
+    "unknownTags_other": "{{number}} unknown tags omitted",
+    "duplicateTags_one": "{{number}} duplicate tag omitted",
+    "duplicateTags_other": "{{number}} duplicate tags omitted",
+    "overBudgetTags_one": "{{number}} tag exceeded the allowance",
+    "overBudgetTags_other": "{{number}} tags exceeded the allowance",
+    "tokens_one": "{{number}} token",
+    "tokens_other": "{{number}} tokens",
+    "coverage": {
+      "none": "Not present",
+      "included": "Included",
+      "start_omitted": "Start omitted",
+      "oversized": "Turn exceeds read allowance",
+      "items_exceeded": "Item allowance reached"
+    },
+    "discard": {
+      "access_changed": "Access changed",
+      "history_changed": "History changed",
+      "source_changed": "Source changed",
+      "producer_changed": "Producer changed",
+      "archived": "Archived",
+      "changed_by_person": "Changed by a person"
+    },
+    "discarded": "Discarded:",
+    "lastAttempt": "Last attempt:",
+    "lastUpdated": "Last updated:",
+    "retryCeiling": "Retry ceiling:",
+    "title": "Automatic title",
+    "tags": "Automatic tags",
+    "skip": {
+      "no_producer": "No summarizer",
+      "cap_no_room": "Usage allowance reached",
+      "not_allowed": "Access unavailable",
+      "provider_unavailable": "Provider unavailable",
+      "call_rule_paused": "Call rules paused",
+      "source_unavailable": "Source unavailable",
+      "unsupported": "Not supported",
+      "failed": "Producer failed"
+    },
+    "skipped": "Skipped · {{reason}}",
+    "outcome": "Outcome:",
+    "outcomes": {
+      "published": "Published",
+      "discarded": "Result discarded",
+      "unusable": "Answer discarded",
+      "failed": "Failed"
+    }
+  },
+  "placesMail": {
+    "source": "Source",
+    "autoFollowed": "Auto-followed because you contributed",
+    "inboxRetention": "Inbox retention: {{duration}}",
+    "retention": "Retention",
+    "oldest": "Oldest retained",
+    "expiry": "Expiry cutoff",
+    "observed": "Observed",
+    "none": "None",
+    "suppressed": "No turn-ended notice · {{reason}}",
+    "forYou": "For you",
+    "decision": "Decision",
+    "acceptanceUnknown": "Channel acceptance not confirmed",
+    "retryEligible": "Retry eligible",
+    "lastAttempt": "Last attempt",
+    "attempts": "Attempts",
+    "acceptance": "Channel acceptance",
+    "reasons": {
+      "interrupted": "Interrupted",
+      "did_not_start": "Did not start",
+      "automatic_recovery": "Automatic recovery",
+      "already_watching": "Already watching",
+      "subagent_notices_off": "Subagent notices off"
+    },
+    "outcomes": {
+      "eligible": "Eligible",
+      "suppressed": "Suppressed",
+      "not_evaluated": "Not evaluated"
+    },
+    "acceptances": {
+      "pending": "Pending",
+      "accepted": "Accepted by channel",
+      "unknown": "Not confirmed"
+    }
+  },
+  "placeFacts": {
+    "attachRetry": "Attach retry eligible <when/>",
+    "lastAttempt": "Last attempt",
+    "nextEligible": "Retry eligible",
+    "reason": "Reason",
+    "revision": "Configuration revision",
+    "notApplicable": "Not applicable",
+    "stage": "Stage",
+    "cleanup": "Cleanup",
+    "leaseRecovery": "Lease eligible for recovery",
+    "observed": "Observed",
+    "recoveringCleanup": "Recovering cleanup",
+    "phaseRetry": "{{phase}} · Retry eligible <when/>",
+    "scope": "Scope",
+    "appliesUnit": "Applies to this unit",
+    "thisMachine": "This machine",
+    "governingResource": "Governing resource",
+    "resourceEnvironment": "Environment",
+    "resourceProvider": "Provider",
+    "resourceMachine": "Physical machine",
+    "authority": "Authority",
+    "turnsSelected_one": "{{n}} turn selected",
+    "turnsSelected_other": "{{n}} turns selected",
+    "selectedTurns": "Selected turns",
+    "contextShare": "Context share",
+    "contextAllowance": "Context allowance",
+    "tokenAllowance": "~{{tokens}} tokens",
+    "basis": "Basis",
+    "proposal": "Proposal",
+    "historyMethod": "History method",
+    "carriedTurns": "Carried turns",
+    "derivedSummary": "Derived summary",
+    "partialTurn": "Partial turn",
+    "omittedPrefix": "Omitted prefix",
+    "beforeTurn": "Before turn {{turn}}",
+    "contextForm": "Context form",
+    "transcript": "Transcript",
+    "recorded": "Recorded",
+    "policyOrganization": "Organization policy",
+    "policyProject": "Project policy",
+    "policyTopic": "Topic policy",
+    "policyThread": "Thread policy",
+    "allowanceSources": {
+      "declared_model_window": "Declared model window",
+      "unknown_model_window": "Window not reported",
+      "native_session": "Native session",
+      "summary": "Summary",
+      "summary_fallback": "Brief fallback",
+      "nothing": "No history"
+    },
+    "contextForms": {
+      "native": "Native history",
+      "verbatim": "Literal turns",
+      "brief": "Brief turns",
+      "summary": "Derived summary",
+      "nothing": "No source history"
+    },
+    "transcriptCoverage": {
+      "complete": "Complete",
+      "partial": "Partial",
+      "not_applicable": "Not applicable",
+      "unreported": "Not reported"
+    },
+    "acceptedRevision": "Accepted session revision",
+    "currentSession": "Current session",
+    "pending": "Pending",
+    "noPendingSetup": "No pending changes",
+    "reload": "Session reload",
+    "refresh": "Refresh",
+    "backgroundDefers": "Background work defers refresh",
+    "notDeferred": "Not deferred",
+    "nextSession": "Applies next session",
+    "configurationKinds": {
+      "configuration": "Configuration",
+      "instructions": "Instructions",
+      "limits": "Subagent limits",
+      "mcp": "MCP servers",
+      "tools": "Orch tools",
+      "skills": "Skills"
+    },
+    "reloadPolicies": {
+      "each_turn": "Reopens each turn",
+      "on_change": "When setup changes"
+    },
+    "environmentStages": {
+      "create": "Creating environment",
+      "start": "Starting environment",
+      "attach": "Attaching directory"
+    },
+    "environment": "Environment",
+    "countAssessment": "Count assessment",
+    "cacheValidUntil": "Reusable until",
+    "observerGraceUntil": "Unwatched stop eligible",
+    "assessed": "Assessed",
+    "executionBudget": "Execution allowance",
+    "executionAccepted": "Accepted",
+    "executionDeadline": "Deadline",
+    "workAllowance": "Allowance",
+    "policyVersion": "Revision {{n}}",
+    "countLifetime": "While counting",
+    "notShared": "Not shared",
+    "fromDirectory": "From",
+    "toDirectory": "To",
+    "notesOutcome": "Outcome",
+    "observedRevision": "Observed revision",
+    "carryNotes": "Carry notes",
+    "copyCleanupPending": "Copy cleanup pending",
+    "notesFates": {
+      "shared": "Shared directory",
+      "copy_if_absent": "Copy if target is absent",
+      "copied": "Copied",
+      "target_kept": "Target kept",
+      "not_carried": "Not carried",
+      "off": "Memory off"
+    },
+    "nativeHistory": "Native history",
+    "lastNativeState": "Last reported state",
+    "nativeIdleEligible": "Idle removal eligible",
+    "nativeCleanupOff": "Native cleanup off",
+    "nativeRetention": "Native retention",
+    "nativeRemoved": "Native removal",
+    "retentionDays_one": "{{n}} day",
+    "retentionDays_other": "{{n}} days",
+    "nativeHistoryStates": {
+      "retained": "Native history retained",
+      "removed": "Native history removed"
+    },
+    "notesPreview": "Notes: {{fate}}",
+    "retention": {
+      "archive": "Automatic archive",
+      "delete": "Automatic delete",
+      "archiveOff": "Automatic archive off",
+      "deleteOff": "Automatic delete off",
+      "archiveDue": "Archive eligible",
+      "deleteDue": "Delete eligible",
+      "heldBy": "Held by",
+      "holds": {
+        "active_work": "Active work",
+        "already_archived": "Already archived",
+        "ancestor_archived": "Parent archived",
+        "not_archived": "Not archived"
+      },
+      "recoveryCutoff": "Recorded restoration cutoff",
+      "physicalCleanup": "Physical cleanup",
+      "dependencies": "Retained dependencies",
+      "noHold": "No known dependency hold"
+    }
+  },
+  "interactiveHistory": {
+    "state": "State",
+    "search": "Search retained work",
+    "more": "Show more",
+    "empty": "No closed entries",
+    "ownership": "Lifecycle owner",
+    "started": "Started by Orch",
+    "announced": "Announced by agent",
+    "mode": "Browser mode",
+    "idle": "Idle close eligible",
+    "idlePolicy": "Idle policy",
+    "idleOff": "Automatic idle close off",
+    "gate": "Current gate",
+    "gates": {
+      "disabled_by_policy": "Off by policy",
+      "environment_switch_off": "Environment switched off",
+      "machine_policy": "Machine policy",
+      "environment_offline": "Environment offline"
+    },
+    "drivingExpiry": "Driving session expiry",
+    "closedAt": "Closed",
+    "entryExpiry": "Closed entry expiry",
+    "retired": "Retired",
+    "environmentPolicy": "Environment policy",
+    "failed": "Failed"
+  },
+  "orchToolFacts": {
+    "title": "Orch tools",
+    "offeredCount_one": "Orch tools · {{n}} offered",
+    "offeredCount_other": "Orch tools · {{n}} offered",
+    "at": "Accepted",
+    "offered": "Offered",
+    "source": "Source",
+    "search": "Find a tool",
+    "more": "More tools",
+    "reasons": {
+      "build": "Build support unavailable",
+      "off": "Off here",
+      "readOnly": "Read-only conversation",
+      "none": "Tools off",
+      "goal": "Goal required",
+      "capability": "Capability unavailable",
+      "program": "Program does not accept Orch tools",
+      "environment": "Environment turns Orch tools off",
+      "work": "Capability work receives no tools"
+    },
+    "unavailable": "Unavailable"
+  },
+  "threadWaitFacts": {
+    "offlineIndefinite": "Offline · Waiting without a deadline",
+    "offlineDeadline": "Offline · Deadline",
+    "outageBegan": "Outage began",
+    "capturedPolicy": "Captured policy",
+    "finite": "Finite deadline",
+    "indefinite": "No deadline",
+    "policySource": "Policy source"
+  },
+  "deliveryResolutionFacts": {
+    "queued": "Queued · Steer unavailable",
+    "interrupt": "Interrupt · Steer unavailable",
+    "requested": "Requested",
+    "applied": "Applied",
+    "fallback": "Fallback",
+    "chosen": "Chosen for this send",
+    "resolved": "Resolved",
+    "reason": "Reason",
+    "reachLimited": "Steer unavailable; the sender could not interrupt this turn",
+    "deferred": "Deferred"
+  },
+  "queueEligibilityFacts": {
+    "next": "Eligible next:",
+    "none": "No eligible queued message",
+    "rechecked": "Rechecked",
+    "waiting": "Waiting for",
+    "author": "Author",
+    "authority": "Authority"
+  },
+  "startWaitFacts": {
+    "acceptance": "Waiting for acceptance · Until",
+    "start": "Waiting for start · Until",
+    "events": "Taking in start events · Until",
+    "began": "Stage began",
+    "deadline": "Deadline",
+    "source": "Admitted default source",
+    "beyondCalendar": "Finite deadline beyond the displayed calendar",
+    "allowance": "Captured allowance",
+    "finite": "Finite wait"
+  },
+  "approvalDeliveryFacts": {
+    "pending": "Decision accepted · Delivery pending",
+    "unknown": "Decision accepted · Delivery unknown",
+    "delivery": "Delivery",
+    "applied": "Applied",
+    "pendingValue": "Pending",
+    "unknownValue": "Unknown",
+    "recipient": "Recipient",
+    "native": "Native harness",
+    "attempt": "Last attempt",
+    "problem": "Problem",
+    "rejected": "The native request could not accept the decision",
+    "timed_out": "The delivery deadline passed",
+    "cancelled": "The delivery command was cancelled",
+    "delivery_failed": "Delivery could not be confirmed"
+  },
+  "scheduleTimingFacts": {
+    "clock": "Clock",
+    "civil": "Civil time",
+    "utc": "UTC",
+    "fixed_instant": "Chosen instant",
+    "repeated": "Repeated time",
+    "earlier_instant": "Earlier instant",
+    "explicit_instant": "Explicitly chosen instant",
+    "not_applicable": "Not applicable",
+    "missing": "Missing time",
+    "skipped": "Skipped",
+    "refused": "Refused",
+    "overdue": "Overdue",
+    "latest_occurrence": "Latest occurrence",
+    "single_occurrence": "Single occurrence",
+    "paused": "Paused dates",
+    "not_replayed": "Not replayed",
+    "zone": "Time zone",
+    "scheduled": "Scheduled for",
+    "coalesced": "Earlier occurrences coalesced"
+  },
+  "databaseWait": {
+    "messages": {
+      "acquire": "Database connection wait expired",
+      "statement": "Database statement timed out",
+      "idleTransaction": "Database transaction expired"
+    },
+    "phase": "Phase",
+    "deadline": "Applied deadline",
+    "phases": {
+      "acquire": "Connection acquisition",
+      "statement": "Statement execution",
+      "idleTransaction": "Idle transaction"
+    }
+  },
+  "sessionSkills": {
+    "title": "Skills",
+    "closed": "Skills · {{selected}} selected · {{skipped}} skipped",
+    "unsupported": "Not offered by this agent",
+    "applied": "Applied",
+    "nextSelection": "Next session selection",
+    "nextChanged": "Applies next session",
+    "nextSame": "Same skill selection",
+    "search": "Search session skills",
+    "personal": "Personal skills",
+    "version": "Version {{number}}",
+    "skipped": "Skipped · {{reason}}",
+    "notShared": "Not shared",
+    "more": "Load more",
+    "empty": "No skills selected or skipped",
+    "noMatch": "No matching skills",
+    "reasons": {
+      "missing": "Not found",
+      "disabled": "Off",
+      "deleted": "Deleted",
+      "noVersion": "No version",
+      "versionNotFound": "Version unavailable",
+      "notUsable": "Contributor lacks Use",
+      "nameTaken": "Another selected skill uses this name"
+    }
+  },
+  "clientFacts": {
+    "readAttempt": "Read attempt",
+    "nextAttempt": "Next attempt",
+    "retryEligible": "Retry eligible",
+    "renewal": "Renewal",
+    "renewalFailed": "Session renewal failed",
+    "renewalPhase": {
+      "scheduled": "Scheduled",
+      "in_progress": "In progress",
+      "completed": "Completed",
+      "failed": "Failed"
+    },
+    "renewed": "Renewed",
+    "device": {
+      "noKinds": "No kinds shown",
+      "collapsedGroups": "Group expansion",
+      "loadedCollapsed_one": "{{number}} loaded group collapsed",
+      "loadedCollapsed_other": "{{number}} loaded groups collapsed",
+      "savedCollapsed_one": "{{number}} group collapsed",
+      "savedCollapsed_other": "{{number}} groups collapsed",
+      "savedUnavailable": "Saved choice unavailable",
+      "placement": "Placement",
+      "floating": "Floating",
+      "docked": "Docked",
+      "maximized": "Maximized",
+      "windowBox": "Window size and position",
+      "openGroups": "Open filter groups",
+      "open": "Open",
+      "closed": "Closed",
+      "notSaved": "Not saved on this device",
+      "unavailableChoice": "Using default · Saved choice unavailable",
+      "unavailableRead": "Unable to read device storage",
+      "source": "Source",
+      "current": "Current",
+      "saved": "Saved",
+      "save": "Device save",
+      "origins": {
+        "address": "Address",
+        "item": "This item",
+        "kind": "This kind",
+        "default": "Default",
+        "page": "In this page"
+      },
+      "saves": {
+        "saved": "Saved on this device",
+        "failed": "Not saved on this device",
+        "not_checked": "Not checked"
+      },
+      "currentFilters_one": "{{number}} filter",
+      "currentFilters_other": "{{number}} filters"
+    }
+  },
+  "fileReach": {
+    "roots": "Roots",
+    "machine": "Machine",
+    "terminal": "Terminal",
+    "bound": "Machine limit: {{reach}}"
+  },
+  "connectionQuality": {
+    "fields": {
+      "recent_samples": "Recent replies",
+      "usual_samples": "Usual replies",
+      "slow_increase_percent": "Warning increase",
+      "slow_extra_ms": "Minimum increase"
+    }
+  },
+  "edgeTransport": {
+    "fields": {
+      "session_cache_mib": "Session cache (MiB)",
+      "session_timeout_secs": "Session lifetime",
+      "session_tickets": "Session tickets",
+      "early_data": "Early safe reads",
+      "http2": "HTTP/2",
+      "http3": "HTTP/3",
+      "alt_svc_secs": "Protocol advertisement lifetime",
+      "reload_secs": "Reload interval"
+    }
+  },
+  "directoryChoice": {
+    "root": "Root",
+    "subdirectory": "Subdirectory",
+    "noRoots": "This machine offers no directory roots",
+    "missingRoot": "Selected root unavailable",
+    "noRootsMatching": "No matching roots",
+    "readFailed": "Could not read this directory"
+  },
+  "modelPicker": {
+    "recent": "Recent",
+    "historySaveFailed": "Could not save recent model choices",
+    "purpose": "Purpose",
+    "overridePurpose": "Override reported purposes",
+    "purposeUnknown": "Purpose not reported",
+    "noSuitableModels": "No models for this work",
+    "notForWork": "Not for this work",
+    "purposes": {
+      "generation": "Text generation",
+      "embedding": "Embeddings",
+      "image_generation": "Image generation",
+      "transcription": "Transcription",
+      "speech_generation": "Speech generation",
+      "rerank": "Reranking",
+      "decision": "Structured decisions"
+    },
+    "purposeDescriptions": {
+      "generation": "Conversations, agent turns and summaries",
+      "embedding": "Text vectors for semantic retrieval",
+      "image_generation": "Images from a generation request",
+      "transcription": "Speech converted to text",
+      "speech_generation": "Generated speech",
+      "rerank": "Ordering existing retrieval results",
+      "decision": "Selecting among supplied structured choices"
+    }
+  },
+  "machineSpool": {
+    "full": "Output paused: disk full · retrying ({{waiting}} waiting)",
+    "write": "Output paused: disk write failed · retrying ({{waiting}} waiting)",
+    "sync": "Output paused: disk sync failed · retrying ({{waiting}} waiting)",
+    "damaged": "Retained output storage was damaged",
+    "event_rejected": "Output paused: the link cannot carry an event",
+    "last": "Last reported: {{state}}"
   }
 }
