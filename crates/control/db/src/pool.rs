@@ -14,6 +14,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{str::FromStr, time::Duration};
+use tracing::instrument::WithSubscriber as _;
 
 /// One connection, alone or inside a transaction.
 pub type Conn = sqlx::PgConnection;
@@ -269,8 +270,17 @@ impl Tx {
     /// Commits. The commit runs what the transaction left for it (`orch_commit_work`): a change
     /// of authority it decided under refuses it as [`DbError::Retry`].
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        let Self { inner, held } = self;
-        let done = inner.commit().await;
+        let Self { mut inner, held } = self;
+        let done = finish_boundary(async move {
+            // Run deferred checks while a rejected transaction still needs its
+            // rollback. A failed PostgreSQL COMMIT has already ended it, while
+            // SQLx would otherwise queue another rollback on the same session.
+            sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+                .execute(&mut *inner)
+                .await?;
+            inner.commit().await
+        })
+        .await;
         drop(held);
         done
     }
@@ -278,10 +288,22 @@ impl Tx {
     /// Rolls back.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         let Self { inner, held } = self;
-        let done = inner.rollback().await;
+        let done = finish_boundary(async move { inner.rollback().await }).await;
         drop(held);
         done
     }
+}
+
+/// Once BEGIN, COMMIT or ROLLBACK is sent, one task owns it through the
+/// server's answer. Cancelling its waiter cannot return a half-finished boundary
+/// to the pool. A BEGIN whose caller disappeared drops its completed transaction
+/// normally; a COMMIT already begun finishes even if the HTTP request goes away.
+async fn finish_boundary<T: Send + 'static>(
+    work: impl Future<Output = Result<T, sqlx::Error>> + Send + 'static,
+) -> Result<T, sqlx::Error> {
+    tokio::spawn(work.with_current_subscriber())
+        .await
+        .map_err(|error| sqlx::Error::Io(std::io::Error::other(error)))?
 }
 
 /// What went wrong in the database, by what a caller can do about it.
@@ -501,7 +523,8 @@ impl Db {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let inner = finish_boundary(async move { pool.begin().await }).await?;
         self.measure(asked.elapsed());
         let mut tx = Tx {
             inner,
@@ -521,16 +544,29 @@ impl Db {
     /// PostgreSQL takes one only before any query, so it comes before what the request's lock class
     /// runs when a transaction begins (a write's request reads its answer after its commit).
     pub(crate) async fn begin_isolated(&self, isolation: &'static str) -> Result<Tx, DbError> {
+        self.begin_isolated_locked(isolation, None).await
+    }
+
+    /// A utility lock can protect partition layout before the first snapshot or epoch query.
+    pub(crate) async fn begin_isolated_locked(
+        &self,
+        isolation: &'static str,
+        lock: Option<&'static str>,
+    ) -> Result<Tx, DbError> {
         check_nested("begin");
         self.asking("begin");
         let asked = Instant::now();
-        let mut inner = self.pool.begin().await?;
+        let pool = self.pool.clone();
+        let inner = finish_boundary(async move { pool.begin().await }).await?;
         self.measure(asked.elapsed());
-        sqlx::query(isolation).execute(&mut *inner).await?;
         let mut tx = Tx {
             inner,
             held: Held::begin(),
         };
+        sqlx::query(isolation).execute(&mut *tx).await?;
+        if let Some(lock) = lock {
+            sqlx::query(lock).execute(&mut *tx).await?;
+        }
         crate::queries::transaction_guard::begin_scope(&mut tx).await?;
         Ok(tx)
     }

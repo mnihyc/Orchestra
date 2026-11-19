@@ -367,7 +367,8 @@ test('a current refusal never offers an administrator a self-grant, including wh
 
 /** Opens Share from the thread's own header. */
 async function shareThread(page: Page): Promise<void> {
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
 }
 
 /** Resource access moved into Settings; its own Share action still opens the same permission page. */

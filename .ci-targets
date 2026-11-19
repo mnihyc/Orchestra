@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-provider-contract --lib -- models::purpose_tests::
+test -p orch-protocol-openai-responses --lib -- models::tests::
+test -p orch-api-core --test model_entries
+test -p orch-api-core --test ask -- an_embedding_entry_never_becomes_the_default_ask_model_because_its_provider_also_serves_chat --exact
+web typecheck
+web lint
+web test -- tests/component/model-picker-rows.test.tsx tests/component/provider-source-models.test.tsx tests/unit/model.test.ts tests/component/ask-models-setting.test.tsx tests/component/semantic-fields.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts
