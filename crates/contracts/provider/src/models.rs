@@ -458,6 +458,27 @@ impl ModelParameters {
             .as_deref()
             .filter(|start| self.reasoning_modes().iter().any(|mode| mode == *start))
     }
+    /// Whether the model reasons before it answers, as its parameters say: it takes efforts, or a
+    /// reasoning mode starts on. What reasons spends part of the output allowance before any text.
+    #[must_use]
+    pub fn reasons(&self) -> bool {
+        !self.efforts().is_empty() || self.reasoning_mode_start().is_some()
+    }
+    /// Output planning does not infer a lack of reasoning from disabled or unrecorded tuning.
+    /// Reserve room unless the upstream explicitly reports no thinking support; enabled
+    /// reasoning controls still take precedence over a contradictory discovery observation.
+    #[must_use]
+    pub fn needs_reasoning_room(&self) -> bool {
+        self.reasons()
+            || self
+                .offered
+                .as_ref()
+                .and_then(|offered| offered.report.as_ref())
+                .and_then(|report| report.capabilities.get("thinking"))
+                .and_then(|thinking| thinking.get("supported"))
+                .and_then(orch_types::Json::as_bool)
+                != Some(false)
+    }
     /// Service tiers explicitly enabled by a manager.
     #[must_use]
     pub fn service_tiers(&self) -> &[ServiceTier] {

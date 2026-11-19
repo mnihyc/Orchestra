@@ -1,4 +1,6 @@
 /** One scoped audit trail for places and Management, with URL filters and continuous day or kind groups. */
+import { bindDeviceChoice, deviceChoiceOf } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import { useViewLocation, useViewNavigate } from '@/features/workbench/pageContext';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Download, RefreshCw, RotateCcw, ScrollText, SlidersHorizontal, X } from 'lucide-react';
@@ -67,11 +69,13 @@ function ScopedTrail({ scope, embedded }: { scope: TraceScope; embedded: boolean
     void navigate({ to: location.pathname, search, replace: true });
   };
   const refresh = async () => { const answer = await list.refetch(); if (answer.error) throw answer.error; return answer.data?.pages.flatMap((page) => page.items) ?? []; };
+  const groupReceipt = deviceChoiceOf(setRemembered);
+  const chooseGroup = bindDeviceChoice((next: GroupBy) => { setRemembered(next); update({ ...filters, group: next }); }, groupReceipt === undefined ? undefined : { ...groupReceipt, effective: group, origin: filters.group === undefined ? groupReceipt.origin : 'address' });
   const content = <div className="@container flex min-w-0 flex-col gap-4">
       {denied ? <ErrorState compact error={list.error ?? new Error('audit authority was lost')} title={t('trace.lostAccess')} onRetry={() => { setLost(false); void list.refetch(); }} /> : <>
-        <details open={filtersOpen} onToggle={(event) => setFiltersOpen(event.currentTarget.open)} className="min-w-0"><summary className="mb-3 flex w-fit cursor-default items-center gap-2 rounded-md px-2 py-1 text-sm text-text-muted hover:bg-bg-muted"><SlidersHorizontal aria-hidden />{t('trace.filters')}{filtered && <Badge>{t('trace.filtered')}</Badge>}</summary><TraceFilters scope={scope} filters={filters} person={selected} onChange={update} /></details>
+        <details open={filtersOpen} onToggle={(event) => { if (event.currentTarget.open !== filtersOpen) setFiltersOpen(event.currentTarget.open); }} className="min-w-0"><summary className="mb-3 flex w-fit cursor-default items-center gap-2 rounded-md px-2 py-1 text-sm text-text-muted hover:bg-bg-muted"><SlidersHorizontal aria-hidden />{t('trace.filters')}<DeviceChoiceWriterException writer={setFiltersOpen} />{filtered && <Badge>{t('trace.filtered')}</Badge>}</summary><DeviceExpansionFacts writer={setFiltersOpen} open={filtersOpen} /><TraceFilters scope={scope} filters={filters} person={selected} onChange={update} /></details>
         <FilterBar label={t('trace.filters')} action={<>{filtered && <Button size="sm" variant="ghost" icon={<X aria-hidden />} onClick={() => update({ group })}>{t('trace.clearFilters')}</Button>}<Button size="sm" icon={<RefreshCw aria-hidden />} pending={list.isFetching && !list.isPending} onClick={() => void list.refetch()}>{t('trace.refresh')}</Button>{!list.isPending && !list.isError && <Button size="sm" icon={<Download aria-hidden />} onClick={() => setDownloading(true)}>{t('trace.download')}</Button>}</>}>
-          <Select label={t('trace.group')} value={group} onValueChange={(next) => { setRemembered(next); update({ ...filters, group: next }); }} options={[{ value: 'day', ...choiceOption(t, 'traceGroup.day') }, { value: 'kind', ...choiceOption(t, 'traceGroup.kind') }]} />
+          <Select label={t('trace.group')} value={group} onValueChange={chooseGroup} options={[{ value: 'day', ...choiceOption(t, 'traceGroup.day') }, { value: 'kind', ...choiceOption(t, 'traceGroup.kind') }]} />
         </FilterBar>
         {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && entries.length === 0 ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} retrying={list.isRefetching} /> : entries.length === 0 ? <EmptyState compact icon={<ScrollText aria-hidden />} title={t(filtered ? 'trace.noMatch' : 'trace.empty')} /> : <><TrailRows key={JSON.stringify(wireFilters(filters))} entries={entries} group={group} hasMore={list.hasNextPage} select={filters.kind === 'deleted'} refresh={refresh} scopeName={scope.name} /><Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} /></>}
       </>}

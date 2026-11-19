@@ -7,7 +7,9 @@ import type * as Client from '@/api/client';
 import { ApiError } from '@/api/client';
 import type { CapabilityBackendCandidate } from '@/generated/api-types';
 import { CapabilityBackendChoice, CapabilityBackendSummary } from '@/features/settings/CapabilityBackendChoice';
-import { changeBackend, selectedBackend } from '@/features/settings/capabilityBackendValue';
+import { backendIdentity, changeBackend, selectedBackend } from '@/features/settings/capabilityBackendValue';
+import { AskModelsEditor } from '@/features/settings/AskModelsEditor';
+import { SummarizerEditor } from '@/features/settings/SummarizerEditor';
 import { i18n, setLocale } from '@/i18n';
 import { id, me, userRef } from '../doubles/fixtures';
 import { inventoryRow } from '../doubles/everything-row';
@@ -26,8 +28,8 @@ vi.mock('@/api/client', async (load) => {
     throw new Error(`Unexpected GET ${path}`);
   } } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
 
 const HOME = id(93, 11), PROVIDER = id(93, 12);
 const provider = planProvider({ id: PROVIDER, name: 'Picture plan', owner: userRef(me(1, 'ada', 'Ada')), org_id: HOME,
@@ -49,6 +51,26 @@ beforeEach(() => {
 });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
+it('keeps two placements of the same model as distinct choices', () => {
+  const first = { ...backend, config: { environment_id: 'first', options: { a: 1, b: 2 } } };
+  const reordered = { config: { options: { b: 2, a: 1 }, environment_id: 'first' }, offering: { offering: 'native-model', provider: PROVIDER }, route: backend.route };
+  expect(backendIdentity(first)).toBe(backendIdentity(reordered));
+  expect(backendIdentity(first)).not.toBe(backendIdentity({ ...backend, config: { environment_id: 'second', options: { a: 1, b: 2 } } }));
+  expect(backendIdentity(first)).not.toBe(backendIdentity({ ...first, route: 'image_generation.service-model' }));
+});
+
+it('keeps the exact stored placement when the same model is chosen again', async () => {
+  const stored = { ...backend, config: { environment_id: HOME, helper_topic_id: id(93, 13) } };
+  show(<Draw initial={stored} />);
+  const user = userEvent.setup();
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  const name = i18n.t('capabilityBackend.delegated', { program: 'Codex on ChatGPT' });
+  await waitFor(() => expect(route).toHaveValue(`${name} · Image model`));
+  await user.click(route);
+  await user.click(await screen.findByRole('option', { name: /Image model/ }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored);
+});
+
 it.each([
   ['en', ['Web search provider', 'Web search route', 'Page fetch provider', 'Page fetch route']],
   ['zh-CN', ['网页搜索提供方', '网页搜索路径', '网页抓取提供方', '网页抓取路径']],
@@ -58,6 +80,19 @@ it.each([
     shape={{ type: 'json' }} value={null} label="Web search backend" onChange={calls.changed} /></form>);
   expect(screen.getAllByRole('combobox')).toHaveLength(names.length);
   for (const name of names) expect(screen.getByRole('combobox', { name })).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('explains a placement without a restricted proxy in %s', async (locale) => {
+  await setLocale(locale);
+  const unavailable = { ...candidate(false), reason: 'program_unit_network_unavailable', reason_text: {} };
+  calls.choices.mockResolvedValue({ items: [unavailable], next_cursor: null });
+  show(<Draw initial={backend} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') }));
+  const option = await screen.findByRole('option', { name: /Image model/ });
+  expect(option).toHaveAttribute('aria-disabled', 'true');
+  expect(within(option).getByText(locale === 'en' ? 'This placement needs a restricted provider proxy and an isolated network' : '此位置需要受限的提供方代理和隔离网络')).toBeVisible();
+  expect(calls.changed).not.toHaveBeenCalled();
 });
 
 it.each(['en', 'zh-CN'] as const)('saves only the complete eligible route and exposes the disabled reason in %s', async (locale) => {
@@ -124,4 +159,56 @@ it('preserves the other capability and opaque members in a shared backend value'
   const removed = changeBackend(next, 'agents.web_search_backend', 'page_fetch', null);
   expect(selectedBackend(removed, 'page_fetch')).toBeNull();
   expect(selectedBackend(removed, 'web_search')?.offering?.offering).toBe('search-new');
+});
+
+function SummaryDraw({ stored, global = false }: { stored: unknown; global?: boolean }) {
+  const [value, setValue] = useState(stored);
+  return <SummarizerEditor target={global ? { kind: 'system' } : { kind: 'node', id: HOME }} shape={{ type: 'json' }} value={value} label="Summarizer"
+    onChange={(next) => { calls.changed(next); setValue(next); }} />;
+}
+it.each(['en', 'zh-CN'] as const)('keeps a summary subscription and placement in the same backend control in %s', async (locale) => {
+  await setLocale(locale);
+  const selected = { ...backend, route: 'summary.delegation', config: { environment_id: HOME, helper_topic_id: id(93, 13) } };
+  const row = { ...candidate(true), backend: { ...selected, config: null }, offering_name: 'Text model' };
+  calls.choices.mockResolvedValue({ items: [row], next_cursor: null });
+  const stored = { kind: 'model', backend: selected, max_output_tokens: 240, prompts: { title: 'Keep the chosen wording.' } };
+  show(<SummaryDraw stored={stored} />);
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  const program = locale === 'en' ? 'Codex on ChatGPT' : 'Codex（ChatGPT 登录）';
+  await waitFor(() => expect(route).toHaveValue(`${i18n.t('capabilityBackend.delegated', { program })} · Text model`));
+  await userEvent.click(route);
+  await userEvent.click(await screen.findByRole('option', { name: /Text model/ }));
+  await waitFor(() => expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored));
+  expect(calls.choices).toHaveBeenCalledWith(expect.objectContaining({ capability: 'summary', place: HOME }));
+  expect(screen.getByRole('spinbutton', { name: i18n.t('settingsEditors.summarizer.answerTokens') })).toHaveValue(240);
+  expect(screen.getByText(i18n.t('settingsEditors.summarizer.instructions'))).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('uses the same subscription choice for a system summary default without a source node in %s', async (locale) => {
+  await setLocale(locale);
+  const selected = { ...backend, route: 'summary.delegation' };
+  calls.choices.mockResolvedValue({ items: [{ ...candidate(true), backend: selected, offering_name: 'Global text model' }], next_cursor: null });
+  const stored = { kind: 'model', backend: selected };
+  show(<SummaryDraw stored={stored} global />);
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  await waitFor(() => expect(route).toHaveValue(`${i18n.t('capabilityBackend.delegated', { program: locale === 'en' ? 'Codex on ChatGPT' : 'Codex（ChatGPT 登录）' })} · Global text model`));
+  await userEvent.click(route);
+  await userEvent.click(await screen.findByRole('option', { name: /Global text model/ }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored);
+  expect(calls.choices).toHaveBeenCalledWith({ capability: 'summary', offering: 'native-model' });
+  expect(calls.choices).toHaveBeenCalledWith(expect.objectContaining({ capability: 'summary', q: '' }));
+});
+
+it.each(['en', 'zh-CN'] as const)('chooses an Ask subscription with its saved placement from the common supplier in %s', async (locale) => {
+  await setLocale(locale);
+  const saved = { ...backend, route: 'ask.delegation', config: { environment_id: HOME } };
+  const result = { ...candidate(true), backend: { ...saved, config: null }, offering_name: 'Team dialogue' };
+  calls.choices.mockResolvedValue({ items: [result], next_cursor: null });
+  show(<AskModelsEditor target={{ kind: 'system' }} label="Ask models" value={[{ backend: saved }]} onChange={calls.changed} />);
+  await waitFor(() => expect(calls.choices).toHaveBeenCalledWith({ capability: 'ask', offering: 'native-model' }));
+  expect(calls.choices.mock.calls.every(([query]) => query.offering !== undefined)).toBe(true);
+  const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox', {name:i18n.t('capabilityBackend.route')}));
+  await user.click(await screen.findByRole('option', {name:/Team dialogue/}));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith([{backend:saved}]);
 });

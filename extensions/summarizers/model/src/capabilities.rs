@@ -3,12 +3,14 @@ use crate::completion::{Complete, Model};
 use crate::descriptor::Config;
 use async_trait::async_trait;
 use orch_provider_contract::capabilities::{
-    CallSource, CapabilityCall, CapabilityExecutor, CapabilityItem, CapabilityResult, Declarations,
-    Route,
+    CallSource, CapabilityCall, CapabilityError, CapabilityExecutor, CapabilityItem,
+    CapabilityResult, Declarations, Route,
 };
 use orch_provider_contract::{SourceError, SourceErrorCode};
 use orch_summarizer_contract::descriptor::SummaryField;
-use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRequest};
+use orch_summarizer_contract::summarizer::{
+    OUTPUT_CUT, SummarizeError, Summarizer, SummaryRequest,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +46,7 @@ pub struct Executor {
     host: Arc<dyn Complete>,
     source: CallSource,
     field: SummaryField,
+    program: bool,
 }
 
 impl Executor {
@@ -54,6 +57,17 @@ impl Executor {
             host,
             source,
             field: SummaryField::Summary,
+            program: false,
+        }
+    }
+    /// The same model producer with an installed source-bound program transport.
+    #[must_use]
+    pub fn program(host: Arc<dyn Complete>, source: CallSource, field: SummaryField) -> Self {
+        Self {
+            host,
+            source,
+            field,
+            program: true,
         }
     }
     /// The native title workflow owns its separate source/cache and binds this field explicitly.
@@ -63,6 +77,7 @@ impl Executor {
             host,
             source,
             field: SummaryField::Title,
+            program: false,
         }
     }
 }
@@ -86,11 +101,15 @@ fn failure(error: SummarizeError) -> SourceError {
             false,
             "the producer does not offer a summary paragraph",
         ),
-        SummarizeError::Skipped(_) => (
+        SummarizeError::Waiting(_) | SummarizeError::Skipped(_) => (
             SourceErrorCode::Refused,
             false,
             "the summary completion was refused",
         ),
+        // The answer ran into its output allowance: its own code, so that whoever is told can raise it.
+        SummarizeError::Failed { message, retryable } if message == OUTPUT_CUT => {
+            (SourceErrorCode::TooLarge, retryable, OUTPUT_CUT)
+        }
         SummarizeError::Failed { retryable, .. } => (
             SourceErrorCode::Unavailable,
             retryable,
@@ -111,15 +130,37 @@ fn failure(error: SummarizeError) -> SourceError {
 
 #[async_trait]
 impl CapabilityExecutor for Executor {
-    async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, SourceError> {
+    fn support(&self) -> Vec<orch_provider_contract::capabilities::ExecutionSupport> {
+        if self.program {
+            vec![orch_provider_contract::capabilities::ExecutionSupport {
+                input: "summary.request".into(),
+                result: "summary.result".into(),
+                confined_tools: true,
+                ..Default::default()
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+    async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, CapabilityError> {
         if call.source != self.source
             || call.capability != "summary"
             || call.item != "summary"
             || call.ledger_unit != "token"
-            || call.route.id != ROUTE
-            || call.route.executor.as_deref() != Some(EXECUTOR)
+            || call.route.id
+                != if self.program {
+                    "summary.delegation"
+                } else {
+                    ROUTE
+                }
+            || call.route.executor.as_deref()
+                != Some(if self.program {
+                    "program-session"
+                } else {
+                    EXECUTOR
+                })
         {
-            return Err(malformed());
+            return Err(malformed().into());
         }
         let request: SummaryRequest =
             serde_json::from_value(call.input).map_err(|_| malformed())?;
@@ -127,18 +168,27 @@ impl CapabilityExecutor for Executor {
             || request.limits.max_chars == 0
             || self.source.node_id.or(self.source.thread_id) != Some(request.node.id)
         {
-            return Err(malformed());
+            return Err(malformed().into());
         }
         let config = Config::read(&request.config).map_err(failure)?;
-        if !call.route.offering.as_ref().is_some_and(|offering| {
-            offering.provider == config.provider_id && offering.offering == config.model_name
-        }) {
-            return Err(malformed());
+        if call.route.backend.as_ref() != Some(&config.backend)
+            || call.route.offering.as_ref() != config.backend.offering.as_ref()
+        {
+            return Err(malformed().into());
         }
         let result = Model::new(self.host.clone())
             .summarize(request)
             .await
-            .map_err(failure)?;
+            .map_err(|error| match error {
+                SummarizeError::Waiting(wait) => CapabilityError::native(
+                    SourceError::new(
+                        SourceErrorCode::Refused,
+                        "Automatic work is waiting for the plan reserve.",
+                    ),
+                    wait,
+                ),
+                other => CapabilityError::from(failure(other)),
+            })?;
         let text = result
             .text
             .filter(|text| !text.trim().is_empty())

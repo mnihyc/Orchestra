@@ -35,23 +35,14 @@ environment or provider runtime does not replace itself.
 
 ## When local policy refuses
 
-The person at the machine keeps the last word. A local `update.auto = false`
-refuses a web request; the refusal names that key and gives the local command:
+The person at the machine controls automatic updates with `update.auto`. Explicit Update remains available while Auto is off and does not enable automatic updates. The operator can also request the same verified update locally:
 
 ```sh
 orch-connector update
 orch-node update
 ```
 
-Use the command for the program on that machine. It is explicit local consent
-to install the verified build even when automatic updates are off. It does
-not change the saved `update.auto` value. An offline machine must reconnect
-before Orch can send it a command. Below the server's accepted minimum build,
-an update is required before normal work can resume. A node can obtain that
-update while its ordinary connection is refused, after the server has waited
-for every hosted turn to end. It never assumes that an empty local harness
-list means its units are idle. If the programs no longer speak a common link
-protocol, the operator uses `orch-node update` on the host.
+Use the command for the program on that machine. It leaves the saved `update.auto` value unchanged. Below the server's accepted minimum build, an authenticated program can obtain an idle update grant without a normal connection. The server first holds new turns and waits for all work using that machine, including every hosted unit. A machine disconnected for another reason must be able to reach its server again. An empty local program list is not proof that the hosted units are idle. If the programs no longer speak a common link protocol, the operator runs the local update command on that machine.
 
 ## Environments and provider runtimes
 

@@ -31,6 +31,7 @@ const CHIPS: Record<GoalChip, { tone: StatusTone; icon: ReactNode }> = {
   working: { tone: 'info', icon: <LoaderCircle className="animate-spin motion-reduce:animate-none" aria-hidden /> },
   waiting: { tone: 'warning', icon: <ShieldQuestionMark aria-hidden /> },
   paused: { tone: 'idle', icon: <Pause aria-hidden /> },
+  unchecked: { tone: 'warning', icon: <ShieldQuestionMark aria-hidden /> },
   met: { tone: 'success', icon: <Check aria-hidden /> },
   stopped: { tone: 'warning', icon: <OctagonAlert aria-hidden /> },
 };
@@ -40,9 +41,10 @@ export function GoalLine({ thread }: { thread: Thread }) {
   const locale = useAppearance((state) => state.locale);
   const read = useThreadReadRef(thread.id);
   const [open, setOpen] = useState(false);
+  const [evidenceShown, setEvidenceShown] = useState(false);
   const goal = thread.goal ?? null;
   const clock = useRunningClock(goal?.status === 'active');
-  const change = useMutation({ mutationFn: (action: 'pause' | 'resume') => updateGoal(read, { action }) });
+  const change = useMutation({ mutationFn: (action: 'pause' | 'resume' | 'accept') => updateGoal(read, { action }) });
   const clear = useMutation({ mutationFn: () => clearGoal(read) });
   if (goal === null) return null;
   const may = holds(thread.access, 'thread.interact') && !thread.archived;
@@ -52,7 +54,9 @@ export function GoalLine({ thread }: { thread: Thread }) {
   const why = chip === 'waiting' && goal.status === 'active'
     ? waitingWords(goal, t)
     : goal.status === 'paused' || goal.status === 'stopped' ? reasonWords(goal, t, locale) : null;
-  const how = goal.status === 'met' ? t(goal.last_report?.checked_by === 'helper' ? 'goals.line.byHelper' : 'goals.line.byAgent') : null;
+  const how = goal.status === 'met' ? goal.last_report?.checked_by === 'helper' ? t('goals.line.byHelper')
+    : goal.last_report?.checked_by === 'person' ? t('goals.line.byPerson') : null : null;
+  const unchecked = goal.status === 'paused' && goal.reason === 'unchecked';
   const checking = goal.checking ? t('goals.checking') : null;
   const condition = t('goals.line.condition', { condition: goal.condition });
   const side = why ?? [used.join(' · '), checking, how].filter((part): part is string => part !== null && part !== '').join(' · ');
@@ -64,15 +68,18 @@ export function GoalLine({ thread }: { thread: Thread }) {
     goal.status === 'active'
       ? <IconButton key="pause" size="sm" label={t('goals.act.pause')} icon={<Pause aria-hidden />} pending={change.isPending && change.variables === 'pause'}
         blocked={!may} reason={driveOnly} onClick={() => change.mutate('pause')} />
-      : <IconButton key="resume" size="sm" label={t('goals.act.resume')} icon={<Play aria-hidden />} pending={change.isPending && change.variables === 'resume'}
+      : <IconButton key="resume" size="sm" label={t(unchecked ? 'goals.act.continue' : 'goals.act.resume')} icon={<Play aria-hidden />} pending={change.isPending && change.variables === 'resume'}
         blocked={!may || reachedFirst} reason={driveOnly ?? (reachedFirst ? t('goals.act.raiseFirst') : undefined)} onClick={() => change.mutate('resume')} />
   ) : null;
   const entries: MenuEntry[] = [
+    ...(unchecked && goal.last_report !== null ? [{ id: 'goal-evidence', label: t(evidenceShown ? 'goals.marker.evidenceLess' : 'goals.marker.evidenceMore'), onSelect: () => setEvidenceShown((held) => !held) }] : []),
     ...(goal.status === 'met' ? [] : [{ id: 'goal-edit', label: t('goals.act.edit'), disabled: driveOnly ?? false, onSelect: () => openGoalEditor(thread.id) } as MenuEntry]),
     { id: 'goal-clear', label: t('goals.act.clear'), disabled: driveOnly ?? false, onSelect: () => clear.mutate() },
   ];
   const acts = (
     <span className="flex shrink-0 items-center gap-1">
+      {unchecked && goal.last_report?.outcome === 'unchecked' && <IconButton size="sm" label={t('goals.act.accept')} icon={<Check aria-hidden />} pending={change.isPending && change.variables === 'accept'}
+        blocked={!may} reason={driveOnly} onClick={() => change.mutate('accept')} />}
       {toggle}
       <Menu label={t('goals.act.more')} align="end" entries={entries} trigger={<IconButton size="sm" label={t('goals.act.more')} icon={<Ellipsis aria-hidden />} />} />
     </span>
@@ -103,6 +110,7 @@ export function GoalLine({ thread }: { thread: Thread }) {
         </div>
       )}
       {error !== null && <ErrorAlert error={error} message={t('goals.act.failed')} />}
+      {evidenceShown && unchecked && goal.last_report !== null && <p className="max-h-48 overflow-auto whitespace-pre-wrap wrap-anywhere" data-goal-evidence>{goal.last_report.evidence}</p>}
       </section>
     </ContextMenu>
   );
