@@ -8,6 +8,9 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+test-observers = []
+
 [dependencies]
 jsonschema.workspace = true
 blake3.workspace = true

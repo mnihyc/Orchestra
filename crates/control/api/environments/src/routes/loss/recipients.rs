@@ -61,6 +61,16 @@ pub(super) struct Prepared {
 /// Native saved-plan polymorphism, not an HTTP endpoint or permission selector.
 fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
     Ok(match record.kind.as_str() {
+        "resource_stop" => vec![
+            serde_json::from_value(
+                record
+                    .plan
+                    .get("object")
+                    .cloned()
+                    .ok_or_else(|| ApiError::internal("the resource review has no subject"))?,
+            )
+            .map_err(ApiError::internal)?,
+        ],
         "loss" => {
             vec![orch_engine::loss::recipient_subject(&record.plan).map_err(ApiError::engine)?]
         }
@@ -76,6 +86,15 @@ fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
         }],
         "move_batch" => environments::moves::recipient_subjects(&record.plan)?,
         "recover_batch" => environments::recovery::recipient_subjects(&record.plan)?,
+        forks::PLAN_KIND => {
+            let native: orch_engine::fork_plan::StoredPlan =
+                serde_json::from_value(record.plan.clone()).map_err(ApiError::internal)?;
+            vec![
+                native
+                    .move_recipient_subject()
+                    .ok_or_else(ApiError::not_found)?,
+            ]
+        }
         forks::BATCH_PLAN_KIND => {
             let native: orch_engine::fork_plan::StoredBatch =
                 serde_json::from_value(record.plan.clone()).map_err(ApiError::internal)?;
@@ -184,12 +203,25 @@ impl native::Selected for Recipients {
             if ctx.user()?.id() != principal.user() {
                 return Err(ApiError::not_found());
             }
-            forks::preflight(conn, ctx.id("id")?)
+            let record = forks::preflight(conn, ctx.id("id")?)
                 .await?
                 .filter(|row| {
                     row.created_by == principal.user() && row.expires_at > ctx.app.clock.now()
                 })
                 .ok_or_else(ApiError::not_found)?;
+            if record.kind == forks::PLAN_KIND {
+                for subject in subjects(&record)? {
+                    crate::middleware::authorization::require(
+                        conn,
+                        principal,
+                        subject.id,
+                        crate::middleware::authorization::VIEW,
+                        orch_authz::Act::Use,
+                        orch_authz::Policy::default(),
+                    )
+                    .await?;
+                }
+            }
             Ok(())
         })
     }

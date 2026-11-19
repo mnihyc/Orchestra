@@ -119,6 +119,8 @@ async fn a_cluster_reports_its_limits_removes_only_its_unit_and_restores_the_sam
         .query(&EnvironmentDeleteQuery {
             confirm: "Retained pool files".into(),
             at: None,
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await

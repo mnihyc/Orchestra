@@ -48,6 +48,7 @@ pub mod network;
 pub mod notifications;
 pub mod outsiders;
 pub mod package;
+pub mod pools;
 pub mod ports;
 pub mod profiles;
 pub mod provider_credits;
@@ -84,3 +85,6 @@ pub mod uploads;
 pub mod ask;
 /// Durable fenced progress of the offline document purge.
 pub mod document_purge_progress;
+
+/// Durable native pool choices and rotation facts.
+pub mod pool_choices;

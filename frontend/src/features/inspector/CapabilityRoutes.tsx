@@ -29,11 +29,11 @@ function quotes(value: Record<string, Quote>): Quote[] {
     && price.amount.trim() !== '' && Number.isFinite(Number(price.amount)) && Number(price.amount) >= 0
     && typeof price.currency === 'string' && typeof price.unit === 'string');
 }
-interface Fallback { rule_id: string; scope: string; when: string; provider: { id: string; title: string } | null }
+interface Fallback { rule_id: string; scope: string; when: string; pool_kind:string | null; provider: { id: string; title: string } | null }
 const word = (words: Record<string, string>, key: string | null | undefined): string | undefined => key === null || key === undefined || !Object.hasOwn(words, key) ? undefined : words[key];
 function fallbackRows(value: unknown): Fallback[] {
   return Array.isArray(value) ? value.filter((row): row is Fallback => record(row) && typeof row.rule_id === 'string'
-    && typeof row.scope === 'string' && typeof row.when === 'string'
+    && typeof row.scope === 'string' && typeof row.when === 'string' && (row.pool_kind===null || typeof row.pool_kind==='string')
     && (row.provider === null || (record(row.provider) && typeof row.provider.id === 'string' && typeof row.provider.title === 'string'))) : [];
 }
 function facts(value: unknown, language: string): { id: string; text: string }[] {
@@ -140,7 +140,7 @@ export function CapabilityRoutes({ value }: { value: unknown }) {
           {notes.length > 0 && <ul className="flex min-w-0 list-disc flex-col gap-1 break-words ps-4 text-text-muted" data-testid="capability-facts">
             {notes.map((fact) => <li key={fact.id} data-fact={fact.id}>{fact.text}</li>)}
           </ul>}
-          {fallbackRows(row.fallbacks).map((fallback, index) => <span key={index} className="text-text-muted"><Trans i18nKey="capabilityRoutes.fallback" values={{ rule: fallback.rule_id, source: word(scopes, fallback.scope) ?? t('capabilityRoutes.scopeUnknown'), when: t(`calls.kinds.${fallback.when}`, { defaultValue: t('calls.kinds.any') }) }} components={{ provider: fallback.provider === null ? <span>{t('calls.capabilityDestination')}</span> : <ResourceChip subject={{ kind:'provider',provider:{id:fallback.provider.id,name:fallback.provider.title} }} hint={false} /> }} /></span>)}
+          {fallbackRows(row.fallbacks).map((fallback, index) => <span key={index} className="text-text-muted"><Trans i18nKey="capabilityRoutes.fallback" values={{ rule: fallback.rule_id, source: word(scopes, fallback.scope) ?? t('capabilityRoutes.scopeUnknown'), when: t(`calls.kinds.${fallback.when}`, { defaultValue: t('calls.kinds.any') }) }} components={{ provider: fallback.provider === null ? <span>{t(fallback.pool_kind===null?'calls.capabilityDestination':'screens.pools.title')}</span> : <ResourceChip subject={{ kind:'provider',provider:{id:fallback.provider.id,name:fallback.provider.title} }} hint={false} /> }} /></span>)}
         </li>;
       })}
     </ul>
