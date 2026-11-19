@@ -2189,3 +2189,410 @@ async fn the_owner_row_of_a_new_provider_names_its_maker_and_a_choice_of_who_els
     assert!(names(&world, &c.stranger, None).await.is_empty());
     let _ = name_on_page; // naming people by hand is done in the other tests
 }
+
+#[tokio::test]
+async fn a_provider_pause_or_removal_notifies_each_affected_person_once_only_when_chosen() {
+    for (remove, notify) in [
+        (false, None),
+        (false, Some(false)),
+        (false, Some(true)),
+        (true, None),
+        (true, Some(false)),
+        (true, Some(true)),
+    ] {
+        let world = world().await;
+        let c = company(&world).await;
+        let provider = make(&world, &c.boss, &api_body("Shared key", c.acme)).await;
+        name_on_page(
+            &world,
+            "provider",
+            provider.base.id,
+            "provider.manage",
+            ("user", Some(c.admin.id()), None),
+        )
+        .await;
+        let first = bind_thread(&world, &c, provider.base.id).await;
+        let second = bind_thread(&world, &c, provider.base.id).await;
+        sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=ANY($1)")
+            .bind(vec![first, second])
+            .bind(c.viewer.id())
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let review = world
+            .app
+            .call(orch_api_contract::resource_facts::ResourceImpactRead, &[])
+            .token(&c.boss.token)
+            .raw_body(&json!({"object":{"kind":"provider","id":provider.base.id},"model_id":null}))
+            .send()
+            .await
+            .ok()
+            .notification
+            .unwrap();
+        let query = match notify {
+            Some(true) => format!("notify=true&notification_review={}", review.preview_id),
+            Some(false) => "notify=false".into(),
+            None => String::new(),
+        };
+        if remove {
+            let reply = world
+                .app
+                .call(ProviderDelete, &[&provider.base.id])
+                .token(&c.boss.token)
+                .raw_query(&query)
+                .send()
+                .await;
+            assert_eq!(reply.status, 204, "{:?}", reply.body);
+        } else {
+            world
+                .app
+                .call(ProviderDisable, &[&provider.base.id])
+                .token(&c.boss.token)
+                .raw_query(&query)
+                .send()
+                .await
+                .ok();
+        }
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.viewer.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            notices,
+            i64::from(notify.unwrap_or(false)),
+            "the same person owns two affected threads"
+        );
+        if notify == Some(true) {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.viewer.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                data["actor"],
+                json!(c.boss.id()),
+                "the affected person can see who acted"
+            );
+        }
+        if remove && notify == Some(true) {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.admin.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                data["path"], "/resources/providers",
+                "a removed provider's managers are not linked to its missing page"
+            );
+        }
+        let duplicates: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT user_id FROM notifications WHERE kind='environment.attention' GROUP BY user_id HAVING count(*)>1) repeated")
+            .fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(duplicates, 0);
+        let actor: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.boss.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            actor, 0,
+            "the confirming person is not part of Notify others"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_provider_confirmation_reads_distinct_people_and_its_inherited_notice_default_without_sending()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Shared key", c.acme)).await;
+    name_on_page(
+        &world,
+        "provider",
+        provider.base.id,
+        "provider.manage",
+        ("user", Some(c.admin.id()), None),
+    )
+    .await;
+    let first = bind_thread(&world, &c, provider.base.id).await;
+    let second = bind_thread(&world, &c, provider.base.id).await;
+    sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=ANY($1)")
+        .bind(vec![first, second])
+        .bind(c.viewer.id())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for (choice, expected) in [("when_blocking", true), ("never", false)] {
+        world
+            .set_at(
+                Target::Node(c.acme),
+                orch_settings_contract::registry::keys::NOTIFY_OPERATIONS,
+                json!(choice),
+            )
+            .await;
+        let read = world
+            .app
+            .call(orch_api_contract::resource_facts::ResourceImpactRead, &[])
+            .token(&c.boss.token)
+            .raw_body(&json!({"object":{"kind":"provider","id":provider.base.id},"model_id":null}))
+            .send()
+            .await;
+        assert_eq!(read.status, 200, "{:?}", read.body);
+        let data: Json = serde_json::from_slice(&read.raw).unwrap();
+        assert_eq!(data["notification"]["default_on"], expected);
+        let people = data["notification"]["audience"]["people"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            people
+                .iter()
+                .filter(|person| person["id"] == json!(c.viewer.id()))
+                .count(),
+            1
+        );
+        assert!(
+            !people
+                .iter()
+                .any(|person| person["id"] == json!(c.boss.id()))
+        );
+        let review: Id =
+            serde_json::from_value(data["notification"]["preview_id"].clone()).unwrap();
+        let recipients = world
+            .app
+            .call(orch_api_contract::loss::OperationRecipientsGet, &[&review])
+            .token(&c.boss.token)
+            .query(&orch_api_contract::common::PageQuery::default())
+            .send()
+            .await
+            .ok();
+        assert_eq!(
+            recipients.total,
+            data["notification"]["people"].as_i64().unwrap()
+        );
+        assert_eq!(
+            recipients.hidden,
+            data["notification"]["audience"]["hidden"].as_i64().unwrap()
+        );
+        assert!(
+            recipients
+                .people
+                .items
+                .iter()
+                .any(|person| person.id == c.viewer.id())
+        );
+        assert!(
+            !recipients
+                .people
+                .items
+                .iter()
+                .any(|person| person.id == c.admin.id())
+        );
+    }
+    let notices: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notifications WHERE kind='environment.attention'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(notices, 0);
+}
+
+#[tokio::test]
+async fn a_model_pause_or_removal_notifies_its_own_threads_once_only_when_explicitly_chosen() {
+    use orch_api_contract::resource_facts::{FactTarget, ResourceImpactRead};
+    use orch_api_contract::resources::{
+        ProviderModelCreate, ProviderModelCreateBody, ProviderModelDelete, ProviderModelUpdate,
+        ProviderModelUpdateBody,
+    };
+    for (remove, notify) in [
+        (false, None),
+        (false, Some(false)),
+        (false, Some(true)),
+        (true, None),
+        (true, Some(false)),
+        (true, Some(true)),
+    ] {
+        let world = world().await;
+        let c = company(&world).await;
+        let provider = make(&world, &c.boss, &api_body("Model notices", c.acme)).await;
+        let mut models = Vec::new();
+        for name in ["chosen-model", "other-model"] {
+            models.push(
+                world
+                    .app
+                    .call(ProviderModelCreate, &[&provider.base.id])
+                    .token(&c.boss.token)
+                    .body(&ProviderModelCreateBody {
+                        model_name: name.into(),
+                        display_name: Some(name.into()),
+                        parameters: None,
+                        groups: None,
+                    })
+                    .send()
+                    .await
+                    .ok()
+                    .into_full()
+                    .unwrap(),
+            );
+        }
+        sqlx::query("UPDATE provider_models SET enabled=true WHERE provider_id=$1")
+            .bind(provider.base.id)
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let first = bind_thread(&world, &c, provider.base.id).await;
+        let second = bind_thread(&world, &c, provider.base.id).await;
+        let unrelated = bind_thread(&world, &c, provider.base.id).await;
+        for (thread, model, owner) in [
+            (first, &models[0], c.viewer.id()),
+            (second, &models[0], c.viewer.id()),
+            (unrelated, &models[1], c.stranger.id()),
+        ] {
+            sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,$2,$3) ON CONFLICT(node_id,key) DO UPDATE SET value=excluded.value")
+                .bind(thread).bind(orch_settings_contract::registry::keys::AGENT_MODEL).bind(json!(model.model_name)).execute(&world.db.pool).await.unwrap();
+            sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=$1")
+                .bind(thread)
+                .bind(owner)
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        }
+        let target = FactTarget {
+            object: orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Provider,
+                id: provider.base.id,
+            },
+            model_id: Some(models[0].id),
+        };
+        let preview = world
+            .app
+            .call(ResourceImpactRead, &[])
+            .token(&c.boss.token)
+            .body(&target)
+            .send()
+            .await
+            .ok();
+        assert!(
+            preview.notification.is_some(),
+            "the exact model exposes its own optional audience"
+        );
+        let query = match notify {
+            Some(true) => "notify=true",
+            Some(false) => "notify=false",
+            None => "",
+        };
+        if remove {
+            let response = world
+                .app
+                .call(ProviderModelDelete, &[&provider.base.id, &models[0].id])
+                .token(&c.boss.token)
+                .raw_query(query)
+                .send()
+                .await;
+            assert_eq!(response.status, 204, "{:?}", response.body);
+        } else {
+            for _ in 0..2 {
+                world
+                    .app
+                    .call(ProviderModelUpdate, &[&provider.base.id, &models[0].id])
+                    .token(&c.boss.token)
+                    .raw_query(query)
+                    .body(&ProviderModelUpdateBody {
+                        enabled: Some(false),
+                        ..Default::default()
+                    })
+                    .send()
+                    .await
+                    .ok();
+            }
+        }
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.viewer.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            notices,
+            i64::from(notify.unwrap_or(false)),
+            "two threads and a repeated pause produce one chosen notice"
+        );
+        let unrelated_notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.stranger.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unrelated_notices, 0,
+            "another model on this provider is a different audience"
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_deletion_tells_its_affected_people_only_when_this_operation_was_chosen() {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_api_contract::resource_facts::{
+        FactTarget, ResourceImpactRead, ResourceNotificationQuery,
+    };
+    let world = world().await;
+    let company = company(&world).await;
+    for notify in [false, true] {
+        let provider = make(
+            &world,
+            &company.boss,
+            &api_body("Retained provider", company.acme),
+        )
+        .await;
+        let id = provider.base.id;
+        name_on_page(
+            &world,
+            "provider",
+            id,
+            "provider.manage",
+            ("user", Some(company.admin.id()), None),
+        )
+        .await;
+        let plan = world
+            .app
+            .call(ResourceImpactRead, &[])
+            .token(&company.boss.token)
+            .body(&FactTarget {
+                object: ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id,
+                },
+                model_id: None,
+            })
+            .send()
+            .await
+            .ok()
+            .notification
+            .unwrap();
+        assert!(!plan.default_on);
+        world
+            .app
+            .call(ProviderDelete, &[&id])
+            .token(&company.boss.token)
+            .query(&ResourceNotificationQuery {
+                notify: Some(notify),
+                notification_review: Some(plan.preview_id),
+            })
+            .send()
+            .await
+            .ok();
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM notifications WHERE user_id=$1 AND data->'provider_ids' @> $2 AND data->>'operation_kind'='provider_delete'").bind(company.admin.id()).bind(json!([id])).fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(count, i64::from(notify));
+    }
+}

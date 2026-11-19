@@ -12,7 +12,7 @@
 #   ./update.sh dumps remove <name> [--yes]
 #   ./update.sh uninstall [--purge] [--no-backup] [--plan|--yes]
 #
-# Readiness checks the operator's public_url from this host as well as the
+# Readiness checks the committed public address from this host as well as the
 # services inside the stack. ORCH_READY_URL may select the reachable edge URL
 # when this host uses a different route to the same deployment.
 #
@@ -73,7 +73,11 @@ BACKUPS="runtime/update-backups"
 
 say() { printf '%s\n' "$*"; }
 note() { printf 'update.sh: %s\n' "$*" >&2; }
-die() { printf 'update.sh: %s\n' "$*" >&2; exit 1; }
+die() {
+  printf 'update.sh: %s\n' "$*" >&2
+  if [[ "${ORCH_UPDATE_JOB:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then update_job_exit; fi
+  exit 1
+}
 stamp() { date -u +%Y%m%dT%H%M%SZ; }
 
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 is needed and is not installed"; }
@@ -204,6 +208,16 @@ ensure_node_lock() {
   (umask 077; : >> "$path")
   [ "$(id -u)" -ne 0 ] || chown "$SERVICE_UID:$SERVICE_GID" "$path"
   chmod 600 "$path"
+}
+
+# First start grants the bundled node's shipped facilities in its single machine policy.
+seed_node_policy() {
+  local path=runtime/node/config.toml initial=runtime/node/.config.toml.initial
+  if [ -e "$path" ] || [ -L "$path" ]; then return 0; fi
+  (umask 077; cat config/node.toml > "$initial") || die "the bundled node policy could not be prepared"
+  chmod 600 "$initial"
+  [ "$(id -u)" -ne 0 ] || chown "$SERVICE_UID:$SERVICE_GID" "$initial"
+  mv -- "$initial" "$path"
 }
 
 prepare_dirs() {
@@ -494,6 +508,30 @@ link_set() {
   mv -T "$path.new" "$path"
 }
 
+# A bundled-node job records only its fixed phases beside that node's state. It never
+# publishes native output, configuration or credentials. The shell path has no job.
+update_job_state() {
+  [ -n "${ORCH_UPDATE_JOB:-}" ] || return 0
+  [[ "$ORCH_UPDATE_JOB" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "the update job identity is invalid"
+  local directory="runtime/node/server-updates/$ORCH_UPDATE_JOB" stage="$1" reason="${2:-}"
+  mkdir -p "$directory"
+  { printf 'stage=%s\nreason=%s\nfrom=%s\nto=%s\n' "$stage" "$reason" "${J[from_tag]:-${SERVER_UPDATE_FROM:-}}" "${J[to_tag]:-${SERVER_UPDATE_TARGET:-}}"; } > "$directory/status.new"
+  chmod 640 "$directory/status.new"
+  if [ "$(id -u)" = 0 ]; then chown "$(stat -c '%u:%g' runtime/node)" "$directory" "$directory/status.new"; fi
+  sync "$directory/status.new"
+  mv -T "$directory/status.new" "$directory/status"
+  sync "$directory"
+}
+
+update_job_exit() {
+  [ -n "${ORCH_UPDATE_JOB:-}" ] || return 0
+  local status="runtime/node/server-updates/$ORCH_UPDATE_JOB/status" stage
+  stage="$(sed -n 's/^stage=//p' "$status" 2> /dev/null || true)"
+  case "$stage" in updated | rolled_back | failed) return 0 ;; esac
+  if [ -f "$JOURNAL" ]; then update_job_state recovering recovery_required
+  else update_job_state failed update_failed; fi
+}
+
 # --- The journal -----------------------------------------------------------------------
 
 declare -A J=()
@@ -518,6 +556,14 @@ journal_load() {
 jset() {
   J["$1"]="${*:2}"
   journal_save
+  if [ "$1" = step ]; then
+    case "${*:2}" in
+      begin | staged) update_job_state applying ;;
+      stopping | dumping | activating | starting) update_job_state "${*:2}" ;;
+      verifying) update_job_state checking ;;
+      restoring | restarting | restoring_entered) update_job_state rolling_back health_check_failed ;;
+    esac
+  fi
   # For the smoke scenarios: stop dead right after a step has been recorded and
   # before it is taken, as a power cut would. Never set in a deployment.
   if [ "$1" = step ] && [ "${ORCH_UPDATE_CRASH_AT:-}" = "${*:2}" ]; then kill -KILL "$$"; fi
@@ -558,19 +604,19 @@ database_start() {
 
 # wait_ready TAG: the services and the operator's web edge serve the release.
 wait_ready() {
-  local version="${1#v}" deadline=$((SECONDS + READY_TIMEOUT)) next=$((SECONDS + 15)) output edge_output edge_url fails skip=()
-  edge_url="${ORCH_READY_URL:-$(env_get ORCH_READY_URL)}"
-  if [ -z "$edge_url" ]; then
-    edge_url="$(sed -n 's/^public_url[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' config/orch.toml | head -n 1)"
-  fi
-  if [ -z "$edge_url" ]; then
-    note "readiness needs [system] public_url or ORCH_READY_URL for the operator's web edge"
-    return 1
-  fi
+  local version="${1#v}" deadline=$((SECONDS + READY_TIMEOUT)) next=$((SECONDS + 15)) output edge_output edge_url operator_edge fails skip=()
+  operator_edge="${ORCH_READY_URL:-$(env_get ORCH_READY_URL)}"
   compose config --services | grep -qx node || skip=(--skip node)
   while :; do
-    if output="$(compose exec -T api /opt/orchctl/orchctl doctor --expect-version "$version" ${skip[@]+"${skip[@]}"} 2>&1)"; then
-      if edge_output="$(runtime/cli/current/orchctl doctor --url "$edge_url" \
+    if output="$(compose exec -T api /opt/orchctl/orchctl doctor --expect-version "$version" --skip edge ${skip[@]+"${skip[@]}"} 2>&1)"; then
+      edge_url="$operator_edge"
+      if [ -z "$edge_url" ]; then
+        # Read again for every attempt: a file edit is only a seed, and publication can change while readiness waits.
+        edge_url="$(compose exec -T api /opt/orchctl/orchctl public-address get 2>/dev/null)" || edge_url=
+      fi
+      if [ -z "$edge_url" ]; then
+        edge_output='FAIL  ready-url        the committed public address could not be read through the local database'
+      elif edge_output="$(runtime/cli/current/orchctl doctor --url "$edge_url" \
         --config config/orch.toml --secrets-dir config/secrets \
         --only edge-page,edge-api,edge-link 2>&1)"; then
         # The edge doctor reports the API version it actually reached. It may
@@ -872,11 +918,15 @@ transact() {
   jset step verifying
   if wait_ready "$to"; then
     finish_transaction
+    update_job_state updated
     return 0
   fi
+  update_job_state rolling_back health_check_failed
   if undo_with_database; then
+    update_job_state rolled_back health_check_failed
     die "release $to did not become ready; $from is running again as it was"
   fi
+  update_job_state failed recovery_required
   die "release $to did not become ready, and $from could not be brought back either"
 }
 
@@ -885,9 +935,12 @@ transact() {
 cmd_update() {
   local selector=$1 kind
   require_installed
+  update_job_state fetching
   fetch_release "$selector"
+  update_job_state verifying
   [ "$TAG" != "$(state_get current_tag)" ] || { say "release $TAG is installed already; nothing to do"; return 0; }
   say "installing release $TAG over $(state_get current_tag)"
+  update_job_state applying
   for kind in $PAYLOADS; do unpack "$kind"; NEW_RELEASE[$kind]="$UNPACKED"; done
   ensure_images
   warn_about_work
@@ -1037,6 +1090,7 @@ begin_transaction() {
   local kind
   J=()
   J[id]="$(stamp)-$$"; J[kind]="$1"; J[from_tag]="$2"; J[to_tag]="$3"
+  if [ -n "${ORCH_UPDATE_JOB:-}" ]; then J[job]="$ORCH_UPDATE_JOB"; fi
   for kind in $PAYLOADS; do
     J[${kind}_current_before]="$(link_get "$kind" current)"
     J[${kind}_previous_before]="$(link_get "$kind" previous)"
@@ -1050,8 +1104,9 @@ cmd_first_start() {
   check_password
   if [ -L runtime/server/current ] && [ -f "$STATE" ]; then die "a release is installed already ($(state_get current_tag)); ./update.sh latest or vX.Y.Z updates it"; fi
   if [ -f "$JOURNAL" ]; then journal_load || true; [ "${J[kind]:-}" = first-start ] || die "a ${J[kind]:-transaction} was interrupted; run ./update.sh recover first"; fi
-  for file in compose.yml nginx.conf config/orch.toml; do [ -f "$file" ] || die "$file is missing"; done
+  for file in compose.yml nginx.conf config/orch.toml config/node.toml; do [ -f "$file" ] || die "$file is missing"; done
   prepare_dirs
+  seed_node_policy
   fetch_release "$selector"
   J=(); J[id]="$(stamp)-$$"; J[kind]=first-start; J[from_tag]=; J[to_tag]="$TAG"; jset step begin
   say "installing release $TAG"
@@ -1080,7 +1135,9 @@ cmd_first_start() {
   journal_clear
   publish_storage_metadata
   fingerprint="$(authority_fingerprint)"
-  url="$(sed -n 's/^public_url[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' config/orch.toml | head -n 1)"
+  url="$(compose exec -T api /opt/orchctl/orchctl public-address get 2>/dev/null)" || url=
+  local browser_line="The committed browser address could not be read; the stack is ready."
+  if [ -n "$url" ]; then browser_line="Open $url and make the first administrator at /setup."; fi
   bind="$(env_get ORCH_FRONTEND_BIND)"; bind="${bind:-127.0.0.1:5180}"
   cat << EOF
 
@@ -1088,8 +1145,8 @@ Orch $TAG is running.
 
   Authority fingerprint (SHA-256): $fingerprint
     A machine that enrolls shows this; compare it before trusting the system.
-  Open $url (the stack's own web edge listens on http://$bind),
-  and make the first administrator at /setup.
+  $browser_line
+  The stack's own web edge listens on http://$bind.
   Back up config/ (it holds the secrets) off this host now; losing config/secrets/orch_master_key or
   orch_ca_key.pem cannot be undone.
 EOF
@@ -1243,6 +1300,18 @@ usage() {
 # --- Main --------------------------------------------------------------------------------------
 
 main() {
+  if [ -n "${ORCH_UPDATE_JOB:-}" ]; then
+    [[ "$ORCH_UPDATE_JOB" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "the update job identity is invalid"
+    local final_stage final_file="runtime/node/server-updates/$ORCH_UPDATE_JOB/status"
+    final_stage="$(sed -n 's/^stage=//p' "$final_file" 2> /dev/null || true)"
+    case "$final_stage" in
+      updated | rolled_back | failed)
+        : > "runtime/node/server-updates/$ORCH_UPDATE_JOB/parked"
+        # The completed process already ran its ordinary cleanup. The node may now remove its helper.
+        sleep infinity
+        return ;;
+    esac
+  fi
   local command="${1:-help}" selector="" argument
   shift || true
   if [ "$command" = dumps ]; then
@@ -1294,7 +1363,7 @@ main() {
   flock -n 8 || die "another update.sh is running here"
 
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/orch-update.XXXXXX")"
-  trap 'rm -rf -- "$WORK"' EXIT
+  trap 'update_job_exit; rm -rf -- "$WORK"' EXIT
   declare -gA NEW_RELEASE=()
   TOOLBOX_IMAGE="$(image_of nginx)"; RUNTIME_IMAGE="$(image_of debian)"
   if [ -z "$TOOLBOX_IMAGE" ] || [ -z "$RUNTIME_IMAGE" ]; then die "compose.yml names no nginx or debian image"; fi
@@ -1305,6 +1374,26 @@ main() {
       || die "the configured release source could not be read"
   fi
   export ORCH_RELEASE_URL="$RELEASE_URL"
+
+  if [ -n "${ORCH_UPDATE_JOB:-}" ]; then
+    [[ "$ORCH_UPDATE_JOB" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "the update job identity is invalid"
+    case "$command" in v[0-9]*) ;; *) die "a bundled update selects one exact release" ;; esac
+    SERVER_UPDATE_TARGET="$command"; SERVER_UPDATE_FROM="$(state_get current_tag)"
+    local recorded_stage
+    recorded_stage="$(sed -n 's/^stage=//p' "runtime/node/server-updates/$ORCH_UPDATE_JOB/status" 2> /dev/null || true)"
+    case "$recorded_stage" in updated | rolled_back | failed) return ;; esac
+    if [ -f "$JOURNAL" ]; then
+      journal_load || die "the interrupted update journal could not be read"
+      [ "${J[job]:-}" = "$ORCH_UPDATE_JOB" ] && [ "${J[to_tag]:-}" = "$command" ] || die "the unfinished update belongs to another operation; run ./update.sh recover"
+      SERVER_UPDATE_FROM="${J[from_tag]}"
+      update_job_state recovering recovery_required
+      cmd_recover
+      if [ "$(state_get current_tag)" = "$command" ]; then update_job_state updated
+      else update_job_state rolled_back health_check_failed; fi
+      return
+    fi
+    update_job_state queued
+  fi
 
   case "$command" in
     first-start) cmd_first_start "$selector" ;;
@@ -1319,6 +1408,11 @@ main() {
     uninstall) [ -z "$selector" ] || die "uninstall takes no release"; cmd_uninstall ;;
     *) die "unknown command $command (./update.sh help)" ;;
   esac
+  if [ -n "${ORCH_UPDATE_JOB:-}" ]; then
+    update_job_state updated
+    # Exit normally so the existing temporary-file cleanup runs. Docker restarts
+    # the helper into the completed-state wait above until the node removes it.
+  fi
 }
 
 main "$@"

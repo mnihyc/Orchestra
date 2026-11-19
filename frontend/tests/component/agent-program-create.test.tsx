@@ -16,8 +16,8 @@ import { harnessName } from '../doubles/harness-names';
 skipOverflowFallback();
 
 const help=vi.hoisted(()=>vi.fn());
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>help}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>help}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn()}));
 vi.mock('@/features/resources/HomePicker',()=>({HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose</option><option value="org">Acme</option></select>}));
 const machine:Pick<Machine,'id'|'name'|'roles'|'facts'|'online'>={id:'gpu',name:'GPU computer',roles:['agent'],facts:{adapters:[],harnesses:[]},online:true};
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),registerAgent:vi.fn(),
@@ -33,7 +33,7 @@ const program:MachineProgram={kind:'agent',name:'research',command:['python','/o
 const agent:Agent={ ...unjudgedProvenance(),id:'profile',name:'My research agent',address:'research',harness_kind:'research-agent', harness: harnessName('research-agent'),machine:{id:'gpu',name:machine.name,online:true,placement:'connected',platform_os:'linux'},
   profile:{},descriptor:program.descriptor,descriptor_overridden:[],home:null,org_id:null,owner:null,disabled:false,revision:1,
   access:{permissions:['agent.view','agent.manage'],admin_only:[],participating:true,administers:false,through:[]},created_at:'2026-10-15T17:00:00Z',updated_at:'2026-10-15T17:00:00Z'};
-beforeEach(()=>{machine.facts={adapters:[],harnesses:[]};vi.clearAllMocks();vi.mocked(registerAgent).mockResolvedValue(agent);vi.mocked(changeMachinePrograms).mockResolvedValue({entries:[program],can_manage:true,capabilities:[],config_file:null});});
+beforeEach(()=>{machine.facts={adapters:[],harnesses:[]};vi.clearAllMocks();vi.mocked(registerAgent).mockResolvedValue(agent);vi.mocked(changeMachinePrograms).mockResolvedValue({approvals:[],entries:[program],can_manage:true,capabilities:[],config_file:null});});
 afterEach(async()=>{document.documentElement.removeAttribute('data-theme');await setLocale('en');});
 
 for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])describe(`${locale}/${theme}`,()=>{

@@ -319,7 +319,7 @@ impl DataDirectoryFacts {
 
 /// A connector that runs.
 pub struct Connector {
-    data_directory: Arc<DataDirectoryFacts>,
+    facts_now: Arc<crate::dispatch::FactsNow>,
     identity_reload: Arc<tokio::sync::Notify>,
     role_changes: Arc<crate::role_changes::Requests>,
     pub(crate) update_requests: Arc<crate::automatic::Requests>,
@@ -420,6 +420,16 @@ impl Connector {
             Arc::clone(&params.clock),
         )?;
         let loopback = Arc::new(Loopback::start().await.map_err(StartError::Listener)?);
+        let gateway_link = link.clone();
+        let gateway_control = Arc::new(crate::gateway_control::Requests::new(
+            data.root().to_owned(),
+            Arc::clone(&policy),
+            Arc::new(move |choice| {
+                if gateway_link.gateway_status().choice != choice {
+                    gateway_link.select_gateway(choice);
+                }
+            }),
+        ));
         let blobs: Arc<dyn BlobEndpoint> = match params.blobs.clone() {
             Some(blobs) => blobs,
             None => {
@@ -551,7 +561,7 @@ impl Connector {
             supervised_roles && !params.managed && !node,
         ));
         let facts_role_changes = Arc::clone(&role_changes);
-        let host = Host::detect();
+        let volume = services.data_dir.clone();
         let facts_roles = roles.clone();
         let facts_policy = Arc::clone(&policy);
         let facts_link = link.clone();
@@ -575,42 +585,52 @@ impl Connector {
             Arc::clone(&services.clock),
         ));
         let facts_directory = Arc::clone(&data_directory);
-        let facts_now: Arc<crate::dispatch::FactsNow> = Arc::new(move || {
-            let mut draft = FactsDraft {
-                process_controls: facts_services.process_controls,
-                dedicated: facts_policy.config().connector.dedicated,
-                plugins: plugin_facts
+        let facts_now = sampled_facts(
+            move || (Host::detect(), crate::facts::data_volume_bytes(&volume)),
+            move |host| {
+                let mut draft = FactsDraft {
+                    process_controls: facts_services.process_controls,
+                    dedicated: facts_policy.config().connector.dedicated,
+                    plugins: plugin_facts
+                        .as_ref()
+                        .map_or_else(|| plugins.clone(), |read| read()),
+                    ..FactsDraft::default()
+                };
+                for role in &facts_roles {
+                    role.contribute(&mut draft);
+                }
+                if draft.storages.is_empty()
+                    && let Some(policy) = facts_policy.policy()
+                    && (!policy.environment_roots.is_empty() || !policy.storages.is_empty())
+                {
+                    draft.storages = crate::storages::facts(
+                        &facts_services.data_dir,
+                        &facts_services.config,
+                        &policy,
+                    );
+                }
+                draft.harnesses.extend(facts_services.installed_harnesses());
+                let mut facts = machine_facts(
+                    host,
+                    draft,
+                    facts_policy.policy(),
+                    facts_link.rates(),
+                    facts_link.clock_offset_ms(),
+                );
+                facts_services.local_harnesses.apply(&mut facts);
+                facts.gateway = Some(facts_link.gateway_status());
+                facts.programs = facts_programs
                     .as_ref()
-                    .map_or_else(|| plugins.clone(), |read| read()),
-                ..FactsDraft::default()
-            };
-            for role in &facts_roles {
-                role.contribute(&mut draft);
-            }
-            if draft.storages.is_empty()
-                && let Some(policy) = facts_policy.policy()
-            {
-                draft.storages = crate::storages::facts(&facts_services.config, &policy);
-            }
-            draft.harnesses.extend(facts_services.installed_harnesses());
-            let mut facts = machine_facts(
-                &host,
-                draft,
-                facts_policy.policy(),
-                facts_link.rates(),
-                facts_link.clock_offset_ms(),
-            );
-            facts_services.local_harnesses.apply(&mut facts);
-            facts.gateway = Some(facts_link.gateway_status());
-            facts.programs = facts_programs
-                .as_ref()
-                .map(|handler| handler.snapshot(&facts_policy));
-            facts.role_management = Some(facts_role_changes.capability(&facts_policy));
-            facts.installation = installation.clone();
-            facts.data_directory = facts_directory.observed();
-            facts
-        });
+                    .map(|handler| handler.snapshot(&facts_policy));
+                facts.role_management = Some(facts_role_changes.capability(&facts_policy));
+                facts.installation = installation.clone();
+                facts.data_directory = facts_directory.observed();
+                facts
+            },
+        );
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
+        dispatcher.gateway_control(Arc::clone(&gateway_control));
+        dispatcher.clock(Arc::clone(&services.clock));
         dispatcher.local_harnesses(
             Arc::clone(&services.local_harnesses),
             Arc::clone(&services.publisher),
@@ -708,7 +728,7 @@ impl Connector {
         ));
         tasks.push(tokio::spawn(report_facts(
             link.clone(),
-            facts_now,
+            Arc::clone(&facts_now),
             policy.changes(),
             Arc::clone(&policy),
             Arc::clone(&services.local_harnesses),
@@ -725,6 +745,7 @@ impl Connector {
         let identity_reload = Arc::new(tokio::sync::Notify::new());
         if !params.managed || params.roles.contains(&Role::Node) {
             let state = crate::local_socket::LocalState {
+                gateway_control: Arc::clone(&gateway_control),
                 identity_reload: supervised_roles.then(|| Arc::clone(&identity_reload)),
                 identity_fingerprint: params.identity.certificate.fingerprint(),
                 link: link.clone(),
@@ -741,7 +762,7 @@ impl Connector {
         }
 
         let connector = Self {
-            data_directory,
+            facts_now,
             identity_reload,
             role_changes,
             update_requests,
@@ -815,32 +836,7 @@ impl Connector {
     /// The machine's facts as they are now.
     #[must_use]
     pub fn facts(&self) -> orch_link_contract::session::MachineFacts {
-        let mut draft = FactsDraft {
-            process_controls: self.services.process_controls,
-            dedicated: self.services.policy.config().connector.dedicated,
-            ..FactsDraft::default()
-        };
-        for role in &self.roles {
-            role.contribute(&mut draft);
-        }
-        if draft.storages.is_empty()
-            && let Some(policy) = self.services.policy.policy()
-        {
-            draft.storages = crate::storages::facts(&self.services.config, &policy);
-        }
-        draft.harnesses.extend(self.services.installed_harnesses());
-        let mut facts = machine_facts(
-            &Host::detect(),
-            draft,
-            self.services.policy.policy(),
-            self.link.rates(),
-            self.link.clock_offset_ms(),
-        );
-        self.services.local_harnesses.apply(&mut facts);
-        facts.gateway = Some(self.link.gateway_status());
-        facts.role_management = Some(self.role_changes.capability(&self.services.policy));
-        facts.data_directory = self.data_directory.observed();
-        facts
+        (self.facts_now)()
     }
 
     fn end_tasks(&self) {
@@ -884,6 +880,20 @@ impl Connector {
         self.end_tasks();
         self.link.shutdown().await;
     }
+}
+
+/// Every reader uses the same observation, including explicit probes and periodic reports.
+fn sampled_facts(
+    observe: impl Fn() -> (Host, Option<i64>) + Send + Sync + 'static,
+    build: impl Fn(&Host) -> orch_link_contract::session::MachineFacts + Send + Sync + 'static,
+) -> Arc<crate::dispatch::FactsNow> {
+    Arc::new(move || {
+        let (host, volume) = observe();
+        let mut facts = build(&host);
+        facts.data_volume_bytes = volume;
+        facts.capacity_refresh_secs = Some(FACTS_EVERY.as_secs());
+        facts
+    })
 }
 
 async fn report_facts(

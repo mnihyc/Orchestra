@@ -1,3 +1,5 @@
+import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
+import { holds } from '@/lib/permissions';
 /** Identity, facts, roles, registered resources and certificate.
  *
  * A machine's page is its console in Orch. It says what the machine is and reports (its system, its
@@ -35,7 +37,7 @@ import { useResourceHeading } from '@/features/resources/trail';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import type { Machine as MachineRow } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
-import { formatBytes, formatNumber } from '@/lib/format';
+import { formatNumber } from '@/lib/format';
 import { DAY_MS, formatDateTime, useNow } from '@/lib/time';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
@@ -97,8 +99,7 @@ function Overview({ machine }: { machine: MachineRow }) {
             { name: t('machines.overview.system'), value: facts.osVersion ?? OS_NAMES[machine.platform_os] },
             ...(facts.dedicated ? [{name:t('machines.policy.isolation'),value:t('machines.policy.dedicated')}] : []),
             ...(facts.hostname === null || facts.hostname===machine.name ? [] : [{ name: t('machines.overview.hostname'), value: facts.hostname }]),
-            ...(facts.cpus === null ? [] : [{ name: t('machines.overview.cpus'), value: formatNumber(facts.cpus, locale) }]),
-            ...(facts.memoryBytes === null ? [] : [{ name: t('machines.overview.memory'), value: formatBytes(facts.memoryBytes, locale) }]),
+            ...(facts.cpus === null && facts.memoryBytes === null ? [] : [{ name:t('machines.capacity.title'),value:<MachineCapacityLine facts={machine.facts} /> }]),
             { name: t('machines.overview.roles'), value: <MachineRoles machine={machine}/> },
             { name: t('machines.overview.lastSeen'), value: machine.last_seen_at === null ? t('machines.list.never') : <span className="flex flex-wrap items-center gap-x-2"><RelativeTime at={machine.last_seen_at} />{machine.last_ip !== null && <span className="text-text-muted">{t('machines.overview.from', { address: machine.last_ip })}</span>}</span> },
             {
@@ -130,7 +131,7 @@ function Overview({ machine }: { machine: MachineRow }) {
         {slow && <p className="text-sm text-text-muted">{t('machines.overview.slowWhy', { ms: SLOW_LINK_MS })}</p>}
       </Section>
 
-      <MachineGatewayStatus machineId={machine.id} online={machine.online} />
+      <MachineGatewayStatus key={machine.id} machineId={machine.id} online={machine.online} manage={holds(machine.access,'machine.manage')||holds(machine.access,'host.manage')} />
 
       <ResourceDetails><JsonTree value={machine.facts} label={t('machines.overview.about')} /></ResourceDetails>
 

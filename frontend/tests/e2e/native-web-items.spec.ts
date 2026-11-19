@@ -6,7 +6,7 @@
 import { expect, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { toolCall } from '../doubles/thread-rows.ts';
+import { rawOf, toolCall } from '../doubles/thread-rows.ts';
 import { ACME, DOUBLE, emit, scenario, signIn } from './support.ts';
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
@@ -33,12 +33,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     for (const [item, arguments_] of [[serverSearch, { query: 'Native server search' }], [serverPage, { url: 'https://docs.python.org/' }]] as const) {
       if (item.kind !== 'tool_call') throw new Error('the server operation is a tool item');
       const nativeInput = JSON.stringify(arguments_);
-      item.payload.raw.input = { inline: nativeInput, total_len: new TextEncoder().encode(nativeInput).length, blob: null, truncated: false };
+      rawOf(item).input = { inline: nativeInput, total_len: new TextEncoder().encode(nativeInput).length, blob: null, truncated: false };
     }
     if (searched.kind !== 'tool_call') throw new Error('the page operation is a tool item');
     const input = JSON.stringify({ query: null, action: { type: 'findInPage', url: 'https://docs.python.org/tutorial/', pattern: 'classes' } });
-    searched.payload.raw.input = { inline: input, total_len: new TextEncoder().encode(input).length, blob: null, truncated: false };
-    searched.payload.raw.output = null;
+    rawOf(searched).input = { inline: input, total_len: new TextEncoder().encode(input).length, blob: null, truncated: false };
+    rawOf(searched).output = null;
     await emit(ACME.mainThread, { items: [found, opened, searched, serverSearch, serverPage, managedSearch, managedPage] });
     await page.goto(`/thread/${ACME.mainThread}`);
     await expect(page.locator('[data-thread-header]')).toBeVisible();

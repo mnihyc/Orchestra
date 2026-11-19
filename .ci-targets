@@ -1,0 +1,3 @@
+fmt
+test -p orch-api-core --test browsers --test kvnc_core --features test-support
+test -p orch-connector-core --test mount_data
