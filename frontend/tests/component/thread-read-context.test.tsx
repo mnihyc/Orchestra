@@ -1,15 +1,19 @@
 /** Inherited passive hooks share one explicit owner; imperative work never infers a route selector. */
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { queryClient } from '@/api/query';
 import { captureThreadRead, selectThreadContinuation } from '@/api/threadRead';
 import { fetchItems, fetchThreadSync } from '@/api/threads';
-import { feeds, socket, useThreadFeed } from '@/realtime/live';
+import { feeds, refreshThread, socket, useThreadFeed } from '@/realtime/live';
+import { ConnectionBanner } from '@/features/thread/ConnectionBanner';
+import { i18n, setLocale } from '@/i18n';
 import { ThreadReadProvider, useThreadReadRef } from '@/realtime/threadReadContext';
 import { defaultThreadRead, resultThreadRead, sameThreadRead, type ThreadReadTarget } from '@/realtime/threadScope';
 import { flushDeltas, threadViewOf, threadWriter, useInput, useItem, useThreadPart, useThreadRow, useThreadView } from '@/realtime/stores/thread';
-import { answer } from '../unit/continuation-fixtures';
+import { answer, projection, snapshot } from '../unit/continuation-fixtures';
 import { A, B, OTHER, OLDER, SHARED, T, bodyOf, serve } from '../unit/thread-read-fixtures';
+import { show } from './support';
+import type { FeedListener } from '@/realtime/socket';
 
 const route = defaultThreadRead(T), preview = resultThreadRead(T,'context-preview'), second = resultThreadRead(T,'context-second');
 function Seen({ target,label }: { target: ThreadReadTarget; label: string }) {
@@ -22,7 +26,78 @@ async function open(target: typeof route,selection: string | null) {
 }
 
 beforeEach(() => { vi.useFakeTimers(); feeds.clear(); threadWriter.clear(); queryClient.clear(); });
-afterEach(() => { cleanup(); feeds.clear(); socket.stop(); flushDeltas(); threadWriter.clear(); queryClient.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllTimers(); vi.useRealTimers(); });
+afterEach(async () => { cleanup(); feeds.clear(); socket.stop(); flushDeltas(); threadWriter.clear(); queryClient.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllTimers(); vi.useRealTimers(); await setLocale('en'); });
+
+function ConnectionWindow({ label }: { label: string }) {
+  useThreadFeed(T);
+  return <section aria-label={label}><ConnectionBanner threadId={T} /></section>;
+}
+
+for (const locale of ['en', 'zh-CN'] as const) it(`shows the actual capacity cause without reading on Details and clears it on data-free acceptance in ${locale}`, async () => {
+  await setLocale(locale); const server = serve(); await open(preview, B);
+  let listener: FeedListener | undefined;
+  vi.spyOn(socket, 'subscribe').mockImplementation((_feed, next) => { listener = next; return { unsubscribe: () => undefined }; });
+  show(<ThreadReadProvider read={preview}><ConnectionWindow label="Capacity window" /></ThreadReadProvider>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  if (listener === undefined) throw new Error('The window must own its native feed');
+  act(() => listener?.onFrame({ op: 'error', id: 1, code: 'too_many_subscriptions', detail: 'Native diagnostic stays private' }));
+  const before = threadViewOf(preview), requests = server.calls.length;
+  expect(screen.getByRole('alert')).toHaveTextContent(i18n.t('ui.error.subscriptionCapacity'));
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = document.querySelector<HTMLElement>('[data-fact-disclosure-body]');
+  if (body === null) throw new Error('Details must use the shared fact body');
+  expect(within(body).getByText(i18n.t('ui.error.subscriptionCapacity'))).toBeVisible();
+  expect(body).not.toHaveTextContent('Native diagnostic'); expect(server.calls).toHaveLength(requests);
+  act(() => listener?.onFrame({ op: 'subscribed', id: 2, feed: `thread:${T}`, mode: 'delta', seq: 20, projection: before.read?.projection ?? undefined }));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument(); expect(threadViewOf(preview).items).toBe(before.items);
+  expect(server.calls).toHaveLength(requests);
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`retries only the failed window whose connection banner was pressed, even with the same thread and history in ${locale}`, async () => {
+  await setLocale(locale);
+  let failing = true;
+  const server = serve((request) => new URL(request.url).pathname.endsWith('/sync') ? Promise.resolve(Response.json({
+    type: 'about:blank', title: 'Read failed', status: 500, code: 'internal', detail: 'The current read failed', request_id: 'synthetic',
+  }, { status: 500 })).then((failure) => failing ? failure : Response.json(snapshot({ ...projection(B, A, 2, false), execution_revision: 1 }, 20))) : undefined);
+  await open(route, B); await open(preview, B);
+  show(<><ThreadReadProvider read={route}><ConnectionWindow label="Other window" /></ThreadReadProvider>
+    <ThreadReadProvider read={preview}><ConnectionWindow label="Retry window" /></ThreadReadProvider></>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  const page = await fetchItems(route, { around: OLDER });
+  act(() => threadWriter.window(route, page.items, false, true));
+  await act(async () => { refreshThread(route); refreshThread(preview); await vi.advanceTimersByTimeAsync(0); });
+  expect(threadViewOf(route).error).not.toBeNull();
+  expect(threadViewOf(preview).error).not.toBeNull();
+  const other = threadViewOf(route), count = server.calls.length, cut = captureThreadRead(preview);
+  const retry = within(screen.getByRole('region', { name: 'Retry window' })).getByRole('button', { name: i18n.t('thread.connection.retry') });
+  failing = false;
+  await act(async () => { fireEvent.click(retry); await vi.advanceTimersByTimeAsync(0); });
+  expect(threadViewOf(preview).error).toBeNull();
+  expect(threadViewOf(preview).order).toEqual([SHARED]);
+  expect(threadViewOf(route)).toBe(other);
+  expect(threadViewOf(route).order).toEqual([OLDER]);
+  expect(server.calls.slice(count)).toHaveLength(1);
+  const request = new URL(server.calls[count]!.url);
+  expect(request.pathname).toBe(`/api/v1/threads/${T}/sync`);
+  expect(request.searchParams.get('since')).toBe('20');
+  expect(request.searchParams.get('continuation_id')).toBe(B);
+  expect(threadViewOf(preview).read?.identity).toBe(cut.scope.identity);
+  expect(threadViewOf(preview).read?.epoch).toBe(cut.scope.epoch);
+  expect(within(screen.getByRole('region', { name: 'Other window' })).getByRole('button', { name: i18n.t('thread.connection.retry') })).toBeVisible();
+  expect(within(screen.getByRole('region', { name: 'Retry window' })).queryByRole('button')).not.toBeInTheDocument();
+});
+
+it('stops offering a stale connection Retry after that read has ended', async () => {
+  const server = serve(); await open(preview, B);
+  threadWriter.failed(preview, new Error('The last read failed'));
+  show(<ThreadReadProvider read={preview}><ConnectionBanner threadId={T} /></ThreadReadProvider>);
+  expect(screen.getByRole('button', { name: i18n.t('thread.connection.retry') })).toBeVisible();
+  act(() => threadWriter.closed(preview, 'revoked'));
+  expect(screen.queryByRole('button', { name: i18n.t('thread.connection.retry') })).not.toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(threadViewOf(preview).closed).toBe('revoked');
+  expect(server.calls).toHaveLength(1);
+});
 
 it('matching-thread hooks inherit the provider, explicit default refs win, and other thread lookups remain default', async () => {
   serve(); await open(route,null); await open(preview,B); await open(defaultThreadRead(OTHER),null);

@@ -18,6 +18,7 @@ metrics.workspace = true
 orch-access-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-api-contract.workspace = true
+orch-config.workspace = true
 orch-documents.workspace = true
 orch-driver-contract.workspace = true
 orch-link-contract.workspace = true
