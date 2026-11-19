@@ -70,6 +70,19 @@ function drawn(startAtEnd = true) {
   return screen.getByRole('log', { name: 'Conversation' });
 }
 
+it('keeps the body of a measured row as the list redraws and replaces it when the row renderer changes', () => {
+  machine();
+  const row = vi.fn((index: number) => <p>Row {index}</p>);
+  const props = { count: 20, keyOf: (index: number) => String(index), estimate: () => 50, label: 'Conversation', startAtEnd: false };
+  const list = render(<VirtualList {...props} render={row} />);
+  expect(screen.getByText('Row 0')).toBeVisible();
+  row.mockClear();
+  list.rerender(<VirtualList {...props} render={row} className="min-h-0" />);
+  expect(row).not.toHaveBeenCalled();
+  list.rerender(<VirtualList {...props} render={(index) => <p>Updated {index}</p>} />);
+  expect(screen.getByText('Updated 0')).toBeVisible();
+});
+
 it('keeps the first row in view when the list resizes before a scroll event', () => {
   const layout = machine();
   const log = drawn(false);

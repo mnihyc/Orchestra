@@ -3,18 +3,20 @@ import { act, cleanup, render, screen, waitFor, type RenderResult } from '@testi
 import { QueryClientProvider } from '@tanstack/react-query';
 import { AppWindow } from 'lucide-react';
 import { useEffect } from 'react';
+import { create } from 'zustand';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { queryClient } from '@/api/query';
 import { client } from '@/api/client';
 import type * as Live from '@/realtime/live';
 import { ViewHost, ViewSlot } from '@/features/workbench/Board';
-import { CachedTabNames } from '@/features/workbench/TabNames';
+import { CachedTabNames, useTabCaptions } from '@/features/workbench/TabNames';
 import { allTabs, findTab, makeGroup, makeTab, type Tab } from '@/features/workbench/layout';
 import { loadWorkspace } from '@/features/workbench/persistence';
 import { pageAddress, parsePageAddress } from '@/features/workbench/PageView';
 import { staticPageName } from '@/features/workbench/pageNames';
 import { useWorkbench } from '@/features/workbench/store';
-import { clearViewOpenings } from '@/features/workbench/viewOpening';
+import { clearViewOpenings, useViewShown } from '@/features/workbench/viewOpening';
+import { useContentFocused } from '@/features/workbench/instance';
 import { registerView, type ViewProps } from '@/features/workbench/views';
 import { FrameReadiness } from '@/shell/FrameReadiness';
 import { clearScreenHeading, focusScreenHeading, forgetScreenHeading, useScreenHeading } from '@/shell/screen';
@@ -23,23 +25,41 @@ import { ACME, acmeTree } from '../doubles/fixtures';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { TooltipProvider } from '@/ui/Tooltip';
 
-const calls = vi.hoisted(() => ({ thread: vi.fn(), document: vi.fn(), fetch: vi.fn<typeof fetch>() }));
+const calls = vi.hoisted(() => ({ body: vi.fn(), thread: vi.fn(), document: vi.fn(), fetch: vi.fn<typeof fetch>() }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: calls.thread, useDocumentFeed: calls.document }));
 const state = () => useWorkbench.getState();
+
+it('keeps the tab captions when the same view reports a different glyph', () => {
+  const tab = makeTab('page', { href: '/resources' });
+  const tabs = [tab], id = tab.id;
+  state().setNamed(id, { title: 'Resources', source: 'view' });
+  const draws = vi.fn();
+  function Captions() { draws(); return <output>{useTabCaptions(tabs).get(id)}</output>; }
+  render(<Captions />);
+  expect(screen.getByText('Resources')).toBeVisible();
+  draws.mockClear();
+  act(() => state().setNamed(id, { title: 'Resources', source: 'view', icon: AppWindow }));
+  expect(draws).not.toHaveBeenCalled();
+  act(() => state().setNamed(id, { title: 'Places', source: 'view' }));
+  expect(screen.getByText('Places')).toBeVisible();
+});
 const USER = 'static-title-reader', OTHER = 'another-title-reader';
 const resources = [
   ['providers', 'Providers', '提供方'], ['agents', 'Agents', '智能体'], ['machines', 'Machines', '机器'],
   ['environments', 'Environments', '环境'], ['templates', 'Templates', '模板'], ['hosts', 'Hosts', '主机'],
   ['mcp', 'MCP servers', 'MCP 服务器'], ['mounts', 'Mounts', '挂载'],
 ] as const;
-const ready = new Set<string>(), mounted: string[] = [], views: RenderResult[] = [];
+const useReady = create<ReadonlySet<string>>(() => new Set());
+const mounted: string[] = [], views: RenderResult[] = [];
 const owners = new Set<string>();
 const savedSession = client.session.getState();
 let locale = currentLocale(), unregister: (() => void) | undefined;
 function DelayedBody({ tab }: ViewProps) {
+  calls.body(tab.id, useViewShown(), useContentFocused());
   const kind = tab.of?.href?.split(/[?#]/)[0]?.split('/').at(-1);
   const resource = resources.find((entry) => entry[0] === kind);
-  useScreenHeading({ title: resource === undefined ? 'Synthetic loaded title' : i18n.t(`screens.${resource[0]}.title`), icon: AppWindow }, ready.has(tab.id));
+  const ready = useReady((ids) => ids.has(tab.id));
+  useScreenHeading({ title: resource === undefined ? 'Synthetic loaded title' : i18n.t(`screens.${resource[0]}.title`), icon: AppWindow }, ready);
   useEffect(() => { mounted.push(tab.id); }, [tab.id]);
   return <div data-testid={`pending-body-${tab.id}`} />;
 }
@@ -74,7 +94,7 @@ function freshDocument() {
 }
 beforeEach(async () => {
   locale = currentLocale(); await setLocale('en'); state().leave(); localStorage.clear(); queryClient.clear(); treeWriter.clear();
-  clearViewOpenings(); focusScreenHeading(null); clearScreenHeading(); ready.clear(); mounted.length = 0;
+  clearViewOpenings(); focusScreenHeading(null); clearScreenHeading(); useReady.setState(new Set(), true); mounted.length = 0;
   client.session.setState({ status: 'signed_in', userId: USER });
   calls.thread.mockClear(); calls.document.mockClear(); calls.fetch.mockReset().mockRejectedValue(new Error('Inactive identity must not fetch'));
   vi.stubGlobal('fetch', calls.fetch);
@@ -99,11 +119,11 @@ it.each(['en', 'zh-CN'] as const)('keeps the previously active cached title thro
   expect(state().named.get(previous.id)?.source).toBe('cache');
   act(() => state().focus(next.id)); await screen.findByTestId(`pending-body-${next.id}`);
   // The previous page never supplied its new heading before Activity paused it.
-  expect(ready.has(previous.id)).toBe(false);
+  expect(useReady.getState().has(previous.id)).toBe(false);
   for (let index = 0; index < tabs.length; index += 1) expect(state().named.get(tabs[index]!.id)?.title).toBe(resources[index]![language === 'en' ? 1 : 2]);
   expect(new Set(mounted)).toEqual(new Set([previous.id, next.id]));
   await act(() => window.dispatchEvent(new Event('pagehide')));
-  const saved = loadWorkspace(USER, 'page').kept;
+  const saved = loadWorkspace(USER).kept;
   expect(saved?.titles?.[previous.id]?.title).toBe(resources[0][language === 'en' ? 1 : 2]);
   freshDocument(); mounted.length = 0; drawFrame(); await screen.findByTestId(`pending-body-${next.id}`);
   expect(new Set(mounted)).toEqual(new Set([next.id]));
@@ -127,6 +147,26 @@ it.each(['en', 'zh-CN'] as const)('repairs a restored workspace without any titl
   expect(mounted).toEqual([]); expect(calls.fetch).not.toHaveBeenCalled(); expect(calls.thread).not.toHaveBeenCalled(); expect(calls.document).not.toHaveBeenCalled();
 });
 
+it('does not redraw a thread’s body or resolve its readers when a different group changes size', async () => {
+  const tab = makeTab('page', { href: `/thread/${ACME.mainThread}` });
+  owners.add(tab.id); seed([tab]); drawFrame();
+  await screen.findByTestId(`pending-body-${tab.id}`);
+  calls.body.mockClear();
+  act(() => state().change((layout) => ({ ...layout, left: { ...layout.left, size: layout.left.size + 10 } })));
+  expect(calls.body).not.toHaveBeenCalled();
+});
+
+it('takes the outgoing page off screen in the same render that activates its neighbour', async () => {
+  const [a, b] = tabsForResources();
+  seed([a!, b!]); drawFrame();
+  await screen.findByTestId(`pending-body-${a!.id}`);
+  calls.body.mockClear();
+  act(() => state().focus(b!.id));
+  await screen.findByTestId(`pending-body-${b!.id}`);
+  expect(calls.body).not.toHaveBeenCalledWith(a!.id, true, false);
+  expect(calls.body).toHaveBeenCalledWith(b!.id, true, true);
+});
+
 it('retranslates cached public names without borrowing a different pane or acquiring metadata readers', async () => {
   await setLocale('en'); const tabs = tabsForResources(); seed(tabs); render(<CachedTabNames layout={state().layout} />);
   await waitFor(() => expect(state().named.get(tabs[0]!.id)?.title).toBe('Providers'));
@@ -136,10 +176,10 @@ it('retranslates cached public names without borrowing a different pane or acqui
 });
 
 it('lets the real page heading take ownership after admission even when its text equals the static fallback', async () => {
-  const tabs = tabsForResources(); seed(tabs); const view = drawFrame();
+  const tabs = tabsForResources(); seed(tabs); drawFrame();
   await screen.findByTestId(`pending-body-${tabs[0]!.id}`);
   await waitFor(() => expect(state().named.get(tabs[0]!.id)?.source).toBe('cache'));
-  ready.add(tabs[0]!.id); view.rerender(<QueryClientProvider client={queryClient}><TooltipProvider><Frame /></TooltipProvider></QueryClientProvider>);
+  act(() => useReady.setState(new Set([tabs[0]!.id]), true));
   await waitFor(() => expect(state().named.get(tabs[0]!.id)?.source).toBe('view'));
   expect(state().named.get(tabs[0]!.id)?.title).toBe('Providers');
   expect(calls.fetch).not.toHaveBeenCalled();

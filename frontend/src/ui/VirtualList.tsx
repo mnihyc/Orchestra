@@ -14,7 +14,7 @@
  * rows: there is nothing to scroll then, and every row is drawn.
  */
 import { useVirtualizer, type VirtualItem, type Virtualizer } from '@tanstack/react-virtual';
-import { type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 export interface VirtualListHandle {
   /** Brings the end into view. */
@@ -97,6 +97,10 @@ export function compensatesMeasurement(
   const fold = belief.offset + belief.adjustments;
   return row.first ? row.start < fold : row.end <= fold && !belief.backward;
 }
+
+const RowBody = memo(function RowBody({ render, index }: Pick<VirtualListProps, 'render'> & { index: number }) {
+  return render(index);
+});
 
 export function VirtualList({
   viewport,
@@ -393,9 +397,11 @@ export function VirtualList({
   const range = virtualizer.range;
   useLayoutEffect(() => {
     if (range === null || onRange === undefined) return;
-    const owner = scroller.current;
-    const visible = viewport === undefined || owner === null ? null : virtualizer.getVirtualItems()
-      .filter((row) => row.end > owner.scrollTop && row.start < owner.scrollTop + owner.clientHeight);
+    const owner = viewport === undefined ? null : scroller.current;
+    const top = owner?.scrollTop ?? 0;
+    const bottom = top + (owner?.clientHeight ?? 0);
+    const visible = owner === null ? null : virtualizer.getVirtualItems()
+      .filter((row) => row.end > top && row.start < bottom);
     const first = visible === null ? range.startIndex : visible[0]?.index ?? 0;
     const last = visible === null ? range.endIndex : visible.at(-1)?.index ?? -1;
     const said = `${first}.${last}`;
@@ -425,7 +431,7 @@ export function VirtualList({
             ref={virtualizer.measureElement}
             style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start - scrollMargin}px)` }}
           >
-            {render(row.index)}
+            <RowBody render={render} index={row.index} />
           </li>
         ))}
       </ol>

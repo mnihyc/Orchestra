@@ -159,6 +159,7 @@ pub enum ApprovalMatcher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalOption {
     /// What a decision names.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// What it is called.
     pub label: String,
@@ -204,6 +205,7 @@ pub struct QuestionOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Question {
     /// What an answer names.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// A short heading.
     pub header: String,
@@ -281,6 +283,7 @@ pub struct McpElicitationRequestDetail {
     /// What it says.
     pub message: String,
     /// A JSON Schema of what it wants back.
+    #[schemars(extend("x-native-schema" = true))]
     pub schema: Json,
 }
 
@@ -476,6 +479,9 @@ pub enum ApproverScope {
 /// Something that waits for a decision, or was decided.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Approval {
+    /// Actual native delivery, distinct from the already committed decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<ApprovalDelivery>,
     /// The approval's identifier.
     pub id: Id,
     /// What it asks, written as `kind` and `request`.
@@ -519,6 +525,37 @@ pub struct Approval {
     pub expires_at: Option<Time>,
     /// When it was made.
     pub created_at: Time,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalDelivery {
+    pub recipient_kind: ApprovalDeliveryRecipient,
+    pub state: ApprovalDeliveryState,
+    pub last_attempt_at: Option<Time>,
+    pub problem: Option<ApprovalDeliveryProblem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDeliveryRecipient {
+    NativeHarness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDeliveryState {
+    Pending,
+    Applied,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDeliveryProblem {
+    Rejected,
+    TimedOut,
+    Cancelled,
+    DeliveryFailed,
 }
 
 /// The answer to a person's decision: the approval as it stands now and, for a port request, the
@@ -627,6 +664,7 @@ pub struct ApprovalListQuery {
 #[serde(deny_unknown_fields)]
 pub struct HarnessOptionDecision {
     /// The option chosen.
+    #[schemars(extend("x-native-reference" = true))]
     pub option_id: String,
     /// A note for the harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -638,6 +676,7 @@ pub struct HarnessOptionDecision {
 #[serde(deny_unknown_fields)]
 pub struct HarnessAnswersDecision {
     /// The answers: the choices or the words given, by question.
+    #[schemars(extend("x-storage-exact"=true,"x-native-keys"=true))]
     pub answers: BTreeMap<String, Vec<String>>,
     /// A note for the harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -664,6 +703,7 @@ pub struct HarnessElicitationDecision {
     pub action: ElicitationAction,
     /// What they answer, when they accept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact"=true,"x-native-keys"=true))]
     pub content: Option<Json>,
 }
 

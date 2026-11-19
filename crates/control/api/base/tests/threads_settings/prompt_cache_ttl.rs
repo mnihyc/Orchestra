@@ -68,6 +68,7 @@ async fn native_cache_lifetime_stays_inherited_and_declared_unsupported_programs
         .call(NodeSettingSet, &[&thread, &"agents.prompt_cache_ttl"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!("5m"),
             locked: None,
             expected_revision: None,
@@ -84,6 +85,7 @@ async fn native_cache_lifetime_stays_inherited_and_declared_unsupported_programs
         .call(NodeSettingSet, &[&thread, &"agents.prompt_cache_ttl"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(null),
             locked: None,
             expected_revision: written.own.as_ref().map(|row| row.revision),
