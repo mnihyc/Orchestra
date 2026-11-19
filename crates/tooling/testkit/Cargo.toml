@@ -21,6 +21,7 @@ futures.workspace = true
 http.workspace = true
 orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true
+orch-api-contract.workspace = true
 orch-driver-contract.workspace = true
 orch-link-contract.workspace = true
 orch-link.workspace = true
@@ -39,6 +40,9 @@ thiserror.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

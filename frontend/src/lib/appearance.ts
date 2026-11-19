@@ -8,11 +8,9 @@
 import { create } from 'zustand';
 
 import type { Density, Locale, Me, Theme, TimezoneMode } from '@/generated/api-types';
-import { isLocale, nearestLocale, setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
+import { applyDeviceAppearance as apply, darkPreferred, readDeviceAppearance, rememberDeviceAppearance as remember, resolveTheme as resolve } from './deviceAppearance';
 import { browserTimeZone } from '@/lib/time';
-
-/** Where the device keeps them. */
-const STORAGE_KEY = 'orch.appearance';
 
 export interface Appearance {
   theme: Theme;
@@ -29,56 +27,8 @@ interface AppearanceStore extends Appearance {
   set: (change: Partial<Appearance>) => void;
 }
 
-const darkPreferred = (): MediaQueryList | null =>
-  typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
-
-function resolve(theme: Theme): 'light' | 'dark' {
-  if (theme !== 'system') return theme;
-  return darkPreferred()?.matches ? 'dark' : 'light';
-}
-
-function remembered(): Appearance {
-  const fallback: Appearance = {
-    theme: 'system',
-    density: 'comfortable',
-    locale: nearestLocale(typeof navigator === 'undefined' ? [] : navigator.languages),
-    timeZone: browserTimeZone(),
-    timeZoneMode: 'device',
-  };
-  try {
-    const stored: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null');
-    if (typeof stored !== 'object' || stored === null) return fallback;
-    const { theme, density, locale } = stored as Record<string, unknown>;
-    return {
-      theme: theme === 'light' || theme === 'dark' || theme === 'system' ? theme : fallback.theme,
-      density: density === 'compact' || density === 'comfortable' ? density : fallback.density,
-      locale: isLocale(locale) ? locale : fallback.locale,
-      timeZone: fallback.timeZone,
-      timeZoneMode: fallback.timeZoneMode,
-    };
-  } catch {
-    // Storage that is closed to the page, or holds something else: start from what the browser says.
-    return fallback;
-  }
-}
-
-function apply(appearance: Appearance, resolvedTheme: 'light' | 'dark'): void {
-  const root = document.documentElement;
-  root.dataset.theme = resolvedTheme;
-  root.dataset.density = appearance.density;
-  root.lang = appearance.locale;
-}
-
-function remember({ theme, density, locale }: Appearance): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme, density, locale }));
-  } catch {
-    // A device that keeps nothing still shows the page.
-  }
-}
-
 export const useAppearance = create<AppearanceStore>((set, get) => {
-  const initial = remembered();
+  const initial: Appearance = { ...readDeviceAppearance(), timeZone: browserTimeZone(), timeZoneMode: 'device' };
   return {
     ...initial,
     resolvedTheme: resolve(initial.theme),
@@ -96,7 +46,7 @@ export const useAppearance = create<AppearanceStore>((set, get) => {
       set({ ...next, resolvedTheme });
       apply(next, resolvedTheme);
       remember(next);
-      if (next.locale !== before.locale) void setLocale(next.locale);
+      if (next.locale !== before.locale && i18n.isInitialized && next.locale !== i18n.language) void setLocale(next.locale);
     },
   };
 });

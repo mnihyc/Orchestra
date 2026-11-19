@@ -1472,7 +1472,14 @@ async fn prepare_server(
             records.push(row);
         }
         for (hash, bytes, pins, last) in kept_blobs.clone() {
-            let mut row = model::record(format!("blob:{hash}"), StorageKind::Content, hash, at);
+            // Kept content has no name of its own: a person reads its kind, its size and its time, and its hash stays
+            // in the record's identifier.
+            let mut row = model::record(
+                format!("blob:{hash}"),
+                StorageKind::Content,
+                String::new(),
+                at,
+            );
             row.bytes = Some(bytes);
             row.why = if pins > 0 {
                 KeptWhy::InUse
