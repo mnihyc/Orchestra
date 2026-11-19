@@ -48,6 +48,93 @@ async fn a_ping_is_answered_with_its_number() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_valid_tabs_heartbeat_does_not_wait_for_its_subscription_reauthentication_or_epoch_read()
+{
+    use orch_db::queries::transaction_guard::{self, Scope};
+
+    for operation in ["subscribe", "reauthenticate", "epoch"] {
+        let rig = Rig::with_unstarted_engine().await;
+        let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+        if operation == "epoch" {
+            client.sub(1, "user", None).await;
+            client.expect("subscribed").await;
+        }
+        // Reserve the witness connection before the deliberate lock wait can occupy the pool.
+        let mut observer = rig.pool.acquire().await.unwrap();
+        let mut barrier = rig.pool.begin().await.unwrap();
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        if operation == "reauthenticate" {
+            sqlx::query(
+                "SELECT s.id FROM sessions s JOIN access_tokens a ON a.session_id=s.id
+                 WHERE a.token_hash=$1 FOR UPDATE OF s",
+            )
+            .bind(orch_api_core::middleware::authentication::token_hash(
+                &rig.token,
+            ))
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+            client.send(json!({"op":"reauth","token":rig.token})).await;
+        } else {
+            sqlx::query("LOCK TABLE permission_entries IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            if operation == "subscribe" {
+                client.sub(1, "user", None).await;
+            } else {
+                // Moving only the cache epoch models an unrelated new object. It still asks
+                // the existing subscription to establish its next actual expiry boundary.
+                transaction_guard::request_scope(Scope::Creation, async {
+                    let mut tx = rig.pool.begin().await.unwrap();
+                    orch_db::queries::access::bump_epoch(&mut tx).await.unwrap();
+                    tx.commit().await.unwrap();
+                })
+                .await;
+            }
+        }
+        let waiting = tokio::time::timeout(realtime_support::PATIENCE, async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(blocker)
+                .fetch_one(&mut *observer)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let heartbeat = if waiting.is_ok() {
+            Some(tokio::time::timeout(Duration::from_secs(1), client.heartbeat()).await)
+        } else {
+            None
+        };
+        // Release and retire all owners even when the old sequential reader misses the bar.
+        barrier.rollback().await.unwrap();
+        drop(observer);
+        drop(client);
+        rig.shutdown().await;
+        assert!(
+            waiting.is_ok(),
+            "{operation} must reach the actual database lock"
+        );
+        assert!(
+            heartbeat.is_some_and(|result| result.is_ok()),
+            "a valid tab's heartbeat must finish within one second while {operation} waits"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_does_not_offer_the_protocol_is_closed_with_4409() {
     let rig = Rig::new().await;
     for offered in [&["orch.v0"][..], &[][..]] {

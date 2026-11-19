@@ -1,0 +1,9 @@
+fmt
+test -p orch-api-core --lib --test blob_housekeeping --test workspace_files --test human_check --test forwarded_edge --test kfix_deploy
+test -p orch-engine --lib --test caps --test forks --test initial_files --test environment_moves --test machine_moves --test volume_carry -- --skip history_pages::
+test -p orch-settings-contract --lib
+test -p orch-api-contract --lib
+test -p orchctl --bin orchctl -- commands::doctor::
+test -p orch-xtask --bin orch-xtask -- release::
+test -p orch-human-check --lib --test edge_policy
+web-e2e tests/e2e/admin.spec.ts tests/e2e/human-check-admin.spec.ts tests/e2e/human-check.spec.ts

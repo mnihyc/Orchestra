@@ -84,3 +84,12 @@ for (const language of ['en','zh-CN'] as const) describe('QS-029 setup in ' + la
     expect(state(provider)).toMatchObject({text:t('providers.phrase.needsRuntime'),detail:t('providers.overview.needsRuntimeLead'),next:'runtime'});
   });
 });
+
+for (const language of ['en', 'zh-CN'] as const) it(`distinguishes observed vendor quota from refused calls in ${language}`, () => {
+  const t = i18n.getFixedT(language);
+  const current = (status: 'exhausted' | 'disabled' | 'error') => providerState(planProvider({ status, status_detail: null }), t, { locale: language, timeZone: 'UTC' }, PLAN_NOW);
+  expect(current('exhausted').text).toContain(language === 'en' ? 'Vendor limit reported' : '厂商报告已达限额');
+  expect(current('exhausted').text).toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+  expect(current('disabled').text).not.toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+  expect(current('error').text).not.toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+});

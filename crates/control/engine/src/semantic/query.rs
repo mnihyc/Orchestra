@@ -7,6 +7,24 @@ use crate::error::EngineError;
 use orch_db::DbError;
 use orch_db::queries::semantic as rows;
 use orch_types::Id;
+use orch_types::Time;
+
+/// The actual lookup's source, retained with its query rather than reconstructed from current settings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServingReceipt {
+    /// Actual embedding endpoint reference.
+    pub provider_id: Id,
+    /// Routing model of the searched embedding space.
+    pub model_name: String,
+    /// Its label captured during the lookup's metadata read.
+    pub model_display: String,
+    /// Request usage owner; absent when cache reuse started no request.
+    pub usage_owner: Option<Id>,
+    /// The vector was reused without another embedding request.
+    pub cached: bool,
+    /// When this lookup completed.
+    pub observed_at: Time,
+}
 
 /// A piece found near a query.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +48,8 @@ pub enum Meaning {
     Unavailable(String),
     /// The nearest pieces, best first, with how results are to be joined.
     Found {
+        /// Actual source and usage decision of this lookup.
+        receipt: ServingReceipt,
         /// The generation whose embedding space was searched.
         generation_id: Id,
         /// The pieces.
@@ -219,6 +239,7 @@ impl Engine {
                     vector
                 }
             });
+            let cached_query = cached.is_some();
             let active_pause = if active.provider_id == named.provider_id {
                 index_pause
             } else {
@@ -238,6 +259,9 @@ impl Engine {
             {
                 return Ok(Meaning::Unavailable("model_changed".to_owned()));
             }
+            let model_display =
+                rows::serving_model_display(&mut conn, active.provider_id, &active.model_name)
+                    .await?;
             metadata_cancellation.disarm();
             conn.commit().await.map_err(DbError::from)?;
             let texts = vec![asked.query(query)];
@@ -336,6 +360,14 @@ impl Engine {
                 Err(_) => return Ok(Meaning::Unavailable("query_timeout".to_owned())),
             };
             Ok(Meaning::Found {
+                receipt: ServingReceipt {
+                    provider_id: active.provider_id,
+                    model_name: active.model_name.clone(),
+                    model_display,
+                    usage_owner: if cached_query { None } else { asked.writer },
+                    cached: cached_query,
+                    observed_at: Time::new(self.inner.clock.now()),
+                },
                 generation_id: active.id,
                 near: near
                     .into_iter()
