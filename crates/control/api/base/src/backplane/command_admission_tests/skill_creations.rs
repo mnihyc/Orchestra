@@ -103,6 +103,7 @@ impl CommandHandler for SkillPeer {
                 self.lists.fetch_add(1, Ordering::SeqCst);
                 self.pause().await;
                 Ok(CommandResult::FsList(FsListResult {
+                    facts: None,
                     entries: vec![DirEntry {
                         name: "SKILL.md".into(),
                         path: "skill/SKILL.md".into(),
@@ -146,6 +147,7 @@ impl CommandHandler for SkillPeer {
                     .map_err(|_| CommandError::new(ErrorCode::Internal, "file upload"))?;
                 self.files.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandResult::FsFetch(FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
                     hash,
                     size,
                     mtime_ns: self
@@ -245,6 +247,7 @@ async fn native_skill_sources_keep_actual_environment_or_host_raw_origin_and_onc
                     build: old.build,
                     blobs: old.blobs.clone(),
                     cache: crate::cache::Cache::new(&old.config),
+                    metrics_listener_failed: old.metrics_listener_failed.clone(),
                     host_ports: old.host_ports.clone(),
                     builtin_sources: old.builtin_sources.clone(),
                 }),

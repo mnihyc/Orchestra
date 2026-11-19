@@ -135,8 +135,6 @@ impl Fixture {
                     },
                 },
                 source: frozen,
-                record_days: 7,
-                max_bytes: 1024,
             }
         } else {
             Action::Prepare {
@@ -156,6 +154,8 @@ impl Fixture {
             token: None,
             creator_origin: None,
             scheduled_input: None,
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action,
         })
     }

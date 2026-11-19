@@ -629,6 +629,7 @@ async fn measure(
 > {
     let home = part == EnvironmentDataPart::Home;
     let body = serde_json::to_value(FsDataMeasure {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id: environment,
         part,
@@ -942,6 +943,7 @@ impl Engine {
             source.id,
             SerialKey::Environment(environment),
             &FsManifest {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 selection: selection.clone(),
             },
@@ -1034,6 +1036,14 @@ impl Engine {
             .map_or(0, |count| count.bytes)
             .saturating_add(home.as_ref().map_or(0, |home| home.total_bytes));
         let files = FilesPlan {
+            source_policy: Some(crate::fork_source::workspace_copy_policy()),
+            home_policy: home
+                .as_ref()
+                .filter(|home| home.measured)
+                .map(|_| crate::fork_source::owned_copy_policy()),
+            file_states_policy: recorded
+                .as_ref()
+                .map(|_| crate::fork_source::owned_copy_policy()),
             source: FilesSource::Live,
             source_as_of: parsed.header().generated_at,
             file_count: listed.file_count,
@@ -1781,6 +1791,7 @@ impl Moving {
                     self.recipe.source_machine,
                     &format!("machine-move.export.{name}"),
                     &FsDataExport {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: self.recipe.environment,
                         job_id: job.id(),
@@ -1795,6 +1806,7 @@ impl Moving {
                     self.recipe.source_machine,
                     "machine-move.workspace.snapshot",
                     &FsSnapshot {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: self.recipe.environment,
                         job_id: job.id(),
@@ -1878,6 +1890,7 @@ impl Moving {
                 machine,
                 "machine-move.workspace.materialize",
                 &FsMaterialize {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: self.recipe.environment,
                     job_id: Some(job.id()),
@@ -1922,6 +1935,7 @@ impl Moving {
                     machine,
                     &format!("machine-move.import.{name}"),
                     &FsDataImport {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: self.recipe.environment,
                         job_id: job.id(),
@@ -1958,6 +1972,7 @@ impl Moving {
                 machine,
                 "machine-move.recorded.verify",
                 &FsRecordVerify {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: self.recipe.environment,
                 },
             )

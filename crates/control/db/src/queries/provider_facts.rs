@@ -206,6 +206,41 @@ pub async fn credential_end(
     .flatten())
 }
 
+// Shared by scheduling and policies that consume this provider's measured windows.
+const CADENCE_MINUTES: &str = "CASE
+             WHEN p.status = 'error' THEN cadence.refused
+             WHEN EXISTS (SELECT 1 FROM threads th JOIN turns t ON t.thread_id = th.node_id
+               WHERE th.provider_id = p.id AND (t.state = 'running'
+                 OR EXTRACT(EPOCH FROM ($1 - GREATEST(t.started_at,t.completed_at))) / 60 <= cadence.recent))
+             OR (p.status='exhausted' AND EXISTS (
+               SELECT 1 FROM threads th JOIN nodes n ON n.id=th.node_id
+               JOIN thread_inputs i ON i.thread_id=th.node_id
+               WHERE th.provider_id=p.id AND n.deleted_at IS NULL AND n.archived_at IS NULL
+                 AND i.state IN ('pending','delivering')))
+             THEN cadence.active ELSE cadence.idle END";
+
+/// The configured interval for this provider's actual activity, including its source minimum.
+pub async fn observation_seconds(
+    conn: &mut Conn,
+    now: DateTime<Utc>,
+    schedule: &ReadSchedule,
+) -> Result<Option<i64>, DbError> {
+    let sql = format!("SELECT LEAST(9223372036854775807::numeric,GREATEST(
+        ({CADENCE_MINUTES})::numeric*60,CASE WHEN p.sources #>> '{{facts,descriptor,facts,min_interval_secs}}' ~ '^[0-9]+$'
+        THEN (p.sources #>> '{{facts,descriptor,facts,min_interval_secs}}')::numeric ELSE 0 END))::bigint
+        FROM providers p CROSS JOIN (VALUES($3::bigint,$4::bigint,$5::bigint,$6::bigint)) cadence(recent,active,idle,refused)
+        WHERE p.id=$2 AND p.deleted_at IS NULL");
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(now)
+        .bind(schedule.provider_id)
+        .bind(schedule.recent)
+        .bind(schedule.active)
+        .bind(schedule.idle)
+        .bind(schedule.refused)
+        .fetch_optional(conn)
+        .await?)
+}
+
 /// Providers whose online runtime is due an observation at its cadence or a minute after a vendor reset.
 pub async fn due_reads(
     conn: &mut Conn,
@@ -226,17 +261,7 @@ pub async fn due_reads(
          JOIN UNNEST($3::uuid[],$4::bigint[],$5::bigint[],$6::bigint[],$7::bigint[])
            AS cadence(provider_id,recent,active,idle,refused) ON cadence.provider_id = p.id
          WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
-           AND (p.facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1 - COALESCE(p.facts_requested_at,p.facts_at,p.created_at))) / 60 >= CASE
-             WHEN p.status = 'error' THEN cadence.refused
-             WHEN EXISTS (SELECT 1 FROM threads th JOIN turns t ON t.thread_id = th.node_id
-               WHERE th.provider_id = p.id AND (t.state = 'running'
-                 OR EXTRACT(EPOCH FROM ($1 - GREATEST(t.started_at,t.completed_at))) / 60 <= cadence.recent))
-             OR (p.status='exhausted' AND EXISTS (
-               SELECT 1 FROM threads th JOIN nodes n ON n.id=th.node_id
-               JOIN thread_inputs i ON i.thread_id=th.node_id
-               WHERE th.provider_id=p.id AND n.deleted_at IS NULL AND n.archived_at IS NULL
-                 AND i.state IN ('pending','delivering')))
-             THEN cadence.active ELSE cadence.idle END OR {RESET_READ_DUE})
+           AND (p.facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1 - COALESCE(p.facts_requested_at,p.facts_at,p.created_at))) / 60 >= {CADENCE_MINUTES} OR {RESET_READ_DUE})
            AND {SOURCE_INTERVAL_DUE}
          ORDER BY COALESCE(p.facts_requested_at,p.facts_at,p.created_at),p.id LIMIT $8");
     // Only this module's constants are put into the statement.
@@ -378,19 +403,45 @@ pub async fn claim_trial(
     if active {
         return Ok(None);
     }
-    let next:Option<(Id,Id)> = sqlx::query_as("SELECT i.id,i.thread_id FROM thread_inputs i
+    let next:Option<(Id,Id,Id)> = sqlx::query_as("SELECT i.id,i.thread_id,COALESCE(i.run_as,i.author_id,n.owner_id) FROM thread_inputs i
         JOIN threads th ON th.node_id = i.thread_id JOIN nodes n ON n.id = th.node_id
         WHERE th.provider_id = $1 AND th.current_turn_id IS NULL AND th.state = 'blocked'
           AND th.blocked_reason = 'provider_unavailable' AND i.state = 'pending' AND i.state_detail IS NULL
           AND n.deleted_at IS NULL AND n.archived_at IS NULL
         ORDER BY i.created_at,i.position,i.id LIMIT 1").bind(provider).fetch_optional(&mut *conn).await?;
-    let Some((input, thread)) = next else {
+    let Some((input, thread, person)) = next else {
         return Ok(None);
     };
     let claimed = sqlx::query("UPDATE providers SET credential_trial_input_id = $2,credential_trial_turn_id = NULL,
+        credential_trial_receipt=jsonb_build_object('state','reserved','at',$3::timestamptz,'input_ref',$2::uuid,'thread_ref',$4::uuid,'person_ref',$5::uuid),
         revision = revision+1,updated_at = $3 WHERE id = $1 AND status = 'error' AND deleted_at IS NULL")
-        .bind(provider).bind(input).bind(now).execute(conn).await?.rows_affected() > 0;
+        .bind(provider).bind(input).bind(now).bind(thread).bind(person).execute(conn).await?.rows_affected() > 0;
     Ok(claimed.then_some((input, thread)))
+}
+
+/// One bounded last-trial receipt and its actual current native turn, without any credential material.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TrialObservation {
+    pub receipt: Option<Json>,
+    pub input_id: Option<Id>,
+    pub turn_id: Option<Id>,
+    pub turn_state: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+pub async fn trial_observation(
+    conn: &mut Conn,
+    provider: Id,
+) -> Result<Option<TrialObservation>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT p.credential_trial_receipt AS receipt,p.credential_trial_input_id AS input_id,
+        p.credential_trial_turn_id AS turn_id,t.state AS turn_state,t.started_at
+        FROM providers p LEFT JOIN turns t ON t.id=p.credential_trial_turn_id
+        WHERE p.id=$1 AND p.deleted_at IS NULL",
+    )
+    .bind(provider)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// Whether this exact input may start or resume the manager's single credential trial.
@@ -427,22 +478,25 @@ pub async fn reset_request(conn: &mut Conn, command: Id) -> Result<Option<Json>,
         sqlx::query_scalar("SELECT body FROM commands WHERE id = $1 AND kind = 'provider.reset'")
             .bind(command)
             .fetch_optional(conn)
-            .await?,
+            .await?
+            .map(orch_types::storable::decode_exact)
+            .transpose()?,
     )
 }
 
 /// The current provider binding and credential generation, without exposing any credential material.
+/// The configuration revision advances only when a person's editable choices change.
 /// The sealed-value digest also distinguishes two rotations made at the same stepped clock time.
 pub async fn credential_epoch(
     conn: &mut Conn,
     provider: Id,
-    revision: Option<i64>,
+    configuration_revision: Option<i64>,
 ) -> Result<Option<Json>, DbError> {
     Ok(sqlx::query_scalar("SELECT jsonb_build_array(p.revision,p.machine_id,p.key_machine_id,p.agent_id,p.login_state,
         COALESCE((SELECT jsonb_agg(jsonb_build_array(s.id,s.name,s.rotated_at,s.created_at,md5(s.sealed)) ORDER BY s.name)
           FROM secrets s WHERE s.owner_kind = 'provider' AND s.owner_id = p.id),'[]'::jsonb))
         FROM providers p WHERE p.id = $1 AND p.deleted_at IS NULL AND ($2::bigint IS NULL OR p.revision = $2)")
-        .bind(provider).bind(revision).fetch_optional(conn).await?)
+        .bind(provider).bind(configuration_revision).fetch_optional(conn).await?)
 }
 
 /// Whether a manager's one reserved input or turn is still pending.
@@ -453,4 +507,15 @@ pub async fn trial_pending(conn: &mut Conn, provider: Id) -> Result<bool, DbErro
         WHERE p.id = $1 AND th.provider_id = p.id AND
           ((p.credential_trial_turn_id IS NULL AND i.state IN ('pending','delivering')) OR t.state IN ('starting','running')))")
         .bind(provider).fetch_one(conn).await?)
+}
+
+/// Records a successful explicit recovery check which reserves no input.
+pub async fn note_no_trial(
+    conn: &mut Conn,
+    provider: Id,
+    now: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE providers SET credential_trial_receipt=jsonb_build_object('state','not_reserved','at',$2::timestamptz,'input_ref',NULL,'thread_ref',NULL,'person_ref',NULL) WHERE id=$1")
+        .bind(provider).bind(now).execute(conn).await?;
+    Ok(())
 }
