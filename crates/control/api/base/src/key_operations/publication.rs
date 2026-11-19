@@ -41,13 +41,14 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use std::sync::Mutex;
-type Check = dyn for<'a> Fn(&'a Ctx, &'a mut Conn, &'a Principal) -> BoxFuture<'a, ApiResult<()>>
+type Check = dyn for<'a> Fn(&'a Ctx, &'a mut Conn, &'a Principal) -> BoxFuture<'a, ApiResult<Option<Bytes>>>
     + Send
     + Sync;
 
 struct Source {
     accepted: Caller,
     check: Arc<Check>,
+    rebuilding: bool,
 }
 
 #[derive(Clone)]
@@ -234,12 +235,64 @@ where
     let retained: Arc<Check> = Arc::new(move |ctx, conn, principal| {
         let source = Arc::clone(&source);
         let check = Arc::clone(&check);
-        Box::pin(async move { check(ctx, conn, principal, &source).await })
+        Box::pin(async move {
+            check(ctx, conn, principal, &source).await?;
+            Ok(None)
+        })
     });
     Ok(Arc::new(Source {
         accepted: accepted.clone(),
         check: retained,
+        rebuilding: false,
     }))
+}
+
+/// A finite JSON reader may rebuild its body at the actual current-source cut. It must
+/// preserve the original source association and every ordinary/current access gate.
+pub(super) fn retain_rebuilding<T, F>(
+    ctx: &Ctx,
+    accepted: &Caller,
+    source: T,
+    check: F,
+) -> ApiResult<()>
+where
+    T: Send + Sync + 'static,
+    F: for<'a> Fn(
+            &'a Ctx,
+            &'a mut Conn,
+            &'a Principal,
+            &'a T,
+        ) -> BoxFuture<'a, ApiResult<Option<Bytes>>>
+        + Send
+        + Sync
+        + 'static,
+{
+    if !super::admission::same_response_origin(ctx, accepted)? {
+        return Err(ApiError::internal(
+            "response source changed credential origin",
+        ));
+    }
+    ctx.publication.retain_deadline(
+        accepted
+            .grant()
+            .and_then(orch_authz::TokenGrant::expires_at),
+    )?;
+    let source = Arc::new(source);
+    let check = Arc::new(check);
+    let retained: Arc<Check> = Arc::new(move |ctx, conn, principal| {
+        let (source, check) = (source.clone(), check.clone());
+        Box::pin(async move { check(ctx, conn, principal, &source).await })
+    });
+    ctx.publication
+        .sources
+        .lock()
+        .map_err(|_| ApiError::internal("response source state is poisoned"))?
+        .push(Arc::new(Source {
+            accepted: accepted.clone(),
+            check: retained,
+            rebuilding: true,
+        }));
+    Ok(())
 }
 
 /// One immutable native header/page source. Clones retain the same original association;
@@ -373,7 +426,7 @@ where
             if !Arc::ptr_eq(&item.frame.source, &header.source) {
                 sources.push(Arc::clone(&item.frame.source));
             }
-            check_sources(&ctx, &sources).await?;
+            let _ = check_sources(&ctx, &sources).await?;
             // No awaited bookkeeping follows this source check before the bytes leave.
             Ok(Some((item.bytes, (stream, ctx, header))))
         },
@@ -394,71 +447,99 @@ fn retained_sources(ctx: &Ctx) -> ApiResult<Vec<Arc<Source>>> {
 
 /// Current original HTTP identity and each frozen native source, followed by a synchronous cut.
 pub async fn check(ctx: &Ctx) -> ApiResult<()> {
-    check_sources(ctx, &retained_sources(ctx)?).await
+    check_sources(ctx, &retained_sources(ctx)?)
+        .await
+        .map(|_| ())
 }
 
-async fn check_sources(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<()> {
+async fn check_sources(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<Option<Bytes>> {
     super::snapshot_read::retry_conflict(|| check_sources_once(ctx, sources)).await
 }
 
-async fn check_sources_once(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<()> {
-    let key = ctx.user().is_ok_and(|user| !user.is_session());
-    if !key && sources.is_empty() {
-        return Ok(());
+/// The reader that a retained source is checked as, on a snapshot that is already open: the original HTTP
+/// identity as it is now, kept inside what the source accepted.
+async fn reader_of(
+    ctx: &Ctx,
+    tx: &mut Conn,
+    identity: &transaction_guard::CurrentHttpIdentity,
+    accepted: &Caller,
+) -> ApiResult<(Ctx, Principal)> {
+    if accepted.as_admin() && !identity.caller.as_admin() {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the response's administrator context has ended",
+        ));
     }
+    let accepted = if accepted.grant().is_some() {
+        orch_authz::CapturedCaller::capture(accepted)
+            .restore_current(tx, ctx.app.clock.as_ref())
+            .await
+            .map_err(authorization::restoration_error)?
+            .ok_or_else(|| {
+                ApiError::new(ErrorCode::AuthInvalidToken, "the response key has ended")
+            })?
+    } else {
+        accepted.clone()
+    };
+    let caller = identity
+        .caller
+        .intersect_restrictions(&accepted)
+        .map_err(ApiError::internal)?;
+    ctx.publication
+        .retain_deadline(caller.grant().and_then(orch_authz::TokenGrant::expires_at))?;
+    let principal = authorization::load_principal(tx, caller, identity.now).await?;
+    let principal = crate::sign_in::second_step::hold(tx, &identity.user, principal).await?;
+    let current = ctx
+        .for_operation_checkpoint(identity.user.clone(), identity.now.get())
+        .with_snapshot_inspection()?;
+    Ok((current, principal))
+}
+
+/// Whether this request has a transport identity that a later read can be checked against.
+fn checkable(ctx: &Ctx) -> bool {
     let native_read = ctx
         .ask_read
         .as_ref()
         .is_some_and(|read| read.native_identity().is_some());
-    if (ctx.surface.is_some() || native_read) && (key || !sources.is_empty()) {
+    ctx.surface.is_some() || native_read
+}
+
+async fn check_sources_once(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<Option<Bytes>> {
+    let key = ctx.user().is_ok_and(|user| !user.is_session());
+    if !key && sources.is_empty() {
+        return Ok(None);
+    }
+    let mut body = None;
+    if checkable(ctx) && (key || !sources.is_empty()) {
+        crate::testing::hold_boundary(ctx.route.name, "publication.snapshot").await;
         let mut tx = ctx.app.db.begin_snapshot().await?;
         let identity =
             transaction_guard::current_http_identity(ctx, &mut tx, HttpIdentityMode::Read).await?;
         for source in sources {
-            if source.accepted.as_admin() && !identity.caller.as_admin() {
-                return Err(ApiError::new(
-                    ErrorCode::AuthzDenied,
-                    "the response's administrator context has ended",
-                ));
-            }
-            let accepted = if source.accepted.grant().is_some() {
-                orch_authz::CapturedCaller::capture(&source.accepted)
-                    .restore_current(&mut tx, ctx.app.clock.as_ref())
-                    .await
-                    .map_err(authorization::restoration_error)?
-                    .ok_or_else(|| {
-                        ApiError::new(ErrorCode::AuthInvalidToken, "the response key has ended")
-                    })?
-            } else {
-                source.accepted.clone()
-            };
-            let caller = identity
-                .caller
-                .intersect_restrictions(&accepted)
-                .map_err(ApiError::internal)?;
-            ctx.publication
-                .retain_deadline(caller.grant().and_then(orch_authz::TokenGrant::expires_at))?;
-            let principal = authorization::load_principal(&mut tx, caller, identity.now).await?;
-            let principal =
-                crate::sign_in::second_step::hold(&mut tx, &identity.user, principal).await?;
-            let current = ctx
-                .for_operation_checkpoint(identity.user.clone(), identity.now.get())
-                .with_snapshot_inspection()?;
+            let (current, principal) = reader_of(ctx, &mut tx, &identity, &source.accepted).await?;
             let reads = current
                 .inspection
                 .as_ref()
                 .map(|info| info.reads.clone())
                 .unwrap_or_default();
-            orch_db::queries::trace::read_scope(
+            let replacement = orch_db::queries::trace::read_scope(
                 &reads,
                 (source.check)(&current, &mut tx, &principal),
             )
             .await?;
+            if let Some(replacement) = replacement
+                && body.replace(replacement).is_some()
+            {
+                return Err(ApiError::internal(
+                    "more than one source rebuilt the response body",
+                ));
+            }
         }
         tx.commit().await.map_err(DbError::from)?;
         identity.check_deadline(&ctx.app)?;
     }
-    ctx.publication.check_deadline(ctx)
+    ctx.publication.check_deadline(ctx)?;
+    Ok(body)
 }
 
 /// Called after Registry bookkeeping. Preserve completed effects and typed receipts;
@@ -484,7 +565,21 @@ pub(crate) async fn response(ctx: Ctx, response: Response) -> ApiResult<Response
         sources.push(Arc::clone(&header.source));
         // Its body performs the same complete check including the current immutable page.
         // Wrapping another awaited global-only check after it would stale that page cut.
-        check_sources(&ctx, &sources).await.map(|()| response)
+        check_sources(&ctx, &sources).await.map(|_| response)
+    } else if retained_sources(&ctx)?
+        .iter()
+        .any(|source| source.rebuilding)
+    {
+        if !matches!(ctx.route.reply, orch_api_contract::routes::Shape::Json(_)) {
+            return Err(ApiError::internal(
+                "a rebuilt reply requires its finite JSON transport",
+            ));
+        }
+        crate::response_body::checked_rebuilding(response, move || {
+            let ctx = checking.clone();
+            async move { check_sources(&ctx, &retained_sources(&ctx)?).await }
+        })
+        .await
     } else {
         crate::response_body::checked(response, move || {
             let ctx = checking.clone();

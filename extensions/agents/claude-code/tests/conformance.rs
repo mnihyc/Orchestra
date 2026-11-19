@@ -53,7 +53,7 @@ impl Launcher for Isolated {
             .0
     }
 }
-async fn shared(case: &str) {
+async fn shared(case: &str) -> orch_api_contract::admin::HarnessConformanceCase {
     let mut rig = common::Rig::new()
         .await
         .expect("native conformance requires its pinned image");
@@ -154,14 +154,6 @@ async fn shared(case: &str) {
                 .map_err(|error| error.to_string()),
         }
     };
-    // Until the real subscription trial passes, only this ignored test sees the local probe.
-    let local_checks = (case == "auto_review").then(|| {
-        let mut checks = orch_adapter_claude_code::descriptor::manifest()
-            .checks
-            .clone();
-        checks.probes.push(case.to_owned());
-        checks
-    });
     let version =
         std::env::var("ORCH_EXPECTED_CLAUDE_VERSION").unwrap_or_else(|_| "2.1.322".into());
     let recording = native_recording::NativeRecording::from_env(case, &version, &common::image());
@@ -196,9 +188,7 @@ async fn shared(case: &str) {
             binary,
         },
         version,
-        checks: local_checks
-            .as_ref()
-            .unwrap_or(&orch_adapter_claude_code::descriptor::manifest().checks),
+        checks: &orch_adapter_claude_code::descriptor::manifest().checks,
         workspace: rig.work.path().into(),
         within: NATIVE_CASE_WITHIN,
         requests: &requests,
@@ -211,29 +201,19 @@ async fn shared(case: &str) {
             None
         },
     };
-    let informational = local_checks.is_some();
-    let result = if informational {
-        native::run_probe(&mut rig.adapter, &fixture, case).await
-    } else {
-        native::run_case(&mut rig.adapter, &fixture, case).await
-    };
+    let result = native::run_case(&mut rig.adapter, &fixture, case).await;
     model_only::record(
         "claude-code",
         case,
-        if informational {
-            "informational"
-        } else if result.passed {
-            "passed"
-        } else {
-            "failed"
-        },
+        if result.passed { "passed" } else { "failed" },
         &fixture.version,
         json!(result),
     );
     if let Some(recording) = &recording {
-        recording.finish(result.passed, informational);
+        recording.finish(result.passed, false);
     }
     assert!(result.passed, "{result:?}");
+    result
 }
 
 #[tokio::test]
@@ -259,6 +239,11 @@ async fn an_unproved_readonly_boundary_is_not_offered_and_a_session_requiring_it
 #[tokio::test]
 async fn native_tool_answers_have_only_one_model_facing_form() {
     shared("tools.result_form").await;
+}
+
+#[tokio::test]
+async fn a_checkpoint_before_an_earlier_message_forks_exactly_there_and_leaves_the_source_whole() {
+    shared("input_prefix").await;
 }
 
 #[tokio::test]
@@ -407,10 +392,13 @@ async fn changing_bypass_keeps_ask_mode_and_uses_the_matching_launch_environment
 }
 
 #[tokio::test]
-#[ignore = "explicit candidate-only staged classifier proof; real subscription and manifest activation remain pending"]
 async fn native_auto_classifier_stages_hooks_and_model_policy_are_observed() {
-    assert!(!orch_adapter_claude_code::descriptor::auto_proven());
-    shared("auto_review").await;
+    let result = shared("auto_review").await;
+    assert_eq!(result.feature.as_deref(), Some("approval_modes.auto"));
+    assert!(
+        result.error.is_none() && result.unsupported.is_none(),
+        "{result:?}"
+    );
 }
 
 /// A real candidate, a disposable home and the actual read-only control reply; no model credential or turn.

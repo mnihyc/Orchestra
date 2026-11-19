@@ -130,6 +130,7 @@ impl Files {
                 assert_eq!(body.environment_id, environment);
                 if body.path == "web" {
                     return Ok(CommandResult::FsStat(FileStat {
+                        facts: None,
                         entry: DirEntry {
                             name: "web".into(),
                             path: body.path.clone(),
@@ -148,6 +149,7 @@ impl Files {
                 assert!(body.path.starts_with("web/"));
                 assert!(body.mount.is_none());
                 Ok(CommandResult::FsStat(FileStat {
+                    facts: None,
                     entry: DirEntry {
                         name: "result.bin".into(),
                         path: body.path.clone(),
