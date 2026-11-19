@@ -69,47 +69,11 @@ async function pointerWalk(page: Page, mode: 'choices' | 'icons', selectors: str
       if (refreshed === false) { target = await measureInBrowser(page, prepareLayoutPointer, remaining); continue; }
       target = { ...target, ...refreshed };
     }
-    let measured: TransientResult;
-    if (mode === 'choices') {
-      const point = await measureInBrowser(page, async (selector: string) => {
-        await document.fonts.ready;
-        await new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())));
-        const element = document.querySelector(selector);
-        if (!(element instanceof HTMLElement)) throw new Error('The option lost its pointer target.');
-        const box = element.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + box.height / 2;
-        const hit = document.elementFromPoint(x, y);
-        return { x, y, direct: hit !== null && element.contains(hit) };
-      }, target.selector);
-      // Use the measured centre only when it really hits the settled option. Clipped or
-      // covered choices retain native hover's actionability; every path is checked after input.
-      if (point.direct) await hoverMeasured(page, point);
-      else await page.locator(target.selector).hover({ timeout: REVEAL_DEADLINE_MS });
-      measured = await transientLayout(page, mode, target.selector, remaining, { kind: 'pointer', sequence: inputs.pointer });
-    } else {
-      const moved = hoverMeasured(page, target);
-      [, measured] = await Promise.all([moved, transientLayout(page, mode, target.selector, remaining, { kind: 'pointer', sequence: inputs.pointer })]);
-    }
+    const moved = hoverMeasured(page, target);
+    const [, measured] = await Promise.all([moved, transientLayout(page, mode, target.selector, remaining, { kind: 'pointer', sequence: inputs.pointer })]);
     faults.push(...measured.result.faults); target = measured.next; inputs = measured.inputs;
   }
   return faults;
-}
-
-/**
- * Where the pointer rests between probes: the viewport's corner, unless a control or a cut value stands there (a bare page, a header, a rail
- * or a narrow cell can put the very owner under the corner). A pointer that rests on the owner has already entered it: its pointerover fires at
- * the rest, its hint is dismissed with Escape before the probe, and the next move inside the owner is no entrance, so no hint comes back and a
- * disclosure that works is reported as missing. So the rest is a point outside the owner (and, where one can be found, outside every control).
- */
-async function restingPoint(page: Page, owner?: string): Promise<{ x: number; y: number }> {
-  return measureInBrowser(page, (selector: string | undefined) => {
-    const root = selector === undefined ? null : document.querySelector(selector);
-    const width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
-    const corners = [{ x: 0, y: 0 }, { x: width - 1, y: 0 }, { x: 0, y: height - 1 }, { x: width - 1, y: height - 1 }];
-    const onOwner = (point: { x: number; y: number }) => root?.contains(document.elementFromPoint(point.x, point.y)) === true;
-    const onControl = (point: { x: number; y: number }) => (document.elementFromPoint(point.x, point.y)
-      ?.closest('a[href],button,input,select,textarea,summary,[tabindex],[role="button"],[role="tab"],[role="menuitem"],[role="option"],[data-layout-probe]') ?? null) !== null;
-    return corners.find((point) => !onOwner(point) && !onControl(point)) ?? corners.find((point) => !onOwner(point)) ?? corners[0]!;
-  }, owner);
 }
 
 /** A tooltip from the preceding probe must not cover the next control's real pointer target. */
@@ -135,11 +99,6 @@ async function dismissTooltips(page: Page, selector?: string): Promise<{ x: numb
  * Close only identified information layers before starting another independent input walk.
  */
 async function dismissPageDisclosures(page: Page): Promise<void> {
-  // Release the preceding probe's hover/focus before dismissing its card. Otherwise a pending
-  // hover can reopen it during the next independent menu walk and cover the pointer target.
-  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
-  const rest = await restingPoint(page);
-  await page.mouse.move(rest.x, rest.y);
   const selector = ':is([role="tooltip"],[data-inspection-card],[data-reference-card]):visible';
   const layers = page.locator(selector);
   const open = page.locator(`${selector}:not([data-state="closed"],[data-state="closed"] *)`);
@@ -258,17 +217,7 @@ export async function auditPage(page: Page, cutWithin?: string): Promise<LayoutR
   // The settled page already revealed every underlying value. A menu pass still
   // measures all rules, but only exercises disclosures belonging to its open layer.
   // Hovering the page behind a picker repeats tooltip delays and can close the picker.
-  // Read a card before probing its underlying menu: that next pointer/focus entrance
-  // can legitimately close the card and retire the values captured in this snapshot.
-  const ordered = await measureInBrowser(page, (selectors: string[]) => selectors.map((selector, index) => {
-    let depth = 0;
-    for (let at = document.querySelector(selector); at !== null; at = at.parentElement) {
-      if (at.matches('[data-inspection-card],[data-reference-card]')) depth += 1;
-    }
-    return { index, depth };
-  }).sort((one, other) => other.depth - one.depth || one.index - other.index).map((cut) => cut.index), result.cuts.map((cut) => cut.selector));
-  for (const index of ordered) {
-    const cut = result.cuts[index]!;
+  for (const cut of result.cuts) {
     try {
       await test.step(`Reveal complete value: ${cut.text}`, async () => {
         const source = page.locator(cut.selector);
@@ -278,13 +227,11 @@ export async function auditPage(page: Page, cutWithin?: string): Promise<LayoutR
           if (element.closest('[data-inspection-card],[data-reference-card]') !== null) return false;
           if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
           return true;
-        }, undefined, { timeout: REVEAL_DEADLINE_MS })) {
-          // Outside this owner, so that the hover below is an entrance into it.
-          const rest = await restingPoint(page, cut.selector);
-          await page.mouse.move(rest.x, rest.y);
+        })) {
+          await page.mouse.move(0, 0);
         }
         await dismissTooltips(page);
-        await source.hover({ timeout: REVEAL_DEADLINE_MS });
+        await source.hover();
         if (!cut.title?.replace(/\s+/g, ' ').includes(cut.text)) {
           await expect.poll(() => page.locator('[role="tooltip"]').allTextContents().then((texts) => texts.map((text) => text.replace(/\s+/g, ' ').trim()).join('\n')),
             { timeout: REVEAL_DEADLINE_MS, message: `Hover must reveal ${cut.text}` }).toContain(cut.text);
@@ -312,8 +259,7 @@ export async function auditPage(page: Page, cutWithin?: string): Promise<LayoutR
       result.faults.push({ rule: 'cut-text', text: cut.text, selectors: [cut.selector, cut.focus], detail: error instanceof Error ? error.message : String(error) });
     }
   }
-  const rest = await restingPoint(page);
-  await page.mouse.move(rest.x, rest.y);
+  await page.mouse.move(0, 0);
   return result;
 }
 

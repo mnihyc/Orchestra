@@ -6,8 +6,7 @@
  */
 import { QueryObserver, queryOptions } from '@tanstack/react-query';
 
-import { accepted, api, client, done, ok, repeatable } from '@/api/client';
-import { newActKey } from '@/lib/requests';
+import { api, client, done, ok } from '@/api/client';
 import { queryClient } from '@/api/query';
 import type {
   AuthEmailCodeSendBody,
@@ -111,22 +110,11 @@ function adopt(result: AuthResult): AuthResult {
   return result;
 }
 
-export type SetUp = { signedIn: true; result: AuthResult } | { signedIn: false; alreadyCreated: true };
-
-/** Makes the first administrator. A completed resend continues at sign-in without another secret. */
-// Read the wire flag as a runtime value even though the contract declares the receipt's true literal.
-const signInRequired = (value: unknown): boolean => value === true;
-
-export async function setUp(body: SetupCreateBody, key = newActKey()): Promise<SetUp> {
-  const reply = await accepted(api.POST('/setup', { body, ...repeatable(key) }));
-  if ('sign_in_required' in reply && signInRequired(reply.sign_in_required)) {
-    queryClient.setQueryData(metaKey, (meta: Meta | undefined) => meta && { ...meta, needs_setup: false });
-    return { signedIn: false, alreadyCreated: true };
-  }
-  if (!('access_token' in reply)) throw new Error('Setup did not return a session or a sign-in receipt');
-  const result = adopt(reply);
+/** Makes the first administrator. From then on the system needs no setup. */
+export async function setUp(body: SetupCreateBody): Promise<AuthResult> {
+  const result = adopt(await ok(api.POST('/setup', { body })));
   queryClient.setQueryData(metaKey, (meta: Meta | undefined) => meta && { ...meta, needs_setup: false });
-  return { signedIn: true, result };
+  return result;
 }
 
 /** Signs in with one proof, or with two for somebody who has a second step. */
@@ -143,12 +131,11 @@ export function askEmailCode(body: AuthEmailCodeSendBody): Promise<void> {
 }
 
 /** How a registration ended: signed in, or waiting for the address to be confirmed. */
-export type Registered = { signedIn: true; result: AuthResult; accepted: InvitationAcceptReply | null } | { signedIn: false; alreadyCreated?: boolean };
+export type Registered = { signedIn: true; result: AuthResult; accepted: InvitationAcceptReply | null } | { signedIn: false };
 
 /** Registers a person. Where addresses are confirmed first, nobody is signed in yet. */
-export async function register(body: AuthRegisterBody & { accepted_terms_hash?: string }, key = newActKey()): Promise<Registered> {
-  const reply = await accepted(api.POST('/auth/register', { body, ...repeatable(key) }));
-  if ('sign_in_required' in reply && signInRequired(reply.sign_in_required)) return { signedIn: false, alreadyCreated: true };
+export async function register(body: AuthRegisterBody): Promise<Registered> {
+  const reply = await ok(api.POST('/auth/register', { body }));
   if ('access_token' in reply) return { signedIn: true, result: adopt(reply), accepted: reply.accepted_invitation ?? null };
   return { signedIn: false };
 }

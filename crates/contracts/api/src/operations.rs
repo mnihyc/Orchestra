@@ -905,20 +905,14 @@ mod tests {
                 .iter()
                 .any(|facet| facet.action == KeyAction::Read
                     && facet.usage == FacetUsage::Required
-                    && facet.target
-                        == TargetResolver::ResolvedCollection(
-                            crate::document_sources::OPERATION_AFFECTED
-                        ))
+                    && facet.target == TargetResolver::Resolved("sources"))
         );
         assert!(
             copy.facets
                 .iter()
                 .any(|facet| facet.action == KeyAction::Write
                     && facet.usage == FacetUsage::Required
-                    && facet.target
-                        == TargetResolver::ResolvedCollection(
-                            crate::document_sources::OPERATION_DESTINATIONS
-                        ))
+                    && facet.target == TargetResolver::Resolved("destination"))
         );
     }
 

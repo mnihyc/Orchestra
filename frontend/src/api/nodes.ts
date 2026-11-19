@@ -90,7 +90,7 @@ async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal, op
   const reader = client.session.getState().readerVersion;
   return scheduledReads.run(nodeKey(id), async (current) => {
     const data = await ok(api.GET('/nodes/{id}/overview', { params: { path: { id }, query: {
-      from: opening.from, to: opening.to, breakdowns: opening.breakdowns.join(','), limit: opening.limit ?? null,
+      from: opening.from, to: opening.to, breakdowns: opening.breakdowns.join(','), limit: opening.limit,
     } }, signal }));
     if (!current() || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
     if (data.node.id !== id) throw new Error('The node overview returned a different node');
@@ -103,12 +103,12 @@ async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal, op
   });
 }
 
-/** A node's frame and overview share the same native opening when those figures are visible. */
-export const nodeQuery = (id: string, opening?: UsageParams) =>
+/** Any node by its id, with what the caller holds on it. */
+export const nodeQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
     ...suppliedRead(nodeKey(id)),
-    queryFn: ({ signal, client: cache }): Promise<Node> => fetchNode(id, cache, signal, opening),
+    queryFn: ({ signal, client: cache }): Promise<Node> => fetchNode(id, cache, signal),
   });
 
 /** Explicitly reads current or retained facts to reconcile an uncertain write. */

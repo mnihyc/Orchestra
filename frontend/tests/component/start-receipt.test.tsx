@@ -86,8 +86,7 @@ it('acknowledges a committed start without full-thread followups or automatic re
   const request = sent[0];
   if (request === undefined) throw new Error('Expected the single accepted start');
   const body: unknown = await request.json();
-  expect(body).toMatchObject({ environment: { use: 'e1' }, let_into_environment: true,
-    first_input: { content: [{ type: 'text', text: selected.message }] } });
+  expect(body).toMatchObject({ environment: { use: 'e1' }, first_input: { content: [{ type: 'text', text: selected.message }] } });
   expect(request.headers.get('Idempotency-Key')).toEqual(expect.any(String));
   expect(request.headers.get('Idempotency-Key')).not.toBe('');
 });

@@ -2,16 +2,10 @@
 //! out under, so that they can be kept between requests and used again exactly while nothing they come from changed.
 //!
 //! `access_holders` reads every place and every page of the system, which is too much for each request. The
-//! database records each transaction that writes a row it reads (`access_changes`). A row trigger on each table the
-//! function reads writes the record when the statement that changed the row ends: for the people (made, removed,
-//! their status or their flag of system admin changed), the places that are no threads, the memberships and
-//! suspensions of orgs, the groups and their members, the roles in places, and the rows and entries of the pages of
-//! the system and of those places. So no statement of an ordinary session can change what the function reads and
-//! leave no record; a TRUNCATE and a session in the replica role run no row triggers, the product uses neither, and
-//! how long a set is kept bounds what a restore that does could leave unseen. A set worked out under one snapshot
-//! still holds under a later one when no such transaction is visible to the later snapshot that was not to the
-//! earlier, and when no role or entry of a page begins or stops counting between the two moments it is asked at (the
-//! only time the function compares).
+//! database records each transaction that writes a row it reads (`access_changes`, written by triggers, so that no
+//! writer can leave one out). A set worked out under one snapshot still holds under a later one when no such
+//! transaction is visible to the later snapshot that was not to the earlier, and when no role or entry of a page
+//! begins or stops counting between the two moments it is asked at (the only time the function compares).
 
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
@@ -43,11 +37,8 @@ impl Stamp {
         self.from.is_none_or(|from| from <= at) && self.until.is_none_or(|until| at < until)
     }
 
-    /// Whether the set may be used by other requests: the transaction that worked it out had recorded no change of a
-    /// row the set comes from (such a change is seen by that transaction and by nobody else, and may never be
-    /// committed), and a change it makes after this is seen by the check on a kept set, because its identifier, if it
-    /// has one, is at or past the horizon of the snapshot the set is stamped with. A transaction that only locked
-    /// rows, or wrote rows the function does not read, is neither.
+    /// Whether the set may be used by other requests: it was worked out by a transaction that had written nothing.
+    /// One that had written could see changes of its own that are not committed, and may never be.
     #[must_use]
     pub fn keepable(&self) -> bool {
         self.keepable
@@ -165,15 +156,7 @@ pub async fn holder_sets(
                 COALESCE((SELECT array_agg(role ORDER BY kind, id) FROM held), '{}') AS roles,
                 (SELECT oid::int8 FROM pg_database WHERE datname = current_database()) AS database,
                 pg_current_snapshot()::text AS snapshot,
-                -- Kept unless this transaction has changed a row the sets come from (its triggers have recorded that
-                -- before this statement; such a change is visible here and nowhere else), or unless a later change of
-                -- it could go unseen by the check above. A row lock (a request locks its own credential first) gives a
-                -- transaction an identifier without changing anything; an identifier at or past the horizon of the
-                -- snapshot is one by which the check above sees every later change of this transaction.
-                (pg_current_xact_id_if_assigned() IS NULL
-                 OR (pg_current_xact_id_if_assigned() >= pg_snapshot_xmax(pg_current_snapshot())
-                     AND NOT EXISTS (SELECT 1 FROM access_changes c
-                                      WHERE c.xid = pg_current_xact_id_if_assigned()))) AS keepable,
+                pg_current_xact_id_if_assigned() IS NULL AS keepable,
                 greatest(
                   (SELECT max(expires_at) FROM node_roles
                     WHERE removed_at IS NULL AND expires_at IS NOT NULL AND expires_at <= $2),

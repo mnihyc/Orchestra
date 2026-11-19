@@ -17,7 +17,6 @@ import type { Project, Topic } from '@/generated/api-types';
 import { canCreateIn } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
 import { Button } from '@/ui/Button';
-import { Checkbox } from '@/ui/Checkbox';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Skeleton } from '@/ui/Skeleton';
@@ -31,9 +30,7 @@ import { type Mode, NO_PICKS, type Picks, settingsToKeep } from './choices';
 import { MissingDefault, useScopes, widestScope } from './MissingDefault';
 import { useStartOptions } from './options';
 import { useStart } from './start';
-import { bindingReason } from './words';
-import { StartValues } from './ChoiceOrigin';
-import { useViewerDefault } from './viewerDefault';
+import { bindingReason, runsLine } from './words';
 
 /** Defaults, the last successful setup, then the first usable setup; the line always names what Enter will start. */
 const QUICK_SETUP: Mode = { suggest: true, respectDefaults: true };
@@ -54,9 +51,7 @@ function Composer({ node }: { node: Topic | Project }) {
   const [picks, setPicks] = useState<Picks>(NO_PICKS);
   const [keepChosen, setKeepChosen] = useState<string | null | undefined>(undefined);
   const [changing, setChanging] = useState(false);
-  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(node.id, picks, QUICK_SETUP, true, undefined,
-    node.kind === 'topic' ? node.default_environment_id : undefined);
-  const viewers = useViewerDefault(node.id, options);
+  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(node.id, picks, QUICK_SETUP);
   // This same options failure is already rendered once beneath the composer.
   const agentAccess = useOfferedAgentAccess({ at: node.id, offer: options?.agent_access, pending: loading || refreshing, retry });
   const kept = options !== null && resolved !== null && resolved.missing.length === 0 && (picks.provider !== null || picks.agent !== null || picks.model !== null) && settingsToKeep(options, resolved).length > 0;
@@ -68,14 +63,13 @@ function Composer({ node }: { node: Topic | Project }) {
     setPicks(NO_PICKS);
     setKeepChosen(undefined);
     agentAccess.reset();
-    viewers.reset();
   });
 
   const message = text.trim();
   // A choice that was made here for the thread stays in view with the way to keep it, until it has been kept or the thread has started.
-  const ready = options !== null && resolved !== null && resolved.missing.length === 0 && !refreshing && !resolved.settling && !checkingScopes && agentAccess.ready && viewers.ready;
+  const ready = options !== null && resolved !== null && resolved.missing.length === 0 && !refreshing && !resolved.settling && !checkingScopes && agentAccess.ready;
   const send = () => {
-    if (!ready || message === '' || make.pending || viewers.value === undefined) return;
+    if (!ready || message === '' || make.pending) return;
     make.start({
       place,
       options,
@@ -84,7 +78,7 @@ function Composer({ node }: { node: Topic | Project }) {
       directory: '',
       privately: false,
       generalAccess: 'defaults',
-      letIntoEnvironment: viewers.value,
+      letIntoEnvironment: false,
       agentAccess: agentAccess.value,
       message,
     });
@@ -97,7 +91,7 @@ function Composer({ node }: { node: Topic | Project }) {
     send();
   };
 
-  const why = ready ? null : loading || refreshing || checkingScopes ? t('start.quick.checking') : failed !== null ? t('start.quick.failed') : !viewers.ready ? t('startImplicit.checkingViewerDefault') : resolved?.missing[0] !== undefined ? t('start.quick.missingWhy') : null;
+  const why = ready ? null : loading || refreshing || checkingScopes ? t('start.quick.checking') : resolved?.missing[0] !== undefined ? t('start.quick.missingWhy') : null;
   const kindKey = node.kind === 'topic' ? 'topic' : 'project';
   return (
     <section aria-label={t(`start.quick.label.${kindKey}`)} className="flex flex-col gap-2" data-quick-start>
@@ -131,13 +125,12 @@ function Composer({ node }: { node: Topic | Project }) {
         <div className="flex min-h-(--control-sm) items-center">
           <Skeleton className="h-4 w-2/3" />
         </div>
-      ) : resolved.missing.length > 0 && !refreshing ? (
+      ) : resolved.missing.length > 0 ? (
         <MissingDefault place={place} node={node} options={options} resolved={resolved} picks={picks} onPick={(patch) => setPicks((before) => ({ ...before, ...patch }))} scopes={scopes} keepAt={keepAt} onKeepAt={setKeepChosen} onChange={() => setChanging(true)} />
       ) : (
         <>
           <p className="flex min-h-(--control-sm) flex-wrap items-center gap-x-2 text-sm text-text-muted" data-runs-on>
-            <span aria-live="polite" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">{make.pending && make.step !== null ? t(`start.making.${make.step}`) : <StartValues resolved={resolved} />}</span>
-            {refreshing && <span role="status">{t('start.quick.checking')}</span>}
+            <span aria-live="polite">{make.pending && make.step !== null ? t(`start.making.${make.step}`) : runsLine(resolved, t)}</span>
             <Button size="sm" variant="ghost" disabled={make.pending} onClick={() => setChanging(true)}>
               {t('start.quick.change')}
             </Button>
@@ -151,9 +144,6 @@ function Composer({ node }: { node: Topic | Project }) {
       {options !== null && resolved !== null && <NewAudienceSummary place={node.kind === 'project' ? t('places.project.newTopic') : place.name}
         summary={resolved.environment?.environment.placement === 'connected' ? options.access.connected : options.access.managed}
          />}
-      {options !== null && resolved !== null && viewers.value !== undefined && <Checkbox label={t('access.general.letIn')}
-        checked={viewers.value} onCheckedChange={viewers.onChange} disabled={make.pending}
-        tooltip={make.pending ? make.step===null?t('start.why.checking'):t(`start.making.${make.step}`) : viewers.tooltip} />}
       <CreationAgentAccess access={agentAccess} disabled={make.pending} />
 
       {make.error !== null && (
@@ -169,7 +159,7 @@ function Composer({ node }: { node: Topic | Project }) {
           )}
         </div>
       )}
-      {changing && <NewThreadDialog parent={place} open onClose={() => setChanging(false)} draft={{ picks, message: text, agentAccess: agentAccess.value, ...(agentAccess.reduced?{agentAccessPreset:agentAccess.preset}:{}), generalAccess: 'defaults', ...(viewers.value===undefined?{}:{letIntoEnvironment:viewers.value}) }} />}
+      {changing && <NewThreadDialog parent={place} open onClose={() => setChanging(false)} draft={{ picks, message: text, agentAccess: agentAccess.value, generalAccess: 'defaults', letIntoEnvironment: false }} />}
     </section>
   );
 }

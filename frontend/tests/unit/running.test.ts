@@ -23,18 +23,6 @@ describe('reviewing native commands', () => {
     expect(canEndAll(roster({ total: null }))).toBe(false);
     expect(canEndAll(roster({ total: 250, next_cursor: 'page' }))).toBe(false);
   });
-  it('keeps the native end reason through paging and refuses targets it closes', async () => {
-    vi.mocked(fetchBackground).mockReset();
-    vi.mocked(fetchBackground).mockResolvedValueOnce(roster({ total: 2, next_cursor: 'next' }))
-      .mockResolvedValueOnce(roster({ total: 2, items: [command('two')], can_end: false, end_reason: 'interact_required' }));
-    const review = await loadReview('thread', new AbortController().signal);
-    expect(review.end_reason).toBe('interact_required');
-    expect(reviewedRequest(review, ['one'])).toBeNull();
-    const mixed = roster({ total: 2, items: [{ ...command('one'), end_reason: 'no_current_target' }, command('two')] });
-    expect(canEndAll(mixed)).toBe(false);
-    expect(reviewedRequest(mixed, ['one'])).toBeNull();
-    expect(reviewedRequest(mixed, ['two'])).toEqual({ list_ref: 'review', command_ids: ['two'] });
-  });
   it('reads every page and keeps the final idle deadline before confirming more than two hundred', async () => {
     const items = Array.from({ length: 250 }, (_, index) => command(String(index)));
     vi.mocked(fetchBackground).mockResolvedValueOnce(roster({ items: items.slice(0, 50), total: 250, next_cursor: 'next' })).mockResolvedValueOnce(roster({ items: items.slice(50), total: 250, expires_at: '2026-10-14T10:01:00Z' }));

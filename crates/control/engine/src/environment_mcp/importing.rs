@@ -30,7 +30,6 @@ pub struct Input {
     owner: Option<Id>,
     scope: Json,
     fingerprint: Hash,
-    environment: Id,
     command: orch_link_contract::commands::McpImport,
 }
 impl std::fmt::Debug for Input {
@@ -40,7 +39,7 @@ impl std::fmt::Debug for Input {
 }
 impl Input {
     /// Freeze the already selected native offering and newly allocated copy identity.
-    /// The physical machine's owner is retained as a source-change guard, not as the new resource's owner.
+    /// The owner is selected from this same physical Machine, never the Environment's actor.
     pub async fn capture(
         conn: &mut Conn,
         selected: &ImportSelection,
@@ -54,13 +53,12 @@ impl Input {
             owner: machine.owner_id,
             scope: selected.api_scope().clone(),
             fingerprint: selected.fingerprint()?,
-            environment: selected.environment().id,
             command: selected.command(server),
         })
     }
     /// Actual creation namespace.
     pub fn environment(&self) -> Id {
-        self.environment
+        self.command.environment_id
     }
     /// Actual native connector recipient.
     pub fn machine(&self) -> Id {
@@ -69,6 +67,10 @@ impl Input {
     /// The new server owned by this one native copy, never a pre-existing Read governor.
     pub fn server(&self) -> Id {
         self.command.server_id
+    }
+    /// Native imported definitions belong to the physical machine's owner when it has one.
+    pub fn owner(&self, caller: &Caller) -> Id {
+        self.owner.unwrap_or_else(|| caller.user())
     }
     /// Exact original native command; authority stays out of this machine body.
     pub fn command(&self) -> orch_link_contract::commands::McpImport {

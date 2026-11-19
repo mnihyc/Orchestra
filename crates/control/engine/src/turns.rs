@@ -63,9 +63,6 @@ use serde_json::json;
 use std::time::Duration;
 
 mod end_work;
-mod offline;
-
-type TurnText = (instructions::InputText, Vec<ModelBlock>);
 
 /// This exact cause belongs to retained terminal follow-up, not to a person's Stop
 /// or another failure. Successful follow-up may clear only this cause.
@@ -439,19 +436,6 @@ impl Engine {
 
     /// Says what a starting thread waits for.
     pub(crate) async fn set_step(&self, thread: Id, step: &str) -> Result<(), EngineError> {
-        self.set_step_with_preparation(thread, step, None).await
-    }
-
-    /// Source-aware sibling over the same native status writer, on its actual transaction.
-    pub(crate) async fn set_step_with_preparation(
-        &self,
-        thread: Id,
-        step: &str,
-        preparation: Option<(
-            &crate::harnesses::preparation::Preparation,
-            crate::harnesses::preparation::Target,
-        )>,
-    ) -> Result<(), EngineError> {
         let mut conn = self.inner.db.acquire().await?;
         let row = threads::thread(&mut conn, thread).await?;
         if row.as_ref().is_none_or(|row| {
@@ -461,12 +445,6 @@ impl Engine {
         }
         drop(conn);
         let mut tx = self.inner.db.begin().await?;
-        if let Some((source, target)) = preparation {
-            let _ = source
-                .checkpoint(&mut tx, self.inner.clock.as_ref(), target)
-                .await?;
-        }
-        let mut deadline = None;
         let finished = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             // The thread is looked at again under its lock: a number is spent
@@ -475,24 +453,11 @@ impl Engine {
                 && locked.state == thread_state::STARTING
                 && locked.starting_step.as_deref() != Some(step)
             {
-                if let Some((source, target)) = preparation {
-                    let check = source
-                        .checkpoint(&mut *unit.conn, self.inner.clock.as_ref(), target)
-                        .await?;
-                    deadline = Some(check.deadline());
-                    check.check(self.inner.clock.as_ref())?;
-                }
                 let seq = unit.stamp(thread).await?;
-                if let Some(deadline) = &deadline {
-                    deadline.check(self.inner.clock.as_ref())?;
-                }
                 threads::set_starting_step(&mut *unit.conn, thread, Some(step), seq).await?;
             }
             unit.finish().await?
         };
-        if let Some(deadline) = &deadline {
-            deadline.check(self.inner.clock.as_ref())?;
-        }
         self.commit(tx, finished).await?;
         Ok(())
     }
@@ -948,10 +913,6 @@ impl Engine {
                     }
                     Err(error) => return Err(error),
                 };
-                let command = crate::tools::capability_service::delegation::seal_session(
-                    self, &snap, command,
-                )
-                .await?;
                 let accepted_configuration = crate::harnesses::SessionConfiguration::from(&body);
                 let outcome =
                     crate::commands::run(self.inner.commands.as_ref(), command.clone()).await?;
@@ -1015,9 +976,8 @@ impl Engine {
             {
                 self.set_step(thread_id, "credential").await?;
                 let protocol = snap.arrangement.protocol.clone();
-                let choices = crate::leases::LeaseChoices::of_snapshot(&snap)?;
                 let mut outcome = self
-                    .open_lease_at_provider(lease, &snap.provider, protocol.clone(), 0, &choices)
+                    .open_lease_at_provider(lease, &snap.provider, protocol.clone(), 0)
                     .await?;
                 if provider_was_lost(&outcome) {
                     // The machine holds no such provider any more (its store was wiped, or the
@@ -1026,13 +986,7 @@ impl Engine {
                     match self.restart_provider(snap.provider.id, lease.id).await? {
                         Keeping::Up => {
                             outcome = self
-                                .open_lease_at_provider(
-                                    lease,
-                                    &snap.provider,
-                                    protocol,
-                                    1,
-                                    &choices,
-                                )
+                                .open_lease_at_provider(lease, &snap.provider, protocol, 1)
                                 .await?;
                         }
                         Keeping::Failed(failed) => {
@@ -1103,7 +1057,6 @@ impl Engine {
             self.scope_agent_history_notices(&mut snap).await?;
             let (text, blocks) = self.turn_text(&snap, &placement).await?;
             let body = TurnStart {
-                native_model: snap.native_model.clone(),
                 native_wake,
                 thread_id,
                 turn_id: snap.turn.id,
@@ -1454,15 +1407,7 @@ impl Engine {
     }
 
     /// Rechecks the loaded selector before file delivery; a changed mapping preserves the waiting input.
-    fn revalidate_native_start<'a>(
-        &'a self,
-        snap: &'a StartSnapshot,
-        rejected: bool,
-    ) -> futures::future::BoxFuture<'a, Result<bool, EngineError>> {
-        Box::pin(self.revalidate_native_start_inner(snap, rejected))
-    }
-
-    async fn revalidate_native_start_inner(
+    async fn revalidate_native_start(
         &self,
         snap: &StartSnapshot,
         rejected: bool,
@@ -1551,15 +1496,7 @@ impl Engine {
     /// The text a turn is started with, block by block in the order they go: where the agent is, what a side
     /// conversation is, why the turn before was cut, what waited, who sent the earlier words where names begin, and
     /// the input's own words. The text is the blocks joined; the record of what the model was given keeps them apart.
-    fn turn_text<'a>(
-        &'a self,
-        snap: &'a StartSnapshot,
-        placement: &'a crate::delivery::Placement,
-    ) -> futures::future::BoxFuture<'a, Result<TurnText, EngineError>> {
-        Box::pin(self.turn_text_inner(snap, placement))
-    }
-
-    async fn turn_text_inner(
+    async fn turn_text(
         &self,
         snap: &StartSnapshot,
         placement: &crate::delivery::Placement,
@@ -1655,45 +1592,13 @@ impl Engine {
             ));
         }
         // Words that are the first to name their sender after words that named nobody are told, just before them,
-        // who sent those. The block is made before the completions that were held are, so that their room is what is
-        // left of the length an input may have once it is known.
-        let attribution_block = if attribute {
-            instructions::attribution_started_block(&snap.unnamed_before, &snap.settings.messages)
-        } else {
-            None
-        };
-        // The completions of background work that a refused wake held are said with the input that reports them,
-        // in the words the wake would have used and, for a command, with the end of what it printed, as far as the
-        // input has room under the length an input may have.
+        // who sent those.
+        if attribute
+            && let Some(block) = instructions::attribution_started_block(
+                &snap.unnamed_before,
+                &snap.settings.messages,
+            )
         {
-            let mut conn = self.inner.db.acquire().await?;
-            // The assembled text is held to the length an input may have: the person's own words stay whole, and
-            // what is left of the length, less the block that comes after and the newlines between the blocks, is
-            // the room of the block. (The blocks of Orch that stand before are each bounded on their own; a limit
-            // that refused the whole would refuse an input of the length a person may type.)
-            let used = text.text.chars().count()
-                + blocks
-                    .iter()
-                    .map(|block| block.text.chars().count())
-                    .sum::<usize>()
-                + attribution_block
-                    .as_ref()
-                    .map_or(0, |block| block.chars().count() + 2)
-                + 2 * (blocks.len() + 2);
-            let room = usize::try_from(orch_api_contract::threads::INPUT_TEXT_MAX_CHARS)
-                .unwrap_or(usize::MAX)
-                .saturating_sub(used);
-            if let Some(carried) =
-                crate::background_wake::held_words(&mut conn, &snap.thread, &snap.input, room)
-                    .await?
-            {
-                blocks.push(
-                    ModelBlock::new(instructions::PENDING_NOTICES_KEY, "notices", carried.text)
-                        .telling_of(carried.inputs),
-                );
-            }
-        }
-        if let Some(block) = attribution_block {
             blocks.push(ModelBlock::new(
                 instructions::ATTRIBUTION_STARTED_KEY,
                 "orch",
@@ -1780,20 +1685,6 @@ impl Engine {
                 .await?
                 .is_some()
             {
-                // Keep the actual opening's recipient in the same successful-open
-                // transaction as its native reference, including older unassigned rows.
-                if !orch_db::queries::machine_streams::bind_segment(
-                    unit.conn,
-                    snap.thread.node_id,
-                    snap.segment.id,
-                    snap.key.machine,
-                )
-                .await?
-                {
-                    return Err(EngineError::unreadable(
-                        "the segment belongs to another harness machine",
-                    ));
-                }
                 let seq = unit.stamp(snap.thread.node_id).await?;
                 threads::set_native_session_ref(&mut *unit.conn, snap.segment.id, native_ref, seq)
                     .await?;
@@ -2476,16 +2367,15 @@ impl Engine {
                 let seq = unit.stamp(thread_id).await?;
                 // Once this fence was crossed, a replay must keep the original
                 // decision: the command may already have reached the harness.
+                let background_wait = input.state_detail.as_deref() != Some("steering")
+                    && crate::background_wake::other_author(unit.conn, thread_id, input.answers())
+                        .await?
+                        .is_some();
                 let allowed = input.state_detail.as_deref() == Some("steering")
-                    || Box::pin(self.steer_authorized(&mut unit, &thread, turn, &input)).await?;
+                    || !background_wait
+                        && Box::pin(self.steer_authorized(&mut unit, &thread, turn, &input))
+                            .await?;
                 if allowed {
-                    crate::background_wake::record_overlap(
-                        &mut unit,
-                        &thread,
-                        input.answers(),
-                        turn.id,
-                    )
-                    .await?;
                     sqlx::query(
                         "UPDATE thread_inputs SET state_detail='steering',seq_updated=$2 WHERE id=$1",
                     )
@@ -2511,6 +2401,10 @@ impl Engine {
                         seq,
                     )
                     .await?;
+                    if background_wait {
+                        threads::hold_input(unit.conn, input.id, Some("background_author"), seq)
+                            .await?;
+                    }
                     unit.wake(thread_id);
                 }
             }
@@ -2681,9 +2575,6 @@ impl Engine {
             let mut conn = self.inner.db.acquire().await?;
             self.harness_machine_of(&mut conn, thread_id).await?
         };
-        if machine.is_none() && self.finish_marked_ask_interrupt(thread_id, turn).await? {
-            return Ok(());
-        }
         let start = if turn.state == turn_state::STARTING {
             self.start_progress(turn).await?
         } else {
@@ -2783,7 +2674,6 @@ impl Engine {
         forced: Option<&'static str>,
     ) -> Result<(), EngineError> {
         let mut tx = self.inner.db.begin().await?;
-        let mut offline_machine = None;
         let finished = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? else {
@@ -2792,33 +2682,13 @@ impl Engine {
             let Some(turn) = threads::turn(&mut *unit.conn, turn_id).await? else {
                 return Ok(());
             };
-            if !turn.is_active() || thread.current_turn_id != Some(turn.id) {
+            if !turn.is_active() {
                 return Ok(());
             }
-            if forced == Some("machine_offline") {
-                let Some(machine) = self
-                    .offline_deadline_due_in(&mut unit, &thread, &turn)
-                    .await?
-                else {
-                    return Ok(());
-                };
-                offline_machine = Some(machine);
-                unit.stamp(thread_id).await?;
-                threads::set_interrupt_cause(unit.conn, turn.id, "machine_offline").await?;
-            }
-            let message = if forced == Some("machine_offline") {
-                "The machine stayed offline past this turn's deadline; the turn was ended without the harness."
-            } else {
-                "The harness did not stop when asked; the turn was ended without it."
-            };
             let error = forced.map(|code| {
                 error_json(
                     code,
-                    if code == "machine_offline" {
-                        message
-                    } else {
-                        "the harness did not stop when asked, so the turn was ended without it"
-                    },
+                    "the harness did not stop when asked, so the turn was ended without it",
                     false,
                 )
             });
@@ -2829,7 +2699,7 @@ impl Engine {
                     turn.segment_id,
                     Some(turn.id),
                     code,
-                    message,
+                    "The harness did not stop when asked; the turn was ended without it.",
                     false,
                 )
                 .await?;
@@ -2866,24 +2736,14 @@ impl Engine {
             unit.finish().await?
         };
         self.commit(tx, finished).await?;
-        if let Some(machine) = offline_machine {
-            for attempt in 0..=SESSION_REPAIRS {
-                self.inner
-                    .commands
-                    .cancel(ids::turn_start(turn_id, attempt))
-                    .await?;
-            }
-            self.send_interrupt_best_effort(machine, thread_id, turn_id)
-                .await;
-        }
         Ok(())
     }
 
     // ------------------------------------------------------------ presence
 
     /// A machine lost its session: the threads whose turn runs on it are
-    /// blocked as `agent_offline`. The current turn keeps waiting until events
-    /// resume, a person stops it, or its configured offline deadline expires. The directories of people's machines
+    /// blocked as `agent_offline`, and the turn stays as it is until events
+    /// resume or somebody interrupts. The directories of people's machines
     /// that are on it stand `offline` from the next sweep.
     pub async fn machine_offline(&self, machine: Id) -> Result<(), EngineError> {
         lock(&self.inner.sessions).machine_lost(machine);
@@ -2899,29 +2759,18 @@ impl Engine {
         self.tell_machine_offline(machine, &affected).await
     }
 
-    /// Marks an active turn's offline wait and retains its configured outage deadline.
+    /// Blocks one thread as offline, where its turn is running or waits for an
+    /// approval; the turn stays as it is.
     pub(crate) async fn block_as_offline(&self, thread_id: Id) -> Result<(), EngineError> {
         let mut tx = self.inner.db.begin().await?;
         let finished = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-            if let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? {
+            if threads::lock(&mut *unit.conn, thread_id).await?.is_some() {
                 let seq = unit.stamp(thread_id).await?;
-                if self.remember_offline_in(&mut unit, &thread).await? {
-                    sqlx::query("UPDATE threads SET seq_state=$2 WHERE node_id=$1")
-                        .bind(thread_id)
-                        .bind(seq)
-                        .execute(&mut *unit.conn)
-                        .await
-                        .map_err(orch_db::DbError::from)?;
-                }
                 crate::notifications::set_state(
                     &mut unit,
                     thread_id,
-                    &[
-                        thread_state::STARTING,
-                        thread_state::RUNNING,
-                        thread_state::WAITING_APPROVAL,
-                    ],
+                    &[thread_state::RUNNING, thread_state::WAITING_APPROVAL],
                     &threads::StateChange::blocked(
                         "agent_offline",
                         Some("the machine of the harness is offline"),
@@ -2949,7 +2798,6 @@ impl Engine {
             self.restore_after_offline(thread_id).await?;
             self.wake(thread_id);
         }
-        self.resume_session_loss_recoveries(machine).await?;
         Ok(())
     }
 
@@ -2987,28 +2835,6 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
     ) -> Result<(), EngineError> {
-        if let Some(turn) = thread.current_turn_id
-            && let Some(episode) = threads::offline::episode(unit.conn, turn).await?
-        {
-            let online: Option<bool> =
-                sqlx::query_scalar("SELECT online FROM machines WHERE id=$1 FOR SHARE")
-                    .bind(episode.machine)
-                    .fetch_optional(&mut *unit.conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?;
-            if online == Some(true) {
-                let seq = unit.stamp(thread.node_id).await?;
-                threads::offline::clear(unit.conn, turn).await?;
-                sqlx::query("UPDATE threads SET seq_state=$2 WHERE node_id=$1")
-                    .bind(thread.node_id)
-                    .bind(seq)
-                    .execute(&mut *unit.conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?;
-            } else {
-                return Ok(());
-            }
-        }
         if thread.state != thread_state::BLOCKED
             || thread.blocked_reason.as_deref() != Some("agent_offline")
         {
@@ -3043,39 +2869,26 @@ impl Engine {
 
     // ------------------------------------------------------------ supervision
 
-    // Construct each concrete phase inside this factory so reconciliation stores only its boxed interface.
-    fn reconciliation_phase<'a, F>(
-        make: impl FnOnce() -> F,
-    ) -> futures::future::BoxFuture<'a, Result<(), EngineError>>
-    where
-        F: std::future::Future<Output = Result<(), EngineError>> + Send + 'a,
-    {
-        Box::pin(make())
-    }
-
     /// Looks at a thread and does what is outstanding for it.
     pub(crate) async fn reconcile(&self, thread_id: Id) -> Result<(), EngineError> {
-        if let Err(error) = Self::reconciliation_phase(|| self.drive_turn_end_work(thread_id)).await
-        {
+        if let Err(error) = self.drive_turn_end_work(thread_id).await {
             // Accounting/notification trouble must not prevent a previously closed
             // lease from being retired on its native keeper. Both remain durable.
-            Self::reconciliation_phase(|| self.drive_lease_closes(thread_id)).await?;
+            self.drive_lease_closes(thread_id).await?;
             return Err(error);
         }
         // The end of the last turn first: the next one waits for it.
-        Self::reconciliation_phase(|| self.drive_end_observation(thread_id)).await?;
-        // A configured final outage deadline precedes any further start/delivery work.
-        Self::reconciliation_phase(|| self.drive_offline_deadline(thread_id)).await?;
+        self.drive_end_observation(thread_id).await?;
         // The goal of the thread, if it has one, counts what the turn used and queues the next turn.
-        Self::reconciliation_phase(|| self.drive_goal(thread_id)).await?;
-        Self::reconciliation_phase(|| self.recheck_waiting(thread_id)).await?;
+        self.drive_goal(thread_id).await?;
+        self.recheck_waiting(thread_id).await?;
         self.drive_preparation(thread_id).await?;
         // A start includes the whole session setup; reconciliation should not hold it inline on the worker stack.
-        Self::reconciliation_phase(|| self.drive_start(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_steers(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_interrupt(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_approvals(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_lease_closes(thread_id)).await?;
+        Box::pin(self.drive_start(thread_id)).await?;
+        self.drive_steers(thread_id).await?;
+        self.drive_interrupt(thread_id).await?;
+        self.drive_approvals(thread_id).await?;
+        self.drive_lease_closes(thread_id).await?;
         Ok(())
     }
 
@@ -3418,7 +3231,7 @@ pub struct OwnUse<'a> {
     pub provider: Id,
     /// The entry through which the person uses the provider.
     pub entry: Option<Id>,
-    /// The actual person who issued this request; automatic work has none.
+    /// Whoever last wrote the summarizer's setting.
     pub person: Option<Id>,
     /// The model, by the name that was sent.
     pub model: &'a str,
@@ -3433,138 +3246,67 @@ pub struct OwnUse<'a> {
 /// What a model call Orch made for itself was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnPurpose {
-    /// A personal question: its topic operand is the fixed governing root org.
-    Ask,
     /// A title, a description, tags or a handoff: put down to its topic and thread.
     Summary,
     /// Vectors for search by meaning: put down to the root org whose index they are, which stands for its
     /// project and topic too.
     Embeddings,
-    /// A model-backed web search, including its native tool fees.
-    WebSearch,
-    /// A model-backed page fetch.
-    PageFetch,
-    /// A model-backed image generation.
-    ImageGeneration,
 }
 
 impl Engine {
     /// Counts a model call Orch made for itself: one `request` row of the origin `orch` and its purpose that
-    /// always counts against matching shared caps and, for an actual issuer, their matching personal caps,
-    /// at the same immutable model price as generation. The answer says whether this call wrote the row.
+    /// always counts, against the provider and the caps that are shared and never against a person's own, at
+    /// the rate the model is counted at as a turn's would be. The answer says whether this call wrote the row.
     pub async fn count_own_use(
         &self,
         conn: &mut orch_db::Conn,
         own: &OwnUse<'_>,
     ) -> Result<bool, EngineError> {
-        self.count_own_use_context(conn, own, None).await
-    }
-
-    /// Count an owned program's request with its actual retained conversation context.
-    pub async fn count_own_use_context(
-        &self,
-        conn: &mut orch_db::Conn,
-        own: &OwnUse<'_>,
-        context: Option<(Id, Id)>,
-    ) -> Result<bool, EngineError> {
-        use orch_db::usage::ledger::{SummaryAttribution, summary_place};
-        let (org, project) = if matches!(own.purpose, OwnPurpose::Embeddings | OwnPurpose::Ask) {
-            (own.topic, own.topic)
-        } else {
-            let Some(place) = summary_place(conn, own.topic).await? else {
-                return Ok(false);
-            };
-            place
+        use orch_db::usage::ledger::{
+            NewSummary, SummaryAttribution, purpose, record_own_measured, summary_place,
         };
-        self.count_own_use_frozen_context(
-            conn,
-            own,
-            context,
-            &SummaryAttribution {
-                org_id: org,
-                project_id: project,
-                topic_id: own.topic,
-                thread_id: own.thread,
-                provider_id: own.provider,
-                entry_id: own.entry,
-                user_id: own.person,
-            },
-        )
-        .await
-    }
-
-    /// Count actual measured work under its producer's original frozen placement.
-    /// These are factual ledger operands, never source admission, Read or provider Use.
-    pub async fn count_own_use_frozen_context(
-        &self,
-        conn: &mut orch_db::Conn,
-        own: &OwnUse<'_>,
-        context: Option<(Id, Id)>,
-        attribution: &orch_db::usage::ledger::SummaryAttribution,
-    ) -> Result<bool, EngineError> {
-        use orch_db::usage::ledger::{NewSummary, purpose, record_own_measured_context};
-        if attribution.topic_id != own.topic
-            || attribution.thread_id != own.thread
-            || attribution.provider_id != own.provider
-            || attribution.entry_id != own.entry
-            || attribution.user_id != own.person
-        {
-            return Err(EngineError::unreadable(
-                "the measured model request changed its native attribution",
-            ));
-        }
-        let word = match own.purpose {
-            OwnPurpose::Summary => purpose::SUMMARY,
-            OwnPurpose::Embeddings => purpose::EMBEDDINGS,
-            OwnPurpose::WebSearch => "web_search",
-            OwnPurpose::PageFetch => "page_fetch",
-            OwnPurpose::ImageGeneration => "image_generation",
-            OwnPurpose::Ask => purpose::ASK,
+        let (org, project, word) = match own.purpose {
+            OwnPurpose::Summary => {
+                let Some((org, project)) = summary_place(conn, own.topic).await? else {
+                    return Ok(false);
+                };
+                (org, project, purpose::SUMMARY)
+            }
+            OwnPurpose::Embeddings => (own.topic, own.topic, purpose::EMBEDDINGS),
         };
         let rate = crate::caps::own_rate(conn, own.provider, own.model).await?;
-        let rate_place = if own.purpose == OwnPurpose::Ask {
-            own.topic
-        } else {
-            own.thread.unwrap_or(own.topic)
-        };
-        let book = crate::rates::RateBook::load(conn, rate_place).await?;
+        let book = crate::rates::RateBook::load(conn, own.thread.unwrap_or(own.topic)).await?;
         let observed = own.timing.cloned().unwrap_or_default();
-        let (tier, mut priced) = book
+        let (tier, priced) = book
             .price_observed(
                 conn,
                 rate.as_ref(),
                 own.model,
                 &own.tokens,
                 (own.tokens.input, own.tokens.input),
-                crate::rates::Observation {
-                    timing: &observed,
-                    protocol: own.protocol,
-                },
+                &observed,
+                own.protocol,
             )
             .await?;
-        if own.timing.is_some_and(|timing| {
-            timing
-                .reported_tokens
-                .as_ref()
-                .is_none_or(|tokens| tokens.is_empty())
-                && timing
-                    .outcome
-                    .value()
-                    .is_some_and(|outcome| outcome != "done")
-        }) {
-            priced.credits = None;
-        }
         let rate_json = priced
             .found
             .as_ref()
             .and_then(|found| serde_json::to_value(&found.rate).ok());
-        let written = record_own_measured_context(
+        let written = record_own_measured(
             conn,
             word,
             &NewSummary {
                 id: own.id,
                 at: own.at,
-                attribution,
+                attribution: &SummaryAttribution {
+                    org_id: org,
+                    project_id: project,
+                    topic_id: own.topic,
+                    thread_id: own.thread,
+                    provider_id: own.provider,
+                    entry_id: own.entry,
+                    user_id: own.person,
+                },
                 model: own.model,
                 tier: tier.as_deref(),
                 tokens: own.tokens,
@@ -3575,25 +3317,10 @@ impl Engine {
                 credits: priced.credits.as_deref(),
             },
             own.timing,
-            context,
         )
         .await?;
         if written && let Some(timing) = own.timing {
             crate::providers::record_model_metrics(own.model, tier.as_deref(), timing);
-        }
-        if written {
-            Box::pin(self.note_own_use_caps(
-                conn,
-                &crate::caps::OwnCapAsk {
-                    place: rate_place,
-                    provider: own.provider,
-                    model: own.model,
-                    tier: tier.as_deref(),
-                    purpose: word,
-                    person: own.person,
-                },
-            ))
-            .await?;
         }
         Ok(written)
     }

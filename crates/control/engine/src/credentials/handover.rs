@@ -528,7 +528,6 @@ impl Engine {
             keeper,
             SerialKey::Provider(provider),
             &ProviderCredentialAccept {
-                copy: None,
                 provider_id: provider,
                 form: sealed.form.clone(),
                 credential: sealed.credential.clone(),
@@ -572,10 +571,10 @@ impl Engine {
     ) -> Result<Option<i64>, ReturnError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
-        if let Some(source) = source
-            && !source.current(&mut tx, false).await?
-        {
-            return Err(refused());
+        if let Some(source) = source {
+            if !source.current(&mut tx, false).await? {
+                return Err(refused());
+            }
         }
         // Reconcile a completed native accept even after caller/key loss, only for its exact custody.
         let released = rows::release_credential_incarnation(

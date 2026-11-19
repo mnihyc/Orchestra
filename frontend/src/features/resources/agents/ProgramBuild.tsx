@@ -32,7 +32,7 @@ export function ProgramBuild({ program, name }: { program: RunningHarnessBuild; 
 export function EnvironmentPrograms({ id, generation, compact = false }: { id: string; generation?: number; compact?: boolean }) {
   const { t } = useTranslation();
   const programs = useQuery(environmentProgramsQuery(id, generation));
-  if (programs.isPending) return <SkeletonRows read={programs} rows={2} />;
+  if (programs.isPending) return <SkeletonRows rows={2} />;
   if (programs.isError) return <ErrorState compact error={programs.error} onRetry={() => void programs.refetch()} />;
   return <section className="flex min-w-0 flex-col gap-2" aria-label={t('programVersions.running')}>
     {!compact && <h3 className="text-sm font-medium text-text-muted">{t('programVersions.running')}</h3>}

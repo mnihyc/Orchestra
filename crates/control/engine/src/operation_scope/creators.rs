@@ -170,13 +170,6 @@ impl Prefix {
             birth.worktree.is_some(),
         )
         .await?;
-        super::creator_files::bind_readers(
-            conn,
-            &mut plan,
-            new.environment,
-            birth.let_into_environment,
-        )
-        .await?;
         let frozen = birth
             .agent_access
             .clone()
@@ -254,8 +247,12 @@ impl Prefix {
         } else {
             None
         };
-        let source_thread = match initial.as_ref().and_then(|initial| initial.source_thread()) {
-            Some(thread) => Some(targets::node(conn, thread).await.map_err(unreadable)?),
+        let source_thread = match &initial {
+            Some(initial) => Some(
+                targets::node(conn, initial.source_thread())
+                    .await
+                    .map_err(unreadable)?,
+            ),
             None => None,
         };
         let source_environment = match &initial {
@@ -336,13 +333,11 @@ impl Prefix {
             crate::jobs::provision::retain_creator_provision_origin(
                 conn,
                 &origin,
-                crate::jobs::provision::CreatedProvision {
-                    thread,
-                    environment: new.environment,
-                    home,
-                    job,
-                    new_created: true,
-                },
+                thread,
+                new.environment,
+                home,
+                job,
+                true,
                 self.principal.now(),
             )
             .await?;
@@ -454,7 +449,7 @@ pub async fn restore_initial_files(
     origin: &orch_authz::CapturedOperation,
     created_thread: Id,
     target_environment: Id,
-    source_thread: Option<Id>,
+    source_thread: Id,
     source_environment: Id,
     now: orch_types::Time,
 ) -> Result<Option<Caller>, EngineError> {
@@ -483,14 +478,9 @@ pub async fn restore_initial_files(
     let home = targets::node(conn, env.home_node_id)
         .await
         .map_err(EngineError::unreadable)?;
-    let source = match source_thread {
-        Some(thread) => Some(
-            targets::node(conn, thread)
-                .await
-                .map_err(EngineError::unreadable)?,
-        ),
-        None => None,
-    };
+    let source = targets::node(conn, source_thread)
+        .await
+        .map_err(EngineError::unreadable)?;
     let source_env = targets::page_object(
         conn,
         orch_access_contract::decisions::ObjectRef {
@@ -505,24 +495,21 @@ pub async fn restore_initial_files(
             "creator_new_environment_homes",
             orch_access_contract::key_scope::KeyAction::Write,
             ObjectKind::Environment,
-            Some(&home),
+            &home,
         ),
         (
             "creator_initial_file_threads",
             orch_access_contract::key_scope::KeyAction::Read,
             ObjectKind::Thread,
-            source.as_ref(),
+            &source,
         ),
         (
             "creator_initial_file_environments",
             orch_access_contract::key_scope::KeyAction::Read,
             ObjectKind::Environment,
-            Some(&source_env),
+            &source_env,
         ),
     ] {
-        let Some(target) = target else {
-            continue;
-        };
         facts.extend(super::creator_files::required_facet(
             &plan,
             TargetResolver::ResolvedCollection(role),

@@ -1,6 +1,6 @@
 //! Actual archive-open sources for the shared continuing-operation kernel.
 
-use super::{PreparedExportOpen, prepare_export_open_for_row};
+use super::{PreparedExportOpen, prepare_export_open_row};
 use crate::operation_scope::{
     continuing::{self, Error},
     sources::Facts,
@@ -44,12 +44,11 @@ impl continuing::Source for Archive {
         conn: &'a mut Conn,
         caller: &'a Caller,
         input: &'a Input,
-        now: Time,
+        _now: Time,
     ) -> BoxFuture<'a, Result<(PreparedExportOpen, Vec<Facts<Role>>), Error>> {
         Box::pin(async move {
             let row = exports::get(conn, input.original.row().id).await?;
-            let principal = Principal::load(conn, caller.clone(), now).await?;
-            let value = prepare_export_open_for_row(row, &principal).map_err(|_| Error::Refused)?;
+            let value = prepare_export_open_row(row, caller.user()).map_err(|_| Error::Refused)?;
             let target =
                 targets::from_export(conn, value.row())
                     .await
@@ -74,9 +73,7 @@ impl continuing::Source for Archive {
         value: &'a PreparedExportOpen,
     ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
-            if !crate::archive::may_read_custody(principal, value.row().user_id)
-                || !input.original.preserves(value)
-            {
+            if value.row().user_id != Some(principal.user()) || !input.original.preserves(value) {
                 return Err(Error::Refused);
             }
             Ok(())

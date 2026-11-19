@@ -4,7 +4,6 @@ use super::{
     Actor, Command, Error, Item, MembershipStamp, Options, Receipt, Request, access, audience,
     copying, create, prepare,
 };
-use futures::future::BoxFuture;
 use orch_access_contract::permissions::Permission;
 use orch_db::{
     Conn, Tx,
@@ -15,13 +14,6 @@ use orch_documents::versions::Writer;
 use orch_types::{Id, Time, new_id};
 use serde_json::json;
 use std::collections::HashSet;
-
-pub(super) mod checkpoint;
-mod sources;
-mod staged;
-pub(super) use checkpoint::Checkpoint;
-pub use sources::{OperationSources, prepare_operation_sources_in, require_operation_sources_in};
-pub use staged::{Operation, apply_operation_in, complete_operation_in, require_operation_in};
 
 fn validate_root_name(row: &containers::EntryRow, name: &str) -> Result<(), Error> {
     create::validate_name(name, row.kind == "container")?;
@@ -50,10 +42,7 @@ async fn namespace(
             return Err(Error::Conflict);
         }
     }
-    if matches!(
-        request.command,
-        Command::Copy | Command::Move | Command::MoveOut
-    ) {
+    if matches!(request.command, Command::Copy | Command::Move) {
         let (node, _, parent) = prepared.destination.ok_or(Error::NotFound)?;
         let mut names = HashSet::new();
         for row in &prepared.roots {
@@ -124,7 +113,6 @@ async fn record(
     actor: Actor<'_>,
     change: AuditChange<'_>,
     now: Time,
-    checkpoint: &mut Checkpoint<'_>,
 ) -> Result<(), Error> {
     let identity = access::identity(conn, actor).await?;
     let who = identity
@@ -155,7 +143,6 @@ async fn record(
         // The trail of the place it left reads the line too.
         entry.details["from_node"] = json!(from);
     }
-    checkpoint.check()?;
     audit::append(conn, &entry, &audit::current_origin(), now.get()).await?;
     Ok(())
 }
@@ -172,31 +159,23 @@ async fn reread(conn: &mut Conn, items: &[Item]) -> Result<Vec<containers::Entry
     Ok(out)
 }
 
+async fn move_entries(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    now: Time,
+) -> Result<Vec<Item>, Error> {
+    let identity = access::identity(conn, actor).await?;
+    move_entries_with_identity(conn, &identity, request, prepared, now).await
+}
+
 async fn move_entries_with_identity(
     conn: &mut Conn,
     identity: &access::Identity,
     request: &Request,
     prepared: &prepare::Prepared,
     now: Time,
-) -> Result<Vec<Item>, Error> {
-    move_entries_checked(
-        conn,
-        identity,
-        request,
-        prepared,
-        now,
-        &mut Checkpoint::native(),
-    )
-    .await
-}
-
-async fn move_entries_checked(
-    conn: &mut Conn,
-    identity: &access::Identity,
-    request: &Request,
-    prepared: &prepare::Prepared,
-    now: Time,
-    checkpoint: &mut Checkpoint<'_>,
 ) -> Result<Vec<Item>, Error> {
     let (node, root, parent) = prepared.destination.ok_or(Error::NotFound)?;
     let selected: HashSet<_> = prepared.roots.iter().map(access::item).collect();
@@ -222,7 +201,6 @@ async fn move_entries_checked(
             &row.title
         };
         if row.node_id != node || row.parent_container_id != parent || row.basename != name {
-            checkpoint.check()?;
             if row.kind == "container" {
                 sqlx::query("UPDATE document_containers SET node_id=$2,org_id=$3,parent_container_id=$4,name=$5,updated_at=$6 WHERE id=$1")
                     .bind(row.id).bind(node).bind(root).bind(parent).bind(name).bind(now.get()).execute(&mut *conn).await?;
@@ -242,17 +220,16 @@ async fn move_entries_checked(
 
 async fn delete_entries(
     conn: &mut Conn,
-    identity: &access::Identity,
+    actor: Actor<'_>,
     prepared: &prepare::Prepared,
     operation: Id,
     now: Time,
-    checkpoint: &mut Checkpoint<'_>,
 ) -> Result<Vec<Item>, Error> {
+    let identity = access::identity(conn, actor).await?;
     let by = identity.thread.is_none().then_some(identity.owner);
     let mut out = Vec::new();
     for row in &prepared.entries {
         if row.deleted_at.is_none() {
-            checkpoint.check()?;
             if row.kind == "container" {
                 sqlx::query("UPDATE document_containers SET deleted_at=$2,deleted_by=$3,deleted_in=$4,updated_at=$2 WHERE id=$1")
                     .bind(row.id).bind(now.get()).bind(by).bind(operation).execute(&mut *conn).await?;
@@ -325,18 +302,8 @@ async fn restore_selected(
     restoring: Vec<containers::EntryRow>,
     now: Time,
 ) -> Result<Vec<Item>, Error> {
-    restore_selected_checked(conn, restoring, now, &mut Checkpoint::native()).await
-}
-
-async fn restore_selected_checked(
-    conn: &mut Conn,
-    restoring: Vec<containers::EntryRow>,
-    now: Time,
-    checkpoint: &mut Checkpoint<'_>,
-) -> Result<Vec<Item>, Error> {
     let mut out = Vec::new();
     for row in restoring {
-        checkpoint.check()?;
         if row.kind == "container" {
             sqlx::query("UPDATE document_containers SET deleted_at=NULL,deleted_by=NULL,deleted_in=NULL,updated_at=$2 WHERE id=$1")
                 .bind(row.id).bind(now.get()).execute(&mut *conn).await?;
@@ -354,6 +321,34 @@ async fn restore_selected_checked(
     Ok(out)
 }
 
+async fn restore_entries(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    now: Time,
+    options: Options,
+) -> Result<Vec<Item>, Error> {
+    let (restoring, _) = restoring_selection(conn, prepared, now, options).await?;
+    // Reparent the still-deleted cohort first. The old parent can be deleted when the
+    // caller explicitly restores elsewhere; no intermediate live orphan is admitted.
+    if request.to.is_some() {
+        let moved = prepare::Prepared {
+            roots: prepared.roots.clone(),
+            entries: prepared.entries.clone(),
+            destination: prepared.destination,
+            text_copy: None,
+        };
+        move_entries(conn, actor, request, &moved, now).await?;
+    }
+    let out = restore_selected(conn, restoring, now).await?;
+    if request.to.is_some() {
+        Ok(prepared.entries.iter().map(access::item).collect())
+    } else {
+        Ok(out)
+    }
+}
+
 async fn insert_folder(
     conn: &mut Conn,
     request: &Request,
@@ -362,29 +357,7 @@ async fn insert_folder(
     id: Id,
     now: Time,
 ) -> Result<(Vec<Item>, Vec<super::Copied>), Error> {
-    insert_folder_checked(
-        conn,
-        request,
-        prepared,
-        identity,
-        id,
-        now,
-        &mut Checkpoint::native(),
-    )
-    .await
-}
-
-async fn insert_folder_checked(
-    conn: &mut Conn,
-    request: &Request,
-    prepared: &prepare::Prepared,
-    identity: &access::Identity,
-    id: Id,
-    now: Time,
-    checkpoint: &mut Checkpoint<'_>,
-) -> Result<(Vec<Item>, Vec<super::Copied>), Error> {
     let (node, root, parent) = prepared.destination.ok_or(Error::NotFound)?;
-    checkpoint.check()?;
     containers::insert(
         conn,
         &containers::NewContainer {
@@ -402,6 +375,102 @@ async fn insert_folder_checked(
     .await?;
     create::creation_grant(conn, id, true, identity, now).await?;
     Ok((vec![Item::Container(id)], Vec::new()))
+}
+
+fn apply(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    operation: Id,
+    now: Time,
+    options: Options,
+) -> impl std::future::Future<Output = Result<(Vec<Item>, Vec<super::Copied>), Error>> {
+    // An unused command branch must not enlarge every enclosing writer future.
+    Box::pin(apply_inner(
+        conn, actor, request, prepared, operation, now, options,
+    ))
+}
+
+async fn apply_inner(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    operation: Id,
+    now: Time,
+    options: Options,
+) -> Result<(Vec<Item>, Vec<super::Copied>), Error> {
+    match request.command {
+        Command::CreateFolder => {
+            let identity = access::identity(conn, actor).await?;
+            insert_folder(conn, request, prepared, &identity, new_id(), now).await
+        }
+        Command::Copy => copying::copy(conn, actor, request, prepared, now, options).await,
+        Command::Move => Ok((
+            move_entries(conn, actor, request, prepared, now).await?,
+            Vec::new(),
+        )),
+        Command::Delete => Ok((
+            delete_entries(conn, actor, prepared, operation, now).await?,
+            Vec::new(),
+        )),
+        Command::Restore => Ok((
+            restore_entries(conn, actor, request, prepared, now, options).await?,
+            Vec::new(),
+        )),
+        Command::Rename => {
+            let row = prepared.roots.first().ok_or(Error::NotFound)?;
+            let identity = access::identity(conn, actor).await?;
+            let writer = identity
+                .thread
+                .zip(identity.agent)
+                .map_or(Writer::User(identity.owner), |(thread, agent)| {
+                    Writer::Agent { thread, agent }
+                });
+            rows::rename(
+                conn,
+                row.id,
+                request.name.as_deref().unwrap_or_default().trim(),
+                &writer,
+                now.get(),
+            )
+            .await?;
+            Ok((vec![Item::Document(row.id)], Vec::new()))
+        }
+        Command::RestoreVersion => {
+            let row = prepared.roots.first().ok_or(Error::NotFound)?;
+            let identity = access::identity(conn, actor).await?;
+            let writer = identity
+                .thread
+                .zip(identity.agent)
+                .map_or(Writer::User(identity.owner), |(thread, agent)| {
+                    Writer::Agent { thread, agent }
+                });
+            let mut settings = crate::tools::edit::settings_at(conn, row.node_id).await?;
+            settings.rules.window_secs = options.version_window_secs;
+            match batch::restore(
+                conn,
+                row.id,
+                request
+                    .version
+                    .ok_or(Error::Invalid("give a document version"))?,
+                &writer,
+                settings.limits,
+                settings.rules,
+                now.get(),
+            )
+            .await?
+            {
+                batch::Restored::Done(_) => {}
+                batch::Restored::Gone | batch::Restored::NoSuchVersion => {
+                    return Err(Error::NotFound);
+                }
+                _ => return Err(Error::Limit),
+            }
+            Ok((vec![Item::Document(row.id)], Vec::new()))
+        }
+    }
 }
 
 enum TreeState {
@@ -1257,14 +1326,13 @@ async fn prepare_tree(
     text_copy: Option<&super::TextCopy>,
 ) -> Result<PreparedTree, Error> {
     prepare::validate(request)?;
-    if matches!(request.command, Command::Delete | Command::MoveOut) != deletion_plan.is_some() {
+    if (request.command == Command::Delete) != deletion_plan.is_some() {
         return Err(Error::Invalid(
-            "deletion and Move to another org require their complete native deletion plan",
+            "only deletion requires its complete confirmation plan",
         ));
     }
-    let sources = sources::prepare_with_copy(conn, actor, request, text_copy).await?;
-    sources::check_association(conn, actor, &sources).await?;
-    complete_locked_tree(conn, actor, sources.locked, deletion_plan, now).await
+    let locked = lock_tree(conn, actor, request, text_copy).await?;
+    complete_locked_tree(conn, actor, locked, deletion_plan, now).await
 }
 
 /// The native actor/request and complete header footprint, before private material or audience.
@@ -1394,175 +1462,120 @@ async fn finish_tree(
     options: Options,
     applied: Option<(Vec<Item>, Vec<super::Copied>)>,
 ) -> Result<Receipt, Error> {
-    finish_tree_checked(
-        conn,
-        actor,
-        packet,
-        now,
-        options,
-        applied,
-        &mut Checkpoint::native(),
-    )
-    .await
-}
-
-fn finish_tree_checked<'a, 'check: 'a>(
-    conn: &'a mut Conn,
-    actor: Actor<'a>,
-    packet: &'a PreparedTree,
-    now: Time,
-    options: Options,
-    applied: Option<(Vec<Item>, Vec<super::Copied>)>,
-    checkpoint: &'a mut Checkpoint<'check>,
-) -> BoxFuture<'a, Result<Receipt, Error>> {
-    Box::pin(async move {
-        let (prepared, before, operation) = match &packet.state {
-            TreeState::Replay { receipt, .. } => return Ok(receipt.clone()),
-            TreeState::New {
-                prepared,
-                before,
-                operation,
-            } => (prepared, before, operation),
-        };
-        let request = &packet.request;
-        let identity = &packet.identity;
-        let arguments = packet.arguments.clone();
-        let operation = *operation;
-        let (items, copied) = applied.ok_or(Error::Invalid(
-            "new tree effects require their prepared native operands",
-        ))?;
-        let changed = reread(conn, &items).await?;
-        let until = if matches!(request.command, Command::Delete | Command::MoveOut) {
-            Some(prepare::deadline(now, options)?)
-        } else {
-            None
-        };
-        // Each name is registered as written here, so that the catalogue's check finds this writer.
-        let action = match request.command {
-            Command::CreateFolder | Command::Copy | Command::MoveOut => {
-                if identity.thread.is_some() {
-                    orch_db::audit::name!("document.created_by_agent")
-                } else {
-                    orch_db::audit::name!("document.created")
-                }
-            }
-            Command::Move => orch_db::audit::name!("document.moved"),
-            Command::Delete => orch_db::audit::name!("document.deleted"),
-            Command::Restore => orch_db::audit::name!("document.restored"),
-            Command::Rename => orch_db::audit::name!("document.renamed"),
-            Command::RestoreVersion => orch_db::audit::name!("document.version_restored"),
-        };
-        for row in &changed {
-            let source = copied
-                .iter()
-                .find(|copy| copy.destination == access::item(row))
-                .map(|copy| copy.source);
-            let action = if request.command == Command::Restore && row.deleted_at.is_some() {
-                orch_db::audit::name!("document.moved")
-            } else {
-                action
-            };
-            let from_node = prepared
-                .entries
-                .iter()
-                .find(|before| before.id == row.id && before.node_id != row.node_id)
-                .map(|before| before.node_id);
-            record(
-                conn,
-                actor,
-                AuditChange {
-                    row,
-                    operation,
-                    action,
-                    source,
-                    until: if request.command == Command::MoveOut {
-                        None
-                    } else {
-                        until
-                    },
-                    from_node,
-                },
-                now,
-                checkpoint,
-            )
-            .await?;
-        }
-        if request.command == Command::MoveOut {
-            let ended: Vec<_> = prepared
-                .entries
-                .iter()
-                .filter(|row| row.deleted_at.is_none())
-                .map(access::item)
-                .collect();
-            for row in reread(conn, &ended).await? {
-                record(
-                    conn,
-                    actor,
-                    AuditChange {
-                        row: &row,
-                        operation,
-                        action: orch_db::audit::name!("document.deleted"),
-                        source: None,
-                        until,
-                        from_node: None,
-                    },
-                    now,
-                    checkpoint,
-                )
-                .await?;
-            }
-        }
-        let after = audience::read(conn, actor, &changed, now).await?;
-        let (gaining, losing) = audience::difference(before, &after, &copied);
-        let mut nodes: HashSet<_> = prepared.entries.iter().map(|row| row.node_id).collect();
-        nodes.extend(changed.iter().map(|row| row.node_id));
-        for node in nodes {
-            checkpoint.check()?;
-            orch_db::queries::hierarchy::stamp(conn, node).await?;
-            orch_db::queries::hierarchy::touch_activity(conn, node, now.get()).await?;
-        }
-        if !matches!(request.command, Command::Rename | Command::RestoreVersion) {
-            checkpoint.check()?;
-            orch_authz::epoch::bump(conn).await?;
-        }
-        let receipt = Receipt {
+    let (prepared, before, operation) = match &packet.state {
+        TreeState::Replay { receipt, .. } => return Ok(receipt.clone()),
+        TreeState::New {
+            prepared,
+            before,
             operation,
-            entries: changed.iter().map(access::project).collect(),
-            copied,
-            gaining,
-            losing,
-            restore_until: until,
+        } => (prepared, before, operation),
+    };
+    let request = &packet.request;
+    let identity = &packet.identity;
+    let arguments = packet.arguments.clone();
+    let operation = *operation;
+    let (items, copied) = match applied {
+        Some(applied) => applied,
+        None => apply(conn, actor, request, prepared, operation, now, options).await?,
+    };
+    let changed = reread(conn, &items).await?;
+    let until = if request.command == Command::Delete {
+        Some(prepare::deadline(now, options)?)
+    } else {
+        None
+    };
+    // Each name is registered as written here, so that the catalogue's check finds this writer.
+    let action = match request.command {
+        Command::CreateFolder | Command::Copy => {
+            if identity.thread.is_some() {
+                orch_db::audit::name!("document.created_by_agent")
+            } else {
+                orch_db::audit::name!("document.created")
+            }
+        }
+        Command::Move => orch_db::audit::name!("document.moved"),
+        Command::Delete => orch_db::audit::name!("document.deleted"),
+        Command::Restore => orch_db::audit::name!("document.restored"),
+        Command::Rename => orch_db::audit::name!("document.renamed"),
+        Command::RestoreVersion => orch_db::audit::name!("document.version_restored"),
+    };
+    for row in &changed {
+        let source = copied
+            .iter()
+            .find(|copy| copy.destination == access::item(row))
+            .map(|copy| copy.source);
+        let action = if request.command == Command::Restore && row.deleted_at.is_some() {
+            orch_db::audit::name!("document.moved")
+        } else {
+            action
         };
-        checkpoint.check()?;
-        containers::remember(
+        let from_node = prepared
+            .entries
+            .iter()
+            .find(|before| before.id == row.id && before.node_id != row.node_id)
+            .map(|before| before.node_id);
+        record(
             conn,
-            identity.kind,
-            identity.id,
-            &request.request_ref,
-            &containers::Operation {
-                arguments,
-                operation_id: operation,
-                result: serde_json::to_value(&receipt)?,
+            actor,
+            AuditChange {
+                row,
+                operation,
+                action,
+                source,
+                until,
+                from_node,
             },
-            now.get(),
+            now,
         )
         .await?;
-        Ok(receipt)
-    })
+    }
+    let after = audience::read(conn, actor, &changed, now).await?;
+    let (gaining, losing) = audience::difference(before, &after, &copied);
+    let mut nodes: HashSet<_> = prepared.entries.iter().map(|row| row.node_id).collect();
+    nodes.extend(changed.iter().map(|row| row.node_id));
+    for node in nodes {
+        orch_db::queries::hierarchy::stamp(conn, node).await?;
+        orch_db::queries::hierarchy::touch_activity(conn, node, now.get()).await?;
+    }
+    if !matches!(request.command, Command::Rename | Command::RestoreVersion) {
+        orch_authz::epoch::bump(conn).await?;
+    }
+    let receipt = Receipt {
+        operation,
+        entries: changed.iter().map(access::project).collect(),
+        copied,
+        gaining,
+        losing,
+        restore_until: until,
+    };
+    containers::remember(
+        conn,
+        identity.kind,
+        identity.id,
+        &request.request_ref,
+        &containers::Operation {
+            arguments,
+            operation_id: operation,
+            result: serde_json::to_value(&receipt)?,
+        },
+        now.get(),
+    )
+    .await?;
+    Ok(receipt)
 }
 
-fn execute<'a>(
-    tx: &'a mut Tx,
-    actor: Actor<'a>,
-    request: &'a Request,
-    deletion_plan: Option<super::DeletionConfirmation<'a>>,
+fn execute(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    deletion_plan: Option<super::DeletionConfirmation<'_>>,
     now: Time,
     options: Options,
-    text_copy: Option<&'a super::TextCopy>,
-) -> BoxFuture<'a, Result<Receipt, Error>> {
+    text_copy: Option<&super::TextCopy>,
+) -> impl std::future::Future<Output = Result<Receipt, Error>> {
     // The operation lives on the heap beneath both savepoint facades.
     Box::pin(execute_inner(
-        tx,
+        conn,
         actor,
         request,
         deletion_plan,
@@ -1573,7 +1586,7 @@ fn execute<'a>(
 }
 
 async fn execute_inner(
-    tx: &mut Tx,
+    conn: &mut Conn,
     actor: Actor<'_>,
     request: &Request,
     deletion_plan: Option<super::DeletionConfirmation<'_>>,
@@ -1581,24 +1594,8 @@ async fn execute_inner(
     options: Options,
     text_copy: Option<&super::TextCopy>,
 ) -> Result<Receipt, Error> {
-    prepare::validate(request)?;
-    if matches!(request.command, Command::Delete | Command::MoveOut) != deletion_plan.is_some() {
-        return Err(Error::Invalid(
-            "deletion and Move to another org require their complete native deletion plan",
-        ));
-    }
-    let sources = sources::prepare_with_copy(&mut *tx, actor, request, text_copy).await?;
-    let prepared =
-        complete_operation_in(&mut *tx, actor, sources, deletion_plan, now, options).await?;
-    staged::apply_on(
-        &mut *tx,
-        actor,
-        prepared,
-        now,
-        options,
-        &mut Checkpoint::native(),
-    )
-    .await
+    let packet = prepare_tree(conn, actor, request, deletion_plan, now, text_copy).await?;
+    finish_tree(conn, actor, &packet, now, options, None).await
 }
 
 /// Executes one complete operation inside the supplied transaction, rolling back its own work on any refusal.
@@ -1633,7 +1630,7 @@ pub async fn execute_confirmed_in(
     sqlx::query("SAVEPOINT document_tree_operation")
         .execute(&mut **tx)
         .await?;
-    let result = execute(tx, actor, request, deletion_plan, now, options, None).await;
+    let result = execute(&mut *tx, actor, request, deletion_plan, now, options, None).await;
     if result.is_err() {
         sqlx::query("ROLLBACK TO SAVEPOINT document_tree_operation")
             .execute(&mut **tx)

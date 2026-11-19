@@ -166,7 +166,7 @@ pub use orch_provider_contract::facts::{
 /// What a model can be run with at a provider, and a model as a list gives it, written once with the
 /// provider's contract.
 pub use orch_provider_contract::models::{
-    ModelOffered, ModelParameters, ModelReport, ModelSuggestion, Rate, RateAbove, ServiceTier,
+    ModelOffered, ModelParameters, ModelSuggestion, Rate, RateAbove, ServiceTier,
 };
 pub use orch_provider_contract::source::{
     SourceCredential, SourceDescriptor, SourceDescriptorFacts, SourceDescriptorModels,
@@ -197,14 +197,6 @@ pub enum MachineStatus {
 /// A machine that is registered with the system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Machine {
-    /// Management-visible apparent file sizes from the connector's regular observation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_directory: Option<crate::storage::MachineDataInventory>,
-    /// Its stored home and native grouping metadata.
-    #[serde(default, flatten)]
-    pub grouping: crate::resource_groups::ResourceGrouping,
-    /// The current stored revision, which a guarded role change names.
-    pub revision: Revision,
     /// When its identity was permanently declared lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_at: Option<Time>,
@@ -272,30 +264,6 @@ pub struct ComponentUpdate {
     pub detail: Option<String>,
     /// The local command, including when local policy refuses the web action.
     pub command: String,
-}
-
-/// A Host update acknowledgement without the physical program's existing versions or progress.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct HostUpdateNowReceipt {
-    /// Restricted response marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual Host controlled by this operation.
-    pub host_id: Id,
-    /// Its selected intrinsic physical program.
-    pub machine_id: Id,
-    /// Whether this action filed a fresh native request, including a local-policy refusal.
-    pub requested: bool,
-}
-
-crate::common::full_or_receipt! {
-    /// The existing native progress when this operation may read it, or its safe acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum HostUpdateNowResponse {
-        /// Same-operation Read admits the existing native program status.
-        Full(ComponentUpdate),
-        /// Safe accepted identities and whether a fresh request was filed.
-        Receipt(HostUpdateNowReceipt),
-    }
 }
 
 /// A limit of the plan that has been reached.
@@ -564,22 +532,8 @@ pub struct Upstream {
     pub options: Json,
 }
 
-/// A weak credential-format hint declared by a provider preset, never an authentication result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ProviderCredentialHint {
-    /// A public key-format prefix, never key material or proof that a credential works.
-    pub prefix: String,
-    /// Suggested credential role; unknown roles are retained for later extensions.
-    pub role: String,
-    /// The existing source-secret field for a non-model role, where declared.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
-    /// Future hint metadata is preserved without inventing support for it.
-    #[serde(flatten, default)]
-    pub extensions: BTreeMap<String, Json>,
-}
-
-/// A named list of endpoints that fills a new provider's form; the stored provider does not refer to it.
+/// A named list of endpoints that fills the form of a new provider in. A provider does not refer
+/// to it afterwards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderPreset {
     /// Its name.
@@ -599,9 +553,6 @@ pub struct ProviderPreset {
     /// The suggested vector length for an embeddings model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
-    /// Weak proposals only; vendor observations and a person's overrides take precedence.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_hints: Vec<ProviderCredentialHint>,
 }
 
 /// A harness, named by its kind and by what it is called. Every payload that says which harness a thing
@@ -713,9 +664,6 @@ pub struct ProviderSetupRuntimeTemplate {
 /// Everything the page that adds a provider needs, for the caller, in one answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderSetup {
-    /// Grouping of the actual resource references offered by this compound picker.
-    #[serde(default)]
-    pub grouping: Vec<crate::resource_groups::ResourceChoiceGrouping>,
     /// Usable physical machines and the services each actually declares for the two independent locations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machines: Option<Vec<ProviderSetupMachine>>,
@@ -856,8 +804,8 @@ pub struct ProviderModel {
     pub source: ModelSource,
 }
 
-/// The shipped default for the configurable number of groups per model.
-pub const MODEL_GROUPS_DEFAULT: i64 = 8;
+/// The most groups one model can be in.
+pub const MODEL_GROUPS_MAX: usize = 8;
 /// The most characters in the name of a group.
 pub const MODEL_GROUP_NAME_MAX: usize = 40;
 
@@ -1040,21 +988,6 @@ pub struct ProviderSignInSupport {
 /// Placement is a derived label for that runtime, rather than a stored capability or policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Provider {
-    /// Declared service choices visible with the provider's ordinary View; no endpoint or credential data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_catalogue: Option<Vec<ProviderServiceOffering>>,
-    /// Manager choices for extension-declared services; discovery alone never enables them.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub service_offerings: BTreeMap<String, orch_provider_contract::services::ServiceConfig>,
-    /// Request option declarations on its existing named model groups.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub model_group_options: BTreeMap<String, orch_provider_contract::models::ModelGroupOptions>,
-    /// The configured membership limit at this provider's home.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_groups_max: Option<i64>,
-    /// Protected origin and native contextual availability, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Window projections on the single-provider read; absent on lists and without View.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_forecasts: Option<BTreeMap<String, orch_provider_contract::forecast::UsageForecast>>,
@@ -1150,22 +1083,6 @@ pub struct Provider {
     pub access: ResourceAccess,
 }
 
-/// Safe service metadata and manager choices for the existing provider editor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ProviderServiceOffering {
-    pub id: String,
-    pub title: String,
-    pub capabilities: Vec<String>,
-    pub enabled: bool,
-    pub available: bool,
-    pub groups: Vec<String>,
-    pub declared_groups: Vec<String>,
-    pub units: Vec<String>,
-    pub catalogue_prices: BTreeMap<String, orch_provider_contract::capabilities::Price>,
-    pub prices: BTreeMap<String, orch_provider_contract::capabilities::Price>,
-    pub explicit_prices: Vec<String>,
-}
-
 /// Permitted facts used by provider and model choices without a request for each option.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderChoiceUsage {
@@ -1182,9 +1099,6 @@ pub struct ProviderChoiceUsage {
 /// puts it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Agent {
-    /// Protected origin and native contextual availability, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Readable providers that keep this profile or currently use it for a thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<ProviderRef>>,
@@ -1273,9 +1187,6 @@ pub struct HostRunning {
 /// whoever its page names, wherever they work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
-    /// Protected origin and native contextual availability, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// When this host was permanently declared lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_at: Option<Time>,
@@ -1386,9 +1297,6 @@ pub struct HostKeptLayers {
 /// A recipe for units: environments, or the runtimes of providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Template {
-    /// Protected origin and native contextual availability, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// The template's identifier.
     pub id: Id,
     /// Its name.
@@ -1441,9 +1349,6 @@ pub struct McpServerImported {
 /// An MCP server that environments can be given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpServer {
-    /// The origin and native per-machine judgements, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Current machine offerings; the resource stays when this list is empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub offerings: Vec<McpServerOffering>,
@@ -2081,14 +1986,6 @@ pub enum CreateProvider {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUpdateBody {
-    /// Replaces manager choices for declared services; empty clears all service opt-ins.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_offerings:
-        Option<BTreeMap<String, orch_provider_contract::services::ServiceConfig>>,
-    /// Replaces request option declarations on named model groups; empty clears them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_group_options:
-        Option<BTreeMap<String, orch_provider_contract::models::ModelGroupOptions>>,
     /// A new name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -2570,7 +2467,7 @@ pub struct ProviderModelCreateBody {
     /// `context_window`; `default_context` is at most `context_max` and needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<ModelParameters>,
-    /// The groups to put it in, within the home's configured limit, each named as [`is_model_group_name`]
+    /// The groups to put it in: at most [`MODEL_GROUPS_MAX`], each named as [`is_model_group_name`]
     /// says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<String>>,
@@ -2879,9 +2776,6 @@ pub struct McpServerListQuery {
     /// Only those whose home is that org or an org inside it, with the system's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
-    /// Judge these options in this readable environment; unavailable ones stay listed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment_id: Option<Id>,
 }
 
 /// Makes an MCP server. One that is imported from a machine is made by importing it into an
@@ -2980,24 +2874,6 @@ pub enum McpServerUpdateResponse {
     Receipt(McpServerUpdateReceipt),
 }
 
-/// The exact native copy outcome without existing configuration or offering metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct McpServerImportReceipt {
-    pub projection: crate::common::ReceiptProjection,
-    pub server_id: Id,
-    pub revision: Option<Revision>,
-    pub selected: bool,
-    pub cleanup_queued: bool,
-}
-crate::common::full_or_receipt! {
-    /// The ordinary stored-server view or the original completed native import's receipt.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum McpServerImportResponse {
-        Full(McpServer),
-        Receipt(McpServerImportReceipt),
-    }
-}
-
 impl McpServerUpdateResponse {
     /// Extract full native content while retaining the restricted acknowledgement.
     pub fn into_full(self) -> Result<McpServer, McpServerUpdateReceipt> {
@@ -3078,99 +2954,12 @@ impl MachineUpdateResponse {
     }
 }
 
-/// The accepted physical registration without existing machine metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachineRevokeReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual Machine whose withdrawal was accepted, including an already revoked one.
-    pub machine_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// The native machine body or its accepted withdrawal acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachineRevokeResponse {
-        Full(Machine),
-        Receipt(MachineRevokeReceipt),
-    }
-}
-
-/// A completed probe without disclosure of retained Machine facts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachineProbeReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The physical Machine whose reported facts were retained.
-    pub machine_id: Id,
-}
-
-/// A newly issued replacement credential without retained installation paths or roles.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachineEnrollmentAgainReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The retained physical identity this new token enrolls again.
-    pub machine_id: Id,
-    /// Newly generated one-use credential, never replayed from retained storage.
-    pub token: String,
-    /// Native expiry of that new credential.
-    pub expires_at: Time,
-    /// Newly generated one-way issuer recovery reference.
-    pub receipt: Option<String>,
-}
-
-/// An explicit native update choice without existing software or installation progress.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachineUpdateNowReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The physical program whose update choice completed.
-    pub machine_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// Native update progress or the accepted choice's identity alone.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachineUpdateNowResponse {
-        /// Existing operational facts under this operation's own Read.
-        Full(ComponentUpdate),
-        /// The update choice completed without existing progress or versions.
-        Receipt(MachineUpdateNowReceipt),
-    }
-}
-
-crate::common::full_or_receipt! {
-    /// Newly issued replacement credential, with retained installation commands only under Read.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachineEnrollmentAgainResponse {
-        /// The old native enrollment body under this operation's current Read.
-        Full(EnrollmentToken),
-        /// The generated credential remains usable with the operator's local configuration.
-        Receipt(MachineEnrollmentAgainReceipt),
-    }
-}
-
-crate::common::full_or_receipt! {
-    /// Native Machine content or the completed facts probe's identity alone.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachineProbeResponse {
-        /// Current native content under this operation's own Read.
-        Full(Machine),
-        /// The probe completed without old content.
-        Receipt(MachineProbeReceipt),
-    }
-}
-
 /// Change a physical connector's offered roles; Node remains hosted by orch-node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MachineRolesSetBody {
     /// Environment, agent and/or provider, without duplicates and with at least one role.
     pub roles: Vec<String>,
-    /// Refuses an outdated machine snapshot; omitted preserves the existing behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<Revision>,
 }
 
 /// The actual physical program's role editing capability and enforcing policy.
@@ -3195,30 +2984,6 @@ pub struct MachineRolesChange {
     pub reconnecting: bool,
 }
 
-/// The native role selection completed without existing individual Machine metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachineRolesReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The physical connector that accepted the role selection.
-    pub machine_id: Id,
-    /// The newly accepted role names.
-    pub requested_roles: Vec<String>,
-    /// Whether the native supervisor is reconnecting for this accepted selection.
-    pub reconnecting: bool,
-}
-
-crate::common::full_or_receipt! {
-    /// Native individual readback or the generated role-selection outcome alone.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachineRolesResponse {
-        /// The existing individual Machine body under this operation's Read.
-        Full(MachineRolesChange),
-        /// Accepted role selection without existing Machine content.
-        Receipt(MachineRolesReceipt),
-    }
-}
-
 /// Registers a provider whose runtime is a machine of the caller's. It is shared from its home
 /// with whomever its page names, of whatever org, and needs no second registration for that; one
 /// registered again in another org is another provider there.
@@ -3227,9 +2992,8 @@ crate::common::full_or_receipt! {
 pub enum MachineProviderCreateBody {
     /// The login that a harness already has there.
     Subscription {
-        /// Its home; omitted uses the machine's registered Org/Project home.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        home_id: Option<Id>,
+        /// Its home: the caller's domain or an org inside it.
+        home_id: Id,
         /// Its name.
         name: String,
         /// A profile of this machine.
@@ -3240,9 +3004,8 @@ pub enum MachineProviderCreateBody {
     },
     /// An API whose key is set on the machine.
     Api {
-        /// Its home; omitted uses the machine's registered Org/Project home.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        home_id: Option<Id>,
+        /// Its home: the caller's domain or an org inside it.
+        home_id: Id,
         /// Its name.
         name: String,
         /// Its endpoints.
@@ -3256,26 +3019,6 @@ pub enum MachineProviderCreateBody {
 /// Keys of a machine's local policy and the values to give them. A key the machine has not
 /// delegated is refused, and nothing is changed.
 pub type MachinePolicyUpdateBody = BTreeMap<String, Json>;
-
-/// A completed native policy choice without retained local policy or Machine content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachinePolicyReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual physical Machine whose native policy choice completed.
-    pub machine_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// Native policy content or the accepted choice's identity alone.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachinePolicyResponse {
-        /// Current native content under this operation's Read.
-        Full(MachinePolicy),
-        /// Policy choice completed without old content.
-        Receipt(MachinePolicyReceipt),
-    }
-}
 
 /// The hosts the caller may view, use or manage, or administers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -3621,25 +3364,9 @@ const fn provider_threads_read_facets() -> [Facet; 6] {
     ]
 }
 
-/// The selected native place whose work-share bounds a contextual resource projection.
-/// No context is projected by the ordinary full resource read.
-pub const RESOURCE_READ_CONTEXT: &str = "resource_read_context";
-
-const fn resource_read_context_facet() -> Facet {
-    Facet::response_content(
-        &[
-            Object(K::Org),
-            Object(K::Project),
-            Object(K::Topic),
-            Object(K::Thread),
-        ],
-        Target::ResolvedCollection(RESOURCE_READ_CONTEXT),
-    )
-}
-
 /// A collection's primary proof covers actual Provider results; full payload sources are
 /// response content so checked-empty reads do not require grants for absent Group/name rows.
-const fn provider_list_read_facets() -> [Facet; 7] {
+const fn provider_list_read_facets() -> [Facet; 6] {
     [
         Facet::required(
             Read,
@@ -3666,7 +3393,6 @@ const fn provider_list_read_facets() -> [Facet; 7] {
             &[Object(K::Thread)],
             Target::ResolvedCollection("provider_names_threads"),
         ),
-        resource_read_context_facet(),
     ]
 }
 
@@ -3710,44 +3436,6 @@ const fn provider_setup_facets() -> [Facet; 8] {
     ]
 }
 
-/// Candidate input for the common capability backend picker at an actual governing node.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct CapabilityBackendQuery {
-    /// Exact declared capability id; capabilities may share a backend setting.
-    pub capability: String,
-    /// Actual org/project/topic/thread where the backend will be used.
-    pub place: Id,
-    /// Search the provider's offering names using the native supplier before paging.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub q: Option<String>,
-    /// Exact selected offering lookup, including a stored choice that is now disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offering: Option<String>,
-    /// Existing bounded-list transport vocabulary.
-    #[serde(flatten)]
-    pub page: PageQuery,
-}
-/// An actual offering/route pair with current backend eligibility; no private endpoint or config.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct CapabilityBackendCandidate {
-    /// Exact explicit value the setting stores.
-    pub backend: orch_provider_contract::capabilities::BackendRef,
-    /// Reader-authorized offering name.
-    pub offering_name: String,
-    /// Common declaration-owned localized route title.
-    pub route_text: BTreeMap<String, String>,
-    /// Static program-owned native label, where this is a delegated route.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub program_text: BTreeMap<String, String>,
-    /// Current backend Use/model/policy/allowance answer; execution rechecks it.
-    pub eligible: bool,
-    /// A short actual reason for a disabled candidate.
-    pub reason: Option<String>,
-    /// Static localized explanation supplied by the program declaration, where available.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub reason_text: BTreeMap<String, String>,
-}
-
 crate::endpoints! {
     /// Lists the providers the caller owns or holds a permission on, of whatever org, each as far as the caller may see it.
     ProviderList: GET "/providers", User, query ProviderListQuery, none, json crate::common::Page<crate::common::Listed<Provider>>, 200,
@@ -3775,7 +3463,6 @@ crate::endpoints! {
             Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
             Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
             Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
-            resource_read_context_facet(),
         ]);
     /// Reads the visible plan windows' current measurements, usage history and start-over markers.
     ProviderPlanGet: GET "/providers/{id}/plan", Permission("provider.view"), query ProviderPlanGetQuery, none, json crate::common::Page<ProviderHistorySeries>, 200,
@@ -3843,8 +3530,7 @@ crate::endpoints! {
     /// Plans an update of a provider's runtime, or a plain recreation, before anything is done.
     ProviderRuntimeUpdatePreflight: POST "/providers/{id}/runtime/updates/preflight", Permission("provider.manage"), none, json UpdatePreflightBody, json ProviderUpdatePlan, 200;
     /// Carries out a plan of an update as a job; the runtime and every thread bound to the provider are locked at once.
-    ProviderRuntimeUpdateCreate: POST "/providers/{id}/runtime/updates", Permission("provider.manage"), query UpdateConfirmQuery, json ForkCreateBody, json crate::workspace::JobCreationResponse, 202,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
+    ProviderRuntimeUpdateCreate: POST "/providers/{id}/runtime/updates", Permission("provider.manage"), query UpdateConfirmQuery, json ForkCreateBody, json Job, 202;
     /// Plans the update of several providers' runtimes together.
     ProviderRuntimeUpdateBatchPreflight: POST "/providers/runtime/updates/preflight", Rule("provider.manage, on each provider"), none, json ProviderRuntimeUpdateBatchPreflightBody, json ProviderRuntimeUpdateBatchPreflightResponse, 200,
         operation Op::receipt(&Op::facets(&provider_runtime_batch_facets()));
@@ -3913,9 +3599,6 @@ crate::endpoints! {
     /// Lists the models a provider lists.
     ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
-    /// Lists explicit capability backends of this provider at a governed place.
-    ProviderCapabilityBackendList: GET "/providers/{id}/capability-backends", Permission("provider.view"), query CapabilityBackendQuery, none, json crate::common::Page<CapabilityBackendCandidate>, 200,
-        operation Op::facets(crate::settings_sources::CAPABILITY_BACKEND_FACETS);
     /// Adds a model to a provider, with the groups it is in and what it can be run with there; `409 conflict.exists` for a routing or display name the provider already has, `400 request.invalid` for a default that is not among what is enabled, a `context_max` below the window, a `default_context` above `context_max` or given without one, and a group that is badly named or more than eight.
     ProviderModelCreate: POST "/providers/{id}/models", Permission("provider.manage"), none, json ProviderModelCreateBody, json ProviderModelWriteResponse, 200,
         operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
@@ -3948,7 +3631,6 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("agent_names_projects")),
             Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("agent_names_topics")),
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("agent_names_threads")),
-            resource_read_context_facet(),
         ]);
     /// Makes an agent profile in an org.
     OrgAgentCreate: POST "/orgs/{id}/agents", Permission("settings.manage"), none, json OrgAgentCreateBody, json OrgAgentCreateResponse, 200,
@@ -3964,7 +3646,6 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("agent_names_projects")),
             Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("agent_names_topics")),
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("agent_names_threads")),
-            resource_read_context_facet(),
         ]);
     /// Changes an agent profile.
     AgentUpdate: PATCH "/agents/{id}", Permission("agent.manage"), query crate::resource_facts::ResourcePauseQuery, json AgentUpdateBody, json Agent, 200,
@@ -3995,7 +3676,7 @@ crate::endpoints! {
         operation Op::receipt(&Op::facets(&crate::template_sources::CREATE_FACETS));
     /// Proposes the spec of a template from a file a driver can read; nothing is saved.
     TemplateImport: POST "/templates/import", Rule("as making a template for that home and driver"), none, json TemplateImportBody, json TemplateImportReply, 200,
-        operation Op::facets(&crate::template_import_sources::FACETS);
+        operation Op::single(Manage, &[Object(K::Template)], Target::Resolved("home"));
     /// Checks a configuration against the reported driver schema and unit rules without saving it.
     TemplateCheck: POST "/templates/check", User, none, json TemplateCheckBody, json TemplateCheckReply, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
@@ -4025,7 +3706,6 @@ crate::endpoints! {
     McpServerList: GET "/mcp-servers", User, query McpServerListQuery, none, json Vec<crate::common::Listed<McpServer>>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Object(K::McpServer)], Target::ResolvedCollection("results")),
-            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("mcp_context")),
             Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("mcp_machines")),
             Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("mcp_groups")),
             Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("mcp_names_orgs")),
@@ -4058,11 +3738,15 @@ crate::endpoints! {
             Facet::required(Manage, &[Object(K::Machine)], Target::ResolvedCollection("forgotten_copies")),
         ]);
     /// Takes the definition of an imported MCP server again from where it was found.
-    McpServerReimport: POST "/mcp-servers/{id}/reimport", Rule("mcp.manage, and what importing it needs"), none, none, json McpServerImportResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::mcp_sources::IMPORT_FACETS));
+    McpServerReimport: POST "/mcp-servers/{id}/reimport", Rule("mcp.manage, and what importing it needs"), none, none, json McpServer, 200,
+        operation Op::returning(Manage, &[Object(K::McpServer)], Target::Path("id"));
     /// Uses a manager-selected native definition from a machine that reported it.
-    McpOfferingUse: POST "/mcp-servers/{id}/offerings/{machine_id}/use", Rule("mcp.manage and authority to import from the offering machine"), none, json McpOfferingUseBody, json McpServerImportResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::mcp_sources::IMPORT_FACETS));
+    McpOfferingUse: POST "/mcp-servers/{id}/offerings/{machine_id}/use", Rule("mcp.manage and authority to import from the offering machine"), none, json McpOfferingUseBody, json McpServer, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::McpServer)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Machine)], Target::Path("machine_id")),
+            Facet::response_content(&[Object(K::McpServer)], Target::Path("id")),
+        ]);
     /// Lists the machines visible to the caller, with their current access facts.
     MachineList: GET "/machines", User, none, none, json Vec<Machine>, 200,
         operation Op::facets(&crate::machine_sources::LIST_FACETS);
@@ -4070,8 +3754,8 @@ crate::endpoints! {
     MachineEnrollmentTokenCreate: POST "/machines/enrollment-tokens", User, none, json MachineEnrollmentTokenCreateBody, json EnrollmentToken, 200,
         operation Op::single(Manage, &[Object(K::Machine)], Target::CurrentAccount);
     /// Issues a token that enrolls the same machine again, preserving its page and registrations.
-    MachineEnrollmentAgainTokenCreate: POST "/machines/{id}/enrollment-tokens", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineEnrollmentAgainResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
+    MachineEnrollmentAgainTokenCreate: POST "/machines/{id}/enrollment-tokens", Rule("machine.manage, or host.manage on its node facade"), none, none, json EnrollmentToken, 200,
+        operation Op::single(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// Reads a machine.
     MachineGet: GET "/machines/{id}", Rule("machine.view, or host.view on its node facade"), none, none, json Machine, 200,
         operation Op::facets(&crate::machine_sources::GET_FACETS);
@@ -4085,20 +3769,17 @@ crate::endpoints! {
     MachineUpdate: PATCH "/machines/{id}", Rule("machine.manage, or host.manage on its node facade"), none, json MachineUpdateBody, json MachineUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::UPDATE_FACETS));
     /// Saves delegated connector roles and reconnects after its answer is journaled.
-    MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
+    MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesChange, 200,
+        operation Op::returning(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// Requests a verified physical connector update, drained under its local update.auto policy.
-    MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineUpdateNowResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
+    MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json ComponentUpdate, 200,
+        operation Op::returning(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// Requests the same verified procedure for a host's node, after its units finish their turns.
-    HostUpdateNow: POST "/hosts/{id}/update", Rule("host.manage"), none, none, json HostUpdateNowResponse, 200,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage, &[Object(K::Host)], Target::Path("id")),
-            Facet::response_content(&[Object(K::Host)], Target::Path("id")),
-        ]));
+    HostUpdateNow: POST "/hosts/{id}/update", Rule("host.manage"), none, none, json ComponentUpdate, 200,
+        operation Op::single(Manage, &[Object(K::Host)], Target::Path("id"));
     /// Withdraws a machine's registration and drops its session at once.
-    MachineRevoke: POST "/machines/{id}/revoke", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineRevokeResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::REVOKE_FACETS));
+    MachineRevoke: POST "/machines/{id}/revoke", Rule("machine.manage, or host.manage on its node facade"), none, none, json Machine, 200,
+        operation Op::returning(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// Registers a provider whose runtime is the machine: the login its harness has there, or an API whose key is set there.
     MachineProviderCreate: POST "/machines/{id}/providers", Rule("machine.use; the home is the caller's domain or an org inside it"), none, json MachineProviderCreateBody, json MachineProviderCreateResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -4112,14 +3793,14 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
         ]));
     /// Asks the machine for its facts again.
-    MachineProbe: POST "/machines/{id}/probe", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineProbeResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::UPDATE_FACETS));
+    MachineProbe: POST "/machines/{id}/probe", Rule("machine.manage, or host.manage on its node facade"), none, none, json Machine, 200,
+        operation Op::returning(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// Reads the local policy of a machine as it last reported it.
     MachinePolicyGet: GET "/machines/{id}/policy", Rule("machine.view, or host.view on its host page; managers of hosted environments/providers read their binding sections without machine management"), none, none, json MachinePolicy, 200,
         operation Op::single(Read, &[Object(K::Machine)], Target::Path("id"));
     /// Changes keys of a machine's local policy that its owner handed over, key by key; nothing changes if any is refused.
-    MachinePolicyUpdate: PATCH "/machines/{id}/policy", Rule("machine.manage, or host.manage on its host page; only keys handed to Orch, with every explicit local value enforced"), none, json MachinePolicyUpdateBody, json MachinePolicyResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
+    MachinePolicyUpdate: PATCH "/machines/{id}/policy", Rule("machine.manage, or host.manage on its host page; only keys handed to Orch, with every explicit local value enforced"), none, json MachinePolicyUpdateBody, json MachinePolicy, 200,
+        operation Op::returning(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// The executors this machine can offer, with their tool sets: those of the connector's release, which carries
     /// the registry's executors, and the executor plugins the machine reported. The policy screen offers these and no
     /// others for `exec.offers`.
@@ -4129,14 +3810,14 @@ crate::endpoints! {
     MachineProgramsGet: GET "/machines/{id}/programs", Rule("machine.view or host.view"), none, none, json MachinePrograms, 200,
         operation Op::single(Read, &[Object(K::Machine)], Target::Path("id"));
     /// Registers, tests, removes or reloads a program through the same native registry.
-    MachineProgramsChange: POST "/machines/{id}/programs", Rule("machine.manage or host.manage; remote registration also requires its delegated local policy key"), none, json MachineProgramsCommand, json crate::machine_programs::MachineProgramsResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
+    MachineProgramsChange: POST "/machines/{id}/programs", Rule("machine.manage or host.manage; remote registration also requires its delegated local policy key"), none, json MachineProgramsCommand, json MachinePrograms, 200,
+        operation Op::returning(Manage, &[Object(K::Machine)], Target::Path("id"));
     /// Lists the hosts the caller may view, use or manage, or administers, of whatever org.
     HostList: GET "/hosts", User, query HostListQuery, none, json Vec<crate::common::Listed<Host>>, 200,
         operation Op::facets(&crate::resource_reads::HOST.facets::<7>(Target::ResolvedCollection("results")));
     /// Asks for a token with which a host enrolls.
     HostEnrollmentTokenCreate: POST "/hosts/enrollment-tokens", Rule("its home is the caller's domain or an org inside it and the members of that home may add hosts there; else settings.manage on that org; a system admin when it has no home"), none, json HostEnrollmentTokenCreateBody, json EnrollmentToken, 200,
-        operation Op::receipt(&Op::single(Manage, &[Object(K::Host)], Target::Resolved("home")));
+        operation Op::single(Manage, &[Object(K::Host)], Target::Resolved("home"));
     /// Reads a host.
     HostGet: GET "/hosts/{id}", Rule("any permission on the host"), none, none, json Host, 200,
         operation Op::facets(&crate::resource_reads::HOST.facets::<7>(Target::Path("id")));
@@ -4194,7 +3875,6 @@ mod tests {
     fn provider() -> Value {
         merged(&[
             json!({
-                "origin_machine": null, "availability": [],
                 "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a12", "name": "Team Pro", "kind": "subscription",
                 "harness_kind": "codex", "harness": { "kind": "codex", "name": "Codex" }, "address": "acme.research.alice.team-pro",
                 "placement": "managed", "status": "ready",
@@ -4646,7 +4326,6 @@ mod tests {
     #[test]
     fn what_a_transfer_answers_with_is_the_resource_itself() {
         let template = json!({
-            "origin_machine": null, "availability": [],
             "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a17", "name": "Ubuntu", "description": "",
             "org_id": null, "owner": null, "home": null, "address": "system.ubuntu",
             "kind": "environment", "driver": "docker", "spec": {}, "units": 3, "enabled": true,

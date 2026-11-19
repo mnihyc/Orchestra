@@ -20,7 +20,7 @@ pub enum Source {
     ByteEnvironments,
     /// The acting account's selected retained-upload custody.
     ByteUploads,
-    /// The actual native home at which the chat is opened.
+    /// The actual root org at which the chat is opened.
     Parent,
     /// The native newly created or deduplicated existing chat.
     OpenedChat,
@@ -85,25 +85,6 @@ pub const BLOB_GET: Declaration<Source> = Declaration {
     ],
 };
 
-/// A new attachment writes its actual chat. Referenced bytes keep one selected source;
-/// bytes supplied in this request make those source collections genuinely empty.
-pub const ATTACHMENT_CREATE: Declaration<Source> = Declaration {
-    operation: "ChatAttachmentCreate",
-    bindings: BLOB_GET.bindings,
-};
-
-/// The same explicit byte-source cardinalities, with the destination's own Write act.
-#[must_use]
-pub const fn attachment_facets() -> [FacetSpec; 6] {
-    let mut facets = blob_read_facets();
-    facets[0] = FacetSpec::required(
-        KeyAction::Write,
-        &[KeyTargetKind::Identity(KeyIdentityKind::Chat)],
-        TargetResolver::Path("id"),
-    );
-    facets
-}
-
 /// The canonical actions remain here; the source row only connects their actual roles.
 #[must_use]
 pub const fn blob_read_facets() -> [FacetSpec; 6] {
@@ -149,7 +130,7 @@ pub const CREATE: Declaration<Source> = Declaration {
     bindings: &[
         Binding {
             source: Source::Parent,
-            target: TargetResolver::Resolved("chat_home"),
+            target: TargetResolver::Path("id"),
             usage: FacetUsage::Required,
             cardinality: Cardinality::One,
         },
@@ -207,7 +188,7 @@ pub const fn creation_facets() -> [FacetSpec; 8] {
         FacetSpec::required(
             KeyAction::Write,
             &[Identity(I::Chat)],
-            TargetResolver::Resolved("chat_home"),
+            TargetResolver::Path("id"),
         ),
         FacetSpec::response_content(
             &[Identity(I::Chat)],
@@ -382,21 +363,4 @@ pub const EXPORT: Declaration<Source> = Declaration {
             cardinality: Cardinality::Collection,
         },
     ],
-};
-
-/// Self-joining names only the actual stored group; home access remains the native prerequisite.
-pub const JOIN_FACETS: [FacetSpec; 1] = [FacetSpec::required(
-    KeyAction::Write,
-    &[KeyTargetKind::Identity(KeyIdentityKind::Chat)],
-    TargetResolver::Path("id"),
-)];
-/// One stored-subject row for the native public-group self join.
-pub const JOIN: Declaration<Source> = Declaration {
-    operation: "ChatJoin",
-    bindings: &[Binding {
-        source: Source::Chat,
-        target: TargetResolver::Path("id"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::One,
-    }],
 };

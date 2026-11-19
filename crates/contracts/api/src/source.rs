@@ -272,58 +272,9 @@ pub struct RestoreWriter {
     pub active: bool,
 }
 
-/// Actual file-tool material, retained only by its recording producer and restore planner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FileChangeImage {
-    /// The path did not exist at this side of the file-tool change.
-    Absent,
-    /// Complete text supplied by the harness, never a clipped displayed diff.
-    Text { text: String },
-    /// Complete bytes already retained in the content store.
-    Blob {
-        blob: Hash,
-        size: i64,
-        executable: bool,
-    },
-}
-/// First pre-image and final recorded write for one actual touched path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TouchedRestorePath {
-    pub path: String,
-    /// None means the recording did not retain a complete pre-image.
-    pub before: Option<FileChangeImage>,
-    /// None means changed-since cannot be proved by a complete final image.
-    pub after: Option<FileChangeImage>,
-}
-/// Native file-tool coverage; it never includes unrecorded shell writes or the rest of a directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TouchedRestore {
-    pub thread_id: Id,
-    pub turn_id: Id,
-    pub paths: Vec<TouchedRestorePath>,
-    pub whole_unavailable: String,
-    #[serde(default)]
-    pub overwrite: Vec<String>,
-}
-/// The coverage the restore actually plans and journals.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RestoreForm {
-    #[default]
-    WholeDirectory,
-    TouchedFiles {
-        count: u64,
-        whole_unavailable: String,
-    },
-}
-
 /// A whole-directory restore that must be rechecked before any effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RestorePlan {
-    /// Actual whole or file-tool coverage of this plan.
-    #[serde(default)]
-    pub form: RestoreForm,
     /// The plan's confirmation word.
     pub preflight_id: Id,
     /// When the plan expires.
@@ -462,9 +413,6 @@ pub struct EnvironmentGitPushBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentRestorePreflightBody {
-    /// Touched paths whose later contents the person explicitly chose to overwrite.
-    #[serde(default)]
-    pub overwrite: Vec<String>,
     /// The target turn or undo state.
     pub snapshot_id: Id,
     /// Options whose omissions take the existing change settings.

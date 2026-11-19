@@ -76,13 +76,6 @@
           },
           "description": "The source's secret fields that have a value, by name; each value is the provider secret\n`source:<element>:field:<name>`."
         },
-        "secret_source": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Source identity to which the encrypted fields belong; never inferred from a later endpoint edit."
-        },
         "descriptor": {
           "anyOf": [
             {
@@ -214,13 +207,6 @@
           "type": "string",
           "description": "What it is, in one sentence."
         },
-        "summary_locales": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Optional localized descriptions supplied by the source, with summary as the fallback."
-        },
         "contract": {
           "type": "integer",
           "format": "uint32",
@@ -294,17 +280,6 @@
     "SourceDescriptorFacts": {
       "type": "object",
       "properties": {
-        "admin_credential": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AdminCredential"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional source-only administrative credential; never used for model requests."
-        },
         "reports": {
           "type": "array",
           "items": {
@@ -353,30 +328,6 @@
         }
       },
       "description": "What a source tells of a provider's facts."
-    },
-    "AdminCredential": {
-      "type": "object",
-      "properties": {
-        "labels": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Localized field labels; an extension can call it an admin or management key without core changes."
-        },
-        "reports": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/FactMember"
-          },
-          "description": "Members unavailable while this source secret is absent."
-        }
-      },
-      "required": [
-        "labels",
-        "reports"
-      ],
-      "description": "A source declares which members need its separate administrative credential."
     },
     "FactMember": {
       "oneOf": [

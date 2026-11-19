@@ -99,18 +99,6 @@ impl CopyCommand {
         self.id
     }
 
-    pub(crate) fn matches_receipt(&self, row: &CommandRow) -> Result<bool, EngineError> {
-        Ok(row.id == self.id
-            && row.kind == "mcp.import"
-            && crate::jobs::command_identity::canonical(
-                row.id,
-                row.machine_id,
-                row.serial_key(),
-                &row.kind,
-                &row.body,
-            )? == self.canonical)
-    }
-
     pub(super) async fn completed(&self, conn: &mut Conn) -> Result<bool, EngineError> {
         let Some(stored) = orch_db::queries::link::command_with_authority(conn, self.id).await?
         else {
@@ -123,17 +111,11 @@ impl CopyCommand {
                 )
                 .is_err()
             })
+            || stored.authority
+                != Some(serde_json::to_value(
+                    crate::commands::CommandAuthority::mcp_import(self.clone()),
+                )?)
         {
-            return Ok(false);
-        }
-        let Some(value) = stored.authority else {
-            return Ok(false);
-        };
-        let actual: crate::commands::CommandAuthority = serde_json::from_value(value)?;
-        if !actual.matches_native_receipt(
-            &crate::commands::CommandAuthority::mcp_import(self.clone()),
-            &stored.command,
-        )? {
             return Ok(false);
         }
         Ok(crate::jobs::command_identity::canonical(

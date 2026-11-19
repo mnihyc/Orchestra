@@ -79,9 +79,6 @@ pub struct PersonNotifyBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChatPersonGrantBody {
-    /// Optional validated composer context for this explicit grant, recorded with its server actor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_origin: Option<orch_access_contract::audit::LinkOrigin>,
     /// View or participate, as offered for this chat.
     pub choice: crate::access::AccessChoice,
     /// Tell the person in the same transaction as the grant.
@@ -108,9 +105,6 @@ pub struct PersonNotifyContext {
 /// What a notification is about. Who receives each kind is a rule of the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum NotificationKind {
-    /// An administrator's accepted message; always in the Inbox, optional on external channels.
-    #[serde(rename = "admin_message")]
-    AdminMessage,
     /// One scheduled occurrence could not start under its author's current authority.
     #[serde(rename = "schedule.cannot_start")]
     ScheduleCannotStart,
@@ -456,27 +450,6 @@ pub struct NotificationRouteLink {
     pub url: String,
     /// When it stops being good.
     pub expires_at: Time,
-}
-
-/// An accepted link generation without a readable current link secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct NotificationRouteLinkReceipt {
-    /// No existing link secret is included.
-    pub projection: crate::common::ReceiptProjection,
-    /// Actual native route of this accepted link generation.
-    pub route_id: Id,
-    /// When this accepted generation expires.
-    pub expires_at: Time,
-}
-crate::common::full_or_receipt! {
-    /// The generated/readable current native link or its accepted identity receipt.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum NotificationRouteLinkResponse {
-        /// Existing original URL/expiry shape.
-        Full(NotificationRouteLink),
-        /// No secret is recovered, rotated or disclosed.
-        Receipt(NotificationRouteLinkReceipt),
-    }
 }
 
 /// How a route fared when it last sent.
@@ -1243,26 +1216,13 @@ crate::endpoints! {
             },
         ]);
     /// Sets up a channel of the system: its mail server, its bot, a webhook, push. A system admin.
-    AdminNotificationChannelCreate: POST "/admin/notification-channels", Session, none, json NotificationChannelCreateBody, json NotificationChannelUpdateResponse, 200,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Identity(I::System)],Target::System),
-            Facet::response_content(&[Identity(I::System)],Target::System),
-            Facet::response_content(&[Identity(I::Account)],Target::ResolvedCollection("channel_caller_routes")),
-        ]));
+    AdminNotificationChannelCreate: POST "/admin/notification-channels", Session, none, json NotificationChannelCreateBody, json NotificationChannel, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Sets up a channel of a root org, for its members; a second mail server or bot is refused.
-    OrgNotificationChannelCreate: POST "/orgs/{id}/notification-channels", Permission("settings.manage"), none, json NotificationChannelCreateBody, json NotificationChannelUpdateResponse, 200,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Object(K::Org)],Target::PermissionObject),
-            Facet::response_content(&[Object(K::Org)],Target::PermissionObject),
-            Facet::response_content(&[Identity(I::Account)],Target::ResolvedCollection("channel_caller_routes")),
-        ]));
+    OrgNotificationChannelCreate: POST "/orgs/{id}/notification-channels", Permission("settings.manage"), none, json NotificationChannelCreateBody, json NotificationChannel, 200;
     /// Sets up a webhook of the caller's own.
-    MeNotificationChannelCreate: POST "/me/notification-channels", User, none, json MeNotificationChannelCreateBody, json NotificationChannelUpdateResponse, 200,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Identity(I::Account)],Target::CurrentAccount),
-            Facet::response_content(&[Identity(I::Account)],Target::CurrentAccount),
-            Facet::response_content(&[Identity(I::Account)],Target::ResolvedCollection("channel_caller_routes")),
-        ]));
+    MeNotificationChannelCreate: POST "/me/notification-channels", User, none, json MeNotificationChannelCreateBody, json NotificationChannel, 200,
+        operation Op::returning(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Changes a channel.
     NotificationChannelUpdate: PATCH "/notification-channels/{id}", Rule("whoever may set that channel up: a system admin for the system's, settings.manage on the root org for an org's, its person for their own"), none, json NotificationChannelUpdateBody, json NotificationChannelUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -1288,16 +1248,15 @@ crate::endpoints! {
     MeNotificationRouteSet: PUT "/me/notification-routes/{channel_id}", User, none, json MeNotificationRouteSetBody, json NotificationRoute, 200,
         operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Makes the link that opens a bot with a code, good for ten minutes, for a channel whose notifier links.
-    MeNotificationRouteLinkCreate: POST "/me/notification-routes/{channel_id}/link", User, none, none, json NotificationRouteLinkResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::CurrentAccount));
+    MeNotificationRouteLinkCreate: POST "/me/notification-routes/{channel_id}/link", User, none, none, json NotificationRouteLink, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Switches the caller's route off and unlinks it.
     MeNotificationRouteDelete: DELETE "/me/notification-routes/{channel_id}", User, none, none, none, 204,
         operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the destinations of a node.
     NodeDestinationList: GET "/nodes/{id}/destinations", Permission("settings.manage"), none, none, json Vec<Destination>, 200;
     /// Sets up a destination at a node, which is an org at any level, a project or a topic.
-    NodeDestinationCreate: POST "/nodes/{id}/destinations", Permission("settings.manage"), none, json NodeDestinationCreateBody, json DestinationUpdateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::PermissionObject));
+    NodeDestinationCreate: POST "/nodes/{id}/destinations", Permission("settings.manage"), none, json NodeDestinationCreateBody, json Destination, 200;
     /// Changes a destination.
     DestinationUpdate: PATCH "/destinations/{id}", Rule("settings.manage on its node"), none, json DestinationUpdateBody, json DestinationUpdateResponse, 200,
         operation Op::receipt(&Op::returning(

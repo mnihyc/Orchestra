@@ -504,17 +504,7 @@ mod tests {
     fn codex_keeps_the_interface_and_cases_its_adapter_was_written_against() {
         let codex = Programs::builtin().program("codex").unwrap();
         let probe = codex.checks.interface.as_ref().unwrap();
-        assert_eq!(probe.needs.len(), 74);
-        for name in [
-            "thread/environment/connected",
-            "thread/environment/disconnected",
-            "model/safetyBuffering/updated",
-            "thread/goal/updated",
-            "thread/goal/cleared",
-            "thread/goal/get",
-        ] {
-            assert!(probe.needs.iter().any(|need| need.name == name));
-        }
+        assert_eq!(probe.needs.len(), 54);
         assert_eq!(
             codex
                 .checks

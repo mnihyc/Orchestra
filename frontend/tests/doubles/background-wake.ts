@@ -7,7 +7,8 @@ export function backgroundWork(more: Partial<BackgroundWork> = {}): BackgroundWo
 }
 
 export function backgroundWake(more: Partial<BackgroundWakeStatus> = {}): BackgroundWakeStatus {
-  return { setting: true, effective: true, refresh_deferred: false, tasks: [backgroundWork()], held_completions: 0, ...more };
+  return { setting: true, effective: true, refresh_deferred: false, tasks: [backgroundWork()], held_completions: 0,
+    waiting_author: null, waiting_running: 0, ...more };
 }
 
 export function wakeCause(more: Partial<BackgroundTask> = {}): BackgroundTask {

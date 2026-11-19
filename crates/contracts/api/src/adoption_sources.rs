@@ -226,24 +226,3 @@ pub const ADOPT: Declaration<Source> = Declaration {
         },
     ],
 };
-
-/// Retry admission and independent optional native header publication.
-pub const RETRY: Declaration<Source> = Declaration {
-    operation: "ThreadAdoptRetryHistory",
-    bindings: &[
-        RETRY_PREPARATION.bindings[0],
-        RETRY_PREPARATION.bindings[1],
-        Binding {
-            source: Source::RetainedThread,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::Header,
-            target: TargetResolver::ResolvedCollection("retried_thread_content"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};

@@ -156,7 +156,7 @@ try {
     if (-not $machine) { $machine = $env:PROCESSOR_ARCHITECTURE }
     switch ($machine) {
         'AMD64' { $Arch = 'x86_64' }
-        'ARM64' { $Arch = 'aarch64' }
+        'ARM64' { $Arch = 'x86_64' }
         default { throw "no connector is made for a $machine processor" }
     }
     if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: the connector is installed for a person, in their profile' }
@@ -189,8 +189,12 @@ try {
         throw "release $($manifest.version) lists no SHA-256 for the connector, which this installer checks; it is older than this installer"
     }
 
-    # Windows on ARM64 has a native connector of its own. An x64 PowerShell on ARM64 reports AMD64, so it gets
-    # the x86-64 connector, which Windows runs through emulation; the build chosen is the one named below.
+    # An x64 PowerShell can itself be emulated, so it may not identify the native ARM64 machine.
+    if ($PSUICulture -like 'zh*') {
+        Say '正在安装 x86-64 连接器；Windows 11 在 ARM64 上通过模拟运行它。'
+    } else {
+        Say 'Installing the x86-64 connector; Windows 11 on ARM64 runs it through emulation.'
+    }
     Say "Downloading the connector $($manifest.version) for Windows on $Arch"
     $download = Join-Path $Work 'orch-connector.exe'
     Invoke-WebRequest -Uri "$Url$wanted" -OutFile $download -MaximumRedirection 0 -UseBasicParsing

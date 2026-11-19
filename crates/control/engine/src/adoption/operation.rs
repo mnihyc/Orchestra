@@ -48,7 +48,9 @@ const ENVIRONMENT: KeyTargetKind = KeyTargetKind::Object(ObjectKind::Environment
 const THREAD: KeyTargetKind = KeyTargetKind::Object(ObjectKind::Thread);
 
 /// A known original preparation source closed; absence never becomes ordinary work.
-pub use crate::harnesses::preparation::Ended as PreparationEnded;
+#[derive(Debug, thiserror::Error)]
+#[error("the original adoption preparation no longer permits this work")]
+pub struct PreparationEnded;
 fn engine(error: Error) -> EngineError {
     match error {
         Error::Refused | Error::Binding(crate::operation_scope::BindingError::Refused) => {
@@ -121,6 +123,12 @@ fn present_retained<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<RetainedHistory>, D::Error> {
     RetainedHistory::deserialize(deserializer).map(Some)
+}
+/// Missing old native provenance is absence; an explicitly present null is malformed.
+pub(crate) fn present_preparation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Preparation>, D::Error> {
+    Preparation::deserialize(deserializer).map(Some)
 }
 
 impl std::fmt::Debug for Preparation {
@@ -197,6 +205,12 @@ impl Preparation {
     pub(crate) fn without_transport(mut self) -> Self {
         self.transport = None;
         self
+    }
+    /// A retained setup plan may reuse only the same actual request's in-memory transport.
+    pub(crate) fn attach_transport(&mut self, current: &Self) {
+        if self == current {
+            self.transport = current.transport.clone();
+        }
     }
     /// Only a genuine recorded browser Session supplies this policy input.
     pub(crate) fn browser_session(&self) -> Option<Id> {
@@ -348,90 +362,29 @@ impl Preparation {
             tx.commit().await.map_err(DbError::from)?;
             return Ok(command);
         }
-        let authority = self
-            .command_on(&mut tx, engine.inner.clock.as_ref(), key, &command)
-            .await?;
-        tx.commit().await.map_err(DbError::from)?;
-        command.authority = Some(authority);
-
-        Ok(command)
-    }
-
-    async fn command_on(
-        &self,
-        conn: &mut Conn,
-        clock: &dyn Clock,
-        key: HarnessKey,
-        command: &Outgoing,
-    ) -> Result<CommandAuthority, EngineError> {
-        let native = NativeCommand::from_outgoing(command);
         let check = self
-            .checkpoint_for(conn, clock, key, Some(native.clone()))
+            .checkpoint_for(
+                &mut tx,
+                engine.inner.clock.as_ref(),
+                key,
+                Some(native.clone()),
+            )
             .await
             .map_err(engine_error)?;
-        let request = self.accepted_at(&check)?.without_transport();
-        check.check(clock)?;
-        Ok(CommandAuthority::adoption_preparation(CommandEvidence {
-            request,
+        let mut request = self.clone();
+        request.origin =
+            CapturedOperation::capture(&check.caller).map_err(EngineError::unreadable)?;
+        request.http_until = minimum(request.http_until, check.until);
+        check.check(engine.inner.clock.as_ref())?;
+        tx.commit().await.map_err(DbError::from)?;
+        command.authority = Some(CommandAuthority::adoption_preparation(CommandEvidence {
+            request: request.without_transport(),
             key,
             command: native,
-        }))
+        }));
+        Ok(command)
     }
 }
-impl crate::harnesses::preparation::Source for Preparation {
-    fn origin(&self) -> &CapturedOperation {
-        &self.origin
-    }
-    fn until(&self) -> Option<Time> {
-        self.http_until
-    }
-    fn checkpoint<'a>(
-        &'a self,
-        conn: &'a mut Conn,
-        clock: &'a dyn Clock,
-        target: crate::harnesses::preparation::Target,
-    ) -> BoxFuture<'a, Result<crate::harnesses::preparation::Checkpoint, EngineError>> {
-        Box::pin(async move {
-            let crate::harnesses::preparation::Target::Harness(key) = target else {
-                return Err(EngineError::BeforeEffect(Box::new(PreparationEnded)));
-            };
-            let check = Preparation::checkpoint(self, conn, clock, key).await?;
-            Ok(crate::harnesses::preparation::Checkpoint::from_check(
-                check.caller.clone(),
-                check.until,
-                Box::new(move |clock| check.check(clock)),
-            ))
-        })
-    }
-    fn accepted(
-        &self,
-        origin: CapturedOperation,
-        until: Option<Time>,
-    ) -> Result<Arc<dyn crate::harnesses::preparation::Source>, EngineError> {
-        if origin.user() != self.origin.user() || origin.operation() != self.origin.operation() {
-            return Err(EngineError::BeforeEffect(Box::new(PreparationEnded)));
-        }
-        let mut request = self.clone();
-        request.origin = origin;
-        request.http_until = minimum(request.http_until, until);
-        Ok(Arc::new(request))
-    }
-    fn command<'a>(
-        &'a self,
-        conn: &'a mut Conn,
-        clock: &'a dyn Clock,
-        target: crate::harnesses::preparation::Target,
-        command: &'a Outgoing,
-    ) -> BoxFuture<'a, Result<CommandAuthority, EngineError>> {
-        Box::pin(async move {
-            let crate::harnesses::preparation::Target::Harness(key) = target else {
-                return Err(EngineError::BeforeEffect(Box::new(PreparationEnded)));
-            };
-            self.command_on(conn, clock, key, command).await
-        })
-    }
-}
-
 fn engine_error(error: Error) -> EngineError {
     engine(error)
 }
@@ -444,7 +397,7 @@ pub struct Checkpoint {
     transport: Option<BeforeTransport>,
 }
 /// The exact raw HTTP deadline check, supplied by that request's shared bridge.
-pub use crate::harnesses::preparation::BeforeEffect as BeforeTransport;
+pub type BeforeTransport = Box<dyn FnOnce() -> Result<(), EngineError> + Send>;
 impl Checkpoint {
     /// Accept only an actual preparation Frame of this closed native source family.
     pub fn from_frame<E: Entry>(
@@ -558,7 +511,7 @@ pub async fn retry_history_facts(
     if !retained
         .current(conn)
         .await
-        .map_err(EngineError::unreadable)?
+        .map_err(|error| EngineError::unreadable(error))?
     {
         return Err(EngineError::BeforeEffect(Box::new(PreparationEnded)));
     }

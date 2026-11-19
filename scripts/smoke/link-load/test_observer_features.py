@@ -27,7 +27,7 @@ class ObserverFeatures(unittest.TestCase):
             ('crates/platform/link/src/machine.rs', ['observed_inputs']),
             ('crates/platform/link/src/commands.rs', ['observed']),
             ('crates/platform/link/src/tunnels/terminal.rs', ['observed']),
-            ('crates/control/api/base/src/backplane.rs', ['terminal_observed']),
+            ('crates/control/api/src/backplane.rs', ['terminal_observed']),
         ]:
             source = (ROOT / path).read_text()
             for field in fields:
@@ -42,21 +42,7 @@ class ObserverFeatures(unittest.TestCase):
             self.assertIn('test-observers', package['features'])
         self.assertEqual(link['features']['test-observers'], ['dep:sha2'])
         self.assertTrue(link['dependencies']['sha2']['optional'])
-        workspace = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['dependencies']
-        backend_names = sorted(name for name in api['dependencies']
-            if isinstance(workspace.get(name), dict)
-            and workspace[name].get('path', '').startswith('crates/control/api/'))
-        self.assertIn('orch-api-base', backend_names)
-        self.assertEqual(sorted(api['features']['test-observers']),
-            sorted(['orch-link/test-observers', *(name + '/test-observers' for name in backend_names)]))
-        for name in backend_names:
-            backend = manifest(workspace[name]['path'])
-            self.assertEqual(backend['features']['default'], [])
-            expected = ['orch-link/test-observers']
-            if name != 'orch-api-base':
-                expected.append('orch-api-base/test-observers')
-            self.assertEqual(backend['features']['test-observers'], expected)
-            self.assertNotIn('test-observers', backend['dependencies']['orch-link'].get('features', []))
+        self.assertEqual(api['features']['test-observers'], ['orch-link/test-observers'])
         self.assertEqual(gateway['features']['test-observers'],
             ['orch-link/test-observers', 'orch-api-core/test-observers'])
         self.assertNotIn('orch-api-core', gateway['dependencies'])

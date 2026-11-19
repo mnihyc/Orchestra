@@ -64,13 +64,10 @@ pub enum Request {
         from: Option<String>,
         /// The console's selected place; the command uses the name and harness alone.
         place: Option<String>,
-        /// An explicit valid resource name; the original native name is retained as origin.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_name: Option<String>,
     },
-    /// Forgets the recorded imported resource and its copy, using the current machine owner's authority.
+    /// Deletes the copy of the tool server called `name`, from the harness `from` where several have one.
     McpForget {
-        /// Its resource alias, original configured name, or exact identifier.
+        /// The server's name in the harness's configuration.
         name: String,
         /// The harness kind.
         from: Option<String>,
@@ -332,14 +329,8 @@ impl LocalState {
             Request::McpList => Reply::Mcp {
                 servers: self.servers().await,
             },
-            Request::McpImport {
-                name,
-                from,
-                place,
-                as_name,
-            } => {
-                self.import(&name, from.as_deref(), place.as_deref(), as_name)
-                    .await
+            Request::McpImport { name, from, place } => {
+                self.import(&name, from.as_deref(), place.as_deref()).await
             }
             Request::McpForget { name, from } => self.forget(&name, from.as_deref()).await,
             Request::Activity { limit } => Reply::Activity {
@@ -516,13 +507,7 @@ impl LocalState {
             .collect()
     }
 
-    async fn import(
-        &self,
-        name: &str,
-        from: Option<&str>,
-        place: Option<&str>,
-        as_name: Option<String>,
-    ) -> Reply {
+    async fn import(&self, name: &str, from: Option<&str>, place: Option<&str>) -> Reply {
         let Some(role) = &self.environments else {
             return Reply::Error {
                 message:
@@ -567,7 +552,6 @@ impl LocalState {
                 }
             },
             directory: found.directory,
-            as_name,
         };
         match self.link.import_mcp(request).await {
             Ok(answer) if answer.code.is_none() && answer.server_id.is_some() => Reply::Done {
@@ -587,27 +571,42 @@ impl LocalState {
     }
 
     async fn forget(&self, name: &str, from: Option<&str>) -> Reply {
-        let request = orch_link_contract::mcp_import::McpForgetAsk {
-            request_id: orch_types::new_id(),
-            forget: orch_link_contract::mcp_import::McpForgetSelection {
-                name: name.to_owned(),
-                from: from.map(str::to_owned),
-            },
+        let Some(role) = &self.environments else {
+            return Reply::Error {
+                message: "this machine plays no environment role, so it keeps no tool servers"
+                    .to_owned(),
+            };
         };
-        match self.link.import_mcp(request).await {
-            Ok(answer) if answer.code.is_none() && answer.server_id.is_some() => Reply::Done {
-                said: answer.detail,
-            },
-            Ok(answer) => Reply::Error {
-                message: format!(
-                    "{}: {}",
-                    answer.code.as_deref().unwrap_or("unconfirmed"),
-                    answer.detail
-                ),
-            },
-            Err(error) => Reply::Error {
-                message: error.to_string(),
-            },
+        let roots: Vec<String> = role
+            .host()
+            .environments()
+            .iter()
+            .map(|environment| environment.facts().workspace_root)
+            .collect();
+        let found: Vec<_> = role
+            .imports()
+            .found(&roots)
+            .await
+            .into_iter()
+            .filter(|found| found.name == name && from.is_none_or(|from| found.source == from))
+            .collect();
+        let copies = copies(&self.data_dir);
+        let mut forgotten = 0;
+        for server in &found {
+            for (id, digest) in &copies {
+                if *digest == server.digest && role.host().mcp_forget(*id).is_ok() {
+                    forgotten += 1;
+                }
+            }
+        }
+        if forgotten == 0 {
+            Reply::Error {
+                message: format!("no copy of a tool server called {name} is kept here"),
+            }
+        } else {
+            Reply::Done {
+                said: format!("The copy of {name} is forgotten; Orch no longer starts it here."),
+            }
         }
     }
 }
@@ -800,10 +799,7 @@ where
 
 /// Asks the connector running on `data_dir` one thing.
 pub async fn ask(data_dir: &Path, request: &Request) -> Result<Reply, LocalError> {
-    let limit = if matches!(
-        request,
-        Request::McpImport { .. } | Request::McpForget { .. }
-    ) {
+    let limit = if matches!(request, Request::McpImport { .. }) {
         Duration::from_secs(orch_link_contract::mcp_import::ANSWER_WITHIN_SECS) + ANSWER_LIMIT
     } else {
         ANSWER_LIMIT
@@ -914,21 +910,6 @@ mod tests {
 
     #[test]
     fn requests_and_answers_are_one_line_of_json_each() {
-        let older: Request = serde_json::from_str(
-            r#"{"op":"mcp_import","name":"native:name","from":null,"place":null}"#,
-        )
-        .unwrap();
-        assert!(matches!(older, Request::McpImport { as_name: None, .. }));
-        let named = Request::McpImport {
-            name: "native:name".into(),
-            from: None,
-            place: None,
-            as_name: Some("valid-name".into()),
-        };
-        assert_eq!(
-            serde_json::from_str::<Request>(&serde_json::to_string(&named).unwrap()).unwrap(),
-            named
-        );
         let request = Request::McpForget {
             name: "files".to_owned(),
             from: Some("codex".to_owned()),

@@ -701,25 +701,19 @@ pub async fn find_entry_for_share(
 ) -> Result<Option<EntryRow>, DbError> {
     find_entry_for_share_selected(
         conn,
-        ShareEntryLookup {
-            page,
-            profile,
-            permission,
-            holder_kind,
-            holder_id,
-            holder_role,
-            share_inside,
-            by: None,
-        },
+        page,
+        profile,
+        permission,
+        holder_kind,
+        holder_id,
+        holder_role,
+        share_inside,
+        None,
     )
     .await
 }
 
 /// The independently retained contribution of this giver. Human entries keep their ordinary identity.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "grant and reconciliation callers supply independent permission, holder, reach and giver selectors"
-)]
 pub async fn find_entry_for_share_by(
     conn: &mut Conn,
     page: &PageKey,
@@ -733,36 +727,6 @@ pub async fn find_entry_for_share_by(
 ) -> Result<Option<EntryRow>, DbError> {
     find_entry_for_share_selected(
         conn,
-        ShareEntryLookup {
-            page,
-            profile,
-            permission,
-            holder_kind,
-            holder_id,
-            holder_role,
-            share_inside,
-            by: Some(by),
-        },
-    )
-    .await
-}
-
-struct ShareEntryLookup<'a> {
-    page: &'a PageKey,
-    profile: &'a str,
-    permission: &'a str,
-    holder_kind: &'a str,
-    holder_id: Option<Id>,
-    holder_role: Option<&'a str>,
-    share_inside: Option<bool>,
-    by: Option<Option<Id>>,
-}
-
-async fn find_entry_for_share_selected(
-    conn: &mut Conn,
-    selection: ShareEntryLookup<'_>,
-) -> Result<Option<EntryRow>, DbError> {
-    let ShareEntryLookup {
         page,
         profile,
         permission,
@@ -770,8 +734,22 @@ async fn find_entry_for_share_selected(
         holder_id,
         holder_role,
         share_inside,
-        by,
-    } = selection;
+        Some(by),
+    )
+    .await
+}
+
+async fn find_entry_for_share_selected(
+    conn: &mut Conn,
+    page: &PageKey,
+    profile: &str,
+    permission: &str,
+    holder_kind: &str,
+    holder_id: Option<Id>,
+    holder_role: Option<&str>,
+    share_inside: Option<bool>,
+    by: Option<Option<Id>>,
+) -> Result<Option<EntryRow>, DbError> {
     Ok(sqlx::query_as(concat!(
         "SELECT ",
         entry_columns!(),
@@ -1143,42 +1121,6 @@ pub async fn group_edge_allowed(conn: &mut Conn, outer: Id, inner: Id) -> Result
         .bind(outer).bind(inner).fetch_one(conn).await?)
 }
 
-/// Serialize a direct-holder writer with the actual group revision it will change.
-pub async fn lock_group(conn: &mut Conn, group: Id) -> Result<Option<i64>, DbError> {
-    Ok(
-        sqlx::query_scalar("SELECT revision FROM groups WHERE id=$1 FOR UPDATE")
-            .bind(group)
-            .fetch_optional(conn)
-            .await?,
-    )
-}
-
-async fn touch_group(conn: &mut Conn, group: Id) -> Result<(), DbError> {
-    sqlx::query("UPDATE groups SET revision=revision+1 WHERE id=$1")
-        .bind(group)
-        .execute(conn)
-        .await?;
-    Ok(())
-}
-
-async fn insert_group_holder(
-    conn: &mut Conn,
-    group: Id,
-    holder: &GroupHolderRow,
-    by: Id,
-    at: DateTime<Utc>,
-) -> Result<bool, DbError> {
-    lock_group(conn, group).await?;
-    let changed = sqlx::query("INSERT INTO group_members (group_id, user_id, member_group_id, member_node_id, member_org_id, member_role, added_by, added_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
-        .bind(group).bind(holder.user_id).bind(holder.member_group_id).bind(holder.member_node_id).bind(holder.member_org_id)
-        .bind(&holder.member_role).bind(by).bind(at).execute(&mut *conn).await?.rows_affected() > 0;
-    if !changed {
-        touch_group(conn, group).await?;
-    }
-    Ok(changed)
-}
-
 /// Adds an exact holder identity; a duplicate is harmless.
 pub async fn add_group_holder(
     conn: &mut Conn,
@@ -1187,7 +1129,10 @@ pub async fn add_group_holder(
     by: Id,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    insert_group_holder(conn, group, holder, by, at).await?;
+    sqlx::query("INSERT INTO group_members (group_id, user_id, member_group_id, member_node_id, member_org_id, member_role, added_by, added_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
+        .bind(group).bind(holder.user_id).bind(holder.member_group_id).bind(holder.member_node_id).bind(holder.member_org_id)
+        .bind(&holder.member_role).bind(by).bind(at).execute(conn).await?;
     Ok(())
 }
 
@@ -1197,16 +1142,11 @@ pub async fn remove_group_holder(
     group: Id,
     holder: &GroupHolderRow,
 ) -> Result<bool, DbError> {
-    lock_group(conn, group).await?;
-    let changed = sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id IS NOT DISTINCT FROM $2::uuid
+    Ok(sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id IS NOT DISTINCT FROM $2::uuid
         AND member_group_id IS NOT DISTINCT FROM $3::uuid AND member_node_id IS NOT DISTINCT FROM $4::uuid
         AND member_org_id IS NOT DISTINCT FROM $5::uuid AND member_role IS NOT DISTINCT FROM $6::text")
         .bind(group).bind(holder.user_id).bind(holder.member_group_id).bind(holder.member_node_id).bind(holder.member_org_id)
-        .bind(&holder.member_role).execute(&mut *conn).await?.rows_affected() > 0;
-    if !changed {
-        touch_group(conn, group).await?;
-    }
-    Ok(changed)
+        .bind(&holder.member_role).execute(conn).await?.rows_affected() > 0)
 }
 
 /// One holder source to expand completely for private notification delivery.
@@ -1415,8 +1355,6 @@ pub async fn entries_by_id(conn: &mut Conn, ids: &[Id]) -> Result<Vec<EntryRow>,
 pub struct GroupFull {
     /// The group.
     pub id: Id,
-    /// Advances with row and direct-holder changes.
-    pub revision: i64,
     /// The org that keeps it.
     pub org_id: Id,
     /// The root org of that org.
@@ -1431,7 +1369,7 @@ pub struct GroupFull {
 
 macro_rules! group_columns {
     () => {
-        "g.id, g.revision, g.org_id, n.org_id AS root_id, g.name, g.description,
+        "g.id, g.org_id, n.org_id AS root_id, g.name, g.description,
          (SELECT count(*) FROM group_members m WHERE m.group_id = g.id) AS member_count"
     };
 }
@@ -1797,36 +1735,27 @@ pub async fn add_group_member(
     by: Id,
     at: DateTime<Utc>,
 ) -> Result<bool, DbError> {
-    insert_group_holder(
-        conn,
-        group,
-        &GroupHolderRow {
-            user_id: Some(user),
-            member_group_id: None,
-            member_node_id: None,
-            member_org_id: None,
-            member_role: None,
-        },
-        by,
-        at,
+    let done = sqlx::query(
+        "INSERT INTO group_members (group_id, user_id, added_by, added_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING",
     )
-    .await
+    .bind(group)
+    .bind(user)
+    .bind(by)
+    .bind(at)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Takes `user` out of a group; the answer says whether they were in it.
 pub async fn remove_group_member(conn: &mut Conn, group: Id, user: Id) -> Result<bool, DbError> {
-    remove_group_holder(
-        conn,
-        group,
-        &GroupHolderRow {
-            user_id: Some(user),
-            member_group_id: None,
-            member_node_id: None,
-            member_org_id: None,
-            member_role: None,
-        },
-    )
-    .await
+    let done = sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id = $2")
+        .bind(group)
+        .bind(user)
+        .execute(conn)
+        .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Whether `user` is named in the Owners row of the node `node`, themselves
@@ -1871,10 +1800,6 @@ pub struct MemberRow {
     pub is_owner: bool,
     /// Since when they have been a member.
     pub since: DateTime<Utc>,
-    /// The exact joining terms acknowledged by this member, when any were required.
-    pub terms_hash: Option<String>,
-    /// When that acknowledgement was committed with membership.
-    pub terms_accepted_at: Option<DateTime<Utc>>,
     /// How many roles they hold by name in the tree, besides the one at
     /// their domain.
     pub also: i64,
@@ -1902,7 +1827,7 @@ macro_rules! member_select {
                            AND ((e.holder_kind = 'user' AND e.holder_id = m.user_id)
                                 OR (e.holder_kind = 'group' AND EXISTS (
                                       SELECT 1 FROM group_members gm WHERE gm.group_id = e.holder_id AND gm.user_id = m.user_id)))) AS is_owner,
-                m.joined_at AS since, m.terms_hash, m.terms_accepted_at,
+                m.joined_at AS since,
                 (SELECT count(*) FROM node_roles r JOIN nodes rn ON rn.id = r.node_id
                   WHERE r.subject_kind = 'user' AND r.subject_id = m.user_id AND r.removed_at IS NULL
                     AND r.node_id <> m.domain_id AND rn.org_id = m.org_id
@@ -3079,8 +3004,8 @@ pub mod everything {
     ) -> Result<Vec<AuditRow>, DbError> {
         let actions: Option<Vec<String>> = filter.actions.map(<[String]>::to_vec);
         Ok(sqlx::query_as(
-            concat!("SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.history, a.override, a.object_kind,
-                    a.object_id, a.node_id, a.summary, ", crate::queries::upload_history::details!("0", "2"), " AS details, host(a.ip) AS ip
+            "SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.history, a.override, a.object_kind,
+                    a.object_id, a.node_id, a.summary, a.details, host(a.ip) AS ip
                FROM audit_log a
               WHERE a.history
                 AND (a.object_id = $1 OR a.details -> 'object' ->> 'id' = $1::text
@@ -3097,7 +3022,7 @@ pub mod everything {
                                  WHERE p = $6 OR starts_with(p, $6 || '/')))
                 AND ($7::uuid IS NULL OR (a.at, a.id) < ($8, $7))
               ORDER BY a.at DESC, a.id DESC
-              LIMIT $9"),
+              LIMIT $9",
         )
         .bind(id)
         .bind(environment)
@@ -4408,8 +4333,6 @@ mod tests {
                     subject_role: None,
                     split: caps::split::SHARED,
                     models: &[],
-                    services: &[],
-                    purposes: &[],
                     tiers: &[],
                     harness_kinds: &[],
                     meter: caps::meter::TOKENS,

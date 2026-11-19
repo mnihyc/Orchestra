@@ -15,7 +15,6 @@ import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/
 
 import { ApiError, api, client, done, ok, repeatable } from '@/api/client';
 import { threadGatewayQuery } from '@/api/gateways';
-import { seedPendingAgentSchedules } from '@/api/inputSchedules';
 import { applyThread, isCompleteThread } from '@/api/cache';
 import { queryClient } from '@/api/query';
 import { settingsKey } from '@/api/settings';
@@ -26,7 +25,6 @@ export { captureThreadRead, isCurrentThreadRead, selectThreadContinuation, threa
 import type {
   Catchup,
   ContentPart,
-  NativeInvocation,
   CreateThread,
   Delivery,
   Draft,
@@ -94,12 +92,10 @@ export function hydrateThreadOpening(cache: QueryClient, opening: ThreadOpening,
   } else if (gateway?.status === 'failed') {
     cache.getQueryCache().build(cache, { queryKey: threadGatewayQuery(id, opening.sync.thread.execution_revision).queryKey }).setState({
       data: undefined, status: 'error', fetchStatus: 'idle',
-      error: new ApiError(gateway.problem, gateway.retry_after === null ? null : new Date(Date.now() + gateway.retry_after * 1000)),
+      error: new ApiError(gateway.problem, gateway.retry_after === null || gateway.retry_after === undefined ? null : new Date(Date.now() + gateway.retry_after * 1000)),
     });
   }
   if (opening.sync.projection === undefined || opening.sync.projection === null || opening.sync.projection.follows_active) {
-    seedPendingAgentSchedules(cache, id, opening.sync.thread.topic_id,
-      'pending_agent_schedules' in opening ? opening.pending_agent_schedules : undefined);
     applyThread(cache, opening.sync.thread);
   }
 }
@@ -471,8 +467,8 @@ export const draftQuery = (id: string) =>
     staleTime: Infinity,
   });
 
-export function saveDraft(id: string, content: ContentPart[], delivery: Delivery, nativeAction?: NativeInvocation | null): Promise<Draft> {
-  return ok(api.PUT('/threads/{id}/draft', { params: { path: { id } }, body: { content, delivery, ...(nativeAction === undefined ? {} : { native_action: nativeAction }) } }));
+export function saveDraft(id: string, content: ContentPart[], delivery: Delivery): Promise<Draft> {
+  return ok(api.PUT('/threads/{id}/draft', { params: { path: { id } }, body: { content, delivery } }));
 }
 
 export function deleteDraft(id: string): Promise<void> {
@@ -509,7 +505,7 @@ export function setThreadSetting(id: string, key: string, body: NodeSettingSetBo
 }
 
 /** Gives the title or the description back to automation. */
-export function resumeAutomatic(id: string, field: 'title' | 'tags', action: 'resume' | 'refresh' = 'resume'): Promise<Thread> {
+export function resumeAutomatic(id: string, field: 'title' | 'description', action: 'resume' | 'refresh' = 'resume'): Promise<Thread> {
   return ok(api.POST('/nodes/{id}/auto', { params: { path: { id } }, body: { field, action } })).then((node) => {
     if (node.kind !== 'thread') throw new Error('the node is not a thread');
     return node;

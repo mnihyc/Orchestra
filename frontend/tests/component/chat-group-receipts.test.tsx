@@ -1,10 +1,10 @@
 /** Group acknowledgements finish committed acts without fake rows or replaying earlier additions. */
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import type * as Chats from '@/api/chats';
-import { ApiError, client, ReceiptAcknowledged } from '@/api/client';
+import { ApiError, ReceiptAcknowledged } from '@/api/client';
 import { GroupMenu } from '@/features/chat/GroupMenu';
 import type { UserRef } from '@/generated/api-types';
 import type * as ChatStore from '@/realtime/stores/chat';
@@ -24,8 +24,7 @@ vi.mock('@/features/chat/NewChat', () => ({
 vi.mock('@/realtime/stores/chat', async (load) => ({ ...await load<typeof ChatStore>(), refreshChat: vi.fn() }));
 vi.mock('@/ui/Toast', async (load) => ({ ...await load<typeof ToastModule>(), toast: vi.fn() }));
 
-const row = () => chat({ kind: 'group', node: null, name: 'Current group', members: [ADA], managers: [ADA.id], created_by: ADA, can: { ...chat().can, manage: true } });
-const session = client.session.getState();
+const row = () => chat({ kind: 'group', node: null, name: 'Current group', members: [ADA], created_by: ADA });
 const receipt = () => new ReceiptAcknowledged({ projection: 'receipt', chat_id: row().id }, 200, 'group-accepted');
 const refused = () => new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', title: 'Forbidden', status: 403, detail: 'The current membership rule refused this addition.', request_id: 'group-refused' }, null);
 function acceptedNotice(): void { expect(toast).toHaveBeenCalledExactlyOnceWith({ tone: 'info', title: i18n.t('ui.receipt.title'), description: i18n.t('ui.receipt.accepted') }); }
@@ -36,8 +35,8 @@ async function open(which: 'rename' | 'add') {
   await user.click(screen.getByRole('menuitem', { name: i18n.t(which === 'rename' ? 'chat.group.rename' : 'chat.group.add') }));
   return user;
 }
-beforeEach(async () => { await setLocale('en'); requests.rename.mockReset(); requests.add.mockReset(); vi.mocked(toast).mockClear(); vi.mocked(refreshChat).mockClear(); client.session.setState({ userId: ADA.id, readerVersion: 701 }); useChatStore.setState({ byChat: new Map() }); });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); client.session.setState(session); useChatStore.setState({ byChat: new Map() }); });
+beforeEach(async () => { await setLocale('en'); requests.rename.mockReset(); requests.add.mockReset(); vi.mocked(toast).mockClear(); vi.mocked(refreshChat).mockClear(); useChatStore.setState({ byChat: new Map() }); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); useChatStore.setState({ byChat: new Map() }); });
 
 it('closes an acknowledged rename with a neutral notice and no fabricated Chat', async () => {
   requests.rename.mockRejectedValueOnce(receipt());
@@ -96,41 +95,4 @@ it('keeps a genuine rename refusal in the dialog and applies a real Full reply o
   await waitFor(() => expect(dialog).not.toBeInTheDocument());
   expect(apply).toHaveBeenCalledExactlyOnceWith(row().id, { chat: full }, full.seq);
   expect(refreshChat).toHaveBeenCalledExactlyOnceWith(row().id); expect(requests.rename).toHaveBeenCalledTimes(2);
-});
-
-it('stops an add cohort after a reader change without acknowledging or sending the next person', async () => {
-  let finish: ((value: Awaited<ReturnType<typeof Chats.addMember>>) => void) | undefined;
-  requests.add.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-  const user = await open('add');
-  const dialog = screen.getByRole('dialog', { name: i18n.t('chat.group.addTitle') });
-  await user.click(within(dialog).getByRole('button', { name: DORA.display_name }));
-  await user.click(within(dialog).getByRole('button', { name: GRACE.display_name }));
-  await user.click(within(dialog).getByRole('button', { name: i18n.t('chat.group.addButton', { count: 2 }) }));
-  await waitFor(() => expect(requests.add).toHaveBeenCalledOnce());
-  const settle = finish; if (settle === undefined) throw new Error('Addition did not start');
-  act(() => client.session.setState({ readerVersion: 702 }));
-  await act(() => { settle(row()); return Promise.resolve(); });
-  expect(requests.add.mock.calls).toEqual([[row().id, DORA.id]]);
-  expect(refreshChat).not.toHaveBeenCalled(); expect(toast).not.toHaveBeenCalled();
-  expect(dialog).not.toBeInTheDocument();
-});
-
-it('does not apply a real rename result from the previous reader', async () => {
-  let finish: ((value: Awaited<ReturnType<typeof Chats.renameChat>>) => void) | undefined;
-  requests.rename.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-  const apply = vi.spyOn(chatWriter, 'apply'), user = await open('rename');
-  await user.click(screen.getByRole('button', { name: i18n.t('chat.group.renameButton') }));
-  await waitFor(() => expect(requests.rename).toHaveBeenCalledOnce());
-  const settle = finish; if (settle === undefined) throw new Error('Rename did not start');
-  act(() => client.session.setState({ readerVersion: 702 }));
-  await act(() => { settle(chat({ ...row(), name: 'Old reader result', seq: 8 })); return Promise.resolve(); });
-  expect(apply).not.toHaveBeenCalled(); expect(refreshChat).not.toHaveBeenCalled(); expect(toast).not.toHaveBeenCalled();
-});
-
-it('blocks the final manager from leaving until management is handed over', async () => {
-  const user = userEvent.setup(); show(<GroupMenu chat={row()} me={ADA.id} onLeft={() => undefined} />);
-  await user.click(screen.getByRole('button', { name: i18n.t('chat.group.menu') }));
-  expect(screen.getByRole('menuitem', { name: i18n.t('chat.group.leave') })).toHaveAttribute('aria-disabled', 'true');
-  await user.click(screen.getByRole('menuitem', { name: i18n.t('chat.group.leave') }));
-  expect(screen.queryByRole('dialog', { name: i18n.t('chat.group.leaveTitle') })).toBeNull();
 });

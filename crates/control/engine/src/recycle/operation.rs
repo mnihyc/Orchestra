@@ -130,7 +130,7 @@ impl Input {
             request_origin::current(conn, clock, &self.origin, &self.credential, self.until, OP)
                 .await
                 .map_err(engine)?;
-        let frame = match continuing::prepare_with_caller::<Native>(
+        let frame = continuing::prepare_with_caller::<Native>(
             conn,
             clock,
             &self.origin,
@@ -138,25 +138,12 @@ impl Input {
             self.clone(),
         )
         .await
-        {
-            Ok(frame) => frame,
-            Err(Error::Refused | Error::Binding(crate::operation_scope::BindingError::Refused)) => {
-                // The native locks may have waited past this exact request's lifetime.
-                // Only a still-current credential may skip an independently denied candidate.
-                request_origin::current(
-                    conn,
-                    clock,
-                    &self.origin,
-                    &self.credential,
-                    self.until,
-                    OP,
-                )
-                .await
-                .map_err(engine)?;
-                return Err(EngineError::BeforeEffect(Box::new(Denied)));
+        .map_err(|error| match error {
+            Error::Refused | Error::Binding(crate::operation_scope::BindingError::Refused) => {
+                EngineError::BeforeEffect(Box::new(Denied))
             }
-            Err(error) => return Err(engine(error)),
-        };
+            error => engine(error),
+        })?;
         let check = Checkpoint {
             frame,
             until,

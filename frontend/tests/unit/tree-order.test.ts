@@ -1,13 +1,29 @@
-import { treeNode } from '../doubles/tree-node';
 /** The order of an org's tree: the reader's own choice kept by the server, the org's default, and how the rows of a parent stand in each. */
 import { describe, expect, it } from 'vitest';
 
 import { arranged, choiceOf, effectiveOrder, orderOf, SHIPPED_ORDER, type TreeOrder, withChoice } from '@/features/navigation/treeOrder';
-import { buildRows, placesWithDocs, visibleNodeSiblings } from '@/features/navigation/treeRows';
+import { buildRows, placesWithDocs } from '@/features/navigation/treeRows';
 import type { TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
+  participating: true,
+  id,
+  address: null,
+  kind,
+  name: id,
+  parent_id: parent,
+  color: null,
+  docs: 0,
+  archived: false,
+  deleted: false,
+  restricted: false,
+  chat: { id: `chat-${id}`, seq: 0 },
+  thread: null,
+  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
+  tree_seq: 1,
+  ...more,
+});
 
 it('keeps a loaded document page across a node rename and rereads a changed document namespace', () => {
   const row = node('project', 'project', null, { docs: 2, docs_seq: 7, tree_seq: 10 });
@@ -78,11 +94,5 @@ describe('the choice kept for the reader', () => {
   it('puts a row dragged among its brothers where it was dropped', () => {
     expect(arranged(['a', 'b', 'c', 'd'], 'd', 'b')).toEqual(['a', 'd', 'b', 'c']);
     expect(arranged(['a', 'b', 'c'], 'a', null)).toEqual(['b', 'c', 'a']);
-  });
-
-  it('keeps the visible order of siblings when their root row is omitted', () => {
-    const rows = buildRows(tree, '00-acme', new Set(), 'en', {});
-    const siblings = visibleNodeSiblings(rows, '00-acme');
-    expect(arranged(siblings, '01-charlie', '02-alpha')).toEqual(['04-research', '01-charlie', '02-alpha', '03-bravo']);
   });
 });

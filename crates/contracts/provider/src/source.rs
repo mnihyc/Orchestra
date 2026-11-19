@@ -87,25 +87,9 @@ pub enum SourceCredential {
     Key,
 }
 
-/// The optional administrative credential is a source secret, distinct from the model credential.
-pub const ADMIN_KEY_FIELD: &str = "admin_key";
-
-/// A source declares which members need its separate administrative credential.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminCredential {
-    /// Localized field labels; an extension can call it an admin or management key without core changes.
-    pub labels: BTreeMap<String, String>,
-    /// Members unavailable while this source secret is absent.
-    #[serde(deserialize_with = "known_members")]
-    pub reports: Vec<FactMember>,
-}
-
 /// What a source tells of a provider's facts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SourceDescriptorFacts {
-    /// Optional source-only administrative credential; never used for model requests.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_credential: Option<AdminCredential>,
     /// The members it can tell. A member it does not list is unsupported until it tells it; a name this
     /// contract does not know is left out.
     #[serde(default, deserialize_with = "known_members")]
@@ -152,9 +136,6 @@ pub struct SourceDescriptor {
     pub title: String,
     /// What it is, in one sentence.
     pub summary: String,
-    /// Optional localized descriptions supplied by the source, with summary as the fallback.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub summary_locales: BTreeMap<String, String>,
     /// The version of this contract it speaks.
     pub contract: u32,
     /// What it tells of the facts; `null` when it implements no facts.
@@ -224,33 +205,6 @@ pub enum DescriptorFault {
 }
 
 impl SourceDescriptor {
-    /// Adds the shared optional, write-only credential field through ordinary encrypted source storage.
-    pub fn set_admin_credential(&mut self, credential: AdminCredential) {
-        let label = credential
-            .labels
-            .get("en")
-            .map_or("Admin key", String::as_str);
-        let mut field = Field::new(ADMIN_KEY_FIELD, label, orch_types::FieldType::Secret);
-        field.required = false;
-        field.help = Some("Used only by this facts source; never sent with a model call.".into());
-        self.fields.retain(|field| field.name != ADMIN_KEY_FIELD);
-        self.fields.push(field);
-        if let Some(facts) = &mut self.facts {
-            facts.admin_credential = Some(credential);
-        }
-    }
-
-    /// Availability is derived from this source's declared requirements and names of present secrets.
-    #[must_use]
-    pub fn unavailable_members(&self, secret_names: &[String]) -> Vec<FactMember> {
-        if secret_names.iter().any(|name| name == ADMIN_KEY_FIELD) {
-            return Vec::new();
-        }
-        self.facts
-            .as_ref()
-            .and_then(|facts| facts.admin_credential.as_ref())
-            .map_or_else(Vec::new, |credential| credential.reports.clone())
-    }
     /// A descriptor that speaks this contract and implements nothing yet.
     #[must_use]
     pub fn new(name: &str, title: &str, summary: &str) -> Self {
@@ -258,7 +212,6 @@ impl SourceDescriptor {
             name: name.to_owned(),
             title: title.to_owned(),
             summary: summary.to_owned(),
-            summary_locales: BTreeMap::new(),
             contract: wire::CONTRACT,
             facts: None,
             models: None,
@@ -316,13 +269,6 @@ impl SourceDescriptor {
             wire::CREDENTIAL_PRESENT => self.presents_credential(),
             _ => false,
         }
-    }
-
-    /// Administrative credentials belong only to facts, even if a source implements more interfaces.
-    pub fn secret_fields_for(&self, element: crate::SourceElement) -> impl Iterator<Item = &Field> {
-        self.secret_fields().filter(move |field| {
-            element == crate::SourceElement::Facts || field.name != ADMIN_KEY_FIELD
-        })
     }
 
     /// The fields whose values are kept as provider secrets.
@@ -392,20 +338,6 @@ impl SourceDescriptor {
             {
                 return Err(DescriptorFault::Field(field.name.clone()));
             }
-        }
-        if let Some(facts) = &self.facts
-            && let Some(admin) = &facts.admin_credential
-            && (!self.secret_fields().any(|field| {
-                field.name == ADMIN_KEY_FIELD && !field.required && field.default.is_none()
-            }) || !admin
-                .labels
-                .get("en")
-                .is_some_and(|label| !label.trim().is_empty())
-                || admin.reports.iter().enumerate().any(|(index, member)| {
-                    !facts.reports.contains(member) || admin.reports[..index].contains(member)
-                }))
-        {
-            return Err(DescriptorFault::Field(ADMIN_KEY_FIELD.into()));
         }
         if let Some(docs) = &self.docs_url
             && !(docs.starts_with("https://") || docs.starts_with("http://"))
@@ -843,57 +775,6 @@ mod tests {
             "docs_url": "https://acme.example/orch",
             "x_build": "2026.10"
         })
-    }
-
-    #[test]
-    fn administrative_fields_are_optional_write_only_and_exclusive_to_facts() {
-        let mut descriptor: SourceDescriptor = serde_json::from_value(plan_descriptor()).unwrap();
-        descriptor.set_admin_credential(AdminCredential {
-            labels: BTreeMap::from([("en".into(), "Admin key".into())]),
-            reports: vec![FactMember::Spend],
-        });
-        assert_eq!(descriptor.check(), Ok(()));
-        assert_eq!(
-            descriptor
-                .secret_fields_for(crate::SourceElement::Facts)
-                .map(|field| field.name.as_str())
-                .collect::<Vec<_>>(),
-            ["token", "admin_key"]
-        );
-        for element in [
-            crate::SourceElement::Models,
-            crate::SourceElement::Presenter,
-        ] {
-            assert_eq!(
-                descriptor
-                    .secret_fields_for(element)
-                    .map(|field| field.name.as_str())
-                    .collect::<Vec<_>>(),
-                ["token"]
-            );
-        }
-        let admin = descriptor
-            .fields
-            .iter()
-            .position(|field| field.name == "admin_key")
-            .unwrap();
-        descriptor.fields[admin].default = Some(json!("not-a-secret-default"));
-        assert_eq!(
-            descriptor.check(),
-            Err(DescriptorFault::Field(ADMIN_KEY_FIELD.into()))
-        );
-        descriptor.fields[admin].default = None;
-        descriptor.fields[admin].required = true;
-        assert_eq!(
-            descriptor.check(),
-            Err(DescriptorFault::Field(ADMIN_KEY_FIELD.into()))
-        );
-        descriptor.fields[admin].required = false;
-        descriptor.fields[admin].kind = orch_types::fields::FieldType::Text;
-        assert_eq!(
-            descriptor.check(),
-            Err(DescriptorFault::Field(ADMIN_KEY_FIELD.into()))
-        );
     }
 
     #[test]

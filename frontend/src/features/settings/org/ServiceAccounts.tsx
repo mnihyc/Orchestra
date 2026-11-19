@@ -164,7 +164,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
         )}
         {made !== null && !making && <><TokenMade made={made} name={madeName} />{made.token === null && <div><Button variant="danger" pending={revoke.isPending} onClick={() => revoke.mutate('info' in made ? made.info.id : made.token_id, { onSuccess: () => { setMade(null); make.reset(); setMaking(true); } })}>{t('tokens.new.revokeAndAgain')}</Button></div>}</>}
         {list.isPending ? (
-          <SkeletonRows read={list} rows={2} />
+          <SkeletonRows rows={2} />
         ) : list.isError ? (
           <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         ) : list.data.length === 0 ? (
@@ -214,7 +214,7 @@ function OrgTokens({ org }: { org: Org }) {
   return (
     <Section id="org-tokens" title={t('settings.orgTokens.title', { org: org.name })} lead={t('settings.orgTokens.lead', { org: org.name })}>
       {list.isPending ? (
-        <SkeletonRows read={list} rows={2} />
+        <SkeletonRows rows={2} />
       ) : list.isError && tokens.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : tokens.length === 0 ? (
@@ -308,7 +308,7 @@ export function ServiceAccounts({ org }: { org: Org }) {
       {!may ? (
         <EmptyState compact icon={<Bot aria-hidden />} title={t('settings.service.readers', { name: org.name })} description={refusal} />
       ) : list.isPending ? (
-        <SkeletonRows read={list} rows={2} />
+        <SkeletonRows rows={2} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : list.data.length === 0 ? (

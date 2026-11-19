@@ -12,8 +12,8 @@ mod retention;
 mod types;
 
 pub use create::{
-    TextCreationPlan, apply_text_creation_in, create_folder_in, create_folder_in_before,
-    create_text_in, prepare_text_creation_in, require_text_creation_in,
+    TextCreationPlan, apply_text_creation_in, create_folder_in, create_text_in,
+    prepare_text_creation_in, require_text_creation_in,
 };
 pub use error::Error;
 pub use operations::require_folder_creation_in;
@@ -28,10 +28,6 @@ pub use operations::{
     DocumentRestoration, apply_document_restoration_in, prepare_document_restoration_in,
 };
 pub use operations::{FolderCreation, apply_folder_creation_in, prepare_folder_creation_in};
-pub use operations::{Operation, apply_operation_in, complete_operation_in, require_operation_in};
-pub use operations::{
-    OperationSources, prepare_operation_sources_in, require_operation_sources_in,
-};
 pub use operations::{copy_text_in, execute_confirmed_in, execute_in};
 pub use prepare::{
     DeletionSources, check_deletion_plan_in, complete_deletion_plan_in, deletion_roots_in,

@@ -628,8 +628,7 @@ test('an editor control surface keeps local labels without borrowing another sur
   expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'icon-centre').map((fault) => fault.text)).toEqual(['Local surface action']);
 });
 
-// The owner stands at the page's corner, where the auditor's pointer used to rest: the rest is outside the owner, so the hover is an entrance into it.
-for (const mode of ['complete', 'unowned hint', 'stolen focus', 'no hover hint'] as const) test(`full-value disclosure checks native focus and its own hint: ${mode}`, async ({ page }) => {
+for (const mode of ['complete', 'unowned hint', 'stolen focus'] as const) test(`full-value disclosure checks native focus and its own hint: ${mode}`, async ({ page }) => {
   const value = 'A complete value that is wider than this small control';
   await page.setContent('<style>body{margin:0;background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><main><span id="owner" class="cut" tabindex="0"></span><span id="other" tabindex="-1"></span></main>');
   await page.locator('#owner').evaluate((owner, setup) => {
@@ -640,7 +639,7 @@ for (const mode of ['complete', 'unowned hint', 'stolen focus', 'no hover hint']
       hint.textContent = setup.value;
       if (setup.mode !== 'unowned hint') owner.setAttribute('aria-describedby', hint.id);
     };
-    if (setup.mode !== 'no hover hint') owner.addEventListener('pointerover', show);
+    owner.addEventListener('pointerover', show);
     owner.addEventListener('focus', () => { show(); if (setup.mode === 'stolen focus') document.getElementById('other')?.focus(); });
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { document.getElementById('whole-value')?.remove(); owner.removeAttribute('aria-describedby'); } });
   }, { value, mode });
@@ -704,45 +703,6 @@ for (const broken of [false, true]) test(`menu passes reveal their own values wh
   expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Repeated page caption']);
   expect(result.faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text)).toEqual(broken ? ['A complete value inside the open menu'] : []);
 });
-
-for (const locale of ['en', 'zh-CN'] as const) {
-  test(`card values are revealed before a menu entrance closes their card in ${locale}`, async ({ page }) => {
-    const menu = locale === 'en' ? 'A complete value in the underlying menu' : '底层菜单中的完整内容';
-    const fact = locale === 'en' ? 'Weekly window 81% · resets tomorrow' : '本周用量 81% · 明天重置';
-    await page.setContent(`<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><div role="menu"><button class="cut" id="menu-value">${menu}</button></div><div data-inspection-card id="card"><button class="cut" id="card-value">${fact}</button></div>`);
-    await page.evaluate(() => {
-      document.body.dataset.cardVisits = '0';
-      for (const owner of Array.from(document.querySelectorAll<HTMLElement>('.cut'))) {
-        const show = () => {
-          if (owner.id === 'menu-value') document.getElementById('card')?.remove();
-          else document.body.dataset.cardVisits = String(Number(document.body.dataset.cardVisits) + 1);
-          let hint = document.getElementById('whole');
-          if (hint === null) { hint = document.createElement('div'); hint.id = 'whole'; hint.setAttribute('role', 'tooltip'); document.body.append(hint); }
-          hint.textContent = owner.textContent; owner.setAttribute('aria-describedby', hint.id);
-        };
-        owner.addEventListener('pointerover', show); owner.addEventListener('focus', show);
-      }
-      document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.getElementById('whole')?.remove(); });
-    });
-    expect((await auditPage(page, '[role="menu"],[data-inspection-card]')).faults.filter((fault) => fault.rule === 'cut-text')).toEqual([]);
-    expect(Number(await page.locator('body').getAttribute('data-card-visits'))).toBeGreaterThanOrEqual(2);
-    await expect(page.locator('#card')).toHaveCount(0);
-  });
-
-  test(`a disappearing clipped value reports a finding within its reveal budget in ${locale}`, async ({ page }) => {
-    const text = locale === 'en' ? 'The complete value that disappeared' : '已经消失的完整内容';
-    await page.setContent(`<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><button id="owner" class="cut">${text}</button>`);
-    await page.mouse.move(200, 200);
-    await page.evaluate(() => document.addEventListener('pointermove', (event) => {
-      if (event.clientX === 0 && event.clientY === 0) document.getElementById('owner')?.remove();
-    }));
-    const started = Date.now();
-    const result = await auditPage(page);
-    expect(result.faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text)).toContain(text);
-    // Five reveal intervals leave driver/scheduling margin while rejecting a whole-test wait.
-    expect(Date.now() - started).toBeLessThan(10_000);
-  });
-}
 
 test('context-menu audits open a tab menu by keyboard without selecting the tab', async ({ page }) => {
   await page.setContent('<style>body{background:white;color:black}</style><div role="tablist"><button id="tab" role="tab" aria-selected="true" aria-controls="panel" aria-haspopup="menu">Review</button></div><main id="panel" role="tabpanel" aria-labelledby="tab">Current work</main>');

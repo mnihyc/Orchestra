@@ -89,44 +89,12 @@ the services reach public servers (mail, bots, webhooks, push). The server
 payload therefore carries `share/ca-certificates.crt`, and `SSL_CERT_FILE`
 names it; OpenSSL, which the push crate links, is compiled into the programs.
 
-**The gateway's addresses.** Three settings name the pinned listener, and they
-are not the same address.
-
-- *What the system advertises* is `[[gateway.endpoints]]` in `config/orch.toml`:
-  the entrances that machines are told to dial. The shipped file holds one
-  placeholder, `wss://gateway.example.com:9443`, and an example address is told
-  to no machine. Replace it before people add machines or make environments,
-  with an address that resolves and answers on the published port
-  (`ORCH_GATEWAY_PUBLISH` in `.env`) from machines outside, from inside the
-  stack, and from the host's own Docker containers: a machine outside enrolls
-  and connects through the entrances it is told, and so do the units of
-  environments. The gateway's certificate is checked against the system's own
-  authority, so a name and an IP address both serve. "Add machine" makes no
-  command while the list holds nothing but examples, or `gateway.orch.internal`.
-  An address that is real is told as it is, whether or not it answers.
-- *What a managed runtime is told* is `[gateway] managed_endpoint`, by default
-  `wss://gateway.orch.internal:9443`. `gateway.orch.internal` is the name the
-  gateway's certificate is good for and a network alias of the gateway on
-  `control`; the node gives each runtime it makes a host entry that sends it to
-  the Docker host, where the pinned port is published. It means something only
-  here, so it is not what is advertised to people's machines.
-- *What the bundled node dials* is `[node] gateway_url`, `wss://gateway:9443`:
-  the gateway by its Compose service name, inside the stack. The node asks that
-  address for the system's list the first time; when the system advertises an
-  entrance, it enrolls through one that answers, and when it advertises none,
-  at that address itself. Once enrolled, it keeps its session at that address.
-
-So the shipped file starts: the bundled node comes online without any edit.
-With the placeholder left in place nothing is advertised, `orchctl doctor
---url` reports `the system advertises no endpoint, so no machine can connect`,
-"Add machine" gives no command and an environment's unit cannot connect. An
-address that is real but wrong is advertised as it is, and fails loudly: the
-bundled node logs, once, `waiting to enroll: the system cannot be reached yet
-reason=the system could not be reached: could not connect: failed to lookup
-address information` (for a name that does not resolve), tries again every ten
-seconds, warns again every ten minutes, and `orchctl doctor` fails its `node`
-line (`no host has enrolled, though the first administrator exists`) until the
-address is corrected and the services restarted (`docker compose restart`).
+**The gateway's name.** `gateway.orch.internal` is both what the system
+advertises as the pinned endpoint and what the gateway's certificate is good
+for. The gateway has it as a network alias on `control`, so the node (and
+anything else in the stack) finds it by that name; managed runtimes, which
+run outside Compose on the host's Docker, get a host entry that sends it to the
+published port.
 
 **Regional gateways.** With no `gateway.instances`, the existing `gateway_id` and
 `gateway.endpoints` form one entry. To add regions, list each gateway's stable
@@ -357,8 +325,8 @@ commands must use the exact same path.
 `recover`, `restore`, and `managed-environment`, which uses the stack until an
 environment made from the Default template has run a turn on the bundled host);
 each makes a stack of its own from packaged releases, runs what is described
-above and says which promise was kept. They are run by hand and by the release
-workflow's `scenarios` job, which gives them the release it packaged; each needs
-Docker, and packages the releases it is not given. `ORCH_UPDATE_CRASH_AT=<step>` stops `update.sh` dead
+above and says which promise was kept. They are run by hand and in the
+`deploy-smoke` CI job; each needs Docker, and builds the
+releases it is not given. `ORCH_UPDATE_CRASH_AT=<step>` stops `update.sh` dead
 right after it wrote that step, as the recover scenario does; it is never set in
 a deployment.

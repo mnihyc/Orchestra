@@ -12,14 +12,19 @@ use std::collections::BTreeMap;
 
 /// The ordinary short answer budget for titles and descriptions.
 pub const OUTPUT_TOKENS: i64 = 120;
-/// Ordinary input planning budget; an explicitly larger budget may use the model's available window.
-pub const CONTEXT_TOKENS: u32 = 32_000;
+/// The latest fifty items give a short status enough recent context.
+pub const INPUT_ITEMS: u32 = 50;
+/// A tool's title or a message preview is bounded to five hundred characters.
+pub const INPUT_CHARS: u32 = 500;
 
 const fn output_tokens() -> i64 {
     OUTPUT_TOKENS
 }
-const fn context_tokens() -> u32 {
-    CONTEXT_TOKENS
+const fn input_items() -> u32 {
+    INPUT_ITEMS
+}
+const fn input_chars() -> u32 {
+    INPUT_CHARS
 }
 
 /// Configuration of the built-in model producer.
@@ -36,9 +41,12 @@ pub struct Config {
     /// The maximum response token count.
     #[serde(default = "output_tokens")]
     pub max_output_tokens: i64,
-    /// Input token budget, including the instruction and frame; bounded by the model window less output.
-    #[serde(default = "context_tokens")]
-    pub context_tokens: u32,
+    /// The most recent activity items to send.
+    #[serde(default = "input_items")]
+    pub input_items: u32,
+    /// The maximum characters in each activity item.
+    #[serde(default = "input_chars")]
+    pub input_chars: u32,
     /// Replacement instructions by field; null keeps the built-in text.
     #[serde(default)]
     pub prompts: BTreeMap<String, Option<String>>,
@@ -78,10 +86,11 @@ impl Config {
         })?;
         if config.model_name.trim().is_empty()
             || config.max_output_tokens <= 0
-            || config.context_tokens == 0
+            || config.input_items == 0
+            || config.input_chars == 0
         {
             return Err(SummarizeError::Config(
-                "model name and token budgets must be nonempty and positive".to_owned(),
+                "model name and output/activity budgets must be nonempty and positive".to_owned(),
             ));
         }
         if !config.params.is_object() {
@@ -98,7 +107,7 @@ impl Config {
 pub fn descriptor() -> SummarizerDescriptor {
     let mut schema = schemars::schema_for!(Config).to_value();
     // Match Config::read's positive budgets and nonblank model name at the save boundary too.
-    for name in ["max_output_tokens", "context_tokens"] {
+    for name in ["max_output_tokens", "input_items", "input_chars"] {
         schema["properties"][name]["minimum"] = serde_json::json!(1);
     }
     schema["properties"]["model_name"]["pattern"] = serde_json::json!("\\S");
@@ -107,49 +116,11 @@ pub fn descriptor() -> SummarizerDescriptor {
         "additionalProperties": true,
         "description": "Model request options in this endpoint's format. Current model defaults apply when omitted; routing, prompt, tools and credentials remain owned by Orch."
     });
-    let mut descriptor = SummarizerDescriptor {
+    SummarizerDescriptor {
         name: "model".to_owned(),
         title: "A model".to_owned(),
         config_schema: schema,
         fields: SummaryField::ALL.to_vec(),
         extensions: Default::default(),
-    };
-    // This fixed x_ member belongs to the descriptor's validated extension namespace.
-    let _ = descriptor.extensions.insert(
-        "x_capability_declarations",
-        serde_json::json!(crate::capabilities::declarations()),
-    );
-    descriptor
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn input_has_one_positive_token_default_and_output_is_unchanged() -> Result<(), SummarizeError>
-    {
-        let value = json!({"provider_id":orch_types::new_id(),"model_name":"small"});
-        let config = Config::read(&value)?;
-        assert_eq!(config.context_tokens, 32_000);
-        assert_eq!(config.max_output_tokens, 120);
-        let schema = descriptor().config_schema;
-        assert_eq!(
-            schema["properties"]["context_tokens"]["default"],
-            json!(32_000)
-        );
-        assert!(schema["properties"].get("input_items").is_none());
-        assert!(schema["properties"].get("input_chars").is_none());
-        for (key, value) in [
-            ("context_tokens", json!(0)),
-            ("input_items", json!(50)),
-            ("input_chars", json!(500)),
-        ] {
-            let mut invalid = json!({"provider_id":orch_types::new_id(),"model_name":"small"});
-            invalid[key] = value;
-            assert!(Config::read(&invalid).is_err());
-        }
-        Ok(())
     }
 }

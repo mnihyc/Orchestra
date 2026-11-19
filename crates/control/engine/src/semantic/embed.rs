@@ -27,7 +27,7 @@ use orch_model_contract::protocol::EMBEDDINGS as EMBEDDINGS_PROTOCOL;
 use orch_types::{Id, Time, new_id};
 
 enum Origin<'a> {
-    Query(Box<super::query_origin::QueryWork>),
+    Query(super::query_origin::QueryWork),
     Administration(&'a super::administration::Work),
 }
 
@@ -154,8 +154,8 @@ impl Engine {
         texts: Vec<String>,
         query: Option<super::query_origin::QueryWork>,
     ) -> Result<Vec<Vec<f32>>, EmbedError> {
-        let origin = query.map(|query| Origin::Query(Box::new(query)));
-        self.embed_texts_native(org, named, texts, origin).await
+        self.embed_texts_native(org, named, texts, query.map(Origin::Query))
+            .await
     }
 
     /// The same supplier with the actual administrative index request and original operation.
@@ -238,8 +238,6 @@ impl Engine {
                     provider: provider.id,
                     model: Some(&named.model_name),
                     effort: None,
-                    // Embeddings run in no environment.
-                    runs_in: None,
                 },
             )
             .await
@@ -297,13 +295,8 @@ impl Engine {
         let params =
             resources::provider_request_defaults(&mut tx, provider.id, EMBEDDINGS_PROTOCOL).await?;
         let parameters: orch_provider_contract::models::ModelParameters =
-            orch_provider_contract::models::composed_model_parameters(
-                &model.parameters,
-                &model.groups,
-                &model.option_layers,
-                Some(EMBEDDINGS_PROTOCOL),
-            )
-            .map_err(|_| unavailable("parameters", "the model parameters cannot be read"))?;
+            serde_json::from_value(model.parameters.clone())
+                .map_err(|_| unavailable("parameters", "the model parameters cannot be read"))?;
         let params = orch_model_contract::parameters::resolve(
             EMBEDDINGS_PROTOCOL,
             &parameters,
@@ -341,7 +334,7 @@ impl Engine {
                     .await
                     .map_err(|error| EngineError::BeforeEffect(Box::new(error)))?;
                 let caller = frame.principal().caller().clone();
-                let authority = super::query_origin::QueryAuthority::capture(*query, &outgoing)?;
+                let authority = super::query_origin::QueryAuthority::capture(query, &outgoing)?;
                 outgoing = outgoing.with_authority(
                     crate::commands::CommandAuthority::SemanticQuery(Box::new(authority)),
                 );
@@ -544,7 +537,7 @@ impl Engine {
         &self,
         org: Id,
         provider: Id,
-        _writer: Option<Id>,
+        writer: Option<Id>,
         model: &str,
         call: Id,
         at: chrono::DateTime<chrono::Utc>,
@@ -563,7 +556,7 @@ impl Engine {
                 thread: None,
                 provider,
                 entry: None,
-                person: None,
+                person: writer,
                 model,
                 protocol: Some(EMBEDDINGS_PROTOCOL),
                 tokens: orch_db::usage::ledger::Tokens {

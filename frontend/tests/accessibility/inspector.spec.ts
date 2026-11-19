@@ -53,7 +53,7 @@ test('the viewers: Markdown, an image, an archive, a file with no preview, and a
   await expect(page.getByRole('tree', { name: 'Contents of the archive' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await row(page, /^blob\.bin/).click();
-  await expect(page.getByRole('tabpanel', { name: 'blob.bin' }).getByRole('status').filter({ hasText: 'Preview unavailable' })).toBeVisible();
+  await expect(page.getByText('blob.bin has no preview')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await chooseFileTreeAction(page, 'Back to the thread\'s directory');

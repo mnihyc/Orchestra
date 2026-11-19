@@ -241,12 +241,6 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
   test.setTimeout(TEST_MS * 4);
   const seeded = seed();
   expect(seeded.nodes.length + acmeTree().length).toBeGreaterThanOrEqual(2_000);
-  // Sign in against the small world, then retire that document before creating the measured tree.
-  // Otherwise setup already mounts a second 2,000-row tree whose dead heap pollutes this sample.
-  await signIn(page);
-  const slow = await slowdown(page);
-  test.setTimeout(TEST_MS * Math.max(1, slow));
-  await page.goto('about:blank');
   await changeTree(seeded.nodes);
   // Documents beside every project and folder that was made: each stands in the tree as a row of its own.
   for (const place of seeded.places) for (let number = 1; number <= DOCUMENTS_PER_PLACE; number += 1) await makeDocument(place, `Notes ${number}`);
@@ -279,38 +273,19 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
     { key: `orch.${fixtureId(1, 1)}.tree.${ACME.org}`, open: seeded.open, wanted, documents,
       selector: '[role="tree"][aria-label="Orgs, projects, topics and threads"]' },
   );
-  interface NativeRead { method: string; path: string; status: number; readable: boolean; bootstrap?: unknown }
-  // Observe completion in the consuming document: Chromium can lose CDP's completion/body
-  // handle under this load even after fetch has delivered the entire tree to the application.
-  await page.addInitScript((treePath) => {
-    const observed = window as unknown as { __treeNativeReads: NativeRead[] };
-    observed.__treeNativeReads = [];
-    const send = window.fetch.bind(window);
-    window.fetch = (input, init) => {
-      const address = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
-      const path = new URL(address, location.href).pathname;
-      const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
-      const sent = send(input, init);
-      if (path === '/api/v1/me/bootstrap' || path === '/api/v1/auth/session' || path === treePath) {
-        void sent.then((reply) => {
-          void reply.clone().arrayBuffer().then((bytes) => {
-            const bootstrap: unknown = path === '/api/v1/me/bootstrap' ? JSON.parse(new TextDecoder().decode(bytes)) : undefined;
-            // Keep only the admission facts, never the large tree or the session's credentials.
-            observed.__treeNativeReads.push({ method, path, status: reply.status, readable: bytes.byteLength > 0, bootstrap });
-          }).catch(() => observed.__treeNativeReads.push({ method, path, status: reply.status, readable: false }));
-        }, () => observed.__treeNativeReads.push({ method, path, status: 0, readable: false }));
-      }
-      return sent;
-    };
-  }, `/api/v1/orgs/${ACME.org}/tree`);
+  await signIn(page);
+  const slow = await slowdown(page);
+  test.setTimeout(TEST_MS * Math.max(1, slow));
+  // Setup reads cannot supply witnesses for the next document's native admission.
+  await page.goto('about:blank');
   const nativeRead = (method: string, path: string) => test.step(`${method} ${path} completes before the tree sample`, async () => {
-    const admitted = await page.waitForFunction(({ method, path }) =>
-      (window as unknown as { __treeNativeReads?: NativeRead[] }).__treeNativeReads?.find((read) => read.method === method && read.path === path),
-    { method, path }, { timeout: WAIT_MS * slow });
-    const read = await admitted.jsonValue();
-    expect(read, `${method} ${path} must admit the native fixture`).toMatchObject({ status: 200, readable: true });
+    const response = await page.waitForResponse((response) => response.request().method() === method
+      && new URL(response.url()).pathname === path, { timeout: WAIT_MS * slow });
+    expect(response.status(), `${method} ${path} must admit the native fixture`).toBe(200);
+    expect(await response.finished(), `${method} ${path} must finish its response`).toBeNull();
     if (path === '/api/v1/me/bootstrap') {
-      expect(read?.bootstrap, 'The actual admitted aggregate supplies both current Meta and the session reader').toMatchObject({
+      const data: unknown = await response.json();
+      expect(data, 'The actual admitted aggregate supplies both current Meta and the session reader').toMatchObject({
         meta: { needs_setup: false, name: expect.any(String), may_create_org: expect.any(Boolean) },
         person: { id: expect.any(String) }, admin_mode: { as_admin: expect.any(Boolean) },
       });
@@ -318,15 +293,12 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
   });
   const opened = Promise.all([
     nativeRead('GET', '/api/v1/me/bootstrap'),
-    nativeRead('POST', '/api/v1/auth/session'),
+    nativeRead('POST', '/api/v1/auth/refresh'),
     nativeRead('GET', `/api/v1/orgs/${ACME.org}/tree`),
   ]);
   // The screen is a small one, so that the tree is what is large on the page.
-  await Promise.all([page.goto(`/project/${ACME.shop}`).then(async () => {
-    // A closed or refused navigation view cannot produce the required tree response.
-    // Report that visible fixture failure without spending the native read's whole deadline.
-    await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads', exact: true })).toBeVisible();
-  }), opened]);
+  await Promise.all([page.goto(`/project/${ACME.shop}`), opened]);
+  await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads', exact: true })).toBeVisible();
   await page.waitForFunction(() => typeof (window as unknown as { __tree?: { lastRow: number | null } }).__tree?.lastRow === 'number', undefined, { timeout: WAIT_MS * slow });
   // The documents of every open place have come, and no place still says that its documents are on their way.
   await page.waitForFunction(

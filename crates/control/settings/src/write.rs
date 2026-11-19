@@ -397,10 +397,6 @@ pub async fn prepare_write(
 ) -> Result<PreparedWrite, WriteError> {
     let def =
         registry::get(request.key).ok_or_else(|| Invalid::UnknownKey(request.key.to_owned()))?;
-    if def.key == keys::ORG_TERMS {
-        // Keep the actual lock/provenance snapshot after this source wait, through its write.
-        queries::lock_org_terms(conn, node_of(request.target), true).await?;
-    }
     let snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
     if snapshot.is_side_thread() {
         return Err(WriteError::SideThread);
@@ -451,10 +447,6 @@ pub async fn prepare_clear(
 ) -> Result<PreparedClear, WriteError> {
     let def =
         registry::get(request.key).ok_or_else(|| Invalid::UnknownKey(request.key.to_owned()))?;
-    if def.key == keys::ORG_TERMS {
-        // Keep the actual lock/provenance snapshot after this source wait, through its write.
-        queries::lock_org_terms(conn, node_of(request.target), true).await?;
-    }
     let snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
     if snapshot.is_side_thread() {
         return Err(WriteError::SideThread);
@@ -513,9 +505,6 @@ pub async fn apply_write_before<E, F: FnOnce() -> Result<(), E>>(
     }
     let scope = snapshot.scope();
     let node = node_of(prepared.target);
-    if def.key == keys::ORG_TERMS {
-        queries::lock_org_terms(conn, node, true).await?;
-    }
     let value = prepared.value.clone();
     let wants_locked = prepared.wants_locked;
     let same_value = prepared.same_value;
@@ -590,9 +579,6 @@ pub async fn apply_clear_before<E, F: FnOnce() -> Result<(), E>>(
     }
     let scope = snapshot.scope();
     let node = node_of(prepared.target);
-    if def.key == keys::ORG_TERMS {
-        queries::lock_org_terms(conn, node, true).await?;
-    }
     before_effect().map_err(WriteFailure::BeforeEffect)?;
     match queries::remove(conn, node, def.key, prepared.expected_revision).await? {
         Removed::Gone(row) => {

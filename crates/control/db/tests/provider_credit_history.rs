@@ -79,7 +79,7 @@ impl World {
 
     async fn write(&self, facts: &Json, at: DateTime<Utc>) {
         set_facts(
-            &mut self.db.acquire().await.unwrap(),
+            &mut *self.db.acquire().await.unwrap(),
             self.provider,
             facts,
             at,
@@ -90,7 +90,7 @@ impl World {
 
     async fn rows(&self) -> Vec<SeriesRow> {
         read(
-            &mut self.db.acquire().await.unwrap(),
+            &mut *self.db.acquire().await.unwrap(),
             self.provider,
             self.at,
             None,
@@ -250,11 +250,10 @@ async fn cached_values_and_manual_overrides_never_become_new_vendor_observations
     let override_facts = json!({"balances":[{"id":"plan","unit":"credits","remaining":"999999"}]});
     assert!(
         change_provider(
-            &mut world.db.acquire().await.unwrap(),
+            &mut *world.db.acquire().await.unwrap(),
             world.provider,
             world.revision().await,
             &ProviderChange {
-                model_group_options: None,
                 facts_overrides: Some(&override_facts),
                 ..Default::default()
             },
@@ -562,7 +561,7 @@ async fn source_generation_and_unit_changes_keep_groups_separate_and_paginate_qu
     let model_sources = json!({"models":{"by":"none"}});
     assert!(
         set_sources(
-            &mut world.db.acquire().await.unwrap(),
+            &mut *world.db.acquire().await.unwrap(),
             world.provider,
             world.revision().await,
             &model_sources,
@@ -588,7 +587,7 @@ async fn source_generation_and_unit_changes_keep_groups_separate_and_paginate_qu
     let source_generation = before_source_change + 1;
     assert!(
         set_sources(
-            &mut world.db.acquire().await.unwrap(),
+            &mut *world.db.acquire().await.unwrap(),
             world.provider,
             before_source_change,
             &facts_sources,
@@ -625,7 +624,7 @@ async fn source_generation_and_unit_changes_keep_groups_separate_and_paginate_qu
         ])
     );
     let first = read(
-        &mut world.db.acquire().await.unwrap(),
+        &mut *world.db.acquire().await.unwrap(),
         world.provider,
         world.at,
         None,
@@ -650,7 +649,7 @@ async fn source_generation_and_unit_changes_keep_groups_separate_and_paginate_qu
     }
     let after = &first[0].group_key;
     let rest = read(
-        &mut world.db.acquire().await.unwrap(),
+        &mut *world.db.acquire().await.unwrap(),
         world.provider,
         world.at,
         Some(after),
@@ -697,7 +696,7 @@ async fn observations_rollback_with_facts_and_trim_uses_the_existing_time_cutoff
         .write(&balance(later, Some("9.9"), "credits", false), later)
         .await;
     let cutoff = later.with_second(0).unwrap();
-    let removed = provider_credits::trim(&mut world.db.acquire().await.unwrap(), cutoff)
+    let removed = provider_credits::trim(&mut *world.db.acquire().await.unwrap(), cutoff)
         .await
         .unwrap();
     assert_eq!(removed, 1);

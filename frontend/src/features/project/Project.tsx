@@ -56,7 +56,7 @@ import { Popover } from '@/ui/Popover';
 import { PermissionGate } from '@/ui/PermissionGate';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Menu, type MenuEntry } from '@/ui/Menu';
-import { Skeleton, SkeletonGroup, type SkeletonReads } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 import { TagChip } from '@/ui/TagChip';
 import { toast } from '@/ui/Toast';
 
@@ -143,10 +143,10 @@ function TagsFilter({ tags, chosen, pending, error, onRetry, onOpenChange, onCha
   );
 }
 
-function ProjectSkeleton(props: SkeletonReads) {
+function ProjectSkeleton() {
   return (
     <Page>
-      <SkeletonGroup {...props} className="flex flex-col gap-6">
+      <SkeletonGroup className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -229,7 +229,7 @@ function ProjectScreen({ projectId, search, onSearch: navigate }: ProjectProps) 
     },
   });
 
-  if (query.isPending) return <ProjectSkeleton read={query} />;
+  if (query.isPending) return <ProjectSkeleton />;
   if (query.isError) {
     // A screen the server refused shows what is missing and whom to ask, and the way on, in place of its content.
     return <NodeFailure className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;

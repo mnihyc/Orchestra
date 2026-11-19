@@ -28,12 +28,12 @@ pub struct ModelPaths {
     pub exact: Vec<String>,
 }
 
-/// The observed wire facts needed by the native reviewer case. This is test setup, not
+/// The observed wire facts needed by the fixed-reviewer native case. This is test setup, not
 /// an Auto capability declaration: only the program's verified manifest can offer the mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeNotificationReview {
-    /// Actual fixed reviewer model; None uses the session model on a declared session-model path.
-    pub model: Option<String>,
+    /// Actual reviewer routing model, observed independently of the generic code-review model.
+    pub model: String,
     /// Extra native command arguments that request review of the disposable marker command.
     pub command_arguments: Json,
     /// Structured JSON answer observed to approve a native review.
@@ -52,12 +52,8 @@ pub struct NativeNotificationReview {
 
 /// Evidence forms are native protocol facts, not program names or new approval authorities.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a conformance fixture holds one review form per case; boxing it would only move the bytes and change every case's construction"
-)]
 pub enum NativeAutoReview {
-    /// Native reviewer notifications with their declared model selection.
+    /// Existing fixed-reviewer notification case, unchanged.
     Notifications(NativeNotificationReview),
     /// Structurally matched classifier requests and factual denial hooks.
     Classifier(NativeClassifierReview),

@@ -52,23 +52,19 @@ pub async fn run(
     while !stop.is_cancelled() {
         let mut tx = transaction_guard::scope(false, db.begin()).await?;
         transaction_guard::lock_action(&mut tx).await?;
-        if lease.fence(&mut tx, clock).await?.is_none() {
-            return Ok(Some(done));
-        }
-        let mut page = Done::default();
         let candidates = documents::maintenance_page(&mut tx, after, BATCH).await?;
         if candidates.is_empty() {
             break;
         }
         let ids: Vec<_> = candidates.iter().map(|(id, _)| *id).collect();
-        page.block_documents += documents::purge_removed_blocks_among(
+        done.block_documents += documents::purge_removed_blocks_among(
             &mut tx,
             now - spans::days(config.retention.soft_delete_days),
             &ids,
         )
         .await?;
         // Batch ids are promised for a day, independently of the recovery window.
-        page.batches +=
+        done.batches +=
             documents::purge_batch_records_among(&mut tx, now - chrono::Duration::days(1), &ids)
                 .await?;
         // Resolve a home once within this committed page. Nothing survives into the
@@ -109,18 +105,12 @@ pub async fn run(
                 .await?
                 .is_empty()
             {
-                page.histories += 1;
+                done.histories += 1;
                 documents::touch(&mut tx, *document).await?;
             }
         }
         after = candidates.last().map(|(id, _)| *id);
-        if lease.fence(&mut tx, clock).await?.is_none() {
-            return Ok(Some(done));
-        }
         tx.commit().await.map_err(DbError::from)?;
-        done.block_documents += page.block_documents;
-        done.batches += page.batches;
-        done.histories += page.histories;
         if stop.is_cancelled() {
             break;
         }
@@ -133,10 +123,6 @@ pub async fn run(
     while !stop.is_cancelled() {
         let mut tx = transaction_guard::scope(false, db.begin()).await?;
         transaction_guard::lock_action(&mut tx).await?;
-        if lease.fence(&mut tx, clock).await?.is_none() {
-            return Ok(Some(done));
-        }
-        let mut page = Done::default();
         let mut files =
             documents::unnamed_files(&mut tx, now - chrono::Duration::days(1), BATCH).await?;
         if files.is_empty() {
@@ -153,14 +139,10 @@ pub async fn run(
             )
             .await?
             {
-                page.files += 1;
+                done.files += 1;
             }
         }
-        if lease.fence(&mut tx, clock).await?.is_none() {
-            return Ok(Some(done));
-        }
         tx.commit().await.map_err(DbError::from)?;
-        done.files += page.files;
         if stop.is_cancelled() {
             break;
         }

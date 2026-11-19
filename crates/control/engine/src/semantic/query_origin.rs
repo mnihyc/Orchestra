@@ -344,7 +344,7 @@ impl QueryAuthority {
             work,
             call: command.id,
             machine: command.machine,
-            body: crate::jobs::command_identity::hash(&command.body)?,
+            body: Hash::of(&serde_json::to_vec(&command.body)?),
         })
     }
     pub(crate) async fn current_callers(
@@ -358,13 +358,7 @@ impl QueryAuthority {
             || command.machine_id != self.machine
             || command.kind != "provider.embed"
             || command.serial_key().is_some()
-        {
-            return Ok(None);
-        }
-        // PostgreSQL can reorder object members when storing a command in JSONB.
-        // Also recognize the old digest when the exact serialized body still matches.
-        if crate::jobs::command_identity::hash(&command.body)? != self.body
-            && Hash::of(&serde_json::to_vec(&command.body)?) != self.body
+            || Hash::of(&serde_json::to_vec(&command.body)?) != self.body
         {
             return Ok(None);
         }
@@ -402,8 +396,6 @@ impl QueryAuthority {
                     provider: self.work.generation.provider,
                     model: Some(&self.work.generation.model),
                     effort: None,
-                    // The semantic index runs in no environment.
-                    runs_in: None,
                 },
             )
             .await?;

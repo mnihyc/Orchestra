@@ -10,9 +10,7 @@ import { shapeOf } from '@/features/settings/settingsModel';
 import type { AgentAccessChoice, ResolvedSetting } from '@/generated/api-types';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { i18n, setLocale } from '@/i18n';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 const definition = SETTINGS_REGISTRY.find((row) => row.key === 'threads.agent_access');
@@ -78,13 +76,6 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(screen.getByRole('combobox', { name: i18n.t('access.agents.dialog.what') })).toHaveTextContent(i18n.t('choiceCatalog.generalAccess.custom.name'));
     await userEvent.click(screen.getByRole('button', { name: i18n.t('access.agents.dialog.byArea') }));
     const areas = screen.getByRole('group', { name: i18n.t('access.agents.dialog.byAreaLabel') });
-    const rows = within(areas).getAllByRole('listitem');
-    expect(rows).toHaveLength(3);
-    for (const [index, area] of ['timeline', 'chat', 'documents'].entries()) {
-      const row = rows[index];
-      if (row === undefined) throw new Error('Each preset area keeps its own readable control.');
-      expect(within(row).getByRole('combobox', { name: i18n.t(`access.agents.area.${area}`) })).toBeVisible();
-    }
     expect(within(areas).getByRole('combobox', { name: i18n.t('access.agents.area.timeline') })).toHaveTextContent(i18n.t('choiceCatalog.agentStep.none.name'));
     expect(within(areas).getByRole('combobox', { name: i18n.t('access.agents.area.chat') })).toHaveTextContent(i18n.t('choiceCatalog.agentStep.none.name'));
     await userEvent.click(screen.getByRole('button', { name: i18n.t('common.cancel') }));

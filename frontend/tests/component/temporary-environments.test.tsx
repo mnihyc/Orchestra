@@ -31,15 +31,12 @@ const originalAppearance=useAppearance.getState();
 beforeEach(()=>{vi.clearAllMocks();calls.keep.mockReset();calls.export.mockReset();calls.download.mockReset();useAppearance.setState({locale:'en',timeZone:'UTC',timeZoneMode:'fixed'});calls.keep.mockResolvedValue({...environment,temporary:null});calls.export.mockResolvedValue(finished);calls.download.mockResolvedValue(new Blob(['copied files']));});
 afterEach(async()=>{useAppearance.setState({locale:originalAppearance.locale,timeZone:originalAppearance.timeZone,timeZoneMode:originalAppearance.timeZoneMode});await setLocale('en');});
 
-it.each(['en','zh-CN'] as const)('keeps Temporary compact with its explanation and exact cleanup timing available on intent (%s)',async(locale)=>{
+it.each(['en','zh-CN'] as const)('keeps the Temporary explanation visible and its exact cleanup timing accessible (%s)',async(locale)=>{
   await setLocale(locale);const user=userEvent.setup();
   function Consent(){const [checked,setChecked]=useState(false);return <TemporaryChoice checked={checked} onChange={setChecked} />;}
-  const view=show(<Consent />);
+  show(<Consent />);
   const control=screen.getByRole('switch',{name:i18n.t('temporary.name')});
-  expect(view.container).not.toHaveTextContent(i18n.t('temporary.description'));
-  await user.hover(control);
-  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('temporary.description'));
-  await user.unhover(control);
+  expect(screen.getByText(i18n.t('temporary.description'))).toBeVisible();
   await user.click(control);expect(control).toBeChecked();
   expect(screen.queryByText(i18n.t('temporary.consent'))).not.toBeInTheDocument();
   // A click dismisses the pointer's current tooltip. Leave and re-enter to ask for the new state.

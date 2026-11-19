@@ -15,9 +15,6 @@ import { ChartColumn, X } from 'lucide-react';
 import { type ReactNode, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { meQuery } from '@/api/auth';
-import { AdminModeEnableAction, useAdminMode } from '@/features/access/AdminMode';
-import { StateLine } from '@/ui/StateLine';
 import { nodeQuery } from '@/api/nodes';
 import { providerQuery } from '@/api/resources';
 import { eventsQuery, usageQuery } from '@/api/usage';
@@ -78,14 +75,13 @@ import { Button } from '@/ui/Button';
 import { ErrorState } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
 import { ChoiceLocator } from '@/ui/ChoiceLocator';
-import { Skeleton, SkeletonGroup, type SkeletonReads } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 import { Tabs } from '@/ui/Tabs';
 import { UsageVisibility } from './Visibility';
 import { USAGE_VIEWS } from '@/features/usage/navigation';
 
 import { useUsageChoices, type SearchPatch } from './choices';
 import { Plan,usePlanUsage,useCreditUsage,selectedProviderMetric } from './Plan';
-import {purposeLabel} from './words';
 
 export interface ReportProps {
   providerData?:Provider | undefined;
@@ -105,9 +101,9 @@ function Heading({ title, nodeId }: { title: string; nodeId: string | undefined 
   return null;
 }
 
-function Skeletons({plan, ...reads}:{plan?:ReactNode} & SkeletonReads={}) {
+function Skeletons({plan}:{plan?:ReactNode}={}) {
   return (
-    <SkeletonGroup {...reads} className="flex flex-col gap-4">
+    <SkeletonGroup className="flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <Skeleton className="h-[6rem] rounded-lg" />
         <Skeleton className="h-[6rem] rounded-lg" />
@@ -123,8 +119,6 @@ function Skeletons({plan, ...reads}:{plan?:ReactNode} & SkeletonReads={}) {
 /** The label of a filter that is set, found among the rows of the table it narrows. */
 function labelOfFilter(analytics: UsageAnalytics | undefined, records:readonly UsageEvent[], name: FilterName, value: string | boolean, t: TFunction, locale: string): string {
   if (typeof value === 'boolean') return t(value ? 'usage.key.actualTierNotReported' : 'usage.key.knownTier');
-  if(name==='purpose') return purposeLabel(value,t);
-  if(name==='service') return value;
   if (name === 'turn') return t('usagePerf.selectedTurn');
   if(name==='outcome') return t(`usagePerf.choices.outcomes.${readOutcome(value) ?? 'all'}.name` as 'usagePerf.choices.outcomes.done.name');
   const dimension = FILTER_DIMENSION[name];
@@ -143,9 +137,6 @@ function labelOfFilter(analytics: UsageAnalytics | undefined, records:readonly U
 export function Report({ scope: givenScope, search: given, onSearch, embedded = false,providerData:givenProvider,limitsSlot }: ReportProps) {
   const { t, i18n } = useTranslation();
   const now = useNow();
-  const me = useQuery(meQuery);
-  const adminMode = useAdminMode();
-  const systemAllowed = me.data?.is_system_admin === true && adminMode.data?.as_admin === true;
   const openHelp=useHelpOpener();
   const [own, setOwn] = useState<UsageSearch>({});
   const [openedAt,setOpenedAt] = useState(Date.now);
@@ -154,7 +145,6 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
   const [colors,setColors]=useState<ReadonlyMap<string,number>>(new Map());
   const scope = given === undefined && own.scope !== undefined ? parseScope(own.scope) : givenScope;
   const view = search.view ?? 'usage';
-  const mayReadScope = scope.kind !== 'system' || systemAllowed;
   const change = useCallback((patch: SearchPatch) => {
     keepChoices(patch);
     if(patch.range!==undefined || patch.from!==undefined || patch.to!==undefined) setOpenedAt(Date.now());
@@ -184,14 +174,14 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
   const chartBucket=search.bucket!==undefined && search.bucket!=='auto' && bucketsFor(span.days).includes(search.bucket) ? search.bucket : 'auto';
   const rows = search.more === true ? ROWS.many : ROWS.few;
   const params = useMemo(() => figuresParams(scope, {...search,series:requestedSplit}, span, offered, rows), [scope, search, requestedSplit, span, offered, rows]);
-  const figures = useQuery({ ...usageQuery(params), enabled: mayReadScope && view !== 'requests' });
+  const figures = useQuery({ ...usageQuery(params), enabled: view !== 'requests' });
   const analytics = figures.data;
   const depth = analytics?.depth ?? null;
 
   // The tables by thread are asked for when they are opened: a place's summary refuses them, and a reader cannot be known to have the reports before the first answer.
   const tabs: UsageDimension[] = useMemo(() => [...(offersThreads(scope, depth) && depth !== null ? (['thread'] as const) : []), ...offered], [offered, scope, depth]);
   const tab = search.by !== undefined && tabs.includes(search.by) ? search.by : (offered[0] ?? 'model');
-  const threads = useQuery({ ...usageQuery({ ...params, breakdowns: ['thread'], seriesBy: undefined, bucket: undefined }), enabled: mayReadScope && view !== 'requests' && tab === 'thread' && depth !== null });
+  const threads = useQuery({ ...usageQuery({ ...params, breakdowns: ['thread'], seriesBy: undefined, bucket: undefined }), enabled: view !== 'requests' && tab === 'thread' && depth !== null });
 
   const performanceMeasure = search.show === 'first_token' || search.show === 'errors' ? search.show : 'speed';
   const measure: Measure = view === 'performance' ? performanceMeasure : search.show === 'tokens' || search.show === 'turns' || search.show === 'requests' || search.show === 'credits' ? search.show : DEFAULT_MEASURE;
@@ -209,7 +199,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
   );
 
   const title =
-    scope.kind === 'system' ? t('usage.title.system') : scope.kind === 'me' ? t('usage.title.me') : placeName === null ? t('usage.title.loading') : scope.kind === 'node' ? t('usage.title.place', { name: placeName }) : t('usage.title.provider', { name: placeName });
+    scope.kind === 'me' ? t('usage.title.me') : placeName === null ? t('usage.title.loading') : scope.kind === 'node' ? t('usage.title.place', { name: placeName }) : t('usage.title.provider', { name: placeName });
   const headline =
     depth === null
       ? null
@@ -225,10 +215,10 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
     if (dimension === 'thread') {
       if (threads.isError) return { state: 'failed', error: threads.error, retry: () => void threads.refetch() };
       const table = threads.data?.breakdowns.find((candidate) => candidate.by === 'thread');
-      return table === undefined ? { state: 'loading', read: threads } : { state: 'ready', table };
+      return table === undefined ? { state: 'loading' } : { state: 'ready', table };
     }
     const table = analytics?.breakdowns.find((candidate) => candidate.by === dimension);
-    return table === undefined ? { state: 'loading', read: figures } : { state: 'ready', table };
+    return table === undefined ? { state: 'loading' } : { state: 'ready', table };
   };
 
   // What bounds work where this is looked at: a place's limits, a provider's on its own tab, and, on one's own screen, the share of each allowance that covers one.
@@ -239,7 +229,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
     () => (place.data === undefined ? null : ({ kind: 'node', id: place.data.id, name: place.data.name, manage: holds(place.data.access, 'usage.manage'), reports: holds(place.data.access, 'usage.view') } as const)),
     [place.data],
   );
-  const limits = limitsSlot ?? (scope.kind==='system' ? <Limits of={{ kind: 'system', manage: systemAllowed }} /> : scope.kind==='provider' ? providerData===undefined ? null : <Limits of={{kind:'provider',id:providerData.id,name:providerData.name,manage:holds(providerData.access,'provider.manage')}} /> : embedded ? null : scope.kind==='node' ? placeLimits===null ? null : <Limits of={placeLimits} onRates={onRates} /> : <Limits of={{kind:'mine'}} />);
+  const limits = limitsSlot ?? (scope.kind==='provider' ? providerData===undefined ? null : <Limits of={{kind:'provider',id:providerData.id,name:providerData.name,manage:holds(providerData.access,'provider.manage')}} /> : embedded ? null : scope.kind==='node' ? placeLimits===null ? null : <Limits of={placeLimits} onRates={onRates} /> : <Limits of={{kind:'mine'}} />);
 
   const filters = activeFilters(search);
   const recordParams = recordsParams(scope, search, span);
@@ -284,7 +274,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
       )}
 
       {view === 'requests' ? <Requests key={`${scopeText(scope)}:${search.org ?? ''}`} scope={scope} search={search} span={span} onSearch={change} orgChoices={analytics?.breakdowns.filter((table) => table.by === 'org').flatMap((table) => table.rows.flatMap((row) => row.key.org === null || row.key.org === undefined ? [] : [row.key.org])) ?? []} />
-        : view === 'performance' ? figures.isPending ? <Skeletons read={figures} /> : figures.isError && analytics === undefined ? <ErrorState error={figures.error} onRetry={() => void figures.refetch()} /> : analytics === undefined || bars === null ? null : <PerformanceView
+        : view === 'performance' ? figures.isPending ? <Skeletons /> : figures.isError && analytics === undefined ? <ErrorState error={figures.error} onRetry={() => void figures.refetch()} /> : analytics === undefined || bars === null ? null : <PerformanceView
           measure={performanceMeasure} onMeasure={(show) => change({ show })}
           figures={<PerformanceFigures current={analytics.totals.performance} previous={before === null ? undefined : analytics.performance_before} before={before === null ? '' : t('usage.figures.before', { count: span.days })} />}
           controls={<><ChoiceLocator size="sm" label={t('usage.chart.splitBy')} value={split} onValueChange={(series) => change({ series })} options={[...(measure==='tokens' ? [{value:'token_kind' as const,name:t('usagePerf.choices.splits.token_kind.name'),description:t('usagePerf.choices.splits.token_kind.description')}] : []),...tabs.map((one) => ({ value: one, name: t(`usagePerf.choices.splits.${one}.name`), description: t(`usagePerf.choices.splits.${one}.description`) })), { value: 'none', name: t('usagePerf.choices.splits.none.name'), description: t('usagePerf.choices.splits.none.description') }]} /><Select size="sm" label={t('usage.chart.per')} value={chartBucket} onValueChange={(bucket) => change({bucket})} options={[{ value: 'auto' as const, name: t('usagePerf.choices.buckets.auto.name'), description: t('usagePerf.choices.buckets.auto.description') }, ...bucketsFor(span.days).map((one) => ({ value: one, name: t(`usagePerf.choices.buckets.${one}.name`), description: t(`usagePerf.choices.buckets.${one}.description`) }))]} /></>}
@@ -294,7 +284,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
           breakdowns={<Breakdowns colors={colors} seriesBy={split} performance tabs={tabs} tab={tab} onTab={(by) => change({ by })} tableOf={tableOf} search={search} onFilter={(name, value) => change({ [name]: search[name] === value ? undefined : value })} showingMore={search.more === true} onMore={() => change({ more: true })} />}
         />
         : figures.isPending ? (
-        <Skeletons read={figures} plan={planSection} />
+        <Skeletons plan={planSection} />
       ) : figures.isError && analytics === undefined ? (
         <><ErrorState error={figures.error} retrying={figures.isRefetching} onRetry={() => void figures.refetch()} />{planSection}</>
       ) : analytics === undefined || bars === null ? null : (
@@ -350,17 +340,14 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
 
   const viewOptions = USAGE_VIEWS.map((value) => ({ value, label: t(`usagePerf.viewNames.${value}`), panel: body }));
   const views = <Tabs label={t('usagePerf.views')} value={view} onValueChange={selectView} panelClassName="pt-4" tabs={viewOptions} />;
-  const unavailable = me.isPending ? <Skeletons /> : me.isError ? <ErrorState error={me.error} onRetry={() => void me.refetch()} />
-    : !me.data.is_system_admin ? <StateLine message={t('usage.scope.adminRequired')} /> : adminMode.isPending ? <Skeletons />
-      : adminMode.isError ? <ErrorState error={adminMode.error} onRetry={() => void adminMode.refetch()} /> : <AdminModeEnableAction />;
-  if (embedded) return mayReadScope ? body : unavailable;
+  if (embedded) return body;
   return (
     <ReportFrame
       heading={<Heading title={title} nodeId={scope.kind === 'node' ? scope.id : undefined} />}
       title={t('usage.screenTitle')} icon={<ChartColumn aria-hidden />}
-      actions={mayReadScope ? <>{accessAndHelp}{exportAction}</> : undefined}
-      filters={<><ScopePicker scope={scope} name={placeName} rootOrgId={place.data?.org_id} onChange={chooseScope} allowSystem={me.data?.is_system_admin === true} />{period}</>}
-    >{mayReadScope ? views : unavailable}</ReportFrame>
+      actions={<>{accessAndHelp}{exportAction}</>}
+      filters={<><ScopePicker scope={scope} name={placeName} rootOrgId={place.data?.org_id} onChange={chooseScope} />{period}</>}
+    >{views}</ReportFrame>
   );
 }
 

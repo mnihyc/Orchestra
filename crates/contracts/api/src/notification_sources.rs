@@ -57,8 +57,6 @@ pub enum Source {
     AvailableChannelOwners,
     /// The caller's actual private route/recipient state, only when selected for output.
     ChannelCallerRoutes,
-    /// The native route's actual owning account.
-    RouteAccount,
 }
 
 const NOTICE_NAMES: Binding<Source> = Binding {
@@ -265,78 +263,6 @@ pub const CHANNEL_LIST_MANAGE: Declaration<Source> = Declaration {
     ],
 };
 
-/// Actual native creation owner and separately bounded current-account route data.
-pub const CHANNEL_CREATE_SYSTEM: Declaration<Source> = Declaration {
-    operation: "AdminNotificationChannelCreate",
-    bindings: &[
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::System,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::System,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelCallerRoutes,
-            target: TargetResolver::ResolvedCollection("channel_caller_routes"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-/// Actual native creation owner and separately bounded current-account route data.
-pub const CHANNEL_CREATE_ORG: Declaration<Source> = Declaration {
-    operation: "OrgNotificationChannelCreate",
-    bindings: &[
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::PermissionObject,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelCallerRoutes,
-            target: TargetResolver::ResolvedCollection("channel_caller_routes"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-/// Actual native creation owner and separately bounded current-account route data.
-pub const CHANNEL_CREATE_OWN: Declaration<Source> = Declaration {
-    operation: "MeNotificationChannelCreate",
-    bindings: &[
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelOwner,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::ChannelCallerRoutes,
-            target: TargetResolver::ResolvedCollection("channel_caller_routes"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
 /// Native update owner, independent stored-channel Read and optional own-route content.
 pub const CHANNEL_UPDATE: Declaration<Source> = Declaration {
     operation: "NotificationChannelUpdate",
@@ -358,25 +284,6 @@ pub const CHANNEL_UPDATE: Declaration<Source> = Declaration {
             target: TargetResolver::ResolvedCollection("channel_caller_routes"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// A bot-link generation is created/read only in its native account namespace.
-pub const ROUTE_LINK_CREATE: Declaration<Source> = Declaration {
-    operation: "MeNotificationRouteLinkCreate",
-    bindings: &[
-        Binding {
-            source: Source::RouteAccount,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::RouteAccount,
-            target: TargetResolver::CurrentAccount,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
         },
     ],
 };

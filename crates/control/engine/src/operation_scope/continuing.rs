@@ -3,7 +3,6 @@
 
 use super::{
     BindingError, Prepared, account_policy,
-    http_origin::HttpOrigin,
     sources::{self, Facts},
 };
 use crate::EngineError;
@@ -14,7 +13,7 @@ use orch_api_contract::operation_sources::Declaration;
 use orch_api_contract::routes::Route;
 use orch_authz::{Caller, CapturedOperation, Principal};
 use orch_db::{Conn, DbError, queries::transaction_guard};
-use orch_types::{Clock, Id, Time};
+use orch_types::{Clock, Time};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -34,42 +33,6 @@ impl Phase {
     }
 }
 
-#[derive(Clone)]
-enum Transport {
-    Current(Option<Arc<HttpOrigin>>),
-    Checkpoint(Arc<HttpOrigin>),
-}
-impl Transport {
-    fn http(&self) -> Option<&Arc<HttpOrigin>> {
-        match self {
-            Self::Current(http) => http.as_ref(),
-            Self::Checkpoint(http) => Some(http),
-        }
-    }
-    fn resolve(self) -> Result<Self, Error> {
-        match self {
-            Self::Current(retained) => {
-                let http = match (retained, super::http_origin::active()) {
-                    (Some(old), Some(current)) => Some(Arc::new(old.intersect(&current)?)),
-                    (old, current) => old.or(current),
-                };
-                Ok(Self::Current(http))
-            }
-            checkpoint => Ok(checkpoint),
-        }
-    }
-    fn accepted(self, http: Option<Arc<HttpOrigin>>) -> Result<Self, Error> {
-        match self {
-            Self::Current(_) => Ok(Self::Current(http)),
-            Self::Checkpoint(_) => {
-                Ok(Self::Checkpoint(http.ok_or_else(|| {
-                    refused_at("checkpoint", "transport.missing")
-                })?))
-            }
-        }
-    }
-}
-
 /// A known original operation that closed never becomes an unclassified or ordinary caller.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -83,24 +46,6 @@ pub enum Error {
     #[error(transparent)]
     Native(#[from] EngineError),
 }
-
-/// Opt-in native test diagnostics contain only the operation and the failed checkpoint.
-pub(crate) fn diagnostic(operation: &str, checkpoint: &'static str, error: Error) -> Error {
-    if std::env::var_os("ORCH_TEST_NATIVE_OPERATIONS").is_some() {
-        let outcome = match &error {
-            Error::Refused => "refused",
-            Error::Binding(BindingError::Refused) => "scope_refused",
-            Error::Binding(_) => "binding_error",
-            Error::Native(_) => "native_error",
-        };
-        eprintln!("native operation {operation}: checkpoint={checkpoint} outcome={outcome}");
-    }
-    error
-}
-
-fn refused_at(operation: &str, checkpoint: &'static str) -> Error {
-    diagnostic(operation, checkpoint, Error::Refused)
-}
 impl From<DbError> for Error {
     fn from(error: DbError) -> Self {
         Self::Native(error.into())
@@ -111,11 +56,6 @@ impl From<orch_authz::Error> for Error {
         Self::Native(error.into())
     }
 }
-
-/// Native operands together with the factual bindings of their source roles.
-pub type PreparedSource<V, R> = (V, Vec<Facts<R>>);
-/// The prepared native source a scoped continuation resolves to.
-pub type PreparedFuture<'a, V, R> = BoxFuture<'a, Result<PreparedSource<V, R>, Error>>;
 
 /// One existing native source factory, with the same declaration on HTTP and later work.
 /// Preparation and validation are effect-free; model/connector/stream IO is started by the
@@ -142,7 +82,7 @@ pub trait Source: Send + Sync + 'static {
         caller: &'a Caller,
         input: &'a Self::Input,
         now: Time,
-    ) -> PreparedFuture<'a, Self::Value, Self::Role>;
+    ) -> BoxFuture<'a, Result<(Self::Value, Vec<Facts<Self::Role>>), Error>>;
     /// The existing native ordinary prerequisite, including current system standing where
     /// that native act requires it. Scope admission never supplies that standing/private mode.
     fn require<'a>(
@@ -175,7 +115,6 @@ pub trait Source: Send + Sync + 'static {
 #[must_use = "use the current native operands or validate their original source"]
 pub struct Frame<F: Source> {
     principal: Principal,
-    raw_until: Option<Time>,
     opened: Opened<F>,
 }
 
@@ -190,7 +129,6 @@ pub struct Opened<F: Source> {
     value: Arc<F::Value>,
     plan: Prepared,
     phase: Phase,
-    transport: Transport,
 }
 
 /// One synchronous live-key cut, consumed by the native first-effect callback after all locks.
@@ -198,21 +136,15 @@ pub struct Opened<F: Source> {
 #[must_use = "consume the check at the native first effect"]
 pub struct FirstEffect {
     caller: Caller,
-    raw_until: Option<Time>,
 }
 impl FirstEffect {
     /// Invoke immediately before the native writer's actual first effect; never after releasing
     /// the frame transaction. A later new effect after another wait requires Opened::refresh.
     pub fn check(self, clock: &dyn Clock) -> Result<(), Error> {
-        if self.caller.key_deadline_allows(clock)
-            && self.raw_until.is_none_or(|end| clock.time() < end)
-        {
+        if self.caller.key_deadline_allows(clock) {
             Ok(())
         } else {
-            Err(refused_at(
-                self.caller.admitted_operation().unwrap_or("unadmitted"),
-                "first_effect.deadline",
-            ))
+            Err(Error::Refused)
         }
     }
 }
@@ -238,10 +170,6 @@ pub struct Parts<F: Source> {
 }
 
 impl<F: Source> Frame<F> {
-    /// Actual accepted raw identity/minima when this frame originated in HTTP.
-    pub fn http_origin(&self) -> Option<&HttpOrigin> {
-        self.opened.transport.http().map(Arc::as_ref)
-    }
     /// The actual fresh native ordinary actor.
     pub fn principal(&self) -> &Principal {
         &self.principal
@@ -252,18 +180,10 @@ impl<F: Source> Frame<F> {
     }
     /// Keep the earliest actual accepted/current key deadline across every retained key.
     pub fn check_deadline(&self, clock: &dyn Clock) -> Result<(), Error> {
-        if self.principal.caller().key_deadline_allows(clock)
-            && self.raw_until.is_none_or(|end| clock.time() < end)
-        {
+        if self.principal.caller().key_deadline_allows(clock) {
             Ok(())
         } else {
-            Err(refused_at(
-                self.principal
-                    .caller()
-                    .admitted_operation()
-                    .unwrap_or("unadmitted"),
-                "frame.deadline",
-            ))
+            Err(Error::Refused)
         }
     }
     /// Give the native writer its actual operands and one linear first-effect check.
@@ -273,7 +193,6 @@ impl<F: Source> Frame<F> {
             value: Arc::clone(&self.opened.value),
             first_effect: FirstEffect {
                 caller: self.principal.caller().clone(),
-                raw_until: self.raw_until,
             },
             principal: self.principal,
             opened: self.opened,
@@ -305,7 +224,7 @@ impl<F: Source> Opened<F> {
         let ceiling = match &self.ceiling {
             Some(old) => old
                 .intersect_restrictions(caller)
-                .map_err(|_| refused_at(self.origin.operation(), "refresh.ceiling"))?,
+                .map_err(|_| Error::Refused)?,
             None => caller.clone(),
         };
         self.refresh_with_ceiling(conn, clock, Some(ceiling)).await
@@ -324,7 +243,6 @@ impl<F: Source> Opened<F> {
             Arc::clone(&self.input),
             ceiling,
             self.phase,
-            self.transport.clone(),
         )
         .await?;
         if !self.phase.covers(&fresh.opened.plan, &self.plan)
@@ -338,7 +256,7 @@ impl<F: Source> Opened<F> {
             )
             .await?
         {
-            return Err(refused_at(self.origin.operation(), "refresh.sources"));
+            return Err(Error::Refused);
         }
         fresh.check_deadline(clock)?;
         Ok(fresh)
@@ -354,37 +272,7 @@ pub async fn prepare<F: Source>(
     origin: &CapturedOperation,
     input: F::Input,
 ) -> Result<Frame<F>, Error> {
-    prepare_input::<F>(
-        conn,
-        clock,
-        origin,
-        Arc::new(input),
-        None,
-        Phase::Complete,
-        Transport::Current(None),
-    )
-    .await
-}
-
-/// Recheck a saved request through its own captured transport, independently of an enclosing act.
-/// The enclosing request keeps its account and current raw/key fences before and after this cut.
-/// A frame's ordinary preparation and refresh still require their own exact transport namespace.
-pub async fn checkpoint<F: Source>(
-    conn: &mut Conn,
-    clock: &dyn Clock,
-    origin: &HttpOrigin,
-    input: F::Input,
-) -> Result<Frame<F>, Error> {
-    prepare_input::<F>(
-        conn,
-        clock,
-        origin.origin(),
-        Arc::new(input),
-        None,
-        Phase::Complete,
-        Transport::Checkpoint(Arc::new(origin.clone())),
-    )
-    .await
+    prepare_input::<F>(conn, clock, origin, Arc::new(input), None, Phase::Complete).await
 }
 
 /// The same native source frame with an actual additional restored caller ceiling.
@@ -403,7 +291,6 @@ pub async fn prepare_with_caller<F: Source>(
         Arc::new(input),
         Some(caller.clone()),
         Phase::Complete,
-        Transport::Current(None),
     )
     .await
 }
@@ -415,53 +302,6 @@ async fn prepare_input<F: Source>(
     input: Arc<F::Input>,
     ceiling: Option<Caller>,
     phase: Phase,
-    transport: Transport,
-) -> Result<Frame<F>, Error> {
-    let enclosing = match &transport {
-        Transport::Checkpoint(_) => super::http_origin::active(),
-        Transport::Current(_) => None,
-    };
-    if let Some(enclosing) = &enclosing {
-        if !transaction_guard::in_transaction(conn) {
-            return Err(EngineError::unreadable(
-                "native operation preparation requires its transaction",
-            )
-            .into());
-        }
-        transaction_guard::lock_action(conn).await?;
-        if enclosing.origin().user() != origin.user() {
-            return Err(refused_at(origin.operation(), "checkpoint.actor"));
-        }
-        enclosing.current(conn, clock).await?.check(clock)?;
-    }
-    let prepared = prepare_frame::<F>(
-        conn,
-        clock,
-        origin,
-        input,
-        ceiling,
-        phase,
-        transport.resolve()?,
-    )
-    .await;
-    // Recheck the enclosing identity and restore its audit mode even on a refused checkpoint.
-    // Its active transport remains untouched; the saved frame admits only its own operation.
-    if let Some(enclosing) = enclosing {
-        enclosing.current(conn, clock).await?.check(clock)?;
-    }
-    let frame = prepared?;
-    frame.check_deadline(clock)?;
-    Ok(frame)
-}
-
-async fn prepare_frame<F: Source>(
-    conn: &mut Conn,
-    clock: &dyn Clock,
-    origin: &CapturedOperation,
-    input: Arc<F::Input>,
-    ceiling: Option<Caller>,
-    phase: Phase,
-    transport: Transport,
 ) -> Result<Frame<F>, Error> {
     let earlier = load::<F>(
         conn,
@@ -470,12 +310,9 @@ async fn prepare_frame<F: Source>(
         Arc::clone(&input),
         ceiling.as_ref(),
         phase,
-        transport,
     )
     .await?;
-    F::locks(conn, &earlier.principal, &input, &earlier.opened.value)
-        .await
-        .map_err(|error| diagnostic(origin.operation(), "native.locks", error))?;
+    F::locks(conn, &earlier.principal, &input, &earlier.opened.value).await?;
     let fresh = load::<F>(
         conn,
         clock,
@@ -483,7 +320,6 @@ async fn prepare_frame<F: Source>(
         Arc::clone(&input),
         ceiling.as_ref(),
         phase,
-        earlier.opened.transport.clone(),
     )
     .await?;
     if !phase.covers(&fresh.opened.plan, &earlier.opened.plan)
@@ -497,7 +333,7 @@ async fn prepare_frame<F: Source>(
         )
         .await?
     {
-        return Err(refused_at(origin.operation(), "locked.sources"));
+        return Err(Error::Refused);
     }
     fresh.check_deadline(clock)?;
     Ok(fresh)
@@ -510,9 +346,7 @@ async fn load<F: Source>(
     input: Arc<F::Input>,
     ceiling: Option<&Caller>,
     phase: Phase,
-    transport: Transport,
 ) -> Result<Frame<F>, Error> {
-    let http = transport.http().cloned();
     if !transaction_guard::in_transaction(conn) {
         return Err(EngineError::unreadable(
             "native operation preparation requires its transaction",
@@ -523,70 +357,41 @@ async fn load<F: Source>(
     transaction_guard::lock_action(conn).await?;
     let user = transaction_guard::lock_native_actor(conn, origin.user())
         .await?
-        .ok_or_else(|| refused_at(origin.operation(), "load.actor_missing"))?;
+        .ok_or(Error::Refused)?;
     let caller = origin
         .restore_current(conn, clock)
         .await?
-        .ok_or_else(|| refused_at(origin.operation(), "load.origin_unavailable"))?;
-    let (caller, raw_until, session) = match &http {
-        Some(http) => {
-            if http.origin().user() != origin.user()
-                || http.origin().operation() != origin.operation()
-            {
-                return Err(refused_at(origin.operation(), "load.transport_namespace"));
-            }
-            let current = http
-                .current(conn, clock)
-                .await
-                .map_err(|error| diagnostic(origin.operation(), "load.http_current", error))?;
-            (
-                caller
-                    .intersect_restrictions(current.caller())
-                    .map_err(|_| refused_at(origin.operation(), "load.transport_intersection"))?,
-                current.until(),
-                http.session(),
-            )
-        }
-        None => (caller, None, None),
-    };
+        .ok_or(Error::Refused)?;
     let caller = match ceiling {
         Some(ceiling) => {
             let current = orch_authz::CapturedCaller::capture(ceiling)
                 .restore_current(conn, clock)
                 .await?
-                .ok_or_else(|| refused_at(origin.operation(), "load.ceiling_unavailable"))?;
+                .ok_or(Error::Refused)?;
             caller
                 .intersect_restrictions(&current)
-                .map_err(|_| refused_at(origin.operation(), "load.ceiling_intersection"))?
+                .map_err(|_| Error::Refused)?
         }
         None => caller,
     };
     if caller.user() != user.id
-        || caller.grant().is_some_and(|grant| {
-            grant.token_ids().next().is_none() && caller.native_machine().is_none()
-        })
+        || caller
+            .grant()
+            .is_some_and(|grant| grant.token_ids().next().is_none())
     {
-        return Err(refused_at(origin.operation(), "load.caller_identity"));
+        return Err(Error::Refused);
     }
-    stage
-        .compatible(&caller)
-        .map_err(|error| diagnostic(origin.operation(), "load.compatible", error.into()))?;
-    let (value, facts) = F::prepare(conn, &caller, &input, clock.time())
-        .await
-        .map_err(|error| diagnostic(origin.operation(), "native.prepare", error))?;
+    stage.compatible(&caller)?;
+    let (value, facts) = F::prepare(conn, &caller, &input, clock.time()).await?;
     let row = F::declaration(&input, &value);
     if row.operation != origin.operation() {
-        return Err(refused_at(origin.operation(), "load.declaration_operation"));
+        return Err(Error::Refused);
     }
     let (plan, caller) =
         match phase {
             Phase::Complete => {
-                let plan = sources::bind_required(F::ROUTE, row, &facts).map_err(|error| {
-                    diagnostic(origin.operation(), "load.bind_required", error.into())
-                })?;
-                let caller = plan
-                    .admit(&caller, false)
-                    .map_err(|error| diagnostic(origin.operation(), "load.admit", error.into()))?;
+                let plan = sources::bind_required(F::ROUTE, row, &facts)?;
+                let caller = plan.admit(&caller, false)?;
                 (plan, caller)
             }
             Phase::Preparation => {
@@ -595,82 +400,50 @@ async fn load<F: Source>(
                 if row.bindings.iter().any(|binding| {
                     binding.usage != orch_api_contract::operations::FacetUsage::Required
                 }) {
-                    return Err(refused_at(origin.operation(), "preparation.response_role"));
+                    return Err(Error::Refused);
                 }
                 let plan = sources::bind_declared(F::ROUTE, row, &facts)?;
                 if !plan.covers_known_required_sources(&plan) {
-                    return Err(refused_at(
-                        origin.operation(),
-                        "preparation.source_coverage",
-                    ));
+                    return Err(Error::Refused);
                 }
                 let caller = plan.preparation_caller(&caller)?;
                 (plan, caller)
             }
         };
-    let principal = Principal::load(conn, caller, clock.time()).await?;
-    if principal.caller().admitted_operation() != Some(origin.operation()) {
-        return Err(refused_at(origin.operation(), "load.admitted_operation"));
-    }
-    let actual = match phase {
-        Phase::Complete => plan.required_facets()?,
-        Phase::Preparation => plan.known_required_facets(),
-    };
-    let principal = hold_principal(conn, &user, session, principal, &actual).await?;
-    F::require(conn, &principal, &input, &value)
-        .await
-        .map_err(|error| diagnostic(origin.operation(), "native.require", error))?;
-    let retained_origin = if http.is_some() {
-        origin
-            .narrowed_with(principal.caller())
-            .map_err(|_| refused_at(origin.operation(), "load.retained_origin"))?
-    } else {
-        origin.clone()
-    };
-    let http = http
-        .map(|http| http.accepted(principal.caller(), raw_until).map(Arc::new))
-        .transpose()?;
-    let frame = Frame {
-        principal,
-        raw_until,
-        opened: Opened {
-            origin: retained_origin,
-            ceiling: ceiling.cloned(),
-            input,
-            value: Arc::new(value),
-            plan,
-            phase,
-            transport: transport.accepted(http)?,
-        },
-    };
-    frame.check_deadline(clock)?;
-    Ok(frame)
-}
-
-/// The existing native account/session setup hold on an already resolved factual scope.
-pub(crate) async fn hold_principal(
-    conn: &mut Conn,
-    user: &orch_db::queries::identity::UserRow,
-    session: Option<Id>,
-    mut principal: Principal,
-    actual: &[orch_access_contract::key_scope::KeyFacet],
-) -> Result<Principal, Error> {
-    if principal.user() != user.id {
-        return Err(refused_at("account", "hold.actor"));
-    }
-    if let Some(hold) = account_policy::session_hold(conn, user, session).await? {
+    let mut principal = Principal::load(conn, caller, clock.time()).await?;
+    if let Some(hold) = account_policy::session_hold(conn, &user, None).await? {
         principal = principal.held_for_second_step(hold);
+    }
+    if principal.caller().admitted_operation() != Some(origin.operation()) {
+        return Err(Error::Refused);
     }
     if let Some(hold) = principal.second_step_hold() {
         let held = hold.orgs.iter().copied().collect::<BTreeSet<_>>();
+        let actual = match phase {
+            Phase::Complete => plan.required_facets()?,
+            Phase::Preparation => plan.known_required_facets(),
+        };
         if actual.iter().any(|facet| {
             facet.target.node_ancestors.iter().any(|node| {
                 node.kind == KeyTargetKind::Object(ObjectKind::Org)
                     && node.id.is_some_and(|id| held.contains(&id))
             })
         }) {
-            return Err(refused_at("account", "hold.second_step"));
+            return Err(Error::Refused);
         }
     }
-    Ok(principal)
+    F::require(conn, &principal, &input, &value).await?;
+    let frame = Frame {
+        principal,
+        opened: Opened {
+            origin: origin.clone(),
+            ceiling: ceiling.cloned(),
+            input,
+            value: Arc::new(value),
+            plan,
+            phase,
+        },
+    };
+    frame.check_deadline(clock)?;
+    Ok(frame)
 }

@@ -71,7 +71,7 @@ impl Authority {
             machine: command.machine,
             kind: command.kind,
             key: command.key.wire(),
-            body: crate::jobs::command_identity::hash(&command.body)?,
+            body: Hash::of(&serde_json::to_vec(&command.body)?),
             deadline: command.deadline.ok_or_else(|| {
                 EngineError::unreadable("The side command lost its native budget.")
             })?,
@@ -137,7 +137,7 @@ impl Authority {
             || self.machine != machine
             || self.kind.as_str() != kind
             || self.key.as_deref() != key
-            || self.body != crate::jobs::command_identity::hash(body)?
+            || self.body != Hash::of(&serde_json::to_vec(body)?)
             || self.deadline != deadline
             || clock.time() >= deadline
         {

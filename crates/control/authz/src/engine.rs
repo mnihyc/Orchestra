@@ -93,7 +93,6 @@ impl NodeFacts {
 pub struct Graph {
     nodes: HashMap<Id, NodeFacts>,
     thread_environments: HashMap<Id, Option<Id>>,
-    ask_governance: HashMap<Id, Option<orch_db::queries::ask::Governance>>,
     environment_columns: HashMap<Id, Placement>,
     environment_sources: HashMap<Id, Option<Site>>,
     document_parents: HashMap<Id, Option<Id>>,
@@ -179,10 +178,9 @@ impl Graph {
         if missing.is_empty() {
             return Ok(());
         }
-        for (row, governance) in hierarchy::with_ancestor_governance(conn, &missing).await? {
+        for row in hierarchy::with_ancestors(conn, &missing).await? {
             if row.kind == "thread" {
                 self.thread_environments.insert(row.id, row.environment_id);
-                self.ask_governance.insert(row.id, governance);
             }
             let node = NodeFacts::from_row(row)?;
             self.nodes.insert(node.id, node);
@@ -193,7 +191,6 @@ impl Graph {
     /// Adds nodes that were read elsewhere, as they were.
     pub fn add_rows(&mut self, rows: Vec<NodeRow>) -> Result<(), Error> {
         for row in rows {
-            self.ask_governance.remove(&row.id);
             let environment = row.environment_id;
             let node = NodeFacts::from_row(row)?;
             if node.kind == NodeKind::Thread {
@@ -212,29 +209,6 @@ impl Graph {
             nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
             ..Self::default()
         }
-    }
-
-    async fn ask_rows(
-        &mut self,
-        conn: &mut Conn,
-        threads: &[Id],
-    ) -> Result<Vec<orch_db::queries::ask::Governance>, Error> {
-        let missing: Vec<_> = threads
-            .iter()
-            .copied()
-            .filter(|id| !self.ask_governance.contains_key(id))
-            .collect();
-        if !missing.is_empty() {
-            let current = orch_db::queries::ask::governance(conn, &missing).await?;
-            self.ask_governance
-                .extend(missing.into_iter().map(|id| (id, None)));
-            self.ask_governance
-                .extend(current.into_iter().map(|row| (row.thread_id, Some(row))));
-        }
-        Ok(threads
-            .iter()
-            .filter_map(|id| self.ask_governance.get(id).and_then(Clone::clone))
-            .collect())
     }
 
     /// Reads the hosting machine's delegation once for every environment needed by this frame.
@@ -656,85 +630,12 @@ impl Store {
             .filter_map(move |(profile, permission)| self.rows.get(&(page, *profile, *permission)))
     }
 
-    /// The native page chain, independent of who happens to match its holders today.
-    pub fn chain(&self, graph: &Graph, site: &Site, permission: Permission) -> Chain<'_> {
-        let profile = graph.profile(site, permission);
-        let mut chain = Chain::of(self.row(site.page(), Profile::Any, permission));
-        for id in graph.document_ancestors(site.id) {
-            chain = chain.in_document_container(
-                id,
-                self.row(
-                    PageRef::live(StoredKind::DocumentContainer, id),
-                    Profile::Any,
-                    permission,
-                ),
-            );
-        }
-        if let Some(node) = site.beside {
-            chain = chain.beside(
-                node,
-                self.row(
-                    PageRef::live(StoredKind::Node, node),
-                    Profile::Any,
-                    permission,
-                ),
-            );
-        }
-        for place in &site.chain {
-            chain = chain.under(
-                *place,
-                self.row(PageRef::defaults_of(*place), profile, permission),
-            );
-        }
-        chain
-    }
-
     fn extend(&mut self, more: Self) {
         self.rows.extend(more.rows);
         for (page, keys) in more.pages {
             self.pages.entry(page).or_default().extend(keys);
         }
     }
-}
-
-/// Current audience and control grants of this conversation, without expanding their members.
-/// This uses the same locked/inherited chain as ordinary access and includes its Owners row.
-/// It is source metadata, never a caller, session, token or admission.
-pub async fn conversation_reader_grants(
-    conn: &mut Conn,
-    id: Id,
-    now: Time,
-) -> Result<Vec<Entry>, Error> {
-    let graph = Graph::load(conn, &[id]).await?;
-    let site = graph
-        .site_of(id)
-        .filter(|site| site.kind == ObjectKind::Thread)
-        .ok_or(Error::NotFound(id))?;
-    let mut pages = vec![site.page()];
-    pages.extend(site.chain.iter().copied().map(PageRef::defaults_of));
-    let permissions: Vec<_> = site
-        .kind
-        .permissions()
-        .filter(|permission| *permission != Permission::AccessOwn)
-        .collect();
-    let store = Store::load(conn, &pages, &permissions).await?;
-    let mut grants = Vec::new();
-    for row in access::owner_entries(conn, &[site.page().key()]).await? {
-        let entry = entry_of(&row)?;
-        if entry.counts(now) {
-            grants.push(entry);
-        }
-    }
-    for permission in permissions {
-        grants.extend(
-            store
-                .chain(&graph, &site, permission)
-                .holders(now)
-                .into_iter()
-                .map(|named| named.entry.clone()),
-        );
-    }
-    Ok(grants)
 }
 
 /// What was read to decide about some sites for one person.
@@ -763,7 +664,6 @@ pub struct Frame<'p, S = Principal> {
     outside_bounds: crate::external::LifeBounds,
     outside_group_roots: HashMap<Id, Id>,
     outside_place_roots: HashMap<Id, Id>,
-    ask_boundaries: HashMap<Id, crate::ask::Boundary>,
 }
 
 impl Frame<'_, Principal> {
@@ -910,31 +810,8 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         participation: Option<&[Site]>,
     ) -> Result<Self, Error> {
         let (sites, extra, requested_holders) = targets;
-        let threads: Vec<_> = graph
-            .nodes()
-            .filter(|node| node.kind == NodeKind::Thread)
-            .map(|node| node.id)
-            .collect();
-        let ask_boundaries = if threads.is_empty() {
-            HashMap::new()
-        } else {
-            let rows = graph.ask_rows(conn, &threads).await?;
-            crate::ask::from_rows(conn, rows).await?
-        };
-        let roots: Vec<_> = ask_boundaries
-            .values()
-            .map(|boundary| boundary.root)
-            .collect();
-        graph.extend(conn, &roots).await?;
         let mut expanded = sites.to_vec();
         let mut seen: HashSet<_> = sites.iter().map(|site| (site.kind, site.id)).collect();
-        for root in roots {
-            if let Some(site) = graph.site_of(root)
-                && seen.insert((site.kind, site.id))
-            {
-                expanded.push(site);
-            }
-        }
         for site in sites {
             for id in graph.document_ancestors(site.id) {
                 if let Some(parent) = graph.document_container_site(id)
@@ -1048,7 +925,6 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
             outside_bounds: crate::external::LifeBounds::default(),
             outside_group_roots: HashMap::new(),
             outside_place_roots: HashMap::new(),
-            ask_boundaries,
         };
         frame.creation_parents = frame.outside_creation_parents(&decision_sites);
         frame.resolve_audiences(&audience_sites, &group_sources, &role_sources);
@@ -1485,66 +1361,10 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         site.role_place.and_then(|place| self.role_at(place))
     }
 
-    fn ask_boundary(&self, site: &Site) -> Option<&crate::ask::Boundary> {
-        std::iter::once(site.id)
-            .chain(site.beside)
-            .chain(site.role_place)
-            .chain(site.chain.iter().filter_map(|place| match place {
-                PlaceRef::Node(id) => Some(*id),
-                PlaceRef::System => None,
-            }))
-            .find_map(|id| self.ask_boundaries.get(&id))
-    }
-
-    fn ask_root_available(&self, boundary: &crate::ask::Boundary) -> bool {
-        if boundary
-            .expires
-            .is_none_or(|expires| expires <= self.principal.now())
-            || self.principal.suspension().applies(&[boundary.root])
-        {
-            return false;
-        }
-        let Some(root) = self.graph.site_of(boundary.root) else {
-            return false;
-        };
-        self.principal.permits(Permission::OrgView)
-            && self.principal.reaches(root.path.as_deref())
-            && (self.principal.is_in_tree(boundary.root)
-                || !self.account_ways(&root, Permission::OrgView).is_empty())
-    }
-
-    fn ask_inspection(&self, site: &Site) -> Option<Site> {
-        let boundary = self.ask_boundary(site)?;
-        if boundary.person == self.principal.user() || !self.ask_root_available(boundary) {
-            return None;
-        }
-        let root = self.graph.site_of(boundary.root)?;
-        self.administers(&root).then_some(root)
-    }
-
-    fn inspection_read(permission: Permission) -> bool {
-        permission.level() == orch_access_contract::permissions::Level::View
-            || permission.is_export()
-    }
-
-    fn ask_allows(&self, site: &Site, permission: Permission) -> bool {
-        let Some(boundary) = self.ask_boundary(site) else {
-            return true;
-        };
-        self.ask_root_available(boundary)
-            && (boundary.person == self.principal.user()
-                || Self::inspection_read(permission) && self.ask_inspection(site).is_some())
-    }
-
     /// Whether the person is one of the owners of the site, and counts as
     /// one: a member of its root org.
     #[must_use]
     pub fn owns(&self, site: &Site) -> bool {
-        if let Some(boundary) = self.ask_boundary(site)
-            && (boundary.person != self.principal.user() || !self.ask_root_available(boundary))
-        {
-            return false;
-        }
         self.counts_as_owner(self.owners.get(&site.id), site.root)
     }
 
@@ -1567,11 +1387,6 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// as an owner of such a place included.
     #[must_use]
     pub fn administers(&self, site: &Site) -> bool {
-        // Temporary conversations have a separate read-only inspection entrance;
-        // their storage home's administrator never becomes their manager.
-        if self.ask_boundary(site).is_some() {
-            return false;
-        }
         self.principal.private_admin()
             && (self.principal.is_system_admin() || self.administrative_role(site))
     }
@@ -1650,15 +1465,6 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// As [`Self::admin_access`], for an independently private area such as a chat.
     #[must_use]
     pub fn admin_access_for(&self, site: &Site, permission: Permission) -> Option<AdminReach> {
-        if let Some(root) = self.ask_inspection(site) {
-            return (Self::inspection_read(permission) && !self.ways(site, permission).is_empty())
-                .then(|| self.admin_place(&root))
-                .flatten()
-                .map(|place| AdminReach {
-                    place,
-                    private: true,
-                });
-        }
         if !self.administers(site)
             || self.ordinary_holds(site, permission)
             || self.ways(site, permission).is_empty()
@@ -1679,9 +1485,6 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// The place actually administered by this enabled session, including the place itself.
     #[must_use]
     pub fn admin_place(&self, site: &Site) -> Option<PlaceRef> {
-        if let Some(root) = self.ask_inspection(site) {
-            return self.admin_place(&root);
-        }
         if !self.administers(site) || self.principal.suspension().applies(&site.orgs) {
             return None;
         }
@@ -1735,7 +1538,36 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// The row `permission` of the site, with the rows it follows.
     #[must_use]
     pub fn chain(&self, site: &Site, permission: Permission) -> Chain<'_> {
-        self.store.chain(&self.graph, site, permission)
+        let profile = self.graph.profile(site, permission);
+        let mut chain = Chain::of(self.store.row(site.page(), Profile::Any, permission));
+        for id in self.graph.document_ancestors(site.id) {
+            chain = chain.in_document_container(
+                id,
+                self.store.row(
+                    PageRef::live(StoredKind::DocumentContainer, id),
+                    Profile::Any,
+                    permission,
+                ),
+            );
+        }
+        if let Some(node) = site.beside {
+            chain = chain.beside(
+                node,
+                self.store.row(
+                    PageRef::live(StoredKind::Node, node),
+                    Profile::Any,
+                    permission,
+                ),
+            );
+        }
+        for place in &site.chain {
+            chain = chain.under(
+                *place,
+                self.store
+                    .row(PageRef::defaults_of(*place), profile, permission),
+            );
+        }
+        chain
     }
 
     /// The row `permission` / `profile` of the defaults page of the first
@@ -1791,36 +1623,12 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         permission: Permission,
         work: Option<&[Id]>,
     ) -> Vec<Named<'_>> {
-        self.matching_entries(site, self.chain(site, permission).holders(self.now()), work)
-    }
-
-    /// Match a controlling defaults row without inventing a live object or implicit ownership.
-    pub(crate) fn matching_defaults(
-        &self,
-        site: &Site,
-        places: &[PlaceRef],
-        profile: Profile,
-        permission: Permission,
-    ) -> Vec<Named<'_>> {
-        self.matching_entries(
-            site,
-            self.defaults_chain(places, profile, permission)
-                .holders(self.now()),
-            None,
-        )
-    }
-
-    fn matching_entries<'a>(
-        &'a self,
-        site: &Site,
-        entries: Vec<Named<'a>>,
-        work: Option<&[Id]>,
-    ) -> Vec<Named<'a>> {
         let bound = site
             .root
             .filter(|root| !self.principal.is_in_tree(*root))
             .and_then(|_| self.outside_bounds.at(&crate::external::way_of(site)));
-        entries
+        self.chain(site, permission)
+            .holders(self.now())
             .into_iter()
             .filter(|named| self.outside_entry_admitted(site, named.entry, bound))
             .filter(|named| {
@@ -1988,12 +1796,6 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// internal dependencies of an independently admitted operation may use this factor.
     #[must_use]
     pub(crate) fn account_ways(&self, site: &Site, permission: Permission) -> Vec<Through> {
-        if !self.ask_allows(site, permission) {
-            return Vec::new();
-        }
-        if self.ask_inspection(site).is_some() {
-            return vec![Through::Admin];
-        }
         decisions::holds(permission, &self.standing(site), |row| {
             self.named(site, row)
         })
@@ -2005,9 +1807,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
             return Vec::new();
         }
         held.into_iter()
-            .filter(|held| {
-                self.principal.permits(held.permission) && self.ask_allows(site, held.permission)
-            })
+            .filter(|held| self.principal.permits(held.permission))
             .collect()
     }
 
@@ -2017,24 +1817,10 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// read.
     #[must_use]
     pub fn effective(&self, site: &Site) -> Vec<Held> {
-        let mut held =
+        let held =
             decisions::effective(site.kind, &self.standing(site), site.is_archived(), |row| {
                 self.named(site, row)
             });
-        if self.ask_inspection(site).is_some() {
-            for permission in site
-                .kind
-                .permissions()
-                .filter(|permission| Self::inspection_read(*permission))
-            {
-                if !held.iter().any(|held| held.permission == permission) {
-                    held.push(Held {
-                        permission,
-                        through: vec![Through::Admin],
-                    });
-                }
-            }
-        }
         self.narrowed(site, held)
     }
 

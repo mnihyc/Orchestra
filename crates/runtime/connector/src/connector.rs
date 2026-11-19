@@ -245,81 +245,8 @@ impl ConnectorBuilder {
     }
 }
 
-struct DataDirectoryFacts {
-    root: PathBuf,
-    clock: Arc<dyn Clock>,
-    report: Mutex<Option<orch_api_contract::storage::MachineDataInventory>>,
-    changes: tokio::sync::watch::Sender<()>,
-}
-impl DataDirectoryFacts {
-    fn new(root: PathBuf, clock: Arc<dyn Clock>) -> Self {
-        Self {
-            root,
-            clock,
-            report: Mutex::new(None),
-            changes: tokio::sync::watch::channel(()).0,
-        }
-    }
-
-    fn observed(&self) -> Option<orch_api_contract::storage::MachineDataInventory> {
-        self.report
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    fn remember(&self, report: orch_api_contract::storage::MachineDataInventory) {
-        *self
-            .report
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
-        self.changes.send_replace(());
-    }
-
-    async fn observe(self: Arc<Self>, stop: CancellationToken) {
-        self.observe_with(stop, |state, at, cancelled| async move {
-            let measured = tokio::task::spawn_blocking(move || {
-                let inventory = crate::data_inventory::measure_with_progress(
-                    &state.root,
-                    at,
-                    &cancelled,
-                    |partial| state.remember(partial.clone()),
-                );
-                state.remember(inventory);
-            })
-            .await;
-            if let Err(error) = measured {
-                tracing::warn!(%error, "the connector's directory sizes could not be observed");
-            }
-        })
-        .await;
-    }
-
-    async fn observe_with<M, F>(self: Arc<Self>, stop: CancellationToken, measure: M)
-    where
-        M: Fn(Arc<Self>, orch_types::Time, CancellationToken) -> F,
-        F: std::future::Future<Output = ()>,
-    {
-        let mut ticker = tokio::time::interval(FACTS_EVERY);
-        loop {
-            tokio::select! {
-                () = stop.cancelled() => return,
-                _ = ticker.tick() => {},
-            }
-            let at = self.clock.time();
-            tokio::select! {
-                () = stop.cancelled() => return,
-                () = measure(Arc::clone(&self), at, stop.clone()) => {},
-            }
-            // One scan at a time; a long scan does not accumulate missed scans behind it.
-            ticker.reset();
-        }
-    }
-}
-
 /// A connector that runs.
 pub struct Connector {
-    data_directory: Arc<DataDirectoryFacts>,
     identity_reload: Arc<tokio::sync::Notify>,
     role_changes: Arc<crate::role_changes::Requests>,
     pub(crate) update_requests: Arc<crate::automatic::Requests>,
@@ -570,11 +497,6 @@ impl Connector {
             })
             .collect::<Vec<_>>();
         let facts_programs = programs.clone();
-        let data_directory = Arc::new(DataDirectoryFacts::new(
-            services.data_dir.clone(),
-            Arc::clone(&services.clock),
-        ));
-        let facts_directory = Arc::clone(&data_directory);
         let facts_now: Arc<crate::dispatch::FactsNow> = Arc::new(move || {
             let mut draft = FactsDraft {
                 process_controls: facts_services.process_controls,
@@ -607,7 +529,6 @@ impl Connector {
                 .map(|handler| handler.snapshot(&facts_policy));
             facts.role_management = Some(facts_role_changes.capability(&facts_policy));
             facts.installation = installation.clone();
-            facts.data_directory = facts_directory.observed();
             facts
         });
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
@@ -652,7 +573,6 @@ impl Connector {
         let gateway_link = link.clone();
         let endpoint_data = data.clone();
         let endpoint_stop = stop.clone();
-        let mut gateway_reports = gateway_link.gateway_changes();
         tasks.push(tokio::spawn(async move {
             loop {
                 let endpoints = advertised.borrow_and_update().clone();
@@ -671,7 +591,6 @@ impl Connector {
                     () = endpoint_stop.cancelled() => return,
                     changed = advertised.changed() => if changed.is_err() { return; },
                     changed = gateways.changed() => if changed.is_err() { return; },
-                    changed = gateway_reports.changed() => if changed.is_err() { return; },
                 }
             }
         }));
@@ -703,16 +622,12 @@ impl Connector {
             Arc::clone(&facts_now),
             stop.clone(),
         )));
-        tasks.push(tokio::spawn(
-            Arc::clone(&data_directory).observe(stop.clone()),
-        ));
         tasks.push(tokio::spawn(report_facts(
             link.clone(),
             facts_now,
             policy.changes(),
             Arc::clone(&policy),
             Arc::clone(&services.local_harnesses),
-            Arc::clone(&data_directory),
             stop.clone(),
         )));
         // What the owner changes in the file while the connector runs holds without a restart.
@@ -741,7 +656,6 @@ impl Connector {
         }
 
         let connector = Self {
-            data_directory,
             identity_reload,
             role_changes,
             update_requests,
@@ -839,7 +753,6 @@ impl Connector {
         self.services.local_harnesses.apply(&mut facts);
         facts.gateway = Some(self.link.gateway_status());
         facts.role_management = Some(self.role_changes.capability(&self.services.policy));
-        facts.data_directory = self.data_directory.observed();
         facts
     }
 
@@ -892,12 +805,9 @@ async fn report_facts(
     mut policy_changes: tokio::sync::watch::Receiver<u64>,
     policy: Arc<PolicyStore>,
     discovery: Arc<crate::local_harnesses::Discovery>,
-    data_directory: Arc<DataDirectoryFacts>,
     stop: CancellationToken,
 ) {
     let mut program_changes = discovery.changes();
-    let mut gateway_reports = link.gateway_changes();
-    let mut directory_changes = data_directory.changes.subscribe();
     let mut ticker = tokio::time::interval(FACTS_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick is at once: the facts are reported when the connector starts, whether or not a
@@ -905,7 +815,7 @@ async fn report_facts(
     loop {
         tokio::select! {
             () = stop.cancelled() => return,
-            _ = ticker.tick() => {},
+            _ = ticker.tick() => {}
             changed = policy_changes.changed() => {
                 if changed.is_err() {
                     return;
@@ -913,10 +823,8 @@ async fn report_facts(
                 discovery.refresh(&policy).await;
                 program_changes.borrow_and_update();
             }
-            changed = program_changes.changed() => {if changed.is_err() { return; }},
-            changed = gateway_reports.changed() => {if changed.is_err() { return; }},
-            changed = directory_changes.changed() => {if changed.is_err() { return; }},
-        };
+            changed = program_changes.changed() => if changed.is_err() { return; },
+        }
         let now = facts();
         if let Err(error) = link
             .publish(&Stream::Machine, &Event::MachineFacts(now))
@@ -929,10 +837,6 @@ async fn report_facts(
 
 // ---------------------------------------------------------------------------------------------------------
 // Keeping it running
-
-#[cfg(test)]
-#[path = "connector/facts_tests.rs"]
-mod facts_tests;
 
 /// How a program makes the connector it runs, once it knows who the connector is: the builder with
 /// everything else chosen (the dialer that shows this identity, the adapters, the roles).

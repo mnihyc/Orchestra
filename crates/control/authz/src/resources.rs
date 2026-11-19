@@ -31,8 +31,6 @@ use crate::engine::{Frame, Graph, Site};
 use crate::nodes::{Page, archive_allows, every_permission};
 use crate::{Act, Error, Policy, Principal, missing};
 
-pub mod context;
-
 mod provider_owner;
 pub use provider_owner::provider_owner_host_use;
 
@@ -344,18 +342,7 @@ pub async fn check_machine(
     permission: Permission,
     policy: Policy,
 ) -> Result<Decision, Error> {
-    let (object, permission) = machine_permission(conn, machine, permission).await?;
-    check(conn, principal, object, permission, policy).await
-}
-
-/// Resolves the page and permission that govern a physical machine, including a host facade.
-/// Audience expansion uses this same supplier as the permission check.
-pub async fn machine_permission(
-    conn: &mut Conn,
-    machine: Id,
-    permission: Permission,
-) -> Result<(ObjectRef, Permission), Error> {
-    Ok(match rows::hosting::host_of_machine(conn, machine).await? {
+    let (object, permission) = match rows::hosting::host_of_machine(conn, machine).await? {
         Some(host) => (
             ObjectRef {
                 kind: ObjectKind::Host,
@@ -375,7 +362,8 @@ pub async fn machine_permission(
             },
             permission,
         ),
-    })
+    };
+    check(conn, principal, object, permission, policy).await
 }
 
 /// What an act needs of one thing.

@@ -6,7 +6,7 @@ import type { BackgroundCommand, BackgroundWakeStatus, BackgroundWork, ThreadBac
 import { Button } from '@/ui/Button';
 import { backgroundName, backgroundNotice } from './backgroundWake';
 
-export function BackgroundWorkLine({ status, canManage, mayEnd, onSetting, onEnd, children, showHeldCompletions = true, endUnavailableReason }: {
+export function BackgroundWorkLine({ status, canManage, mayEnd, onSetting, onEnd, children, showHeldCompletions = true }: {
   status: BackgroundWakeStatus | null;
   canManage: boolean;
   mayEnd: boolean;
@@ -15,11 +15,9 @@ export function BackgroundWorkLine({ status, canManage, mayEnd, onSetting, onEnd
   children?: ReactNode;
   /** The active thread's queue owns this count; read-only/standalone reports retain it here. */
   showHeldCompletions?: boolean;
-  /** Safe program-reported cause for an unavailable terminal control. */
-  endUnavailableReason?: string | null;
 }) {
   const { t } = useTranslation();
-  if (status === null || status.tasks.length === 0 && status.held_completions === 0 && !status.refresh_deferred) return children ?? null;
+  if (status === null || status.tasks.length === 0 && status.held_completions === 0 && status.waiting_running === 0 && !status.refresh_deferred) return children ?? null;
   const notice = backgroundNotice(status, t);
   const setting = t(status.effective ? 'backgroundWake.settingOn' : 'backgroundWake.settingOff');
   const tasks = children === undefined ? status.tasks : status.tasks.filter((task) => task.kind === 'command');
@@ -33,7 +31,7 @@ export function BackgroundWorkLine({ status, canManage, mayEnd, onSetting, onEnd
           <span className="min-w-0 wrap-anywhere whitespace-normal">{name}</span>
           <span className="shrink-0 text-text-muted">{t(`backgroundWake.states.${task.state}`)}</span>
           {task.state === 'running' && (task.can_end && mayEnd ? <Button size="sm" variant="ghost" aria-label={t('backgroundWake.endNamed', { name })} onClick={() => onEnd(task)}>{t('running.end')}</Button>
-            : mayEnd && !task.can_end ? <span className="min-w-0 wrap-anywhere text-text-subtle">{task.kind === 'command' && endUnavailableReason ? t('running.unavailableWithReason', { reason: endUnavailableReason }) : t('backgroundWake.cannotEnd')}</span> : null)}
+            : mayEnd && !task.can_end ? <span className="min-w-0 wrap-anywhere text-text-subtle">{t('backgroundWake.cannotEnd')}</span> : null)}
         </li>;
       })}
     </ul>}
@@ -43,9 +41,9 @@ export function BackgroundWorkLine({ status, canManage, mayEnd, onSetting, onEnd
       {canManage ? <Button size="sm" variant="ghost" onClick={onSetting}>{setting}</Button> : <span>{setting}</span>}
       {status.setting !== status.effective && <span>{t(status.setting ? 'backgroundWake.pendingOn' : 'backgroundWake.pendingOff')}</span>}
       {status.refresh_deferred && <span>{t('backgroundWake.deferred')}</span>}
-      {status.tasks.some(task=>task.state==='running') && <span>{t('backgroundWake.overlapBilling')}</span>}
     </span>
     {showHeldCompletions && status.held_completions > 0 && <span className="min-w-0 wrap-anywhere text-xs text-text-muted" data-background-held>{t('backgroundWake.held', { count: status.held_completions })}</span>}
+    {status.waiting_running > 0 && <span className="min-w-0 wrap-anywhere text-xs text-text-muted">{t(status.waiting_author === null ? 'backgroundWake.waitingUnknownAuthor' : 'backgroundWake.waitingAuthor', { name: status.waiting_author?.display_name, count: status.waiting_running })}</span>}
   </div>;
 }
 

@@ -48,7 +48,7 @@ impl RecordedDeletionCustody {
     ) -> Result<Self, EngineError> {
         let origin = CapturedOperation::capture(caller).map_err(EngineError::unreadable)?;
         let server = offering.server_id;
-        if !matches!(origin.operation(), "McpServerDelete" | "McpServerMoveOut")
+        if origin.operation() != mcp_actions::DELETE.operation
             || server.is_nil()
             || command.machine != offering.machine_id
             || command.kind != CommandKind::McpForget
@@ -109,62 +109,10 @@ impl RecordedDeletionCustody {
                 )],
             ),
         ];
-        let expected = if origin.operation() == mcp_actions::DELETE.operation {
-            sources::bind_required(McpServerDelete::ROUTE, &mcp_actions::DELETE, &facts)
-                .map_err(EngineError::unreadable)?
-                .required_facets()
-                .map_err(EngineError::unreadable)?
-        } else {
-            use orch_api_contract::{duplicate_sources as moving, duplicates::McpServerMoveOut};
-            let row = sources::bind_known(
-                McpServerMoveOut::ROUTE,
-                &moving::MCP_MOVE,
-                &[
-                    Facts::one(
-                        moving::Source::Subject,
-                        KeyTargetKind::Object(ObjectKind::McpServer),
-                        targets::page_object(conn, governor)
-                            .await
-                            .map_err(EngineError::unreadable)?,
-                    ),
-                    Facts::collection(
-                        moving::Source::ForgottenCopies,
-                        vec![(
-                            KeyTargetKind::Object(ObjectKind::Machine),
-                            vec![
-                                targets::machine_subject(conn, offering.machine_id)
-                                    .await
-                                    .map_err(EngineError::unreadable)?,
-                            ],
-                        )],
-                    ),
-                ],
-            )
+        let expected = sources::bind_required(McpServerDelete::ROUTE, &mcp_actions::DELETE, &facts)
+            .map_err(EngineError::unreadable)?
+            .required_facets()
             .map_err(EngineError::unreadable)?;
-            let actual = crate::operation_scope::Prepared::for_selection(origin.operation())
-                .map_err(EngineError::unreadable)?;
-            let required: Vec<_> = actual
-                .variant()
-                .facets
-                .iter()
-                .filter(|role| role.usage == orch_api_contract::operations::FacetUsage::Required)
-                .collect();
-            let Some(roles) = caller.admitted_required_roles() else {
-                return Err(EngineError::unreadable(
-                    "the native Move has no complete required role evidence",
-                ));
-            };
-            if roles.len() != required.len()
-                || !roles.iter().zip(required).all(|(role, metadata)| {
-                    role.action == metadata.action && role.resources == metadata.resources
-                })
-            {
-                return Err(EngineError::unreadable(
-                    "the native Move's required source roles changed",
-                ));
-            }
-            row.known_required_facets()
-        };
         let admitted = caller.admitted_facets().unwrap_or(&[]);
         if !expected.iter().all(|facet| admitted.contains(facet))
             || !caller.permits_facets(admitted)
@@ -188,10 +136,8 @@ impl RecordedDeletionCustody {
         conn: &mut Conn,
         command: &CommandRow,
     ) -> Result<bool, EngineError> {
-        if !matches!(
-            self.origin.operation(),
-            "McpServerDelete" | "McpServerMoveOut"
-        ) || self.origin.user().is_nil()
+        if self.origin.operation() != mcp_actions::DELETE.operation
+            || self.origin.user().is_nil()
             || self.server.is_nil()
             || command.machine_id != self.machine
             || command.body

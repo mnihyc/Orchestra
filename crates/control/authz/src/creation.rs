@@ -163,10 +163,138 @@ async fn projected_permissions(
     placement: Placement,
     environment: Option<Id>,
 ) -> Result<[Vec<P>; 3], ChangeError> {
+    let PagePlan {
+        topic_change,
+        thread_change,
+        copy_from,
+        existing_topic,
+    } = page;
     let mut trial = access::begin_trial(conn).await?;
     let outcome = async {
-        let (thread, topic, project, creator) =
-            prepare_page(&mut trial, principal, parent, page, environment).await?;
+        let graph = Graph::load(&mut trial, &[parent]).await?;
+        let node = graph.get(parent).ok_or(Error::NotFound(parent))?;
+        if existing_topic && node.kind != NodeKind::Topic {
+            return Err(ChangeError::Invalid(vec![orch_types::fields::FieldError {
+                path: "topic_id".into(),
+                message: "fork and adoption previews use the selected existing topic".into(),
+            }]));
+        }
+        if !matches!(node.kind, NodeKind::Topic | NodeKind::Project) {
+            return Err(ChangeError::Invalid(vec![orch_types::fields::FieldError {
+                path: "access".into(),
+                message: "a creation preview starts in a topic or project".into(),
+            }]));
+        }
+        let project = node
+            .path
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| {
+                graph
+                    .get(*id)
+                    .is_some_and(|node| node.kind == NodeKind::Project)
+            })
+            .ok_or(Error::NotFound(parent))?;
+        let topic = if node.kind == NodeKind::Project {
+            let first = ownership::owner_of_new(&mut trial, principal.user(), Some(parent)).await?;
+            let topic = new_id();
+            hierarchy::create(
+                &mut trial,
+                &hierarchy::NewNode {
+                    id: topic,
+                    kind: "topic",
+                    parent: Some(parent),
+                    name: "New topic",
+                    name_by_person: false,
+                    description: "",
+                    description_by_person: false,
+                    owner: first,
+                    org: None,
+                    at: principal.now().get(),
+                },
+            )
+            .await?;
+            pages::start(
+                &mut trial,
+                StoredKind::Node,
+                topic,
+                principal.user(),
+                principal.now(),
+            )
+            .await?;
+            if let Some(change) = topic_change {
+                // Exactly as normal topic creation: its live page and its defaults are separate acts.
+                for target in [Target::Live(topic), Target::Defaults(PlaceRef::Node(topic))] {
+                    pages::change(
+                        &mut trial,
+                        principal,
+                        target,
+                        change,
+                        Policy::default(),
+                        &Default::default(),
+                    )
+                    .await?;
+                }
+            }
+            topic
+        } else {
+            if topic_change.is_some() {
+                return Err(ChangeError::Invalid(vec![orch_types::fields::FieldError {
+                    path: "topic_access".into(),
+                    message: "an existing topic is not changed by a thread preview".into(),
+                }]));
+            }
+            parent
+        };
+        // The normal first-thread producer reloads this same scoped Caller after the topic exists.
+        let mut creator =
+            Principal::load(&mut trial, principal.caller().clone(), principal.now()).await?;
+        if let Some(hold) = principal.second_step_hold() {
+            creator = creator.held_for_second_step(hold.clone());
+        }
+        let thread = new_id();
+        if !threads::insert_thread(
+            &mut trial,
+            thread,
+            topic,
+            "New thread",
+            creator.user(),
+            creator.now().get(),
+        )
+        .await?
+        {
+            return Err(Error::NotFound(topic).into());
+        }
+        pages::start(
+            &mut trial,
+            StoredKind::Node,
+            thread,
+            creator.user(),
+            creator.now(),
+        )
+        .await?;
+        threads::make_node_chat(&mut trial, thread, creator.user(), creator.now().get()).await?;
+        if let Some(environment) = environment {
+            threads::set_environment(&mut trial, thread, environment, "", 0).await?;
+        }
+        if let Some(change) = thread_change {
+            pages::change(
+                &mut trial,
+                &creator,
+                Target::Live(thread),
+                change,
+                Policy::default(),
+                &Default::default(),
+            )
+            .await?;
+        }
+        if let Some(source) = copy_from {
+            // Production applies Birth.page first, then carries the selected source page
+            // at fork commit. Preserve that order, including its own locks and entries.
+            ownership::carry_fork_page(&mut trial, source, thread, creator.user(), creator.now())
+                .await?;
+        }
         let graph = Graph::load(&mut trial, &[thread, topic, project]).await?;
         let thread = graph.site_of(thread).ok_or(Error::NotFound(thread))?;
         let topic = graph.site_of(topic).ok_or(Error::NotFound(topic))?;
@@ -240,193 +368,4 @@ async fn projected_permissions(
     .await;
     access::end_trial(trial).await?;
     outcome
-}
-
-// Both prospective operations use the normal birth/page producers inside a rolled-back trial.
-async fn prepare_page(
-    conn: &mut Conn,
-    principal: &Principal,
-    parent: Id,
-    page: PagePlan<'_>,
-    environment: Option<Id>,
-) -> Result<(Id, Id, Id, Principal), ChangeError> {
-    let PagePlan {
-        topic_change,
-        thread_change,
-        copy_from,
-        existing_topic,
-    } = page;
-    let graph = Graph::load(conn, &[parent]).await?;
-    let node = graph.get(parent).ok_or(Error::NotFound(parent))?;
-    if existing_topic && node.kind != NodeKind::Topic {
-        return Err(ChangeError::Invalid(vec![orch_types::fields::FieldError {
-            path: "topic_id".into(),
-            message: "fork and adoption previews use the selected existing topic".into(),
-        }]));
-    }
-    if !matches!(node.kind, NodeKind::Topic | NodeKind::Project) {
-        return Err(ChangeError::Invalid(vec![orch_types::fields::FieldError {
-            path: "access".into(),
-            message: "a creation preview starts in a topic or project".into(),
-        }]));
-    }
-    let project = node
-        .path
-        .iter()
-        .rev()
-        .copied()
-        .find(|id| {
-            graph
-                .get(*id)
-                .is_some_and(|node| node.kind == NodeKind::Project)
-        })
-        .ok_or(Error::NotFound(parent))?;
-    let topic = if node.kind == NodeKind::Project {
-        let first = ownership::owner_of_new(conn, principal.user(), Some(parent)).await?;
-        let topic = new_id();
-        hierarchy::create(
-            conn,
-            &hierarchy::NewNode {
-                id: topic,
-                kind: "topic",
-                parent: Some(parent),
-                name: "New topic",
-                name_by_person: false,
-                description: "",
-                owner: first,
-                org: None,
-                at: principal.now().get(),
-            },
-        )
-        .await?;
-        pages::start(
-            conn,
-            StoredKind::Node,
-            topic,
-            principal.user(),
-            principal.now(),
-        )
-        .await?;
-        if let Some(change) = topic_change {
-            // Exactly as normal topic creation: its live page and its defaults are separate acts.
-            for target in [Target::Live(topic), Target::Defaults(PlaceRef::Node(topic))] {
-                pages::change(
-                    conn,
-                    principal,
-                    target,
-                    change,
-                    Policy::default(),
-                    &Default::default(),
-                )
-                .await?;
-            }
-        }
-        topic
-    } else {
-        if topic_change.is_some() {
-            return Err(ChangeError::Invalid(vec![orch_types::fields::FieldError {
-                path: "topic_access".into(),
-                message: "an existing topic is not changed by a thread preview".into(),
-            }]));
-        }
-        parent
-    };
-    // The normal first-thread producer reloads this same scoped Caller after the topic exists.
-    let mut creator = Principal::load(conn, principal.caller().clone(), principal.now()).await?;
-    if let Some(hold) = principal.second_step_hold() {
-        creator = creator.held_for_second_step(hold.clone());
-    }
-    let thread = new_id();
-    if !threads::insert_thread(
-        conn,
-        thread,
-        topic,
-        "New thread",
-        creator.user(),
-        creator.now().get(),
-    )
-    .await?
-    {
-        return Err(Error::NotFound(topic).into());
-    }
-    pages::start(
-        conn,
-        StoredKind::Node,
-        thread,
-        creator.user(),
-        creator.now(),
-    )
-    .await?;
-    threads::make_node_chat(conn, thread, creator.user(), creator.now().get()).await?;
-    if let Some(environment) = environment {
-        threads::set_environment(conn, thread, environment, "", 0).await?;
-    }
-    if let Some(change) = thread_change {
-        pages::change(
-            conn,
-            &creator,
-            Target::Live(thread),
-            change,
-            Policy::default(),
-            &Default::default(),
-        )
-        .await?;
-    }
-    if let Some(source) = copy_from {
-        // Production applies Birth.page first, then carries the selected source page
-        // at fork commit. Preserve that order, including its own locks and entries.
-        ownership::carry_fork_page(conn, source, thread, creator.user(), creator.now()).await?;
-    }
-    Ok((thread, topic, project, creator))
-}
-
-/// The precise future human audience's environment View gift, without a committed new thread.
-/// Refusal is the ordinary resource-page refusal; no missing permission becomes an access request.
-pub async fn environment_reader_change(
-    conn: &mut Conn,
-    principal: &Principal,
-    parent: Id,
-    topic_change: Option<&PageChange>,
-    thread_change: Option<&PageChange>,
-    environment: Id,
-    policies: &crate::usable::Policies,
-) -> Result<PageChange, ChangeError> {
-    let mut trial = access::begin_trial(conn).await?;
-    let result = async {
-        let (thread, _, _, creator) = prepare_page(
-            &mut trial,
-            principal,
-            parent,
-            PagePlan {
-                topic_change,
-                thread_change,
-                copy_from: None,
-                existing_topic: false,
-            },
-            Some(environment),
-        )
-        .await?;
-        let change =
-            crate::doors::reader_change(&mut trial, &creator, thread, environment, policies)
-                .await?;
-        let facts = orch_db::queries::resources::resource_facts(&mut trial, &[environment]).await?;
-        let home = facts.first().ok_or(Error::NotFound(environment))?.home_id;
-        pages::change_resource_under(
-            &mut trial,
-            &creator,
-            orch_access_contract::decisions::ObjectRef {
-                kind: orch_access_contract::permissions::ObjectKind::Environment,
-                id: environment,
-            },
-            &change,
-            policies.sharing_at(home),
-            policies.at(home),
-            &Default::default(),
-        )
-        .await?;
-        Ok(change)
-    }
-    .await;
-    access::end_trial(trial).await?;
-    result
 }

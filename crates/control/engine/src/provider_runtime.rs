@@ -2,9 +2,8 @@
 //!
 //! A managed provider has one runtime for as long as it exists, shared by every thread bound to it
 //! (`jobs::provider_provision` makes and starts it). It stops when it has had no turn, lease, session
-//! or sign-in under way for as long as a positive `runtime.idle_stop_minutes` of the provider says.
-//! The shipped 0 keeps it running. After an idle or person stop, a turn, sign-in, Start, Refresh or
-//! renewal starts it again; its `state` volume, with the
+//! or sign-in under way for as long as `runtime.idle_stop_minutes` of the provider says (a day, as
+//! shipped), and the next turn, a sign-in, or a person starts it again; its `state` volume, with the
 //! sign-in and the conversations, stays. While the unit is not up the provider has no machine
 //! (`providers.machine_id` is empty), which is how a turn's pre-flight knows to start it.
 //!
@@ -27,7 +26,6 @@ use crate::preflight::Blocked;
 use crate::turns::{InputAfter, TurnEnd, error_json};
 use crate::unit::Unit;
 use chrono::{DateTime, Utc};
-use futures::future::BoxFuture;
 use orch_db::DbError;
 use orch_db::queries::environments::hosting::{self as env_rows, RuntimeFull, runtime_state};
 use orch_db::queries::jobs::{JobRow, provider_jobs};
@@ -155,19 +153,8 @@ pub(crate) async fn harness_variables(
     let Some((runtime, _)) = locations else {
         return Ok(None);
     };
-    let candidate = if runtime.is_none() {
-        orch_db::queries::resources::provider_runtime::live_runtime(conn, provider)
-            .await?
-            .is_some_and(|runtime| {
-                runtime.machine_id == Some(machine)
-                    && runtime.generation == 1
-                    && runtime.state == "creating"
-            })
-    } else {
-        false
-    };
-    if runtime == Some(machine) || candidate {
-        return Ok(Some(harness_values(conn, provider, machine).await?));
+    if runtime == Some(machine) {
+        return Ok(Some(harness_values(conn, provider).await?));
     }
     let home = home_for_harness(conn, provider, agent, machine).await?;
     Ok(Some(orch_link_contract::commands::AgentRuntime {
@@ -205,15 +192,13 @@ pub(crate) async fn home_for_harness(
 }
 
 /// A verified candidate uses the same frozen provider values before its machine becomes current.
-/// `machine` is the runtime's machine: whether it is a unit of the system decides what an unchosen home is.
 pub(crate) async fn harness_values(
     conn: &mut orch_db::Conn,
     provider: Id,
-    machine: Id,
 ) -> Result<orch_link_contract::commands::AgentRuntime, EngineError> {
     let values = variables(conn, provider).await?;
     let variables = serde_json::from_value(Json::Object(values))?;
-    let home = orch_settings::runtime_home_choice(conn, provider, machine).await?;
+    let home = orch_settings::provider_home_choice(conn, provider).await?;
     let storage: Option<orch_settings_contract::unit::UnitStorage> = orch_settings::get(
         conn,
         orch_settings::Place::Provider(provider),
@@ -281,15 +266,6 @@ pub enum StopWhy {
     Idle,
 }
 
-impl StopWhy {
-    fn detail(self) -> &'static str {
-        match self {
-            Self::Idle => rows::STOPPED_IDLE,
-            Self::Person(_) => rows::STOPPED_PERSON,
-        }
-    }
-}
-
 /// The words a provider that waits for its runtime says.
 pub const STARTING_SENTENCE: &str = "its runtime is being started";
 
@@ -301,18 +277,7 @@ impl Engine {
         provider: Id,
         by: Option<Id>,
     ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, by, false, None, false)
-            .await
-    }
-
-    /// A queued observation cannot undo an intentional stop made since its due selection.
-    pub(crate) async fn start_provider_runtime_for_read(
-        &self,
-        provider: Id,
-        scheduled: bool,
-    ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, None, false, None, scheduled)
-            .await
+        self.queue_provider_runtime(provider, by, false, None).await
     }
 
     pub(crate) async fn start_provider_runtime_for_return(
@@ -321,251 +286,233 @@ impl Engine {
         by: Option<Id>,
         authority: Option<&crate::credentials::handover_authority::HandoverAuthority>,
     ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, by, false, authority, false)
+        self.queue_provider_runtime(provider, by, false, authority)
             .await
     }
 
     /// Renews the native sign-in in its running runtime, or starts the same stopped runtime first.
     pub async fn renew_provider_runtime(&self, provider: Id) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, None, true, None, false)
+        self.queue_provider_runtime(provider, None, true, None)
             .await
     }
 
-    fn queue_provider_runtime<'a>(
-        &'a self,
+    async fn queue_provider_runtime(
+        &self,
         provider: Id,
         by: Option<Id>,
         renew: bool,
-        authority: Option<&'a crate::credentials::handover_authority::HandoverAuthority>,
-        scheduled: bool,
-    ) -> BoxFuture<'a, Result<RuntimeStart, RuntimeError>> {
-        Box::pin(async move {
-            let mut tx = self.inner.db.begin().await?;
-            if let Some(authority) = authority {
-                orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-                authority
-                    .require(&mut tx, self.inner.clock.time())
-                    .await
-                    .map_err(|error| match error {
-                        crate::credentials::handover::ReturnError::Internal(error) => {
-                            RuntimeError::Internal(error)
-                        }
-                        _ => RuntimeError::Unavailable(
-                            "the accepted return is no longer authorized".into(),
-                        ),
-                    })?;
-            }
-            let now = self.inner.clock.now();
-            let state = rows::lock(&mut tx, provider)
-                .await?
-                .ok_or(RuntimeError::NotFound)?;
-            if let Some(authority) = authority {
-                authority
-                    .require(&mut tx, self.inner.clock.time())
-                    .await
-                    .map_err(|error| match error {
-                        crate::credentials::handover::ReturnError::Internal(error) => {
-                            RuntimeError::Internal(error)
-                        }
-                        _ => RuntimeError::Unavailable(
-                            "the accepted return is no longer authorized".into(),
-                        ),
-                    })?;
-            }
-            if state.deleted_at.is_some() {
-                return Err(RuntimeError::Unavailable("deleted".to_owned()));
-            }
-            if state.status == "disabled" {
-                return Err(RuntimeError::Unavailable("switched off".to_owned()));
-            }
-            if scheduled
-                && rows::live_runtime(&mut tx, provider)
-                    .await?
-                    .as_ref()
-                    .is_some_and(rows::intentionally_stopped)
+        authority: Option<&crate::credentials::handover_authority::HandoverAuthority>,
+    ) -> Result<RuntimeStart, RuntimeError> {
+        let mut tx = self.inner.db.begin().await?;
+        if let Some(authority) = authority {
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            authority
+                .require(&mut tx, self.inner.clock.time())
+                .await
+                .map_err(|error| match error {
+                    crate::credentials::handover::ReturnError::Internal(error) => {
+                        RuntimeError::Internal(error)
+                    }
+                    _ => RuntimeError::Unavailable(
+                        "the accepted return is no longer authorized".into(),
+                    ),
+                })?;
+        }
+        let now = self.inner.clock.now();
+        let state = rows::lock(&mut tx, provider)
+            .await?
+            .ok_or(RuntimeError::NotFound)?;
+        if let Some(authority) = authority {
+            authority
+                .require(&mut tx, self.inner.clock.time())
+                .await
+                .map_err(|error| match error {
+                    crate::credentials::handover::ReturnError::Internal(error) => {
+                        RuntimeError::Internal(error)
+                    }
+                    _ => RuntimeError::Unavailable(
+                        "the accepted return is no longer authorized".into(),
+                    ),
+                })?;
+        }
+        if state.deleted_at.is_some() {
+            return Err(RuntimeError::Unavailable("deleted".to_owned()));
+        }
+        if state.status == "disabled" {
+            return Err(RuntimeError::Unavailable("switched off".to_owned()));
+        }
+        let unavailable: Option<String> =
+            sqlx::query_scalar("SELECT runtime_unavailable FROM providers WHERE id=$1")
+                .bind(provider)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(DbError::from)?;
+        if let Some(reason) = unavailable {
+            return Err(RuntimeError::Unavailable(format!(
+                "{reason}; review a re-creation before choosing another host"
+            )));
+        }
+        if renew
+            && state.key_machine_id.is_some()
+            && !rows::keeper_has_unit(&mut tx, provider).await?
+        {
+            if !orch_settings::provider_sign_in(&mut tx, provider)
+                .await
+                .map_err(EngineError::from)?
+                .allowed
             {
-                return Err(RuntimeError::Unavailable(
-                    "the runtime was stopped deliberately".to_owned(),
-                ));
+                return Err(RuntimeError::Unavailable("provider.signin: this credential keeper has not permitted renewal in its existing harness home".into()));
             }
-            let unavailable: Option<String> =
-                sqlx::query_scalar("SELECT runtime_unavailable FROM providers WHERE id=$1")
-                    .bind(provider)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(DbError::from)?;
-            if let Some(reason) = unavailable {
-                return Err(RuntimeError::Unavailable(format!(
-                    "{reason}; review a re-creation before choosing another host"
-                )));
-            }
+            tx.commit().await.map_err(DbError::from)?;
+            return match self.renew_sign_in(provider).await? {
+                crate::provider_setup::Renewed::Held => Ok(RuntimeStart::Up),
+                crate::provider_setup::Renewed::Lapsed(reason) => {
+                    Err(RuntimeError::Unavailable(reason))
+                }
+            };
+        }
+        let machine_facts =
+            orch_db::queries::environment_facts::of_provider(&mut tx, provider).await?;
+        if state.machine_id.is_some()
+            && !machine_facts.as_ref().is_some_and(|facts| facts.attaches())
+            && rows::live_runtime(&mut tx, provider).await?.is_none()
+        {
+            return Err(RuntimeError::Unavailable(
+                "the selected machine has not reported usable provider runtime services".into(),
+            ));
+        }
+        if machine_facts.as_ref().is_some_and(|facts| facts.attaches()) {
             if renew
-                && state.key_machine_id.is_some()
-                && !rows::keeper_has_unit(&mut tx, provider).await?
-            {
-                if !orch_settings::provider_sign_in(&mut tx, provider)
+                && !orch_settings::provider_sign_in(&mut tx, provider)
                     .await
                     .map_err(EngineError::from)?
                     .allowed
-                {
-                    return Err(RuntimeError::Unavailable("provider.signin: this credential keeper has not permitted renewal in its existing harness home".into()));
-                }
-                tx.commit().await.map_err(DbError::from)?;
-                return match self.renew_sign_in(provider).await? {
-                    crate::provider_setup::Renewed::Held => Ok(RuntimeStart::Up),
-                    crate::provider_setup::Renewed::Lapsed(reason) => {
-                        Err(RuntimeError::Unavailable(reason))
-                    }
-                };
-            }
-            let machine_facts =
-                orch_db::queries::environment_facts::of_provider(&mut tx, provider).await?;
-            if state.machine_id.is_some()
-                && !machine_facts.as_ref().is_some_and(|facts| facts.attaches())
-                && rows::live_runtime(&mut tx, provider).await?.is_none()
             {
+                return Err(RuntimeError::Unavailable("provider.signin: the credential keeper has not permitted renewal in this existing harness home".into()));
+            }
+            let machine = state
+                .machine_id
+                .ok_or_else(|| RuntimeError::Unavailable("the runtime has no machine".into()))?;
+            let online = machine_rows::machine_place(&mut tx, machine)
+                .await?
+                .is_some_and(|m| m.online && m.status == "active" && m.deleted_at.is_none());
+            if !online {
                 return Err(RuntimeError::Unavailable(
-                    "the selected machine has not reported usable provider runtime services".into(),
+                    "the runtime's machine is away".into(),
                 ));
             }
-            if machine_facts.as_ref().is_some_and(|facts| facts.attaches()) {
-                if renew
-                    && !orch_settings::provider_sign_in(&mut tx, provider)
-                        .await
-                        .map_err(EngineError::from)?
-                        .allowed
-                {
-                    return Err(RuntimeError::Unavailable("provider.signin: the credential keeper has not permitted renewal in this existing harness home".into()));
-                }
-                let machine = state.machine_id.ok_or_else(|| {
-                    RuntimeError::Unavailable("the runtime has no machine".into())
+            let profile = match state.agent_id {
+                Some(agent) => machine_rows::agent(&mut tx, agent).await?,
+                None => None,
+            };
+            tx.commit().await.map_err(DbError::from)?;
+            if state.kind == "subscription" {
+                let profile = profile.ok_or_else(|| {
+                    RuntimeError::Unavailable("the sign-in's agent profile is gone".into())
                 })?;
-                let online = machine_rows::machine_place(&mut tx, machine)
-                    .await?
-                    .is_some_and(|m| m.online && m.status == "active" && m.deleted_at.is_none());
-                if !online {
-                    return Err(RuntimeError::Unavailable(
-                        "the runtime's machine is away".into(),
-                    ));
-                }
-                let profile = match state.agent_id {
-                    Some(agent) => machine_rows::agent(&mut tx, agent).await?,
-                    None => None,
-                };
-                tx.commit().await.map_err(DbError::from)?;
-                if state.kind == "subscription" {
-                    let profile = profile.ok_or_else(|| {
-                        RuntimeError::Unavailable("the sign-in's agent profile is gone".into())
-                    })?;
-                    // A machine-bound source profile stays with its keeper. Other compatible profiles
-                    // attach to this runtime when a binding actually chooses them.
-                    if profile
-                        .machine_id
-                        .is_none_or(|required| required == machine)
+                // A machine-bound source profile stays with its keeper. Other compatible profiles
+                // attach to this runtime when a binding actually chooses them.
+                if profile
+                    .machine_id
+                    .is_none_or(|required| required == machine)
+                {
+                    let key = crate::harnesses::HarnessKey {
+                        provider,
+                        agent: profile.id,
+                        machine,
+                    };
+                    match self
+                        .ensure_harness(key, &profile, orch_types::new_id())
+                        .await?
                     {
-                        let key = crate::harnesses::HarnessKey {
-                            provider,
-                            agent: profile.id,
-                            machine,
-                        };
-                        match self
-                            .ensure_harness(key, &profile, orch_types::new_id())
-                            .await?
-                        {
-                            crate::harnesses::Started::Up => {}
-                            crate::harnesses::Started::Failed(outcome) => {
-                                return Err(RuntimeError::Host(
-                                    crate::provider_setup::failure_text(&outcome),
-                                ));
-                            }
+                        crate::harnesses::Started::Up => {}
+                        crate::harnesses::Started::Failed(outcome) => {
+                            return Err(RuntimeError::Host(crate::provider_setup::failure_text(
+                                &outcome,
+                            )));
                         }
                     }
-                } else if let Err(reason) = Box::pin(self.ensure_provider_up(provider)).await? {
-                    return Err(RuntimeError::Host(reason));
                 }
-                if renew
-                    && let crate::provider_setup::Renewed::Lapsed(reason) =
-                        self.renew_sign_in(provider).await?
-                {
-                    return Err(RuntimeError::Unavailable(reason));
-                }
-                return Ok(RuntimeStart::Up);
+            } else if let Err(reason) = Box::pin(self.ensure_provider_up(provider)).await? {
+                return Err(RuntimeError::Host(reason));
             }
-            // Runtime updates honor the owner's policy before waking a stopped unit.
-            if !renew && let Some(job) = self.provider_update_on_start(&mut tx, provider).await? {
-                tx.commit().await.map_err(DbError::from)?;
-                // Only a job that has not begun needs a sweep to be taken up. A look at one that is under
-                // way is made by every thread that waits for it, each time it is dealt with, and asking for
-                // a sweep at each made the engine sweep one after the other for as long as the host took.
-                if job.state == orch_db::queries::jobs::state::QUEUED {
-                    self.kick();
-                }
-                return Ok(RuntimeStart::Job(Box::new(job)));
-            }
-            let live = rows::live_runtime(&mut tx, provider).await?;
             if renew
-                && live.as_ref().is_none_or(|runtime| {
-                    !matches!(
-                        runtime.state.as_str(),
-                        runtime_state::RUNNING | runtime_state::STOPPED | runtime_state::CREATING
-                    )
-                })
+                && let crate::provider_setup::Renewed::Lapsed(reason) =
+                    self.renew_sign_in(provider).await?
             {
+                return Err(RuntimeError::Unavailable(reason));
+            }
+            return Ok(RuntimeStart::Up);
+        }
+        // Runtime updates honor the owner's policy before waking a stopped unit.
+        if !renew && let Some(job) = self.provider_update_on_start(&mut tx, provider).await? {
+            tx.commit().await.map_err(DbError::from)?;
+            self.kick();
+            return Ok(RuntimeStart::Job(Box::new(job)));
+        }
+        let live = rows::live_runtime(&mut tx, provider).await?;
+        if renew
+            && live.as_ref().is_none_or(|runtime| {
+                !matches!(
+                    runtime.state.as_str(),
+                    runtime_state::RUNNING | runtime_state::STOPPED | runtime_state::CREATING
+                )
+            })
+        {
+            return Err(RuntimeError::Unavailable(
+                "renewal needs a manager to repair or recreate the runtime".to_owned(),
+            ));
+        }
+        if let Some(runtime) = live.as_ref()
+            && let Some(blocked) = crate::network::blocked(&mut tx, runtime.id).await?
+        {
+            return Err(RuntimeError::Unavailable(
+                blocked.detail.unwrap_or_else(|| blocked.reason.to_owned()),
+            ));
+        }
+        let mode = match live.as_ref().map(|runtime| runtime.state.as_str()) {
+            Some(runtime_state::RUNNING) => {
+                if renew {
+                    Mode::Renew
+                } else {
+                    return Ok(RuntimeStart::Up);
+                }
+            }
+            Some(runtime_state::STOPPED) => {
+                if renew {
+                    Mode::Renew
+                } else {
+                    Mode::Start
+                }
+            }
+            Some(runtime_state::CREATING) => {
+                return Ok(
+                    match provider_jobs::open_of_provider(&mut tx, provider)
+                        .await?
+                        .into_iter()
+                        .next()
+                    {
+                        Some(job) => RuntimeStart::Job(Box::new(job)),
+                        None => RuntimeStart::Up,
+                    },
+                );
+            }
+            Some(runtime_state::STOPPING) => {
                 return Err(RuntimeError::Unavailable(
-                    "renewal needs a manager to repair or recreate the runtime".to_owned(),
+                    "its runtime is being stopped".to_owned(),
                 ));
             }
-            if let Some(runtime) = live.as_ref()
-                && let Some(blocked) = crate::network::blocked(&mut tx, runtime.id).await?
-            {
-                return Err(RuntimeError::Unavailable(
-                    blocked.detail.unwrap_or_else(|| blocked.reason.to_owned()),
-                ));
+            None | Some(_) => Mode::Make,
+        };
+        match provider_provision::queue(&mut tx, now, provider, mode, by).await? {
+            provider_jobs::Queued::Made(job) => {
+                tx.commit().await.map_err(DbError::from)?;
+                self.kick();
+                Ok(RuntimeStart::Job(job))
             }
-            let mode = match live.as_ref().map(|runtime| runtime.state.as_str()) {
-                Some(runtime_state::RUNNING) => {
-                    if renew {
-                        Mode::Renew
-                    } else {
-                        return Ok(RuntimeStart::Up);
-                    }
-                }
-                Some(runtime_state::STOPPED) => {
-                    if renew {
-                        Mode::Renew
-                    } else {
-                        Mode::Start
-                    }
-                }
-                Some(runtime_state::CREATING) => {
-                    return Ok(
-                        match provider_jobs::open_of_provider(&mut tx, provider)
-                            .await?
-                            .into_iter()
-                            .next()
-                        {
-                            Some(job) => RuntimeStart::Job(Box::new(job)),
-                            None => RuntimeStart::Up,
-                        },
-                    );
-                }
-                Some(runtime_state::STOPPING) => {
-                    return Err(RuntimeError::Unavailable(
-                        "its runtime is being stopped".to_owned(),
-                    ));
-                }
-                None | Some(_) => Mode::Make,
-            };
-            match provider_provision::queue(&mut tx, now, provider, mode, by).await? {
-                provider_jobs::Queued::Made(job) => {
-                    tx.commit().await.map_err(DbError::from)?;
-                    self.kick();
-                    Ok(RuntimeStart::Job(job))
-                }
-                provider_jobs::Queued::Running(job) => Ok(RuntimeStart::Job(job)),
-                provider_jobs::Queued::NoProvider => Err(RuntimeError::NotFound),
-            }
-        })
+            provider_jobs::Queued::Running(job) => Ok(RuntimeStart::Job(job)),
+            provider_jobs::Queued::NoProvider => Err(RuntimeError::NotFound),
+        }
     }
 
     // ------------------------------------------------------------ what a turn waits for
@@ -936,21 +883,7 @@ impl Engine {
         }
         drop(conn);
         match runtime.state.as_str() {
-            runtime_state::STOPPED | runtime_state::FAILED => {
-                let mut tx = self.inner.db.begin().await?;
-                rows::lock(&mut tx, provider).await?;
-                env_rows::set_runtime_state(
-                    &mut tx,
-                    runtime.id,
-                    &[runtime.state.as_str()],
-                    &runtime.state,
-                    Some(why.detail()),
-                    self.inner.clock.now(),
-                )
-                .await?;
-                tx.commit().await.map_err(DbError::from)?;
-                return Ok(());
-            }
+            runtime_state::STOPPED | runtime_state::FAILED => return Ok(()),
             runtime_state::RUNNING | runtime_state::STOPPING => {}
             other => {
                 return Err(RuntimeError::Unavailable(format!("its runtime is {other}")));
@@ -961,19 +894,16 @@ impl Engine {
         }
         self.clear_provider_turns(provider, interrupt, why).await?;
         let began = {
-            let mut tx = self.inner.db.begin().await?;
-            rows::lock(&mut tx, provider).await?;
-            let changed = env_rows::set_runtime_state(
-                &mut tx,
+            let mut conn = self.inner.db.acquire().await?;
+            env_rows::set_runtime_state(
+                &mut conn,
                 runtime.id,
                 &[runtime_state::RUNNING, runtime_state::STOPPING],
                 runtime_state::STOPPING,
-                Some(why.detail()),
+                None,
                 self.inner.clock.now(),
             )
-            .await?;
-            tx.commit().await.map_err(DbError::from)?;
-            changed
+            .await?
         };
         if !began {
             return Err(RuntimeError::Unavailable(format!(
@@ -1029,25 +959,20 @@ impl Engine {
         .await;
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
-        rows::lock(&mut tx, provider).await?;
         match waited {
             Ok(Ok(Outcome::Succeeded(_))) => {
-                let detail = env_rows::runtime(&mut tx, runtime)
-                    .await?
-                    .and_then(|runtime| runtime.state_detail);
-                let moved = env_rows::set_runtime_state(
+                env_rows::set_runtime_state(
                     &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
                     runtime_state::STOPPED,
-                    detail.as_deref(),
+                    None,
                     now,
                 )
                 .await?;
-                if moved
-                    && rows::live_runtime(&mut tx, provider)
-                        .await?
-                        .is_some_and(|current| current.id == runtime)
+                if rows::live_runtime(&mut tx, provider)
+                    .await?
+                    .is_some_and(|current| current.id == runtime)
                 {
                     self.unit_is_gone(&mut tx, provider, runtime, row.machine_id, now)
                         .await?;
@@ -1287,17 +1212,15 @@ impl Engine {
     /// died began, stops the idle, starts the removal of what was retired, takes the sign-in that waits
     /// for a unit that is up, forgets the one that waited too long, ends the sign-in that nobody finished,
     /// looks at the facts after a sign-in that completed, and tells of a token that is about to lapse.
-    pub(crate) fn reap_provider_runtimes(&self) -> BoxFuture<'_, Result<(), EngineError>> {
-        Box::pin(async move {
-            self.finish_stale_provider_stops().await?;
-            self.stop_idle_providers().await?;
-            self.start_due_provider_removals().await?;
-            self.take_waiting_sign_ins().await?;
-            self.look_after_sign_ins().await?;
-            self.watch_token_ends().await?;
-            self.refresh_due_provider_facts().await?;
-            Ok(())
-        })
+    pub(crate) async fn reap_provider_runtimes(&self) -> Result<(), EngineError> {
+        self.finish_stale_provider_stops().await?;
+        self.stop_idle_providers().await?;
+        self.start_due_provider_removals().await?;
+        self.take_waiting_sign_ins().await?;
+        self.look_after_sign_ins().await?;
+        self.watch_token_ends().await?;
+        self.refresh_due_provider_facts().await?;
+        Ok(())
     }
 
     async fn finish_stale_provider_stops(&self) -> Result<(), EngineError> {
@@ -1451,9 +1374,6 @@ impl Engine {
     pub(crate) async fn after_provider_job(&self, row: &JobRow, provider: Id) {
         if let Err(error) = self.reevaluate_provider(provider).await {
             tracing::warn!(%error, %provider, "the threads of a provider could not be woken");
-        }
-        if let Err(error) = self.reevaluate_starts_waiting_for_provider(provider).await {
-            tracing::warn!(%error, %provider, "the threads that waited for the unit of a provider could not be woken");
         }
         if row.kind != provider_jobs::PROVISION {
             return;

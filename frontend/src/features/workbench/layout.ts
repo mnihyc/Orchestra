@@ -11,7 +11,6 @@
  */
 
 import { placementFor } from '@/features/workbench/placement';
-import { newActKey } from '@/lib/requests';
 import { migrateMainResult, type WorkspaceSource } from './contentAddress';
 import type { ScreenKind } from '@/routes/-access';
 
@@ -128,9 +127,12 @@ export type Side = 'left' | 'right' | 'up' | 'down';
 
 // ---------------------------------------------------------------- making
 
-/** A name that remains distinct from saved layout parts across reloads and windows. */
+let counter = 0;
+
+/** A name that no other part of a layout made on this page has. */
 export function newId(prefix: string): string {
-  return `${prefix}${newActKey()}`;
+  counter += 1;
+  return `${prefix}${Date.now().toString(36)}${counter.toString(36)}`;
 }
 
 export function makeTab(view: string, of?: Record<string, string>): Tab {

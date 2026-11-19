@@ -13,7 +13,6 @@ const SECTIONS: Readonly<Record<string, readonly string[]>> = {
   agent: ['parameters', 'usage', 'knowledge', 'given', 'diagnostics'],
   document: ['comments', 'outline', 'links'],
   help: ['help'],
-  ask: ['ask'],
 };
 
 /** Unknown extensions keep a container of their own, rather than disappearing on an upgrade. */

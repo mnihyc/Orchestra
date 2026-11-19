@@ -588,28 +588,17 @@ fn claim_deadline(row: &jobs::JobRow) -> Option<Time> {
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
 }
-struct CommandRef<'a> {
-    id: Id,
-    machine: Id,
-    key: Option<&'a str>,
-    kind: &'a str,
-    body: &'a Json,
-}
-
 async fn command_callers_for_row(
     conn: &mut Conn,
     row: &jobs::JobRow,
-    command: CommandRef<'_>,
+    id: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
     expected_undo: Option<bool>,
     clock: &dyn Clock,
 ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
-    let CommandRef {
-        id,
-        machine,
-        key,
-        kind,
-        body,
-    } = command;
     let Some(plan) = structural(row)? else {
         return Ok(None);
     };
@@ -689,20 +678,7 @@ pub async fn command_current_callers(
     let Some(row) = jobs::job(conn, owners[0]).await? else {
         return Ok(None);
     };
-    command_callers_for_row(
-        conn,
-        &row,
-        CommandRef {
-            id,
-            machine,
-            key,
-            kind,
-            body,
-        },
-        None,
-        clock,
-    )
-    .await
+    command_callers_for_row(conn, &row, id, machine, key, kind, body, None, clock).await
 }
 /// Private command evidence contains association only. It grants nothing and cannot be
 /// deserialized as a key claim or emitted in a node's wire body.
@@ -728,13 +704,11 @@ impl CapabilityChangeAuthority {
         command_callers_for_row(
             conn,
             &row,
-            CommandRef {
-                id: command.id,
-                machine: command.machine_id,
-                key: command.serial_key(),
-                kind: &command.kind,
-                body: &command.body,
-            },
+            command.id,
+            command.machine_id,
+            command.serial_key(),
+            &command.kind,
+            &command.body,
             Some(self.undo),
             clock,
         )

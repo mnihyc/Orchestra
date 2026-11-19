@@ -136,12 +136,8 @@ export async function nodeChatOpening(world: World, person: Person, id: string, 
   const chosen = scopes.find((scope) => scope.chat.id === query.get('chat_id'))
     ?? scopes.find((scope) => scope.node.kind === query.get('scope')) ?? scopes[0];
   const paging = new URLSearchParams(); if (query.has('limit')) paging.set('limit', query.get('limit') ?? '');
-  const opening = chosen === undefined ? null : await chatOpening(world, person, chosen.chat.id, paging);
-  const summaries = world.summaries.opening(person, opening?.sync.chat ?? null, own.kind === 'topic' || own.kind === 'thread' ? { kind: own.kind, id } : undefined);
-  const result = { scopes, opening,
-    ...(summaries.summaries.length === 0 ? {} : summaries),
+  return { scopes, opening: chosen === undefined ? null : await chatOpening(world, person, chosen.chat.id, paging),
     ...(query.get('defaults') === 'true' ? { defaults: await defaultsOpening(world, person, own, query) } : {}) };
-  return result;
 }
 
 export async function documentPages(world: World, person: Person, id: string, query: URLSearchParams): Promise<NodeDocumentPage[]> {

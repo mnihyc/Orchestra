@@ -53,7 +53,7 @@ import {
 import { Owners } from './Owners';
 import { RequestReview, WaitingRequests } from './RequestCard';
 import { EnvironmentReachLine, privateWarning, ReachesLine } from './Reaches';
-import { linkTo } from '@/lib/links';
+import { linkOf } from './target';
 
 /** What a page that moved on meanwhile says: that it is shown as it is now, what was meant for it, and what can be done. */
 export function StaleNotice({ changes }: { changes: Changes }) {
@@ -205,9 +205,9 @@ export function ShortForm({ target, page, catalogue, changes, ask, onFull, focus
     });
 
 
-  const url = linkTo(target);
+  const url = linkOf(target);
   const copy = async () => {
-    await copyText(url, t('common.linkCopied'));
+    if (url !== null) await copyText(url, t('common.linkCopied'));
   };
 
   const adminPlaces = page.admins.of.map((entry: NodeOrSystem) => placeName(t, entry));
@@ -299,9 +299,11 @@ export function ShortForm({ target, page, catalogue, changes, ask, onFull, focus
         >
           {page.state === 'restricted' ? t('craftAccess.inherit', { place: placeText }) : actionName('makePrivate')}
         </Button>
-        <Button icon={<Copy aria-hidden />} onClick={() => void copy()}>
-          {t('access.footer.copyLink')}
-        </Button>
+        {url !== null && (
+          <Button icon={<Copy aria-hidden />} onClick={() => void copy()}>
+            {t('access.footer.copyLink')}
+          </Button>
+        )}
       </div>
 
       {requesting && (

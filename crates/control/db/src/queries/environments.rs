@@ -396,8 +396,6 @@ pub mod thread_engine {
         pub config: Json,
         /// The machine it is on now.
         pub machine_id: Option<Id>,
-        /// The template it was made from, for a managed environment.
-        pub template_id: Option<Id>,
         /// How many times it was made anew.
         pub generation: i32,
         /// Where it stands.
@@ -415,7 +413,7 @@ pub mod thread_engine {
     /// The environment `id`.
     pub async fn environment(conn: &mut Conn, id: Id) -> Result<Option<EnvironmentRow>, DbError> {
         let mut found: Option<EnvironmentRow> = sqlx::query_as(
-            "SELECT id, name, owner_id, org_id, placement, home_node_id, workspace_root, config, machine_id, template_id,
+            "SELECT id, name, owner_id, org_id, placement, home_node_id, workspace_root, config, machine_id,
                     generation, status, status_detail, facts, remove_at, deleted_at
                FROM environments WHERE id = $1",
         )
@@ -1084,7 +1082,6 @@ pub mod workspace {
         environment: Id,
         thread: Option<Id>,
         turn: Option<Id>,
-        item: Option<Id>,
     ) -> Result<Vec<ChangeRow>, DbError> {
         let rows: Vec<(Id, Id, DateTime<Utc>, Json)> = sqlx::query_as(
             "SELECT DISTINCT ON (c.change ->> 'path') i.id, i.thread_id, i.updated_at, c.change
@@ -1096,13 +1093,11 @@ pub mod workspace {
                 AND jsonb_typeof(i.payload #> '{tool,changes}') = 'array'
                 AND ($2::uuid IS NULL OR i.thread_id = $2)
                 AND ($3::uuid IS NULL OR i.turn_id = $3)
-                AND ($4::uuid IS NULL OR i.id = $4)
               ORDER BY c.change ->> 'path', i.seq_created DESC, c.n DESC",
         )
         .bind(environment)
         .bind(thread)
         .bind(turn)
-        .bind(item)
         .fetch_all(conn)
         .await?;
         Ok(rows
@@ -2289,9 +2284,6 @@ pub mod hosting {
         Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "{CONNECTED_SELECT}
               WHERE e.placement = 'connected' AND e.deleted_at IS NULL AND e.remove_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.environment_id=e.id
-                    AND j.kind='environment_provision' AND j.plan->>'mode'='copy'
-                    AND NOT COALESCE((j.plan->>'provision_committed')::boolean,false))
                 AND e.status = ANY($3)
                 AND (
                       (e.status = 'running' AND NOT (m.online AND m.status = 'active' AND m.deleted_at IS NULL))
@@ -2588,9 +2580,6 @@ pub mod changes {
         conn: &mut Conn,
         machines: &[Id],
     ) -> Result<Vec<(Id, String)>, DbError> {
-        if machines.is_empty() {
-            return Ok(Vec::new());
-        }
         Ok(
             sqlx::query_as("SELECT id, connector_version FROM machines WHERE id = ANY($1)")
                 .bind(machines)

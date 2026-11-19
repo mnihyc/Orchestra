@@ -16,12 +16,6 @@ pub enum Purpose {
     Embedding,
     /// A permission or other configured model review.
     Review,
-    /// A web-search capability call.
-    WebSearch,
-    /// A page-fetch capability call.
-    PageFetch,
-    /// An image-generation capability call.
-    ImageGeneration,
 }
 
 impl Purpose {
@@ -33,26 +27,9 @@ impl Purpose {
             Self::Summary => "summary",
             Self::Embedding => "embedding",
             Self::Review => "review",
-            Self::WebSearch => "web_search",
-            Self::PageFetch => "page_fetch",
-            Self::ImageGeneration => "image_generation",
-        }
-    }
-    /// Capability identity for the common route resolver, without a separate fallback mechanism.
-    #[must_use]
-    pub const fn capability(self) -> Option<&'static str> {
-        match self {
-            Self::Summary => Some("summary"),
-            Self::WebSearch => Some("web_search"),
-            Self::PageFetch => Some("page_fetch"),
-            Self::ImageGeneration => Some("image_generation"),
-            _ => None,
         }
     }
 }
-
-/// A route unavailable under the actual program/access/model facts; it is not an upstream failure.
-pub const UNAVAILABLE: &str = "unavailable";
 
 /// A configured failover destination; no candidate is ever discovered automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -60,15 +37,12 @@ pub const UNAVAILABLE: &str = "unavailable";
 pub struct Candidate {
     /// The provider whose access is checked when the step acts.
     pub provider_id: Id,
-    /// The model's routing name; empty when an exact capability route is selected instead.
+    /// The model's routing name.
     pub model: String,
-    /// Exact service or delegated route from the common capability contract.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<crate::capabilities::BackendRef>,
     /// An alternative agent profile where a different harness is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<Id>,
-    /// Model and harness parameters, including any access program.
+    /// Model and harness parameters, including any access programme.
     #[serde(default = "empty_params")]
     pub params: Json,
     /// Embedding dimensions, required to match the active generation.
@@ -123,10 +97,6 @@ pub enum Until {
 /// A rule's ordered recovery steps; exhausting one advances to the next.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a rule holds a few steps read from settings; boxing the failover candidate would change every engine match on it for no measurable saving"
-)]
 pub enum Step {
     /// Repeat safely, continuing an agent turn if it already had effects.
     Retry {
@@ -188,17 +158,16 @@ impl When {
     /// Whether all supplied conditions match this failure.
     #[must_use]
     pub fn matches(&self, failure: &Match<'_>) -> bool {
-        self.kind.as_deref().is_none_or(|kind| {
-            kind == "any"
-                || kind == failure.kind
-                || kind == "provider_busy" && matches!(failure.kind, "rate_limited" | "overloaded")
-                || kind == "provider_unreachable" && failure.kind == "stream_interrupted"
-        }) && self.reason.as_deref().is_none_or(|reason| {
-            Some(reason) == failure.reason
-                || reason == "access" && crate::failure::is_access_reason(failure.reason)
-        }) && self
-            .provider_id
-            .is_none_or(|provider| provider == failure.provider)
+        self.kind
+            .as_deref()
+            .is_none_or(|kind| kind == "any" || kind == failure.kind)
+            && self
+                .reason
+                .as_deref()
+                .is_none_or(|reason| Some(reason) == failure.reason)
+            && self
+                .provider_id
+                .is_none_or(|provider| provider == failure.provider)
             && self
                 .model
                 .as_deref()
@@ -257,7 +226,6 @@ pub const DEFAULT_RULES: &str = r#"[
     {"id":"unreachable","when":{"kind":"provider_unreachable"},"steps":[{"type":"retry","delay_secs":60,"times":3,"backoff":2},{"type":"wait","until":"person"}]},
     {"id":"refused","when":{"kind":"model_refused"},"steps":[{"type":"continue","times":3},{"type":"wait","until":"person"}]},
     {"id":"limit","when":{"kind":"provider_exhausted"},"steps":[{"type":"wait","until":"reset"}]},
-    {"id":"session-lost","when":{"kind":"session_lost","purpose":"agent"},"steps":[{"type":"continue","times":1},{"type":"wait","until":"person"}]},
     {"id":"other","when":{},"steps":[{"type":"wait","until":"person"}]}
 ]"#;
 
@@ -278,39 +246,10 @@ pub fn validate(value: &Json) -> Result<Vec<Rule>, String> {
         }
         for step in &rule.steps {
             match step {
-                Step::Retry {
-                    delay_secs,
-                    times,
-                    backoff,
-                } if *delay_secs < 0 || *times == 0 || *backoff == 0 => {
-                    return Err(
-                        "retry needs a nonnegative delay and positive times and backoff".to_owned(),
-                    );
-                }
-                Step::Continue { times: 0 } => {
-                    return Err("continue needs positive times".to_owned());
-                }
-                Step::Failover { candidate } => {
-                    if !candidate.params.is_object() || candidate.dimensions == Some(0) {
-                        return Err("a candidate needs object parameters and positive dimensions when supplied".into());
-                    }
-                    if let Some(route) = &candidate.route {
-                        if !candidate.model.is_empty()
-                            || candidate.agent_id.is_some()
-                            || candidate.dimensions.is_some()
-                            || route.route.trim().is_empty()
-                            || !route.offering.as_ref().is_some_and(|offering| {
-                                offering.provider == candidate.provider_id
-                                    && !offering.offering.trim().is_empty()
-                            })
-                        {
-                            return Err("a route candidate names one exact provider offering without model, profile or dimensions".into());
-                        }
-                    } else if candidate.model.trim().is_empty() {
-                        return Err("a model candidate names its routing model".into());
-                    }
-                    requested_effort(&candidate.params).map_err(str::to_owned)?;
-                }
+                Step::Retry { delay_secs, times, backoff } if *delay_secs < 0 || *times == 0 || *backoff == 0 => return Err("retry needs a nonnegative delay and positive times and backoff".to_owned()),
+                Step::Continue { times: 0 } => return Err("continue needs positive times".to_owned()),
+                Step::Failover { candidate } if candidate.model.trim().is_empty() || !candidate.params.is_object() || candidate.dimensions == Some(0) => return Err("a candidate needs a model, object parameters and positive dimensions when supplied".to_owned()),
+                Step::Failover { candidate } => { requested_effort(&candidate.params).map_err(str::to_owned)?; }
                 _ => {}
             }
         }
@@ -354,6 +293,9 @@ pub fn completion_options(params: &Json) -> Result<(), &'static str> {
         .as_object()
         .ok_or("completion parameters must be an object")?;
     requested_effort(params)?;
+    if params.pointer("/reasoning/mode").is_some() {
+        return Err("model options cannot enable privileged reasoning modes");
+    }
     if let Some(search) = object.get("web_search") {
         crate::search::mode(search)?;
     }
@@ -398,6 +340,9 @@ pub fn owned_option(key: &str) -> bool {
             | "conversation"
             | "store"
             | "background"
+            | "metadata"
+            | "user"
+            | "safety_identifier"
             | "provider_id"
             | "protocol"
             | "method"
@@ -410,13 +355,7 @@ pub fn owned_option(key: &str) -> bool {
             | "api_key"
             | "dimensions"
             | "web_searches"
-            | "web_fetches"
-            | "web_fetch_per_call"
-            | "fetch_known_requests"
             | "web_search_per_call"
-            | "_service_groups"
-            | "service_usage"
-            | "credits_per_unit"
             | "search_usage"
             | "known_requests"
     )
@@ -453,9 +392,7 @@ pub fn retry_delay(step: &Step, attempt: u32, vendor_secs: Option<i64>) -> i64 {
 /// Vectors may fail over only when their model identity and dimensions remain comparable.
 #[must_use]
 pub fn compatible_embedding(candidate: &Candidate, model: &str, dimensions: u32) -> bool {
-    candidate.route.is_none()
-        && candidate.model == model
-        && candidate.dimensions == Some(dimensions)
+    candidate.model == model && candidate.dimensions == Some(dimensions)
 }
 
 #[cfg(test)]
@@ -463,73 +400,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_access_rule_keeps_a_specific_credit_program_refusal_in_its_family() {
-        let when = When {
-            kind: Some("model_unavailable".into()),
-            reason: Some("access".into()),
-            ..When::default()
-        };
-        let mut failure = Match {
-            kind: "model_unavailable",
-            reason: Some("credit_program"),
-            provider: Id::default(),
-            model: "model",
-            purpose: Purpose::Agent,
-            status: Some(400),
-            words: "",
-        };
-        assert!(when.matches(&failure));
-        failure.reason = Some("safety");
-        assert!(!when.matches(&failure));
-        failure.reason = None;
-        assert!(!when.matches(&failure));
-    }
-
-    #[test]
-    fn session_loss_continues_an_agent_once_then_waits_for_a_person() {
-        let rules = validate(&serde_json::from_str(DEFAULT_RULES).unwrap()).unwrap();
-        for purpose in [Purpose::Agent, Purpose::Summary] {
-            let rule = rules
-                .iter()
-                .find(|rule| {
-                    rule.when.matches(&Match {
-                        kind: "session_lost",
-                        reason: None,
-                        provider: Id::nil(),
-                        model: "model",
-                        purpose,
-                        status: None,
-                        words: "",
-                    })
-                })
-                .unwrap();
-            let mut cursor = Cursor::default();
-            if purpose == Purpose::Agent {
-                assert_eq!(rule.id, "session-lost");
-                assert!(matches!(
-                    cursor.next(rule).unwrap(),
-                    (Step::Continue { times: 1 }, 1)
-                ));
-            } else {
-                assert_eq!(rule.id, "other");
-            }
-            assert!(matches!(
-                cursor.next(rule).unwrap().0,
-                Step::Wait {
-                    until: Until::Person
-                }
-            ));
-        }
-    }
-
-    #[test]
     fn busy_and_refused_get_three_attempts_but_structural_access_waits() {
         let rules = validate(&serde_json::from_str(DEFAULT_RULES).unwrap()).unwrap();
         for (kind, expected) in [
             ("provider_busy", "busy"),
-            ("rate_limited", "busy"),
-            ("overloaded", "busy"),
-            ("stream_interrupted", "unreachable"),
             ("model_refused", "refused"),
             ("model_unavailable", "other"),
         ] {
@@ -629,9 +503,6 @@ mod completion_options_tests {
         assert!(completion_options(&json!({"web_search":"live"})).is_ok());
         for key in [
             "web_searches",
-            "web_fetches",
-            "web_fetch_per_call",
-            "fetch_known_requests",
             "web_search_per_call",
             "search_usage",
             "known_requests",
@@ -648,10 +519,7 @@ mod completion_options_tests {
             json!({"effort":"high","temperature":0.2}),
             json!({"reasoning":{"effort":"low"}}),
             json!({"reasoning":{"effort":"low","summary":"concise"}}),
-            json!({"reasoning":{"mode":"pro"}}),
             json!({"extra_body":{"vendor":{"keep":[true,null,3]}}}),
-            json!({"safety_identifier":"provider-choice","user":"provider-choice"}),
-            json!({"metadata":{"user_id":"provider-choice"}}),
         ] {
             assert!(completion_options(&params).is_ok());
         }
@@ -660,68 +528,9 @@ mod completion_options_tests {
             json!({"store":true}),
             json!({"previous_response_id":"another-history"}),
             json!({"cyber_access_program":"unopened"}),
+            json!({"reasoning":{"mode":"pro"}}),
         ] {
             assert!(completion_options(&params).is_err(), "{params}");
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
-mod route_candidates {
-    use super::*;
-    use serde_json::json;
-    #[test]
-    fn capability_purposes_and_unavailable_use_the_existing_rule_matcher_without_paid_defaults() {
-        for (purpose, name) in [
-            (Purpose::Summary, "summary"),
-            (Purpose::WebSearch, "web_search"),
-            (Purpose::PageFetch, "page_fetch"),
-            (Purpose::ImageGeneration, "image_generation"),
-        ] {
-            assert_eq!(purpose.as_str(), name);
-            assert_eq!(purpose.capability(), Some(name));
-            let when = When {
-                kind: Some(UNAVAILABLE.into()),
-                purpose: Some(purpose),
-                ..When::default()
-            };
-            assert!(when.matches(&Match {
-                kind: UNAVAILABLE,
-                reason: Some("program_does_not_carry_mode"),
-                provider: Id::nil(),
-                model: "opaque",
-                purpose,
-                status: None,
-                words: "Unavailable"
-            }));
-        }
-        let rules = validate(&serde_json::from_str::<Json>(DEFAULT_RULES).unwrap()).unwrap();
-        assert!(
-            !rules
-                .iter()
-                .flat_map(|rule| &rule.steps)
-                .any(|step| matches!(step, Step::Failover { .. }))
-        );
-    }
-    #[test]
-    fn a_route_candidate_is_exact_and_cannot_also_name_a_generation_model_or_another_account() {
-        let provider = orch_types::new_id();
-        let candidate = json!({"provider_id":provider,"model":"","route":{"route":"lookup.service-api","offering":{"provider":provider,"offering":"public-search"}},"params":{}});
-        let rules = |candidate: Json| json!([{"id":"explicit-fallback","when":{"kind":"unavailable","purpose":"web_search"},"steps":[{"type":"failover","candidate":candidate},{"type":"wait","until":"person"}]}]);
-        assert!(validate(&rules(candidate.clone())).is_ok());
-        let mut ambiguous = candidate.clone();
-        ambiguous["model"] = json!("another-model");
-        assert!(validate(&rules(ambiguous)).is_err());
-        let mut mismatched = candidate.clone();
-        mismatched["route"]["offering"]["provider"] = json!(orch_types::new_id());
-        assert!(validate(&rules(mismatched)).is_err());
-        let mut inferred = candidate;
-        inferred["route"]["offering"] = Json::Null;
-        assert!(validate(&rules(inferred)).is_err());
-        let old = json!({"provider_id":provider,"model":"opaque","params":{}});
-        let old: Candidate = serde_json::from_value(old).unwrap();
-        assert!(old.route.is_none());
-        assert!(serde_json::to_value(old).unwrap().get("route").is_none());
     }
 }

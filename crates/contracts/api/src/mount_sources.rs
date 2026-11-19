@@ -81,12 +81,6 @@ pub enum MachineSource {
     Environments,
     /// Actual organization components of emitted native Mount addresses.
     AddressOrgs,
-    /// Project components of resource homes.
-    AddressProjects,
-    /// Topic components of resource homes.
-    AddressTopics,
-    /// Thread components of resource homes.
-    AddressThreads,
 }
 /// Actual selected Mount collection.
 pub const MACHINE_MOUNTS: &str = "machine_selected_mounts";
@@ -96,7 +90,7 @@ pub const MACHINE_ENVIRONMENTS: &str = "machine_selected_environments";
 pub const MACHINE_ADDRESS_ORGS: &str = "machine_mount_address_orgs";
 const MACHINE: TargetResolver = TargetResolver::Resolved("machine");
 /// Physical machine mount data and independently readable selected references.
-pub const MACHINE_MOUNT_FACETS: [FacetSpec; 7] = [
+pub const MACHINE_MOUNT_FACETS: [FacetSpec; 4] = [
     FacetSpec::required(
         KeyAction::Read,
         &[KeyTargetKind::Object(ObjectKind::Machine)],
@@ -115,18 +109,6 @@ pub const MACHINE_MOUNT_FACETS: [FacetSpec; 7] = [
     FacetSpec::response_content(
         &[KeyTargetKind::Object(ObjectKind::Org)],
         TargetResolver::ResolvedCollection(MACHINE_ADDRESS_ORGS),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Project)],
-        TargetResolver::ResolvedCollection("machine_mount_address_projects"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Topic)],
-        TargetResolver::ResolvedCollection("machine_mount_address_topics"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Thread)],
-        TargetResolver::ResolvedCollection("machine_mount_address_threads"),
     ),
 ];
 /// Physical machine directory facts and actual selected Environment uses.
@@ -167,24 +149,6 @@ pub const MACHINE_MOUNT_READ: Declaration<MachineSource> = Declaration {
         Binding {
             source: MachineSource::AddressOrgs,
             target: TargetResolver::ResolvedCollection(MACHINE_ADDRESS_ORGS),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineSource::AddressProjects,
-            target: TargetResolver::ResolvedCollection("machine_mount_address_projects"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineSource::AddressTopics,
-            target: TargetResolver::ResolvedCollection("machine_mount_address_topics"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: MachineSource::AddressThreads,
-            target: TargetResolver::ResolvedCollection("machine_mount_address_threads"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
         },

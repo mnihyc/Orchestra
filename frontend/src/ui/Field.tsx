@@ -53,7 +53,7 @@ export function Field({ label, optional, hint, error, hideLabel, aside, help, cl
           </label>
           {help !== undefined && help !== null && help !== false && <span className="flex min-h-(--control-sm) shrink-0 items-center">{help}</span>}
         </span>
-        {aside !== undefined && <span className="flex min-h-(--control-sm) items-center text-sm">{aside}</span>}
+        {aside !== undefined && <span className="text-sm">{aside}</span>}
       </div>
       {children({
         id: controlId,

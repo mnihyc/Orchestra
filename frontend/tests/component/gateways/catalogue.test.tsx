@@ -23,11 +23,6 @@ it.each(modes)('shows labels, regions, aliases and revision in $locale/$theme at
   await userEvent.click(screen.getByRole('button', { name: i18n.t('regionalGateways.edit') }));
   const dialog = screen.getByRole('dialog', { name: i18n.t('regionalGateways.editTitle') });
   const first = within(dialog).getByRole('group', { name: i18n.t('regionalGateways.gatewayNumber', { number: 1 }) });
-  const edited = within(dialog).getByRole('list', { name: i18n.t('regionalGateways.catalogue') });
-  expect(edited.querySelectorAll(':scope > li')).toHaveLength(catalogue.gateways.length);
-  expect(edited.querySelector(':scope > li')).toContainElement(first);
-  const endpoints = within(first).getByRole('list', { name: i18n.t('regionalGateways.endpointsFor', { label: 'Europe gateway' }) });
-  expect(within(endpoints).getAllByRole('listitem')).toHaveLength(catalogue.gateways[0]!.endpoints.length);
   expect(within(first).getByRole('textbox', { name: i18n.t('regionalGateways.label') })).toHaveValue('Europe gateway');
   expect(within(first).getByRole('textbox', { name: i18n.t('regionalGateways.endpointNumber', { number: 1 }) })).toHaveValue(catalogue.gateways[0]!.endpoints[0]!.url);
   await userEvent.click(within(dialog).getByRole('button', { name: i18n.t('common.cancel') }));

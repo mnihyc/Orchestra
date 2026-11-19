@@ -77,21 +77,6 @@ pub async fn servers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<McpRow>, DbError
         .bind(ids).fetch_all(conn).await?)
 }
 
-/// Live imports of the exact origins currently discovered on the environment's recorded machine.
-/// A changed digest still names the same import; the saved copy is never replaced by discovery.
-pub async fn imports_found(conn: &mut Conn, environment: Id) -> Result<Vec<McpRow>, DbError> {
-    Ok(sqlx::query_as("SELECT s.id,s.name,s.description,s.org_id,s.home_id,s.owner_id,s.machine_id,s.environment_id,s.spec,s.enabled,s.revision,s.imported
-        FROM mcp_servers s JOIN environments e ON e.machine_id=s.machine_id
-        WHERE e.id=$1 AND e.deleted_at IS NULL AND s.deleted_at IS NULL AND s.imported
-          AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(e.facts->'mcp_found')='array' THEN e.facts->'mcp_found' ELSE '[]'::jsonb END) f
-            WHERE s.spec->'imported'->>'source'=f->>'source'
-              AND s.spec->'imported'->>'name'=f->>'name'
-              AND s.spec->'imported'->>'scope'=CASE f->>'scope' WHEN 'directory' THEN 'project' ELSE f->>'scope' END
-              AND s.spec->'imported'->>'directory' IS NOT DISTINCT FROM f->>'directory')
-        ORDER BY s.id")
-        .bind(environment).fetch_all(conn).await?)
-}
-
 /// Locks a live server before changing its definition or import.
 pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<McpRow>, DbError> {
     Ok(sqlx::query_as("SELECT id,name,description,org_id,home_id,owner_id,machine_id,environment_id,spec,enabled,revision,imported
@@ -388,7 +373,7 @@ pub async fn found(
     reason: &str,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE mcp_server_offerings SET state='found',source=$3,reason=$4,seen_at=$5,job_id=NULL WHERE server_id=$1 AND machine_id=$2 AND state<>'lost'").bind(server).bind(machine).bind(source).bind(reason).bind(at).execute(&mut *conn).await?;
+    sqlx::query("UPDATE mcp_server_offerings SET state='found',source=$3,reason=$4,seen_at=$5 WHERE server_id=$1 AND machine_id=$2 AND state<>'lost'").bind(server).bind(machine).bind(source).bind(reason).bind(at).execute(&mut *conn).await?;
     sqlx::query("UPDATE mcp_servers SET revision=revision+1,updated_at=$2 WHERE id=$1")
         .bind(server)
         .bind(at)
@@ -420,26 +405,11 @@ pub async fn select_definition(
 
 /// Native copy and canonical-definition acts serialize without holding a resource row across a machine call.
 pub async fn lock_definition(conn: &mut Conn, id: Id) -> Result<(), DbError> {
-    lock_definition_for_command(conn, id, None).await
-}
-
-/// The same definition fence also observes its actual outstanding native copy.
-/// Only that exact privately checked command may prepare its own delivery/completion.
-pub async fn lock_definition_for_command(
-    conn: &mut Conn,
-    id: Id,
-    own: Option<Id>,
-) -> Result<(), DbError> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended('mcp.definition:'||$1::uuid::text,0))",
     )
     .bind(id)
-    .execute(&mut *conn)
+    .execute(conn)
     .await?;
-    let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commands WHERE kind='mcp.import' AND state IN ('queued','sent','accepted') AND body->>'server_id'=$1 AND ($2::uuid IS NULL OR id<>$2))")
-        .bind(id.to_string()).bind(own).fetch_one(conn).await?;
-    if pending {
-        return Err(DbError::Retry);
-    }
     Ok(())
 }

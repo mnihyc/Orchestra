@@ -32,8 +32,6 @@ export const imageSourceOf = (spec: Record<string, unknown>): (typeof IMAGE_SOUR
 export const SchemaDraftState = createContext<(id: string, invalid: boolean) => void>(() => undefined);
 /** Resource details keep unshaped plugin values behind the same technical disclosure. */
 export const SchemaTechnicalDetails = createContext(false);
-/** A surrounding dedicated control owns these values; schemas and writes still retain them. */
-export const SchemaManagedPaths = createContext<readonly (readonly string[])[]>([]);
 
 export function useFieldWords(driver: string) {
   const { t, i18n } = useTranslation();
@@ -72,8 +70,6 @@ export function OtherJson({ value, disabled, onChange, objectOnly = false, label
 
 export function SchemaInput({ root, schema: given, value, parts, disabled, problems, driver, onChange, embedded = false, hideHeading = false }: Props) {
   const { t, i18n } = useTranslation();
-  const managed = useContext(SchemaManagedPaths);
-  const owned = (path: readonly string[]) => managed.some((entry) => entry.length === path.length && entry.every((part, index) => part === path[index]));
   const words = useFieldWords(driver);
   const enumWords = useTemplateChoiceWords(driver);
   const errorId = useId();
@@ -95,7 +91,7 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
   const help = embedded ? undefined : <HelpHint term={label} what={hints} />;
   const child = (name: string, field: unknown, childValue: unknown, change: (next: unknown) => void) => <SchemaInput key={name} root={root} schema={field} value={childValue} parts={[...parts, name]} disabled={disabled} problems={problems} driver={driver} onChange={change} embedded={embedded} />;
 
-  if (owned(parts) || given === false || schema['x-orch-hidden'] === true || Array.isArray(schema.enum) && schema.enum.length === 0) return null;
+  if (given === false || schema['x-orch-hidden'] === true || Array.isArray(schema.enum) && schema.enum.length === 0) return null;
   if (Object.hasOwn(schema, 'const')) return <div className="flex min-w-0 flex-col gap-1"><Input label={label} value={printable(schema.const)} disabled readOnly /><p className="text-xs text-text-muted">{t(schema['x-orch-source'] === 'provider' ? 'providerOptions.fixedByProvider' : 'providerOptions.fixedValue')}</p></div>;
 
   if (schema.properties !== undefined || schema.type === 'object') {
@@ -103,9 +99,7 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
     const current = record(value);
     const additional = resolveSchema(root, schema.additionalProperties);
     const stringMap = Object.keys(properties).length === 0 && additional.type === 'string';
-    const visible = Object.fromEntries(Object.entries(current).filter(([key]) => !owned([...parts, key])));
-    const unknown = Object.fromEntries(Object.entries(visible).filter(([key]) => !Object.hasOwn(properties, key)));
-    if (Object.keys(properties).length > 0 && Object.keys(properties).every((key) => owned([...parts, key])) && Object.keys(visible).length === 0) return null;
+    const unknown = Object.fromEntries(Object.entries(current).filter(([key]) => !Object.hasOwn(properties, key)));
     const variants = record(given).anyOf ?? record(given).oneOf;
     const alternatives = Array.isArray(variants) ? variants.map((variant) => resolveSchema(root, variant)).filter((variant) => variant.type === 'object') : [];
     const variantWords=(variant:Schema)=>{
@@ -121,15 +115,16 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
       {!hideHeading && <legend className="px-1"><span className="inline-flex items-center gap-1 font-medium">{label}{help}{reset}</span></legend>}
       {alternatives.length > 1 && <ChoiceLocator label={t('templates.editor.shape')} value={String(Math.max(0, alternatives.findIndex((variant) => variant.properties === schema.properties)))} options={alternatives.map((variant, index) => ({value:String(index),searchText:'',...variantWords(variant)}))} onValueChange={(index) => onChange(newValue(root, alternatives[Number(index)]))} disabled={disabled} />}
       {Object.entries(properties).filter(([, field]) => field !== false).map(([name, field]) => child(name, field, current[name], (next) => { const updated = replaceMember(current, name, next); onChange(Object.keys(updated).length === 0 ? undefined : updated); }))}
-      {stringMap ? <div className="flex flex-col gap-3">{Object.entries(visible).map(([name, entry], index) => <div key={index} className="flex flex-col gap-2 rounded-lg border border-border p-2">
+      {stringMap ? <div className="flex flex-col gap-3">{Object.entries(current).map(([name, entry], index) => <div key={index} className="flex flex-col gap-2 rounded-lg border border-border p-2">
         <Input label={t('templates.editor.key')} value={name} error={Object.hasOwn(current, '') && name === '' ? t('templates.editor.keyRequired') : undefined} onChange={(event) => {
           if (event.target.value !== name && Object.hasOwn(current, event.target.value)) return;
           onChange(Object.fromEntries(Object.entries(current).map(([key, value]) => [key === name ? event.target.value : key, value])));
         }} />
         {child(name, { ...additional, title: t('templates.editor.value') }, entry, (next) => onChange(replaceMember(current, name, next)))}
         <Button size="sm" variant="ghost" onClick={() => onChange(replaceMember(current, name, undefined))}>{t('templates.editor.remove')}</Button>
-      </div>)}<Button size="sm" disabled={disabled || Object.hasOwn(current, '')} onClick={() => onChange({ ...current, '': '' })}>{t('templates.editor.addPair')}</Button></div> : schema.additionalProperties !== false && (Object.keys(unknown).length > 0 || Object.keys(properties).length === 0) && <OtherJson objectOnly value={unknown} disabled={disabled} onChange={(next) => {
-        onChange({ ...Object.fromEntries(Object.entries(current).filter(([key]) => Object.hasOwn(properties, key) || owned([...parts, key]))), ...Object.fromEntries(Object.entries(record(next)).filter(([key]) => !Object.hasOwn(properties, key) && !owned([...parts, key]))) });
+      </div>)}<Button size="sm" disabled={disabled || Object.hasOwn(current, '')} onClick={() => onChange({ ...current, '': '' })}>{t('templates.editor.addPair')}</Button></div> : schema.additionalProperties !== false && (Object.keys(unknown).length > 0 || Object.keys(properties).length === 0) && <OtherJson objectOnly value={Object.keys(properties).length === 0 ? value : unknown} disabled={disabled} onChange={(next) => {
+        if (Object.keys(properties).length === 0) onChange(next);
+        else onChange({ ...Object.fromEntries(Object.entries(current).filter(([key]) => Object.hasOwn(properties, key))), ...Object.fromEntries(Object.entries(record(next)).filter(([key]) => !Object.hasOwn(properties, key))) });
       }} />}
       {error && <p id={errorId} role="status" className="text-sm text-danger-text">{error}</p>}
     </fieldset>;

@@ -29,14 +29,12 @@ import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
-import { ResourcePicker } from '@/ui/ResourcePicker';
 import { cx } from '@/ui/cx';
 
 import { type Missing, modelName, type Picks, type Resolved, settingsToKeep } from './choices';
 import type { StartOptions } from '@/api/start';
 import { RequestDefault } from './RequestDefault';
 import { agentWhy, arrangementWhy, providerWhy } from './words';
-import { ProgramReport } from './ProgramReport';
 
 /** A place whose defaults decide what the threads made in the place run on, and whether the person may write them there. */
 export interface Scope {
@@ -142,7 +140,6 @@ export function MissingDefault({ place, node, options, resolved, picks, onPick, 
   const first = resolved.missing[0];
   const waiting = resolved.waiting;
   const chosenProvider = resolved.provider;
-  const failedProgram = first?.kind === 'agent' ? first.unusable ?? resolved.agents.find((row) => row.entry.program_report?.status === 'error') : undefined;
   const whole = first === undefined;
   // What a choice settles is asked quietly; what no choice here can settle (no environment, no way of placing the agent) is a warning.
   const stuck = first?.kind === 'environment' || first?.kind === 'arrangement';
@@ -184,33 +181,28 @@ export function MissingDefault({ place, node, options, resolved, picks, onPick, 
         <span>{sentence}</span>
       </p>
 
-      {failedProgram?.entry.program_report?.status === 'error' && chosenProvider !== null && <details>
-        <summary className="cursor-pointer text-text-muted">{t('start.agent.programDetails', { agent: failedProgram.entry.agent.name })}</summary>
-        <div className="mt-2"><ProgramReport agent={failedProgram.entry} provider={chosenProvider.entry.provider} /></div>
-      </details>}
-
       {choice !== null && (
         <div className="flex flex-wrap items-start gap-3">
           {(choice.kind === 'provider' || picks.provider !== null) && (
-            <ResourcePicker pickerKey="start-missing-provider"
+            <Select
               label={missingProviderContext ? t(providers.isError ? 'startFlow.providerLocationsFailure' : 'startFlow.providerLocationsLoading') : t('start.provider.title')}
               value={chosenProvider?.id ?? ''}
               placeholder={t('start.missing.pickProvider')}
               disabled={options.defaults.locked || missingProviderContext}
               onValueChange={(next) => onPick({ provider: next, agent: null, model: null, effort: null, arrangement: null })}
-              options={resolved.providers.filter((row) => row.choosable).map((row) => ({ value: row.id, name: providerNames.get(row.id) ?? row.entry.provider.name, resource:{kind:'provider',id:row.id,data:row.entry} }))}
+              options={resolved.providers.filter((row) => row.choosable).map((row) => ({ value: row.id, label: providerNames.get(row.id) ?? row.entry.provider.name }))}
               fieldClassName="min-w-(--field-narrow) flex-1"
             />
           )}
           {chosenProvider !== null && resolved.agents.some((row) => row.startable) && (choice.kind === 'agent' || picks.agent !== null) && (
-            <ResourcePicker pickerKey="start-missing-profile"
+            <Select
               label={t('start.agent.title')}
               value={resolved.agent?.id ?? ''}
               placeholder={t('start.missing.pickAgent')}
               onValueChange={(next) => onPick({ agent: next, arrangement: null })}
               options={resolved.agents.filter((row) => row.startable).map((row) => {
                 const program = programNameIn(row.entry.agent, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
-                return { value: row.id, name: row.entry.agent.name, resource:{kind:'agent',id:row.id,data:row.entry}, description: program === row.entry.agent.name || program === t('resources.harnessNameUnknown') ? undefined : program };
+                return { value: row.id, label: row.entry.agent.name, description: program === row.entry.agent.name || program === t('resources.harnessNameUnknown') ? undefined : program };
               })}
               fieldClassName="min-w-(--field-narrow) flex-1"
             />

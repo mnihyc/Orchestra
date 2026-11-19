@@ -9,7 +9,6 @@ use crate::tools::{
     tree::{FoundEntry, Tree, Where},
 };
 use crate::{Engine, EngineError};
-use futures::future::BoxFuture;
 use orch_authz::reach::{Reach, Things};
 use orch_db::queries::{documents, threads::ThreadRow};
 use orch_db::{Conn, DbError};
@@ -316,42 +315,40 @@ impl Engine {
     }
 
     /// The tool owns paths and deletion capabilities; every mutation belongs to the shared domain.
-    pub(crate) fn manage_shared_call<'a>(
-        &'a self,
-        call: &'a CallContext,
-        thread: &'a ThreadRow,
-    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
-        Box::pin(async move {
-            let (asked, confirm) = match asked_of(&call.arguments) {
-                Ok(asked) => asked,
-                Err(refusal) => return Ok(refusal.into()),
-            };
-            if let Some(answer) = lock(&self.inner.manage_plans).replay(
-                call.thread,
-                &call.call_ref,
-                &asked,
-                self.inner.clock.now(),
-            ) {
-                return Ok(answer);
-            }
-            let answer = if let Some(answer) = self
-                .manage_session_or_chat(call, thread, &asked, confirm.as_deref())
+    pub(crate) async fn manage_shared_call(
+        &self,
+        call: &CallContext,
+        thread: &ThreadRow,
+    ) -> Result<Answer, EngineError> {
+        let (asked, confirm) = match asked_of(&call.arguments) {
+            Ok(asked) => asked,
+            Err(refusal) => return Ok(refusal.into()),
+        };
+        if let Some(answer) = lock(&self.inner.manage_plans).replay(
+            call.thread,
+            &call.call_ref,
+            &asked,
+            self.inner.clock.now(),
+        ) {
+            return Ok(answer);
+        }
+        let answer = if let Some(answer) = self
+            .manage_session_or_chat(call, thread, &asked, confirm.as_deref())
+            .await?
+        {
+            answer
+        } else {
+            self.manage_document_tree(call, thread, &asked, confirm.as_deref())
                 .await?
-            {
-                answer
-            } else {
-                self.manage_document_tree(call, thread, &asked, confirm.as_deref())
-                    .await?
-            };
-            lock(&self.inner.manage_plans).remember(
-                call.thread,
-                &call.call_ref,
-                &asked,
-                self.inner.clock.now(),
-                &answer,
-            );
-            Ok(answer)
-        })
+        };
+        lock(&self.inner.manage_plans).remember(
+            call.thread,
+            &call.call_ref,
+            &asked,
+            self.inner.clock.now(),
+            &answer,
+        );
+        Ok(answer)
     }
 
     async fn manage_document_tree(
@@ -454,7 +451,7 @@ impl Engine {
                 asked,
                 self.inner.clock.now(),
             ) {
-                Claim::Claimed(waiting) => *waiting,
+                Claim::Claimed(waiting) => waiting,
                 Claim::Missing => {
                     return Ok(not_confirmed(
                         "That word is missing, expired, made up, used already or belongs to another call.",
@@ -628,7 +625,7 @@ impl Engine {
                 .unwrap_or_else(|| new_path.clone());
             let mut result = json!({"id":entry.item.id(),"kind":kind(entry.item),"path":old_path,"name":entry.basename,
                 "action":if located.request.command==domain::Command::RestoreVersion {"put_back"} else {match located.request.command {
-                    domain::Command::CreateFolder=>"create_folder",domain::Command::Copy=>"copy",domain::Command::Move=>"move",domain::Command::MoveOut=>"move_out",
+                    domain::Command::CreateFolder=>"create_folder",domain::Command::Copy=>"copy",domain::Command::Move=>"move",
                     domain::Command::Delete=>"delete",domain::Command::Restore=>"restore",domain::Command::Rename=>"rename",domain::Command::RestoreVersion=>"put_back"}},
                 "blocks":rows.get(&entry.item.id()).map_or(0,|row|row.block_count),"files":entry.files,"versions":entry.versions,
                 "shared_with":shared.get(&entry.item.id()).copied().unwrap_or(0)});

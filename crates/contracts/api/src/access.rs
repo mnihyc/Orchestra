@@ -699,9 +699,6 @@ pub enum PageChangeWhole {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PageChange {
-    /// Optional validated composer context for this explicit grant, recorded with its server actor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_origin: Option<orch_access_contract::audit::LinkOrigin>,
     /// The short way to add people: it names holders in every row its choice covers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<Vec<PageChangeName>>,
@@ -738,20 +735,7 @@ pub struct PreviewPerson {
 
 /// The effect a change would have, worked out before it is made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct OwnerReadDisclosure {
-    /// Successful logical owner-read results in the affected recorded history.
-    pub count: i64,
-    /// Threads whose history this act would expose.
-    pub threads: i64,
-    /// Acknowledgement of this exact intent and current result counts; not an access grant.
-    pub confirmation: String,
-}
-
-/// The effect a change would have, worked out before it is made.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PagePreview {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_reads: Option<OwnerReadDisclosure>,
     /// How many pages it reaches; one for a live page.
     pub pages: i64,
     /// For a preview of the system's defaults: in how many root orgs those pages lie; `null` for
@@ -802,10 +786,6 @@ pub struct SharePreviewRule {
 /// The current and proposed live areas for one agent destination, or the bounded size of a proposed copy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SharePreviewAgent {
-    /// This actual recipient's effective read of the linked object before the proposed trial,
-    /// including native rights and other current givers. Absent only from older producers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_before: Option<crate::share::AgentReadBefore>,
     /// Ordinary human `doc.view` entries after this preview, separate from the live agent
     /// contribution; they follow normal expiry/revocation, rather than the giver's future rights.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -860,8 +840,6 @@ pub struct SharePreviewRow {
 /// One row of a selected-row review. It is advice only: the ordinary write rechecks current authority and its own revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SharePreview {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_reads: Option<OwnerReadDisclosure>,
     /// Whether the exact request may be made now.
     pub allowed: bool,
     /// Current live page revision; null for a chat, which has no permission page.
@@ -1213,22 +1191,15 @@ pub struct ResourceAccess {
     pub through: Vec<ResourceThrough>,
 }
 
-/// The least of a provider's models and efforts that would do, and where the work was to run.
+/// The least of a provider's models and efforts that would do.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AccessOptions {
     /// The models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
-    /// The service offerings, independently of generation models.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub services: Option<Vec<String>>,
     /// The efforts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub efforts: Option<Vec<String>>,
-    /// Where the work was to run, told by a refusal when the entries of the person leave that place
-    /// out. A request for access does not carry it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#where: Option<Vec<orch_access_contract::whereabouts::WhereName>>,
 }
 
 /// Why nobody can give what is missing.
@@ -1337,7 +1308,7 @@ pub struct HistoryLine {
     pub wording: Option<HistoryWording>,
     /// What it points at.
     pub about: Option<HistoryAbout>,
-    /// Structured upload summary or bounded file outcomes from its detail page.
+    /// Structured files and outcome of one upload, when this line groups a batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload: Option<UploadHistory>,
 }
@@ -1366,14 +1337,8 @@ pub struct UploadHistory {
     pub environment_id: Id,
     /// Its chosen folder.
     pub folder: String,
-    /// The bounded filename preview, or the selected detail page.
+    /// Every selected file and its measured outcome.
     pub files: Vec<UploadHistoryFile>,
-    /// The complete number of files, independent of the preview or page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_count: Option<i64>,
-    /// The existing History request can page this line's complete file outcomes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub files_paged: bool,
     /// Total bytes received, absent when any receipt is unknown.
     pub bytes: Option<i64>,
     /// The files deliberately replaced.
@@ -1511,9 +1476,6 @@ pub struct PermissionPeopleListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryListQuery {
-    /// The stored upload-summary history line whose individual file outcomes to page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upload: Option<Id>,
     /// Summary contains meaningful acts; Every includes all recorded changes. Thread History starts in Summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<crate::nodes::ActivityDepth>,
@@ -1964,8 +1926,7 @@ crate::endpoints! {
             Facet::required(Read, &[Object(K::DocumentContainer)], Target::ResolvedCollection("snapshot_source_document_containers")),
                 Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_source_environments")),
             Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("snapshot_source_chats")),
-        ]),
-        idempotency crate::routes::Idempotency::NotKeyed("This is read-only advice: every trial write is rolled back and no object is created or reserved.");
+        ]);
     /// Reads what one person holds on an object and what gives it to them.
     EffectiveAccessGet: GET "/{object}/{id}/permissions/effective", Rule("access.manage on the object, or the person themself"), query EffectiveAccessGetQuery, none, json EffectiveAccess, 200,
         operation Op::variants(&[

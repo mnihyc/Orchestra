@@ -142,17 +142,6 @@ pub const REFERENCE: Declaration<Source> = Declaration {
     ],
 };
 
-/// A completed file retry reads only its current native metadata, not spent input-byte sources.
-pub const METADATA_DIRECT: Declaration<Source> = Declaration {
-    operation: DIRECT.operation,
-    bindings: &[BASE[1], BASE[2]],
-};
-/// The same existing response roles on the canonical saved-source variant.
-pub const METADATA_REFERENCE: Declaration<Source> = Declaration {
-    operation: REFERENCE.operation,
-    bindings: METADATA_DIRECT.bindings,
-};
-
 /// A same-name refusal discloses only the actual existing document file identity.
 pub const CONFLICT_DIRECT: Declaration<Source> = Declaration {
     operation: DIRECT.operation,

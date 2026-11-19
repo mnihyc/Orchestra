@@ -665,18 +665,7 @@ impl Outbox {
         let mut read = false;
         let mut snapshots = Vec::new();
         let mut sources = Vec::new();
-        let kinds = merged
-            .iter()
-            .map(|snapshot| snapshot.kind.clone())
-            .collect::<Vec<_>>();
-        let outward = people::outward_kinds(conn, user, &kinds)
-            .await?
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
         for snapshot in merged {
-            if !outward.contains(&snapshot.kind) {
-                continue;
-            }
             // A notification the Inbox still has and that was read since is not told.
             if let Some(id) = snapshot.id
                 && known.contains(&id)
@@ -1093,7 +1082,7 @@ impl Outbox {
         tx.commit().await.map_err(DbError::from)?;
         Ok(callers
             .iter()
-            .all(|source| source.check(self.inner.clock.as_ref())))
+            .all(|caller| caller.key_deadline_allows(self.inner.clock.as_ref())))
     }
 
     /// Records what an attempt came to, under the attempt it was.

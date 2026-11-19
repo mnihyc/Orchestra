@@ -9,7 +9,6 @@
  */
 import type {
   AccessChoice,
-  AccessOptions,
   Entry,
   Holder,
   HolderInput,
@@ -484,17 +483,9 @@ export function forkRowChange(row: PermissionRow, excluded: ReadonlySet<HolderKe
   };
 }
 
-/** Removes direct grants; cuts inheritance only where the removed holder is followed. */
+/** Takes a named or followed holder out, cutting only the rows in which it stands. */
 export function removeHolderChange(page: PermissionPage, holder: LineHolder): PageChange {
-  const rows = page.rows.flatMap((row) => {
-    const held = holdsOfRow(row).filter((item) => holderKey(item.holder) === holder.key);
-    if (held.length === 0) return [];
-    if (held.some((item) => item.hold.entry === null)) return [forkRowChange(row, new Set([holder.key]))];
-    // A direct grant can be withdrawn without changing what the row inherits.
-    // Cutting inheritance also rewrites unrelated holders and needs management.
-    return [{ permission: row.permission, ...(row.profile === 'any' ? {} : { profile: row.profile }),
-      remove: held.flatMap((item) => item.hold.entry === null ? [] : [item.hold.entry.id]) }];
-  });
+  const rows = page.rows.filter((row) => holdsOfRow(row).some((held) => holderKey(held.holder) === holder.key)).map((row) => forkRowChange(row, new Set([holder.key])));
   return { expected_revision: page.revision, rows };
 }
 
@@ -680,11 +671,4 @@ export function isFirstOwner(page: PermissionPage, entry: Entry): boolean {
 /** Whether an owner's entry may be taken out: not the only person there. */
 export function mayTakeOutOwner(page: PermissionPage, entry: Entry): boolean {
   return !(entry.holder.kind === 'user' && ownerPeople(page).length <= 1);
-}
-
-/** What a request carries of the options a refusal named: the places it was refused for are said to the person, and a request asks for the use itself. */
-export function askedOptions(options: AccessOptions): AccessOptions {
-  const asked = { ...options };
-  delete asked.where;
-  return asked;
 }

@@ -24,7 +24,6 @@ meets at a limit is `../../ui/LimitPrompt.tsx`.
 - `choices.ts`: Separate device choices for the usage screen and provider Usage, retaining each chart while explicit addresses take precedence.
 - `Breakdowns.tsx`: The same total divided by person, model, provider, agent, kind of environment and project, one table each; a row filters the whole screen.
 - `Board.tsx`: The usage board of a place: turns, tokens and credits in a period, over time, by person and divided one other way, for whom its row names; Open usage.
-- `RequestFacts.tsx`: The compact token split, failure/status/attempt and tool facts shared by request rows, records and their details.
 - `Records.tsx`: The ledger rows behind what is on screen, each followed to its turn, with the rate its credits were counted at and where that rate came from.
 - `Limits.tsx`: Limits card: caps on tokens, on credits and on turns at once with their meters, who is waiting, how firmly each holds, how often each was passed, changes in place.
 - `CapPeople.tsx`: Shared person chips in cap subjects, setter attribution and per-person shares, including the limit prompt.

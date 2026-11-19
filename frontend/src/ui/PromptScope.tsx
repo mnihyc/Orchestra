@@ -19,12 +19,7 @@ function isolatePromptBackground(doc: Document): () => void {
   const changed = new Map<HTMLElement, string | null>();
   const refresh = () => {
     const modal = usePrompts.getState().entries.some((entry) => entry.kind === 'prompt');
-    // With no prompt open and nothing to give back, a change of the page asks nothing of it.
-    if (!modal && changed.size === 0) return;
-    // Radix hides the body's other children, and inside them the siblings of what it keeps announced (every
-    // aria-live region of a form's fields): each covered part rejects input, not only the outermost ones.
-    const parts = modal ? new Set<Element>([...Array.from(doc.body.children), ...Array.from(doc.body.querySelectorAll('[data-aria-hidden="true"]'))]) : new Set<Element>();
-    for (const child of parts) {
+    for (const child of Array.from(doc.body.children)) {
       if (!(child instanceof HTMLElement) || child.hasAttribute('data-radix-focus-guard')) continue;
       const covered = modal && child.getAttribute('aria-hidden') === 'true';
       if (covered && !changed.has(child) && !child.hasAttribute('inert')) {
@@ -137,36 +132,6 @@ export function useTransientLayer(supplied?: boolean, onChange?: (open: boolean)
 export function currentPrompt(): HTMLElement | null {
   return Array.from(document.querySelectorAll<HTMLElement>('[data-prompt-current="true"]')).find((element) =>
     element.isConnected && element.closest('[style*="display: none"], [hidden], [inert], [aria-hidden="true"]') === null && getComputedStyle(element).visibility !== 'hidden') ?? null;
-}
-
-/** Where each open prompt will give the keyboard back, by prompt: the holders register as the prompt is drawn. */
-const returnTargets = new Map<string, { current: Element | null }>();
-
-/** Registers where a prompt gives the keyboard back; what it returns unregisters it. */
-export function registerReturnTarget(id: string, target: { current: Element | null }): () => void {
-  returnTargets.set(id, target);
-  return () => { if (returnTargets.get(id) === target) returnTargets.delete(id); };
-}
-
-/**
- * A menu whose choice opened a form cannot take the keyboard back to its button: the form covers the
- * page, so the button cannot hold it. The oldest open form which does not hold the button and has no
- * lasting place to return to (it began at the menu's retired entry) gives the keyboard back there when
- * it closes; a second form opened meanwhile has its own place already. Returns whether one took it.
- */
-export function handReturnTargetToPrompt(trigger: HTMLElement): boolean {
-  for (const entry of usePrompts.getState().entries) {
-    const held = entry.kind === 'prompt' ? returnTargets.get(entry.id) : undefined;
-    if (held === undefined) continue;
-    const content = Array.from(document.querySelectorAll('[data-prompt-id]')).find((element) => element.getAttribute('data-prompt-id') === entry.id);
-    if (content === undefined || content.contains(trigger)) continue;
-    const remembered = held.current;
-    const lasting = remembered !== null && remembered.isConnected && remembered !== document.body && remembered.closest('[role="menu"]') === null;
-    if (lasting) continue;
-    held.current = trigger;
-    return true;
-  }
-  return false;
 }
 
 export function restorePromptFocus(element: HTMLElement): boolean {

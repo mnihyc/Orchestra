@@ -19,10 +19,9 @@
 //! row that cost nothing. A turn counts once for each daily row it has rows
 //! under, however many requests it made. Only rows that count are folded;
 //! the others are kept in the ledger as trace.
-//! Public turn figures count distinct historical turn memberships from usage_turn_daily,
-//! including unmetered turns. Each UTC hour/attribution membership folds repeated calls,
-//! preserving hourly buckets without scanning the raw ledger. Span/group totals remain
-//! distinct turn identities, never sums of daily or model membership counts.
+//! Public turn figures separately count distinct historical turn ids within
+//! the same span/filter/group, including unmetered turns. They cannot be found
+//! by summing the stored meter-key turn counts across days or model choices.
 //!
 //! **Reading.** [`read`] adds the rollups (or, for a span read by the hour
 //! and for the dimensions the rollups do not keep, the ledger itself) over a
@@ -177,16 +176,16 @@ fn ledger_measures() -> String {
 }
 
 /// The columns of a daily row, in the order [`daily_select`] gives them.
-const DAILY_COLUMNS: &str = "day, org_id, project_id, topic_id, thread_id, work_node_id, purpose, provider_id, entry_id,
+const DAILY_COLUMNS: &str = "day, org_id, project_id, topic_id, thread_id, purpose, provider_id, entry_id,
                 user_id, model, tier, harness_kind, environment_kind, turns, input_tokens, cached_input_tokens, cache_write_tokens,
                 output_tokens, reasoning_tokens, total_tokens, credits, estimated_credits, unrated_tokens,
                 effort, access_program, requests, errors, speed_tokens, generation_ms_sum, speed_buckets, first_token_buckets, hidden_requests, short_requests,
-                rated_rows, service, unrated_services, service_units";
+                rated_rows";
 
 /// The key of a daily row.
 const DAILY_KEY: &str =
-    "day, topic_id, thread_id, work_node_id, purpose, provider_id, entry_id, model, tier, user_id,
-                      harness_kind, environment_kind, effort, access_program, service_key";
+    "day, topic_id, thread_id, purpose, provider_id, entry_id, model, tier, user_id,
+                      harness_kind, environment_kind, effort, access_program";
 
 /// The measures of the daily rows of the ledger rows (`e`) that `restriction` leaves of the counted ones, grouped
 /// by the key of a daily row: the one rule both a rebuild and a fold apply.
@@ -195,7 +194,7 @@ fn daily_select(restriction: &str) -> String {
     format!(
         "SELECT {DAY} AS day, (array_agg(e.org_id ORDER BY e.at, e.id))[1] AS org_id,
                 (array_agg(e.project_id ORDER BY e.at, e.id))[1] AS project_id,
-                e.topic_id, e.thread_id, e.work_node_id, e.purpose, e.provider_id, e.entry_id, e.user_id, e.model, e.tier,
+                e.topic_id, e.thread_id, e.purpose, e.provider_id, e.entry_id, e.user_id, e.model, e.tier,
                 e.harness_kind, e.environment_kind, count(DISTINCT e.turn_id) FILTER (WHERE e.counted)::int AS turns,
                 COALESCE(sum(e.input_tokens) FILTER (WHERE e.counted), 0)::bigint AS input_tokens,
                 COALESCE(sum(e.cached_input_tokens) FILTER (WHERE e.counted), 0)::bigint AS cached_input_tokens,
@@ -214,13 +213,11 @@ fn daily_select(restriction: &str) -> String {
                 usage_histogram(e.first_token_ms::double precision) AS first_token_buckets,
                 count(*) FILTER (WHERE e.outcome IS NOT NULL AND e.measurement_states->>'reasoning_hidden'='true') AS hidden_requests,
                 count(*) FILTER (WHERE e.outcome IS NOT NULL AND e.measurement_states->'speed_milli'->>'state'='empty') AS short_requests,
-                count(*) FILTER (WHERE e.counted AND e.credits IS NOT NULL) AS rated_rows,
-                e.service, count(*) FILTER (WHERE e.counted AND e.service IS NOT NULL AND e.credits IS NULL) AS unrated_services,
-                COALESCE(usage_merge_unit_counts(usage_service_units(e.measurement_states)) FILTER(WHERE e.counted),'{{}}'::jsonb) AS service_units
+                count(*) FILTER (WHERE e.counted AND e.credits IS NOT NULL) AS rated_rows
            FROM usage_events e
           WHERE (e.counted OR e.outcome IS NOT NULL) AND {restriction}
-          GROUP BY {DAY}, e.topic_id, e.thread_id, e.work_node_id, e.purpose, e.provider_id, e.entry_id, e.user_id, e.model,
-                   e.tier, e.harness_kind, e.environment_kind, e.effort, e.access_program, e.service"
+          GROUP BY {DAY}, e.topic_id, e.thread_id, e.purpose, e.provider_id, e.entry_id, e.user_id, e.model,
+                   e.tier, e.harness_kind, e.environment_kind, e.effort, e.access_program"
     )
 }
 
@@ -239,7 +236,7 @@ fn daily_statement(restriction: &str) -> String {
                 requests=EXCLUDED.requests, errors=EXCLUDED.errors, speed_tokens=EXCLUDED.speed_tokens,
                 generation_ms_sum=EXCLUDED.generation_ms_sum, speed_buckets=EXCLUDED.speed_buckets,
                 first_token_buckets=EXCLUDED.first_token_buckets,hidden_requests=EXCLUDED.hidden_requests,short_requests=EXCLUDED.short_requests,
-                rated_rows=EXCLUDED.rated_rows,unrated_services=EXCLUDED.unrated_services,service_units=EXCLUDED.service_units",
+                rated_rows=EXCLUDED.rated_rows",
         select = daily_select(restriction)
     )
 }
@@ -247,10 +244,9 @@ fn daily_statement(restriction: &str) -> String {
 /// The ledger rows under the same daily row as `EXCLUDED` (a row being added), for the rare repair of its place.
 const SAME_DAY_ROW: &str = "x.at >= EXCLUDED.day::timestamp AT TIME ZONE 'UTC' AND x.at < (EXCLUDED.day + 1)::timestamp AT TIME ZONE 'UTC'
          AND x.topic_id = EXCLUDED.topic_id AND x.thread_id IS NOT DISTINCT FROM EXCLUDED.thread_id
-         AND x.work_node_id IS NOT DISTINCT FROM EXCLUDED.work_node_id
          AND x.purpose = EXCLUDED.purpose AND x.provider_id = EXCLUDED.provider_id
          AND x.entry_id IS NOT DISTINCT FROM EXCLUDED.entry_id AND x.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
-         AND x.model = EXCLUDED.model AND x.service IS NOT DISTINCT FROM EXCLUDED.service AND x.tier IS NOT DISTINCT FROM EXCLUDED.tier
+         AND x.model = EXCLUDED.model AND x.tier IS NOT DISTINCT FROM EXCLUDED.tier
          AND x.harness_kind IS NOT DISTINCT FROM EXCLUDED.harness_kind
          AND x.environment_kind IS NOT DISTINCT FROM EXCLUDED.environment_kind
          AND x.effort IS NOT DISTINCT FROM EXCLUDED.effort AND x.access_program IS NOT DISTINCT FROM EXCLUDED.access_program
@@ -291,9 +287,7 @@ fn daily_addition() -> String {
                 first_token_buckets = usage_counts_merge(usage_daily.first_token_buckets, EXCLUDED.first_token_buckets),
                 hidden_requests = usage_daily.hidden_requests + EXCLUDED.hidden_requests,
                 short_requests = usage_daily.short_requests + EXCLUDED.short_requests,
-                rated_rows = usage_daily.rated_rows + EXCLUDED.rated_rows,
-                unrated_services=usage_daily.unrated_services+EXCLUDED.unrated_services,
-                service_units=usage_unit_counts_merge(usage_daily.service_units,EXCLUDED.service_units)",
+                rated_rows = usage_daily.rated_rows + EXCLUDED.rated_rows",
         select = daily_select("e.id = $1")
     )
 }
@@ -304,22 +298,22 @@ fn monthly_statement(restriction: &str) -> String {
     format!(
         "INSERT INTO usage_monthly (month, org_id, project_id, topic_id, user_id, purpose, provider_id, model, tier,
                 harness_kind, environment_kind, turns, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
-                reasoning_tokens, total_tokens, credits, estimated_credits, unrated_tokens, service, unrated_services, service_units)
+                reasoning_tokens, total_tokens, credits, estimated_credits, unrated_tokens)
          SELECT date_trunc('month', d.day)::date, (array_agg(d.org_id ORDER BY d.day, d.org_id, d.project_id))[1],
                 (array_agg(d.project_id ORDER BY d.day, d.org_id, d.project_id))[1], d.topic_id, d.user_id, d.purpose, d.provider_id, d.model,
                 d.tier, d.harness_kind, d.environment_kind, sum(d.turns)::int, sum(d.input_tokens)::bigint,
                 sum(d.cached_input_tokens)::bigint, sum(d.cache_write_tokens)::bigint, sum(d.output_tokens)::bigint, sum(d.reasoning_tokens)::bigint,
-                sum(d.total_tokens)::bigint, sum(d.credits), sum(d.estimated_credits), sum(d.unrated_tokens)::bigint, d.service, sum(d.unrated_services)::bigint, usage_merge_unit_counts(d.service_units)
+                sum(d.total_tokens)::bigint, sum(d.credits), sum(d.estimated_credits), sum(d.unrated_tokens)::bigint
            FROM usage_daily d
           WHERE {restriction}
           GROUP BY date_trunc('month', d.day)::date, d.topic_id, d.user_id, d.purpose, d.provider_id, d.model,
-                   d.tier, d.harness_kind, d.environment_kind, d.service
-         ON CONFLICT (month, topic_id, user_id, purpose, provider_id, model, tier, harness_kind, environment_kind, service_key)
+                   d.tier, d.harness_kind, d.environment_kind
+         ON CONFLICT (month, topic_id, user_id, purpose, provider_id, model, tier, harness_kind, environment_kind)
          DO UPDATE SET org_id = EXCLUDED.org_id, project_id = EXCLUDED.project_id, turns = EXCLUDED.turns,
                 input_tokens = EXCLUDED.input_tokens, cached_input_tokens = EXCLUDED.cached_input_tokens, cache_write_tokens = EXCLUDED.cache_write_tokens,
                 output_tokens = EXCLUDED.output_tokens, reasoning_tokens = EXCLUDED.reasoning_tokens,
                 total_tokens = EXCLUDED.total_tokens, credits = EXCLUDED.credits,
-                estimated_credits = EXCLUDED.estimated_credits, unrated_tokens = EXCLUDED.unrated_tokens, unrated_services=EXCLUDED.unrated_services,service_units=EXCLUDED.service_units"
+                estimated_credits = EXCLUDED.estimated_credits, unrated_tokens = EXCLUDED.unrated_tokens"
     )
 }
 
@@ -331,17 +325,17 @@ fn monthly_addition() -> String {
          AND d.topic_id = EXCLUDED.topic_id AND d.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
          AND d.purpose = EXCLUDED.purpose AND d.provider_id = EXCLUDED.provider_id AND d.model = EXCLUDED.model
          AND d.tier IS NOT DISTINCT FROM EXCLUDED.tier AND d.harness_kind IS NOT DISTINCT FROM EXCLUDED.harness_kind
-         AND d.environment_kind IS NOT DISTINCT FROM EXCLUDED.environment_kind AND d.service IS NOT DISTINCT FROM EXCLUDED.service";
+         AND d.environment_kind IS NOT DISTINCT FROM EXCLUDED.environment_kind";
     format!(
         "INSERT INTO usage_monthly (month, org_id, project_id, topic_id, user_id, purpose, provider_id, model, tier,
                 harness_kind, environment_kind, turns, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
-                reasoning_tokens, total_tokens, credits, estimated_credits, unrated_tokens, service, unrated_services, service_units)
+                reasoning_tokens, total_tokens, credits, estimated_credits, unrated_tokens)
          SELECT date_trunc('month', c.day)::date, c.org_id, c.project_id, c.topic_id, c.user_id, c.purpose, c.provider_id,
                 c.model, c.tier, c.harness_kind, c.environment_kind, CASE WHEN $2 THEN c.turns ELSE 0 END, c.input_tokens,
                 c.cached_input_tokens, c.cache_write_tokens, c.output_tokens, c.reasoning_tokens, c.total_tokens, c.credits,
-                c.estimated_credits, c.unrated_tokens, c.service, c.unrated_services, c.service_units
+                c.estimated_credits, c.unrated_tokens
            FROM ({select}) c
-         ON CONFLICT (month, topic_id, user_id, purpose, provider_id, model, tier, harness_kind, environment_kind, service_key)
+         ON CONFLICT (month, topic_id, user_id, purpose, provider_id, model, tier, harness_kind, environment_kind)
          DO UPDATE SET
                 org_id = CASE WHEN EXCLUDED.org_id = usage_monthly.org_id
                                    AND EXCLUDED.project_id IS NOT DISTINCT FROM usage_monthly.project_id
@@ -360,9 +354,7 @@ fn monthly_addition() -> String {
                 total_tokens = usage_monthly.total_tokens + EXCLUDED.total_tokens,
                 credits = usage_monthly.credits + EXCLUDED.credits,
                 estimated_credits = usage_monthly.estimated_credits + EXCLUDED.estimated_credits,
-                unrated_tokens = usage_monthly.unrated_tokens + EXCLUDED.unrated_tokens,
-                unrated_services=usage_monthly.unrated_services+EXCLUDED.unrated_services,
-                service_units=usage_unit_counts_merge(usage_monthly.service_units,EXCLUDED.service_units)",
+                unrated_tokens = usage_monthly.unrated_tokens + EXCLUDED.unrated_tokens",
         select = daily_select("e.id = $1")
     )
 }
@@ -404,7 +396,23 @@ pub async fn fold_event(conn: &mut Conn, event: Id) -> Result<(), DbError> {
         .execute(&mut *conn)
         .await?;
     // A turn counts once for each daily row it has counted rows under.
-    let first_of_turn = only_counted_turn_member(conn, event).await?;
+    let first_of_turn: bool = sqlx::query_scalar(
+        "SELECT e.counted AND e.turn_id IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM usage_events x
+              WHERE x.turn_id = e.turn_id AND x.counted AND x.id <> e.id
+                AND (x.at AT TIME ZONE 'UTC')::date = (e.at AT TIME ZONE 'UTC')::date
+                AND x.topic_id = e.topic_id AND x.thread_id IS NOT DISTINCT FROM e.thread_id
+                AND x.purpose = e.purpose AND x.provider_id = e.provider_id
+                AND x.entry_id IS NOT DISTINCT FROM e.entry_id AND x.user_id IS NOT DISTINCT FROM e.user_id
+                AND x.model = e.model AND x.tier IS NOT DISTINCT FROM e.tier
+                AND x.harness_kind IS NOT DISTINCT FROM e.harness_kind
+                AND x.environment_kind IS NOT DISTINCT FROM e.environment_kind
+                AND x.effort IS NOT DISTINCT FROM e.effort AND x.access_program IS NOT DISTINCT FROM e.access_program)
+           FROM usage_events e WHERE e.id = $1",
+    )
+    .bind(event)
+    .fetch_one(&mut *conn)
+    .await?;
     sqlx::query(sqlx::AssertSqlSafe(daily_addition()))
         .bind(event)
         .bind(first_of_turn)
@@ -413,161 +421,6 @@ pub async fn fold_event(conn: &mut Conn, event: Id) -> Result<(), DbError> {
     sqlx::query(sqlx::AssertSqlSafe(monthly_addition()))
         .bind(event)
         .bind(first_of_turn)
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
-}
-
-async fn only_counted_turn_member(conn: &mut Conn, event: Id) -> Result<bool, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT e.counted AND e.turn_id IS NOT NULL AND NOT EXISTS (
-             SELECT 1 FROM usage_events x
-              WHERE x.turn_id = e.turn_id AND x.counted AND x.id <> e.id
-                AND (x.at AT TIME ZONE 'UTC')::date = (e.at AT TIME ZONE 'UTC')::date
-                AND x.topic_id = e.topic_id AND x.thread_id IS NOT DISTINCT FROM e.thread_id
-                AND x.work_node_id IS NOT DISTINCT FROM e.work_node_id
-                AND x.purpose = e.purpose AND x.provider_id = e.provider_id
-                AND x.entry_id IS NOT DISTINCT FROM e.entry_id AND x.user_id IS NOT DISTINCT FROM e.user_id
-                AND x.model = e.model AND x.service IS NOT DISTINCT FROM e.service AND x.tier IS NOT DISTINCT FROM e.tier
-                AND x.harness_kind IS NOT DISTINCT FROM e.harness_kind
-                AND x.environment_kind IS NOT DISTINCT FROM e.environment_kind
-                AND x.effort IS NOT DISTINCT FROM e.effort AND x.access_program IS NOT DISTINCT FROM e.access_program)
-           FROM usage_events e WHERE e.id = $1",
-    )
-    .bind(event)
-    .fetch_one(&mut *conn)
-    .await?)
-}
-
-/// Removes exactly one prior contribution before its two verified request sources are combined.
-/// The same projection and month lock as insertion keep live rollups reproducible without a history scan.
-pub(super) async fn unfold_event(conn: &mut Conn, event: Id) -> Result<(), DbError> {
-    let key: Option<(DateTime<Utc>, Id)> = sqlx::query_as(
-        "SELECT at,topic_id FROM usage_events WHERE id=$1 AND (counted OR outcome IS NOT NULL)",
-    )
-    .bind(event)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some((at, topic)) = key else {
-        return Ok(());
-    };
-    let month = month_of(at.date_naive())?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!("usage_rollup:{topic}:{month}"))
-        .execute(&mut *conn)
-        .await?;
-    let only = only_counted_turn_member(conn, event).await?;
-    let numeric = [
-        "input_tokens",
-        "cached_input_tokens",
-        "cache_write_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-        "total_tokens",
-        "credits",
-        "estimated_credits",
-        "unrated_tokens",
-        "unrated_services",
-    ];
-    let key_columns = [
-        "topic_id",
-        "thread_id",
-        "work_node_id",
-        "purpose",
-        "provider_id",
-        "entry_id",
-        "model",
-        "service",
-        "tier",
-        "user_id",
-        "harness_kind",
-        "environment_kind",
-        "effort",
-        "access_program",
-    ];
-    let same = key_columns
-        .iter()
-        .map(|key| format!("d.{key} IS NOT DISTINCT FROM x.{key}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let mut changes: Vec<String> = numeric
-        .iter()
-        .chain(
-            [
-                "requests",
-                "speed_tokens",
-                "generation_ms_sum",
-                "hidden_requests",
-                "short_requests",
-                "rated_rows",
-            ]
-            .iter(),
-        )
-        .map(|column| format!("{column}=d.{column}-x.{column}"))
-        .collect();
-    changes.push("turns=d.turns-CASE WHEN $2 THEN x.turns ELSE 0 END".into());
-    changes
-        .push("service_units=usage_unit_counts_adjust(d.service_units,x.service_units,-1)".into());
-    for column in ["errors", "speed_buckets", "first_token_buckets"] {
-        changes.push(format!("{column}=(SELECT COALESCE(jsonb_object_agg(key,n),'{{}}'::jsonb) FROM (SELECT key,sum(value::bigint) AS n FROM (SELECT * FROM jsonb_each_text(d.{column}) UNION ALL SELECT key,(-value::bigint)::text FROM jsonb_each_text(x.{column})) entries GROUP BY key HAVING sum(value::bigint)<>0) merged)"));
-    }
-    let sql = format!(
-        "UPDATE usage_daily d SET {} FROM ({}) x WHERE d.day=x.day AND {same}",
-        changes.join(","),
-        daily_select("e.id=$1")
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(event)
-        .bind(only)
-        .execute(&mut *conn)
-        .await?;
-    let month_keys = [
-        "topic_id",
-        "user_id",
-        "purpose",
-        "provider_id",
-        "model",
-        "service",
-        "tier",
-        "harness_kind",
-        "environment_kind",
-    ];
-    let same_month = month_keys
-        .iter()
-        .map(|key| format!("m.{key} IS NOT DISTINCT FROM x.{key}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let mut changes: Vec<String> = numeric
-        .iter()
-        .map(|column| format!("{column}=m.{column}-x.{column}"))
-        .collect();
-    changes.push("turns=m.turns-CASE WHEN $2 THEN x.turns ELSE 0 END".into());
-    changes
-        .push("service_units=usage_unit_counts_adjust(m.service_units,x.service_units,-1)".into());
-    let sql = format!(
-        "UPDATE usage_monthly m SET {} FROM ({}) x WHERE m.month=date_trunc('month',x.day)::date AND {same_month}",
-        changes.join(","),
-        daily_select("e.id=$1")
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(event)
-        .bind(only)
-        .execute(&mut *conn)
-        .await?;
-    // Remove only a group with no other contributing row, not a measured zero request.
-    let same_event = SAME_DAY_ROW.replace("EXCLUDED", "d").replace("x.", "e.");
-    let sql = format!(
-        "DELETE FROM usage_daily d USING usage_events x WHERE x.id=$1 AND d.day=(x.at AT TIME ZONE 'UTC')::date AND {same} AND NOT EXISTS(SELECT 1 FROM usage_events e WHERE e.id<>$1 AND {same_event})"
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(event)
-        .execute(&mut *conn)
-        .await?;
-    let sql = format!(
-        "DELETE FROM usage_monthly m USING usage_events x WHERE x.id=$1 AND m.month=date_trunc('month',x.at AT TIME ZONE 'UTC')::date AND {same_month} AND NOT EXISTS(SELECT 1 FROM usage_daily x WHERE x.day>=m.month AND x.day<(m.month+interval '1 month')::date AND {same_month})"
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(event)
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -589,7 +442,7 @@ pub struct Rebuilt {
 /// writers wait for it, and it waits for those that are under way. Run it in a
 /// transaction.
 pub async fn rebuild(conn: &mut Conn, from: Option<NaiveDate>) -> Result<Rebuilt, DbError> {
-    sqlx::query("LOCK TABLE usage_events, usage_turn_daily, usage_daily, usage_monthly IN SHARE ROW EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE usage_daily, usage_monthly IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut *conn)
         .await?;
     let (first_day, first_month) = match from {
@@ -604,16 +457,6 @@ pub async fn rebuild(conn: &mut Conn, from: Option<NaiveDate>) -> Result<Rebuilt
         .bind(first_month)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("DELETE FROM usage_turn_daily WHERE $1::date IS NULL OR day >= $1")
-        .bind(first_day)
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
-      SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM usage_events e
-      CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p
-      WHERE e.turn_id IS NOT NULL AND ($1::date IS NULL OR (e.at AT TIME ZONE 'UTC')::date >= $1)
-      GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable")
-      .bind(first_day).execute(&mut *conn).await?;
     let begins = first_day.map(day_start).transpose()?;
     let daily = sqlx::query(sqlx::AssertSqlSafe(daily_statement(
         "($1::timestamptz IS NULL OR e.at >= $1)",
@@ -704,10 +547,6 @@ pub struct Filter {
     pub person: Option<Id>,
     /// Only this model, by its routing name.
     pub model: Option<String>,
-    /// Only this actual service offering.
-    pub service: Option<String>,
-    /// Only this actual purpose.
-    pub purpose: Option<String>,
     /// Only this harness kind.
     pub harness_kind: Option<String>,
     /// Only this kind of environment: `managed` or `connected`.
@@ -722,14 +561,6 @@ pub struct Filter {
 
 /// Adds ` AND …` for each member of the filter, for rows aliased `d`.
 pub(crate) fn push_filter(query: &mut QueryBuilder<Postgres>, filter: &Filter) {
-    if let Some(service) = &filter.service {
-        query
-            .push(" AND d.service->>'name' = ")
-            .push_bind(service.clone());
-    }
-    if let Some(purpose) = &filter.purpose {
-        query.push(" AND d.purpose = ").push_bind(purpose.clone());
-    }
     if let Some(turn) = filter.turn {
         query.push(" AND d.turn_id = ").push_bind(turn);
     }
@@ -811,11 +642,20 @@ pub(crate) fn push_filter(query: &mut QueryBuilder<Postgres>, filter: &Filter) {
 
 /// A null historical tier is ordinary unless the retained request/report facts say otherwise.
 /// These predicates only describe the existing measurement envelope; no vendor tier is invented.
+const EXPLICIT_TIER: &str = "d.tier IS NULL AND jsonb_typeof(d.measurement_states->'requested_service_tier')='string' AND d.measurement_states->>'requested_service_tier' NOT IN ('default','standard')";
 fn unknown_tier_sql() -> String {
-    "usage_tier_unknown(d.tier,d.measurement_states)".to_owned()
+    format!(
+        "COALESCE(({EXPLICIT_TIER} AND d.measurement_states->'reported_service_tier'->>'state'='empty'),false)"
+    )
 }
+
 fn unavailable_tier_sql() -> String {
-    "usage_tier_unavailable(d.tier,d.measurement_states)".to_owned()
+    format!(
+        "COALESCE((d.measurement_states->'reported_service_tier'->>'state'='unread'
+            OR (jsonb_typeof(d.measurement_states->'wire_protocol')='string'
+                AND COALESCE(d.measurement_states->'reported_service_tier'->>'state','unsupported')='unsupported')
+            OR ({EXPLICIT_TIER} AND COALESCE(d.measurement_states->'reported_service_tier'->>'state','unsupported') NOT IN ('told','empty'))),false)"
+    )
 }
 
 /// The same factual discriminator for an event's existing measurement envelope.
@@ -907,10 +747,6 @@ pub struct Figures {
     pub estimated_credits: String,
     /// The tokens of the rows that had none.
     pub unrated_tokens: i64,
-    /// Service requests with an unpriced actual unit quantity.
-    pub unrated_services: i64,
-    /// Actual quantities and known/unknown request counts, one object per declared unit.
-    pub service_units: orch_types::Json,
 }
 
 impl Default for Figures {
@@ -927,8 +763,6 @@ impl Default for Figures {
             credits: "0".to_owned(),
             estimated_credits: "0".to_owned(),
             unrated_tokens: 0,
-            unrated_services: 0,
-            service_units: serde_json::json!({}),
         }
     }
 }
@@ -990,9 +824,7 @@ const DAILY_MEASURES: &str = "COALESCE(sum(d.requests),0)::bigint AS requests,
         COALESCE(sum(d.total_tokens), 0)::bigint AS total_tokens,
         COALESCE(sum(d.credits), 0)::text AS credits,
         COALESCE(sum(d.estimated_credits), 0)::text AS estimated_credits,
-        COALESCE(sum(d.unrated_tokens), 0)::bigint AS unrated_tokens,
-        COALESCE(sum(d.unrated_services),0)::bigint AS unrated_services,
-        usage_merge_unit_counts(d.service_units) AS service_units";
+        COALESCE(sum(d.unrated_tokens), 0)::bigint AS unrated_tokens";
 
 /// The same measures, from the counted rows of the ledger (`d`).
 const LEDGER_MEASURES: &str = "count(d.outcome)::bigint AS requests, usage_counts(CASE WHEN PROVIDER_ERROR THEN d.outcome END) AS errors,
@@ -1011,9 +843,7 @@ const LEDGER_MEASURES: &str = "count(d.outcome)::bigint AS requests, usage_count
         COALESCE(sum(d.total_tokens) FILTER (WHERE d.counted), 0)::bigint AS total_tokens,
         COALESCE(sum(d.credits) FILTER (WHERE d.counted), 0)::text AS credits,
         COALESCE(sum(d.credits) FILTER (WHERE d.counted AND d.rate_source = 'catalogue'), 0)::text AS estimated_credits,
-        COALESCE(sum(d.total_tokens) FILTER (WHERE d.counted AND d.credits IS NULL), 0)::bigint AS unrated_tokens,
-        count(*) FILTER (WHERE d.counted AND d.service IS NOT NULL AND d.credits IS NULL)::bigint AS unrated_services,
-        COALESCE(usage_merge_unit_counts(usage_service_units(d.measurement_states)) FILTER(WHERE d.counted),'{}'::jsonb) AS service_units";
+        COALESCE(sum(d.total_tokens) FILTER (WHERE d.counted AND d.credits IS NULL), 0)::bigint AS unrated_tokens";
 
 /// Adds up the counted use of a span, whole, in buckets, by a dimension, or
 /// both. The rollups are read where they hold what is asked; the ledger where
@@ -1196,29 +1026,18 @@ async fn turn_counts(conn: &mut Conn, read: &Read<'_>) -> Result<Vec<TurnCount>,
     let by_tier = read.by == Some(UsageDimension::Tier);
     query
         .push(if by_tier {
-            "d.tier_unknown".to_owned()
+            unknown_tier_sql()
         } else {
             "false".to_owned()
         })
         .push(" AS tier_unknown, ");
     query
-        .push("count(DISTINCT d.turn_id)::bigint AS turns FROM usage_turn_daily d WHERE d.day >= ")
-        .push_bind(read.from)
-        .push(" AND d.day <= ")
-        .push_bind(read.to);
+        .push("count(DISTINCT d.turn_id)::bigint AS turns FROM usage_events d WHERE d.at >= ")
+        .push_bind(day_start(read.from)?)
+        .push(" AND d.at < ")
+        .push_bind(day_start(read.to.succ_opt().ok_or_else(calendar)?)?);
     push_filter(&mut query, read.filter);
-    if let Some(unknown) = read.filter.tier_unknown {
-        query.push(if unknown {
-            " AND d.tier_unknown"
-        } else {
-            " AND NOT d.tier_unknown"
-        });
-    } else if read.filter.tier.as_deref() == Some("none") {
-        query.push(" AND NOT d.tier_unknown");
-    }
-    if by_tier || read.filter.tier_unknown.is_some() || read.filter.tier.is_some() {
-        query.push(" AND NOT d.tier_unavailable");
-    }
+    push_tier_filter(&mut query, read.filter, by_tier);
     if read.bucket.is_some() || read.by.is_some() {
         query.push(if read.bucket.is_some() && read.by.is_some() {
             if by_tier {
@@ -1266,9 +1085,7 @@ pub(crate) fn push_dimension(
 ) {
     match dimension {
         UsageDimension::Person => query.push("d.user_id::text"),
-        UsageDimension::Model => query.push("CASE WHEN d.service IS NULL THEN d.model END"),
-        UsageDimension::Offering => query.push("jsonb_build_object('kind',CASE WHEN d.service IS NULL THEN 'model' ELSE 'service' END,'name',COALESCE(d.service->>'name',d.model))::text"),
-        UsageDimension::Purpose => query.push("d.purpose"),
+        UsageDimension::Model => query.push("d.model"),
         UsageDimension::Provider => query.push("d.provider_id::text"),
         UsageDimension::Agent => query.push("d.harness_kind"),
         UsageDimension::Environment => query.push("d.environment_kind"),

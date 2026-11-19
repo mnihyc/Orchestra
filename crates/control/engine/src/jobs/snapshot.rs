@@ -238,14 +238,6 @@ impl Engine {
                 now,
             )
             .await?;
-            orch_db::idempotency::creation::observe_with(
-                conn,
-                job.created_by,
-                "snapshot_start",
-                snapshot,
-                json!({"job":job.id}),
-            )
-            .await?;
             // The sweep looks once the caller's transaction has had time to commit: before that it would
             // find nothing and wait out its whole interval.
             let engine = self.clone();

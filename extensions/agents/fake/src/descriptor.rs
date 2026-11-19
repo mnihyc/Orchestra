@@ -236,7 +236,6 @@ pub fn full_capabilities(memory: MemoryKind) -> Capabilities {
         steer: true,
         interrupt: true,
         background_commands: true,
-        prompt_cache_ttl: false,
         turn_changes_require_restart: false,
         approvals: vec![
             HarnessRequestKind::Command,
@@ -252,7 +251,6 @@ pub fn full_capabilities(memory: MemoryKind) -> Capabilities {
         plan_mechanics: None,
         reasoning_summary: true,
         input_images: true,
-        image_generation: false,
         effort: EffortSupport::Turn,
         mcp_discovery: true,
         mcp: McpSupport {
@@ -408,10 +406,6 @@ const CONTEXT_OFFERED_FACTOR: i64 = 4;
 /// start.
 #[must_use]
 pub fn parameters() -> Vec<ParameterDef> {
-    parameters_named(&Program::shipped().name)
-}
-
-fn parameters_named(program_name: &str) -> Vec<ParameterDef> {
     let scopes = vec![
         ParameterScope::Org,
         ParameterScope::Project,
@@ -458,7 +452,7 @@ fn parameters_named(program_name: &str) -> Vec<ParameterDef> {
         ParameterDef {
             key: "context".to_owned(),
             title: "Context".to_owned(),
-            description: format!("How much of a conversation {program_name} keeps, in tokens, up to the largest its model's managers opened. It never shortens a conversation: this only says how large it could be."),
+            description: "How much of a conversation the fake keeps, in tokens, up to the largest its model's managers opened. It never shortens a conversation: this only says how large it could be.".to_owned(),
             group: ParameterGroup::Model,
             kind: ParameterType::Integer,
             options: None,
@@ -505,7 +499,6 @@ pub fn models() -> Vec<ModelSuggestion> {
                     }]),
                     access_programs: Some(vec!["early".to_owned()]),
                     context_max: Some(crate::events::CONTEXT_WINDOW * CONTEXT_OFFERED_FACTOR),
-                    ..Offered::default()
                 }),
                 ..ModelParameters::default()
             };
@@ -676,21 +669,15 @@ pub fn descriptor_of(
         // The fake declares what its profile says; it is no evidence of a native boundary.
         side_thread_modes: profile.side_thread_modes.clone().unwrap_or_default(),
         capabilities,
-        parameters: parameters_named(&program.name),
+        parameters: parameters(),
         text: program
             .names
             .iter()
             .map(|(language, words)| {
-                let mut text =
-                    BTreeMap::from([("harness.name".to_owned(), words.clone())]);
-                if language == "zh-CN" {
-                    text.insert("parameters.context.title".to_owned(), "上下文".to_owned());
-                    text.insert(
-                        "parameters.context.description".to_owned(),
-                        format!("{words}保留的对话长度，以词元计，不超过模型管理者开放的上限。此设置不会压缩对话，只表示可容纳的长度。"),
-                    );
-                }
-                (language.clone(), text)
+                (
+                    language.clone(),
+                    BTreeMap::from([("harness.name".to_owned(), words.clone())]),
+                )
             })
             .collect(),
         extensions: Extensions::default(),
@@ -750,28 +737,6 @@ mod tests {
     use super::*;
     use orch_agent_contract::descriptor::HarnessSupport;
     use serde_json::json;
-
-    #[test]
-    fn context_descriptions_name_the_declared_program_in_both_languages() {
-        let mut program = Program::shipped();
-        program.name = "Test assistant".to_owned();
-        program
-            .names
-            .insert("zh-CN".to_owned(), "测试助手".to_owned());
-        let descriptor = descriptor_of(&program, &Profile::default(), HARNESS_VERSION).unwrap();
-        let context = descriptor
-            .parameters
-            .iter()
-            .find(|parameter| parameter.key == "context")
-            .unwrap();
-        assert!(context.description.contains("Test assistant"));
-        assert!(!context.description.contains("the fake"));
-        assert_eq!(
-            descriptor.text["zh-CN"]["parameters.context.title"],
-            "上下文"
-        );
-        assert!(descriptor.text["zh-CN"]["parameters.context.description"].contains("测试助手"));
-    }
 
     #[test]
     fn the_fake_publishes_one_parameter_of_each_kind_that_reads_a_models_entry() {

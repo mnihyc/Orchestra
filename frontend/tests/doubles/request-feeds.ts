@@ -1,7 +1,7 @@
 /** Native view/job events of the fake API, projected by the same authorized readers as its HTTP answers. */
 import { Refusal, type Answer, type Part, type Person, type Subscriber, type World } from './world.ts';
 import type { Listening } from './user-feed.ts';
-import type { EverythingResource, InputSchedule, McpServer, Mount, ResourceAccess, Skill } from '../../src/generated/api-types.ts';
+import type { EverythingResource, ResourceAccess } from '../../src/generated/api-types.ts';
 import { ACME, userRef } from './fixtures.ts';
 import { extraResourceFixtures } from './extra-resources.ts';
 import { IncomingMessage } from 'node:http';
@@ -11,7 +11,6 @@ interface Watch {
   subscriber: Subscriber; person: Person; id: number; feed: string; path: string;
   member?: string; last?: string; timer?: ReturnType<typeof setTimeout>;
 }
-interface ExtraResourceRows { mcp?: Partial<McpServer>; mount?: Partial<Mount>; skill?: Pick<Skill, 'origin'> }
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const RESOURCE_PATHS: Readonly<Record<string, string>> = { provider: 'providers', agent: 'agents', machine: 'machines', host: 'hosts', template: 'templates', environment: 'environments', mcp_server: 'mcp-servers', mount: 'mounts', skill: 'skills' };
 
@@ -22,17 +21,8 @@ export class RequestFeeds implements Part {
   private watches: Watch[] = [];
   private rows = new WeakMap<Listening, Map<string, Map<string, string>>>();
   private extraFixtures = false;
-  private extraRows: ExtraResourceRows = {};
-  private scheduledRows = new Map<string, { seq: number; rows: InputSchedule[] }>();
   private readonly world: World;
   constructor(world: World) { this.world = world; }
-
-  /** One topic projection supplies HTTP openings, pending inputs and live schedule changes alike. */
-  topicSchedules(person: Person, topic: string): { seq: number; rows: InputSchedule[] } {
-    const held = this.scheduledRows.get(topic);
-    return held === undefined ? { seq: 1, rows: [] } : { seq: held.seq, rows: held.rows.map((row) => ({ ...row,
-      definition: row.author.id === person.me.id ? row.definition : null })) };
-  }
 
   /** Native projections also serve aggregate page openings, without a second HTTP call. */
   async read(person: Person, path: string): Promise<Answer> {
@@ -100,7 +90,7 @@ export class RequestFeeds implements Part {
       const json = JSON.stringify(measured);
       if (json !== watch.last) {
         watch.last = json;
-        if (/^(?:env|topic):[^:]+$/.test(watch.feed) && record(data) && typeof data.seq === 'number') watch.subscriber.send({ op: 'sync', id: watch.id, feed: watch.feed, prev: Math.max(0, data.seq - 1), seq: data.seq, data });
+        if (/^env:[^:]+$/.test(watch.feed) && record(data) && typeof data.seq === 'number') watch.subscriber.send({ op: 'sync', id: watch.id, feed: watch.feed, prev: Math.max(0, data.seq - 1), seq: data.seq, data });
         else watch.subscriber.send({ op: 'event', id: watch.id, feed: watch.feed, data });
       }
       const body = answer.body;
@@ -109,8 +99,7 @@ export class RequestFeeds implements Part {
         watch.timer = setTimeout(() => { void this.publish(watch); }, JOB_STEP_MS);
       }
     } catch (error) {
-      if (this.watches.includes(watch)) watch.subscriber.send({ op: 'error', id: watch.id,
-        code: error instanceof Refusal && error.answer.status === 403 ? 'forbidden' : error instanceof Refusal && error.answer.status === 404 ? 'not_found' : 'read_unavailable', detail: watch.feed });
+      if (this.watches.includes(watch)) watch.subscriber.send({ op: 'error', id: watch.id, code: error instanceof Refusal && error.answer.status === 403 ? 'forbidden' : 'not_found', detail: watch.feed });
     }
   }
 
@@ -127,7 +116,6 @@ export class RequestFeeds implements Part {
     let path: string | null = null; let member: string | undefined;
     let found: RegExpExecArray | null;
     if ((found = /^usage:provider:([^:]+):health$/.exec(feed))) { path = `/usage/health?provider_id=${found[1] ?? ''}`; member = 'health'; }
-    else if ((found = /^topic:([^:]+)$/.exec(feed))) path = `/topics/${found[1] ?? ''}/sync`;
     else if ((found = /^job:([^:]+)$/.exec(feed))) { path = `/jobs/${found[1] ?? ''}`; member = 'job'; }
     else if ((found = /^fork:([^:]+)$/.exec(feed))) { path = `/forks/${found[1] ?? ''}`; member = 'batch'; }
     else if ((found = /^resource:([^:]+):([^:]+)$/.exec(feed))) {
@@ -164,28 +152,7 @@ export class RequestFeeds implements Part {
     if (owner === undefined) return null;
     if (!this.world.places.access(person, ACME.org).permissions.includes('org.view')) throw new Refusal(403, 'authz.denied', 'this resource belongs to a place the caller cannot view');
     const access = (kind: string): ResourceAccess => ({ administers: person.me.username === 'ada', permissions: person.me.username === 'ada' ? [`${kind}.view`, `${kind}.use`, `${kind}.manage`] : [`${kind}.view`], through: person.me.username === 'ada' ? [{ kind: 'owner' }] : [] });
-    const rows = extraResourceFixtures(userRef(owner.me), access);
-    // Custom records share every transport while retaining this reader's canonical owner, home and access facts.
-    const mcp = { ...rows.mcp, ...this.extraRows.mcp, owner: rows.mcp.owner, home: rows.mcp.home, org_id: rows.mcp.org_id, access: rows.mcp.access };
-    const mount = { ...rows.mount, ...this.extraRows.mount, owner: rows.mount.owner, home: rows.mount.home, org_id: rows.mount.org_id, access: rows.mount.access };
-    mount.locations = mount.locations.map((location) => ({ ...location, can_remove: location.can_remove && this.managesMachine(person, location.machine.id) }));
-    const origin = this.extraRows.skill?.origin;
-    // This delivered copy has one sanitized origin across its inventory, live detail and version records.
-    if (origin !== undefined) return { ...rows, mcp, mount,
-      skill: { ...rows.skill, origin, latest: rows.skill.latest === null ? null : { ...rows.skill.latest, origin: origin ?? rows.skill.latest.origin } },
-      versions: { ...rows.versions, items: rows.versions.items.map((version) => ({ ...version, origin: origin ?? version.origin })) },
-      files: { ...rows.files, version: { ...rows.files.version, origin } },
-    };
-    return { ...rows, mcp, mount };
-  }
-
-  /** Location changes use the machine's existing management facts, independently of Mount Manage. */
-  private managesMachine(person: Person, id: string): boolean {
-    try {
-      const row = this.world.resources.handle(person, 'GET', `/machines/${id}`, new URLSearchParams(), {})?.body;
-      const access = record(row) && record(row.access) ? row.access : null;
-      return access !== null && Array.isArray(access.permissions) && access.permissions.some((permission: unknown) => permission === 'machine.manage' || permission === 'host.manage');
-    } catch (error) { if (error instanceof Refusal) return false; throw error; }
+    return extraResourceFixtures(userRef(owner.me), access);
   }
 
   /** The aggregate pager uses the same current-reader records as direct and live reads. */
@@ -225,28 +192,15 @@ export class RequestFeeds implements Part {
     return null;
   }
 
-  control(path: string, body: Record<string, unknown> = {}): Answer | null {
-    if (path === '/topic-schedules') {
-      if (typeof body.topic !== 'string' || !Array.isArray(body.rows) || !body.rows.every((row) => record(row) && typeof row.id === 'string' && record(row.author) && typeof row.author.id === 'string')) return { status: 400, body: { detail: 'Topic schedule fixtures need a topic and authored rows.' } };
-      this.scheduledRows.set(body.topic, { seq: (this.scheduledRows.get(body.topic)?.seq ?? 1) + 1, rows: structuredClone(body.rows) as InputSchedule[] });
-      void this.changed();
-      return { status: 204 };
-    }
+  control(path: string): Answer | null {
     if (path !== '/fixtures') return null;
-    for (const kind of ['mcp', 'mount'] as const) {
-      const row = body[kind];
-      if (row !== undefined && (!record(row) || (row.id !== undefined && typeof row.id !== 'string') || (row.name !== undefined && typeof row.name !== 'string'))) return { status: 400, body: { detail: 'A resource fixture must be a record with string identity and name fields.' } };
-    }
-    if (body.skill !== undefined && (!record(body.skill) || !record(body.skill.origin) || body.skill.origin.kind !== 'copy')) return { status: 400, body: { detail: 'A copied skill fixture needs its copy origin.' } };
-    this.extraRows = structuredClone(body);
     this.extraFixtures = true;
-    if (body.mcp !== undefined || body.mount !== undefined || body.skill !== undefined) void this.changed();
     return { status: 204 };
   }
 
   reset(): void {
     for (const watch of this.watches) clearTimeout(watch.timer);
-    this.watches = []; this.rows = new WeakMap(); this.extraFixtures = false; this.extraRows = {}; this.scheduledRows.clear();
+    this.watches = []; this.rows = new WeakMap(); this.extraFixtures = false;
   }
 
   /** Subscription is a baseline, not a mutation of every resource on the next unrelated write. */

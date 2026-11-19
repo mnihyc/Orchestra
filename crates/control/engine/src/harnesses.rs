@@ -10,8 +10,6 @@
 //! `session.open` of mode `resume`, which a session already open answers
 //! with itself.
 
-pub mod preparation;
-
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -69,20 +67,8 @@ impl OrchToolsRevision {
 pub struct SessionConfiguration {
     /// The resolved absolute start directory.
     pub cwd: String,
-    /// Explicit cache lifetime accepted by a program which declares it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// The background completion preference accepted when the session opened.
     pub background_wake: bool,
-    /// Native image generation accepted when the session opened.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_generation: Option<bool>,
-    /// The core's credential-free native instructions which the opening actually accepted.
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub native_configuration: std::collections::BTreeMap<String, Json>,
-    /// Only model details explicitly declared session-bound by this program/access path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_details: Option<Json>,
     /// Native process-bound turn choices, absent for live-switchable harnesses.
     pub restart_sensitive: Option<Json>,
     /// The resolved notes directory/keeper, or disabled native and agent notes.
@@ -95,21 +81,7 @@ impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
             cwd: open.cwd.clone(),
-            prompt_cache_ttl: open.prompt_cache_ttl,
             background_wake: open.background_wake,
-            image_generation: open.image_generation,
-            native_configuration: open
-                .native_model
-                .as_deref()
-                .filter(|native| native.model == open.model)
-                .map(|native| native.native_configuration())
-                .unwrap_or_default(),
-            model_details: open
-                .native_model
-                .as_deref()
-                .filter(|native| native.model == open.model)
-                .and_then(|native| native.extensions.get("model_details"))
-                .cloned(),
             restart_sensitive: open.turn_changes_require_restart.then(|| {
                 serde_json::json!({
                     "model":open.model,"effort":open.effort,"params":open.params,
@@ -400,24 +372,12 @@ pub(crate) async fn provider_config_of(
     conn: &mut orch_db::Conn,
     provider: Id,
 ) -> Result<Json, EngineError> {
-    Ok(provider_start_options(conn, provider).await?.1)
-}
-
-/// Account kind and program configuration are selected together; no credential fields are read.
-pub(crate) async fn provider_start_options(
-    conn: &mut orch_db::Conn,
-    provider: Id,
-) -> Result<(Option<orch_agent_contract::descriptor::ProviderKind>, Json), EngineError> {
-    let row: Option<(String, Json)> =
-        sqlx::query_as("SELECT kind, config FROM providers WHERE id = $1")
-            .bind(provider)
-            .fetch_optional(conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
-    match row {
-        Some((kind, config)) => Ok((Some(serde_json::from_value(Json::String(kind))?), config)),
-        None => Ok((None, serde_json::json!({}))),
-    }
+    let config: Option<Json> = sqlx::query_scalar("SELECT config FROM providers WHERE id = $1")
+        .bind(provider)
+        .fetch_optional(conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    Ok(config.unwrap_or_else(|| serde_json::json!({})))
 }
 
 /// Why a harness process could not be had.
@@ -434,10 +394,10 @@ pub enum Started {
 struct AttachCommands {
     #[serde(
         default,
-        deserialize_with = "preparation::present_stored",
+        deserialize_with = "crate::adoption::operation::present_preparation",
         skip_serializing_if = "Option::is_none"
     )]
-    preparation: Option<preparation::Stored>,
+    preparation: Option<crate::adoption::operation::Preparation>,
     request: Option<AgentStart>,
     ready_before_start: bool,
     commands: Vec<orch_settings_contract::unit::NamedAfterUpCommand>,
@@ -596,38 +556,27 @@ impl Engine {
         command: Id,
         plan: &AttachCommands,
         configuration: &str,
-        preparation: Option<&preparation::Preparation>,
+        preparation: Option<&crate::adoption::operation::Preparation>,
     ) -> Result<Option<(Id, AttachCommands)>, EngineError> {
         let mut conn = self.inner.db.begin().await?;
-        let target = preparation::Target::Harness(key);
-        // Keep the original/current minimum even across the actual native serial wait.
-        let accepted = match preparation {
-            Some(source) => {
-                let check = source
-                    .checkpoint(&mut conn, self.inner.clock.as_ref(), target)
-                    .await?;
-                Some(source.accepted_at(&check)?)
+        let check = match preparation {
+            Some(preparation) => Some(
+                preparation
+                    .checkpoint(&mut conn, self.inner.clock.as_ref(), key)
+                    .await?,
+            ),
+            None => {
+                claim_lock(&mut conn, key).await?;
+                None
             }
-            None => None,
         };
-        claim_lock(&mut conn, key).await?;
         let mut stored_plan = serde_json::to_value(plan)?;
-        let pending = orch_types::new_id();
-        if accepted.is_some() {
-            // Transaction-local ownership marker, replaced by exact private evidence before commit.
-            stored_plan["preparation_pending"] = serde_json::to_value(pending)?;
+        if let (Some(original), Some(check)) = (&plan.preparation, check.as_ref()) {
+            stored_plan["preparation"] = serde_json::to_value(original.accepted_at(check)?)?;
         }
-        let accepted = match accepted {
-            Some(source) => {
-                let check = source
-                    .checkpoint(&mut conn, self.inner.clock.as_ref(), target)
-                    .await?;
-                let source = source.accepted_at(&check)?;
-                check.check(self.inner.clock.as_ref())?;
-                Some(source)
-            }
-            None => None,
-        };
+        if let Some(check) = check {
+            check.check(self.inner.clock.as_ref())?;
+        }
         let row:Option<(Id,Json)>=sqlx::query_as(
             "INSERT INTO harnesses(provider_id,agent_id,machine_id,status,start_command_id,after_up_plan,updated_at)
              VALUES($1,$2,$3,'starting',$4,$5,$6)
@@ -639,63 +588,12 @@ impl Engine {
              RETURNING start_command_id,after_up_plan")
             .bind(key.provider).bind(key.agent).bind(key.machine).bind(command).bind(stored_plan)
             .bind(self.inner.clock.now()).bind(configuration).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        let mut result = None;
-        if let Some((run, raw)) = row {
-            let own = raw.get("preparation_pending") == Some(&serde_json::to_value(pending)?);
-            if raw.get("preparation_pending").is_some() && !own {
-                return Err(EngineError::unreadable(
-                    "native startup has unfinished private source evidence",
-                ));
-            }
-            let mut plan: AttachCommands = serde_json::from_value(raw)?;
-            if own {
-                let source = accepted.as_ref().ok_or_else(|| {
-                    EngineError::unreadable("native startup claim lost its source")
-                })?;
-                let request = plan.request.as_ref().ok_or_else(|| {
-                    EngineError::unreadable("native startup claim lost its request")
-                })?;
-                let outgoing = Outgoing::new(
-                    run,
-                    key.machine,
-                    SerialKey::Harness {
-                        provider_id: key.provider,
-                        agent_id: key.agent,
-                    },
-                    request,
-                )?;
-                let mut commands = vec![
-                    source
-                        .evidence(&mut conn, self.inner.clock.as_ref(), target, &outgoing)
-                        .await?,
-                ];
-                for (position, entry) in plan.commands.iter().enumerate() {
-                    let position = u32::try_from(position).map_err(|_| {
-                        EngineError::unreadable("too many commands after provider attach")
-                    })?;
-                    let body = attach_command(key, run, position, entry);
-                    let id = crate::ids::derived(
-                        "unit.after_up",
-                        &[run.as_bytes(), &position.to_be_bytes()],
-                    );
-                    let outgoing =
-                        Outgoing::new(id, key.machine, SerialKey::Runtime(key.provider), &body)?;
-                    commands.push(
-                        source
-                            .evidence(&mut conn, self.inner.clock.as_ref(), target, &outgoing)
-                            .await?,
-                    );
-                }
-                plan.preparation = Some(preparation::Stored::commands(commands));
-                sqlx::query("UPDATE harnesses SET after_up_plan=$5 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 AND start_command_id=$4")
-                    .bind(key.provider).bind(key.agent).bind(key.machine).bind(run).bind(serde_json::to_value(&plan)?)
-                    .execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
-            }
-            result = Some((run, plan));
-        }
-        if let Some(source) = accepted {
-            source
-                .checkpoint(&mut conn, self.inner.clock.as_ref(), target)
+        let result = row
+            .map(|(run, plan)| Ok::<_, EngineError>((run, serde_json::from_value(plan)?)))
+            .transpose()?;
+        if let Some(preparation) = preparation {
+            preparation
+                .checkpoint(&mut conn, self.inner.clock.as_ref(), key)
                 .await?
                 .check(self.inner.clock.as_ref())?;
         }
@@ -804,60 +702,19 @@ impl Engine {
         agent: &AgentRow,
         command: Id,
     ) -> Result<Started, EngineError> {
-        Box::pin(self.ensure_harness_with_preparation(key, agent, command, None)).await
+        self.ensure_harness_with_preparation(key, agent, command, None)
+            .await
     }
 
-    /// The profile the program is started with: an option that holds back the end of a turn which the profile does not
-    /// set takes its default, or less where `[engine] interrupt_force_secs` leaves less (see
-    /// [`orch_agent_contract::turn_end_delays`]). A value the profile sets is kept as it is; the profile that sets one
-    /// that does not fit is refused when a turn is prepared, not here.
-    fn profile_under_the_bound(&self, agent: &AgentRow) -> Result<Json, EngineError> {
-        let mut profile = agent.profile.clone();
-        let Some(delays) = descriptor_of(agent)?
-            .as_ref()
-            .and_then(crate::preflight::declared_turn_end_delays)
-        else {
-            return Ok(profile);
-        };
-        let mut config = profile.get("config").cloned().unwrap_or(Json::Null);
-        let before = config.clone();
-        match delays.fit(&mut config, self.inner.config.interrupt_force) {
-            Ok(lowered) => {
-                for each in lowered {
-                    tracing::info!(
-                        agent = %agent.id,
-                        option = %each.pointer.trim_start_matches('/'),
-                        default_ms = each.default_ms,
-                        started_with_ms = each.to_ms,
-                        interrupt_force_ms = each.bound_ms,
-                        "an option of the agent profile that holds back the end of a turn is not set: the program is started with less than its default, because [engine] interrupt_force_secs leaves no more"
-                    );
-                }
-            }
-            Err(_) => return Ok(profile),
-        }
-        if config != before
-            && let Some(members) = profile.as_object_mut()
-        {
-            members.insert("config".to_owned(), config);
-        }
-        Ok(profile)
-    }
-
-    pub(crate) async fn ensure_harness_with_preparation(
+    async fn ensure_harness_with_preparation(
         &self,
         key: HarnessKey,
         agent: &AgentRow,
         command: Id,
-        preparation: Option<&preparation::Preparation>,
+        preparation: Option<&crate::adoption::operation::Preparation>,
     ) -> Result<Started, EngineError> {
         let serial = self.harness_serial(key);
         let _held = serial.lock().await;
-        if let Some(source) = preparation {
-            source
-                .check_selection(self, preparation::Target::Harness(key))
-                .await?;
-        }
         let was_ready = self.harness_is_online(key).await?;
         if was_ready
             && let Some(pin) = agent.profile.get("harness_version").and_then(Json::as_str)
@@ -877,14 +734,13 @@ impl Engine {
             ).retryable())));
         }
         let home = None;
-        let (provider_kind, provider_config) =
-            provider_start_options(&mut *self.inner.db.acquire().await?, key.provider).await?;
+        let provider_config =
+            provider_config_of(&mut *self.inner.db.acquire().await?, key.provider).await?;
         let body = AgentStart {
             provider_id: key.provider,
-            provider_kind,
             agent_id: key.agent,
             harness_kind: agent.harness_kind.clone(),
-            profile: serde_json::from_value(self.profile_under_the_bound(agent)?)?,
+            profile: serde_json::from_value(agent.profile.clone())?,
             home,
             provider_config,
             runtime: crate::provider_runtime::harness_variables(
@@ -917,13 +773,20 @@ impl Engine {
         }
         let mut proposed = self.provider_attach_plan(key).await?;
         proposed.request = Some(body.clone());
+        proposed.preparation = preparation.cloned();
         proposed.ready_before_start = was_ready || prior_configuration.is_some();
-        let Some((command, plan)) = self
+        let Some((command, mut plan)) = self
             .begin_harness(key, command, &proposed, &wanted, preparation)
             .await?
         else {
             return Ok(Started::Up);
         };
+        if plan.preparation.is_none() {
+            plan.preparation = preparation.cloned();
+        }
+        if let (Some(original), Some(current)) = (&mut plan.preparation, preparation) {
+            original.attach_transport(current);
+        }
         let frozen = plan.request.is_some();
         let body = plan.request.clone().unwrap_or(body);
         let configuration = orch_types::Hash::of(&serde_json::to_vec(&body)?);
@@ -1164,22 +1027,6 @@ impl Engine {
             now,
         )
         .await?;
-        let detail_changed = pending
-            .as_ref()
-            .and_then(|(_, _, detail)| detail.as_deref())
-            != detail;
-        if before.as_deref() != Some(effective) || detail_changed {
-            crate::audit_facts::harness_status(
-                unit,
-                provider,
-                agent,
-                machine,
-                before.as_deref(),
-                effective,
-                detail_changed,
-            )
-            .await?;
-        }
         if status.status == "error" {
             sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
                 .bind(provider).bind(agent).bind(machine).bind(now).bind(status.detail.as_deref())
@@ -1562,11 +1409,10 @@ impl Engine {
             agent,
             machine,
         };
-        let startup = preparation.cloned().map(preparation::Preparation::new);
         let command = orch_types::new_id();
         let started = tokio::time::timeout(
             self.inner.config.start_timeout,
-            self.ensure_harness_with_preparation(key, &profile, command, startup.as_ref()),
+            self.ensure_harness_with_preparation(key, &profile, command, preparation),
         )
         .await;
         match started {
@@ -1680,11 +1526,7 @@ mod tests {
         let thread = new_id();
         let configuration = SessionConfiguration {
             cwd: "/workspace/child".into(),
-            prompt_cache_ttl: None,
             background_wake: true,
-            image_generation: None,
-            native_configuration: Default::default(),
-            model_details: None,
             restart_sensitive: None,
             memory: None,
             executor_version: None,
@@ -1697,66 +1539,6 @@ mod tests {
         );
         sessions.configuration_accepted(segment, configuration.clone());
         assert!(!sessions.configuration_changed(segment, &configuration));
-        let details = SessionConfiguration {
-            model_details: Some(
-                serde_json::json!({"model":"current","parameters":{"context_window":40_000}}),
-            ),
-            ..configuration.clone()
-        };
-        assert!(sessions.configuration_changed(segment, &details));
-        sessions.configuration_accepted(segment, details.clone());
-        assert!(!sessions.configuration_changed(segment, &details));
-        let next_model = SessionConfiguration {
-            model_details: Some(
-                serde_json::json!({"model":"next","parameters":{"context_window":40_000}}),
-            ),
-            ..details
-        };
-        assert!(sessions.configuration_changed(segment, &next_model));
-        sessions.configuration_accepted(segment, configuration.clone());
-        assert!(
-            serde_json::to_value(&configuration)
-                .unwrap()
-                .get("model_details")
-                .is_none()
-        );
-        let images = SessionConfiguration {
-            image_generation: Some(true),
-            ..configuration.clone()
-        };
-        assert!(sessions.configuration_changed(segment, &images));
-        let native = SessionConfiguration {
-            native_configuration: [("declared-switch".into(), serde_json::json!(true))]
-                .into_iter()
-                .collect(),
-            ..configuration.clone()
-        };
-        assert!(sessions.configuration_changed(segment, &native));
-        sessions.configuration_accepted(segment, native.clone());
-        assert!(!sessions.configuration_changed(segment, &native));
-        assert!(
-            sessions.configuration_changed(segment, &configuration),
-            "removing a native instruction is a session change too"
-        );
-        sessions.configuration_accepted(segment, configuration.clone());
-        assert!(
-            serde_json::to_value(&configuration)
-                .unwrap()
-                .get("image_generation")
-                .is_none()
-        );
-        assert_eq!(
-            serde_json::to_value(&images).unwrap()["image_generation"],
-            true
-        );
-        let cache = SessionConfiguration {
-            prompt_cache_ttl: Some(orch_agent_contract::session::PromptCacheTtl::OneHour),
-            ..configuration.clone()
-        };
-        assert!(
-            sessions.configuration_changed(segment, &cache),
-            "an explicit cache lifetime belongs to the accepted session opening"
-        );
         let notes = SessionConfiguration {
             memory: Some(orch_link_contract::commands::SessionOpenMemory {
                 directory: "/workspace/.orch/memory".into(),

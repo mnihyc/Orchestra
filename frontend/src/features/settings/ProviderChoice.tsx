@@ -1,6 +1,5 @@
-import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 /** A provider default is chosen and read by its authorized name inside the existing settings row. */
-import { queryOptions, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -19,50 +18,40 @@ import { choiceOption } from '@/i18n/choices';
 import { useDebounced } from '@/lib/debounce';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
-import { type ComboboxOption } from '@/ui/Combobox';
+import { Combobox, type ComboboxOption } from '@/ui/Combobox';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
 
-/** The field's independent current-name read never borrows a broader historical cache row. */
-function currentProviderQuery(id: string, reader: string) {
-  return queryOptions({ queryKey: providerDefaultKey(id, reader),
-    queryFn: ({ signal }): Promise<Provider | null> => ok(api.GET('/providers/{id}', { params: { path: { id } }, signal })),
-    retry: false, staleTime: Infinity, refetchOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false });
-}
-
 /** Read-only references never ask a person to interpret a UUID or guess a hidden provider's name. */
-export function ProviderDefaultName({ value, children }: { value: unknown; children?: (name: string) => ReactNode }) {
+export function ProviderDefaultName({ value, children }: { value: unknown; children?: (provider: Provider) => ReactNode }) {
   const { t } = useTranslation();
   return typeof value === 'string' && value !== '' ? <NamedProvider id={value} render={children} /> : <span className="text-text-muted">{t('settings.compact.none')}</span>;
 }
 
-function NamedProvider({ id, render }: { id: string; render: ((name: string) => ReactNode) | undefined }) {
+// Native cache withdrawals can remove a row while its HTTP DTO remains non-nullable.
+const withdrawn = (row: unknown) => row === null;
+
+function NamedProvider({ id, render }: { id: string; render: ((provider: Provider) => ReactNode) | undefined }) {
   const { t } = useTranslation();
-  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
-  // The bounded opening publishes one of these independently authorized name slots.
-  const current = useQuery({ ...currentProviderQuery(id, reader), enabled: false });
-  const reference = useQuery({ ...providerQuery(id), enabled: false });
-  const provider = current.isPending ? reference : current;
-  const named = provider.data;
-  if (named === null || provider.isError && provider.error instanceof ApiError && (provider.error.status === 403 || provider.error.status === 404)) {
+  const provider = useQuery({ ...providerQuery(id), staleTime: Infinity });
+  if (withdrawn(provider.data) || provider.isError && provider.error instanceof ApiError && (provider.error.status === 403 || provider.error.status === 404)) {
     return <span className="text-sm text-text-muted">{t('settings.compact.managed')}</span>;
   }
   if (provider.isError) return <ErrorState compact title={t('places.providerDefault.unavailable')} error={provider.error} retrying={provider.isRefetching} onRetry={() => void provider.refetch()} />;
-  if (named !== undefined) return render === undefined ? <ResourceName subject={{ kind: 'provider', provider: named }} /> : render(named.name);
-  const selected = t('places.providerDefault.selected');
-  return render === undefined ? <span className="text-text-muted">{selected}</span> : render(selected);
+  if (provider.data !== undefined) return render === undefined ? <ResourceName subject={{ kind: 'provider', provider: provider.data }} /> : render(provider.data);
+  return <span className="text-text-muted">{t('places.providerDefault.loading')}</span>;
 }
 
 const readerScope = defaultProviderReader;
 const refused = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
 
 /** The parent's revision/lock/autosave machinery remains the only writer of the setting. */
-export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md' }) {
+export function ProviderDefaultChoice(props: ValueControlProps) {
   const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
   return <ReaderChoice key={reader} {...props} reader={reader} />;
 }
 
-function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm' }: ValueControlProps & { reader: string; size?: 'sm' | 'md' }) {
+function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel }: ValueControlProps & { reader: string }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const known = useKnownPlaces({ trees: false });
@@ -90,7 +79,11 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
   // Keep names across the parent's acknowledged-save remount, but never across
   // readers. Do not seed this exact read from an unscoped historical cache.
   const currentKey = (id: string) => providerDefaultKey(id, reader);
-  const chosen = useQuery({ ...currentProviderQuery(selected, reader), enabled: visited && selected !== '' && !disabled });
+  const chosen = useQuery({ queryKey: currentKey(selected),
+    // Native GET is non-null. A live cache withdrawal can remove a scoped row locally.
+    queryFn: ({ signal }): Promise<Provider | null> => ok(api.GET('/providers/{id}', { params: { path: { id: selected } }, signal })),
+    enabled: selected !== '' && !disabled, retry: false, staleTime: Infinity,
+    refetchOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false });
   const currentError = chosen.error ?? (chosen.isFetching && currentRecovery?.id === selected ? currentRecovery.error : null);
   const current = currentError === null && chosen.isSuccess && chosen.data !== null && chosen.data.id === selected && holds(chosen.data.access, 'provider.view') ? chosen.data : undefined;
   const currentMissing = selected !== '' && chosen.isSuccess && current === undefined && currentError === null;
@@ -107,7 +100,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
   })).values()];
   const labels = providerLabels([...new Map([...(current === undefined ? [] : [current]), ...rows].map((row) => [row.id, row])).values()], known);
   const shown = selected === '' ? '' : managed ? t('settings.compact.managed') : current === undefined
-    ? t(chosen.isPending && currentError === null ? visited ? 'places.providerDefault.loading' : 'places.providerDefault.selected' : 'places.providerDefault.unavailable')
+    ? t(chosen.isPending && currentError === null ? 'places.providerDefault.loading' : 'places.providerDefault.unavailable')
     : labels.get(selected) ?? current.name;
   const busy = waiting || list.isFetching;
   const options: ComboboxOption<string>[] = [
@@ -171,7 +164,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
     void list.refetch({ cancelRefetch: false });
   };
   return <div ref={frame} className="flex min-w-0 flex-col gap-2" data-provider-default onKeyDownCapture={press}>
-    <ResourcePickerLookup pickerKey="provider-default" id={session} size={size} label={label} hideLabel={showLabel !== true} disabled={disabled} error={error} fieldClassName="min-w-0"
+    <Combobox id={session} size="sm" label={label} hideLabel={showLabel !== true} disabled={disabled} error={error} fieldClassName="min-w-0"
       hint={current === undefined ? undefined : <ResourceName subject={{ kind: 'provider', provider: current }} hint={false} wrap><ResourceHint subject={{ kind: 'provider', provider: current }} wrap /></ResourceName>}
       query={typed} onQueryChange={type} displayValue={shown} initialActiveValue={selected} placeholder={placeholder ?? t('places.providerDefault.choose')}
       open={open} onOpenChange={changedOpen} loading={busy} empty={listError !== null ? undefined : t('ui.combobox.empty')}

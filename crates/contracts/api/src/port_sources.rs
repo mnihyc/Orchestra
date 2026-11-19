@@ -18,8 +18,6 @@ pub enum Source {
     ReviewTopics,
     ReviewThreads,
     OpeningEnvironment,
-    /// The actual Thread making the existing native capability request.
-    RequestThread,
     OpeningHosts,
     OpeningPublishers,
     OutsideNode,
@@ -202,61 +200,6 @@ pub const OPENING_CREATE: Declaration<Source> = Declaration {
         Binding {
             source: Source::OpeningEnvironment,
             target: TargetResolver::Path("id"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::OpeningHosts,
-            target: TargetResolver::ResolvedCollection("opening_hosts"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::OpeningPublishers,
-            target: TargetResolver::ResolvedCollection("opening_publishers"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::NamesOrgs,
-            target: TargetResolver::ResolvedCollection("opening_names_orgs"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::NamesProjects,
-            target: TargetResolver::ResolvedCollection("opening_names_projects"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::NamesTopics,
-            target: TargetResolver::ResolvedCollection("opening_names_topics"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::NamesThreads,
-            target: TargetResolver::ResolvedCollection("opening_names_threads"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// The request remains one Thread Interact act; current opening metadata is independent Read.
-pub const THREAD_REQUEST: Declaration<Source> = Declaration {
-    operation: "ThreadPortRequestCreate",
-    bindings: &[
-        Binding {
-            source: Source::RequestThread,
-            target: TargetResolver::Path("id"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::OpeningEnvironment,
-            target: TargetResolver::Resolved("request_environment"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::One,
         },

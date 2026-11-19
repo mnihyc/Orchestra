@@ -16,7 +16,7 @@ export function CreationAgentAccess({ access, disabled = false }: { access: Crea
   return <div className="flex flex-col gap-2">
     <h3 className="text-base font-semibold text-text">{t('agentAccess.title')}</h3>
     {access.pending && <SkeletonRows rows={1} />}
-    {access.reduced && <p className="text-sm text-text-muted" data-agent-access-reduced><span>{t('startImplicit.reducedTo')}</span> <AgentAccessSummary value={access.value} /> · <span>{t('startImplicit.byAvailableAccess')}</span></p>}
+    {access.reduced && <p className="text-sm text-text-muted">{t('agentAccess.presetReduced')} <AgentAccessSummary value={access.preset} /></p>}
     <AgentAccessControl value={access.value} disabled={disabled} onChange={access.onChange} available={access.available} onReachChange={access.onReachChange} onClose={access.onClose} />
     {access.unavailable && <p className="text-sm text-text-muted">{t('agentAccess.presetUnavailable')}</p>}
     {access.blocked === true && <p className="text-sm text-text-muted">{t('agentAccess.unavailable')}</p>}

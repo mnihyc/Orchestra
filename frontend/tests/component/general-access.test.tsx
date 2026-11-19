@@ -25,7 +25,7 @@ import { show } from './support';
 
 const { start } = vi.hoisted(() => ({ start: vi.fn() }));
 const fixture = vi.hoisted((): { defaultsKind: AccessApi.AccessKind } => ({ defaultsKind: 'thread' }));
-const answer = options({ viewer_default: { value: true, source: { scope: 'topic', node: null } } });
+const answer = options();
 vi.mock('@/features/start/options', () => ({ useStartOptions: () => ({ options: answer, resolved: resolve(answer, NO_PICKS, { suggest: true }), loading: false, failed: null, refreshing: false, retry: () => undefined }) }));
 vi.mock('@/features/start/start', () => ({ useStart: () => ({ start, pending: false, error: null, standing: { topic: null, environment: null }, reset: () => undefined, step: null }) }));
 vi.mock('@/features/start/Where', () => ({ Where: () => null, WhereOptions: () => null }));

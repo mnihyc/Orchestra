@@ -1,4 +1,4 @@
-//! Current Environment effects of native thread creators' source preparation.
+//! Current Environment effects of the two thread-creating operations' source preparation.
 //! This binds facts only; the caller admits the complete original operation afterwards.
 
 use super::{Prepared, compatible_selection, facets, targets};
@@ -50,7 +50,6 @@ pub async fn bind(
         plan.variant().operation.as_str(),
         "ThreadCreate"
             | "TopicCreate.with_thread"
-            | "ThreadAdopt"
             | "TopicInputScheduleCreate"
             | "InputScheduleUpdate.definition"
     ) {
@@ -248,41 +247,4 @@ pub async fn restore(
         .admit_facets(&required)
         .ok()
         .map(|admitted| admitted.into_caller()))
-}
-
-/// The same creator may give View doors to its prospective human audience. This is a page effect,
-/// separate from file preparation, and never borrows another operation's PageWrite authority.
-pub async fn bind_readers(
-    conn: &mut Conn,
-    plan: &mut Prepared,
-    environment: Id,
-    requested: bool,
-) -> Result<(), EngineError> {
-    let declared = plan.variant().facets.iter().any(|facet| {
-        facet.target == TargetResolver::ResolvedCollection("creator_reader_environments")
-    });
-    if !declared {
-        return if requested {
-            Err(EngineError::unreadable(
-                "the creator does not declare an environment reader gift",
-            ))
-        } else {
-            Ok(())
-        };
-    }
-    let index = slot(plan, "creator_reader_environments", KeyAction::Manage)?;
-    if !requested {
-        return plan.bind_empty(index).map_err(EngineError::unreadable);
-    }
-    let target = targets::page_object(
-        conn,
-        ObjectRef {
-            kind: ObjectKind::Environment,
-            id: environment,
-        },
-    )
-    .await
-    .map_err(EngineError::unreadable)?;
-    plan.bind(index, ENVIRONMENT, &[target])
-        .map_err(EngineError::unreadable)
 }

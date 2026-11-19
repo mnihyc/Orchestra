@@ -1,4 +1,4 @@
-/** Visible objects keep their Export action and its current access decision in row and screen menus. */
+/** Who may take a thing away as a file, and what a menu says of it: offered to whoever holds the right, left out of a row's menu otherwise, and on the thing's own screen switched off with one line and the way to ask. */
 import { describe, expect, it } from 'vitest';
 
 import { exportEntries } from '@/features/export/menu';
@@ -47,13 +47,9 @@ describe('Export… in a menu', () => {
     expect(idsOf(entries(true, 'row'))).toEqual(['export']);
   });
 
-  it('keeps checking distinct from a requestable refusal in both row and screen menus', () => {
-    for (const where of ['row', 'screen'] as const) {
-      expect(idsOf(entries(false, where))).toEqual(['export', 'export-request']);
-      const checking = entries(null, where);
-      expect(idsOf(checking)).toEqual(['export']);
-      expect(checking[0] && 'disabled' in checking[0] && checking[0].disabled).toBe(t('export.menu.checking'));
-    }
+  it('is left out of a row’s menu where the caller may not, and while nothing is known of what they hold', () => {
+    expect(entries(false, 'row')).toEqual([]);
+    expect(entries(null, 'screen')).toEqual([]);
   });
 
   it('stays on the thing’s own screen, switched off with one line that says for whom it is, with Request access under it', () => {

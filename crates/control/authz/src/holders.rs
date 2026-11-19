@@ -52,32 +52,6 @@ pub struct Principal {
 }
 
 impl Principal {
-    /// Narrow a freshly checked native source without replacing its ordinary facts or
-    /// second-step hold. The exact current proof class and all credential bounds survive.
-    pub fn within_source(mut self, ceiling: &Caller) -> Result<Self, crate::KeyScopeRefusal> {
-        self.caller = ceiling.narrow_source_admission(&self.caller)?;
-        Ok(self)
-    }
-
-    /// Apply the freshly resolved source proof on the same read snapshot's account facts.
-    /// Incompatible credential or ordinary permission bounds require a fresh Principal.
-    pub fn with_current_admission(
-        mut self,
-        current: &Caller,
-    ) -> Result<Self, crate::KeyScopeRefusal> {
-        if self.user() != current.user()
-            || self.caller.credential() != current.credential()
-            || self.caller.as_admin() != current.as_admin()
-            || self.caller.native_machine().is_some()
-            || current.native_machine().is_some()
-            || self.caller.owner_read_source() != current.owner_read_source()
-        {
-            return Err(crate::KeyScopeRefusal::Unclassified);
-        }
-        self.caller = self.caller.narrow_source_admission(current)?;
-        Ok(self)
-    }
-
     /// This person's ordinary pages, preserving second-step holds but never a session's
     /// native administrator reach. Used to filter focus before a list is paged.
     pub async fn ordinary(&self, conn: &mut Conn) -> Result<Self, Error> {
@@ -1197,57 +1171,6 @@ mod tests {
         assert!(session.is_in_tree(root));
         assert_eq!(session.suspension().in_orgs(), [research]);
         assert!(session.is_system_admin());
-        let kind = orch_access_contract::key_scope::KeyTargetKind::Object(
-            orch_access_contract::permissions::ObjectKind::Org,
-        );
-        let facets = [orch_access_contract::key_scope::KeyFacet {
-            operation: "OrgGet".into(),
-            action: orch_access_contract::key_scope::KeyAction::Read,
-            resource_kind: kind,
-            target: orch_access_contract::key_scope::KeyResolvedTarget {
-                object: orch_access_contract::key_scope::KeyObjectRef {
-                    kind,
-                    id: Some(root),
-                },
-                node_ancestors: Vec::new(),
-                document_ancestors: Vec::new(),
-                credential_account: None,
-            },
-        }];
-        let proof = session
-            .caller()
-            .admit_facets(&facets)
-            .unwrap()
-            .into_caller();
-        let hold = crate::suspension::SecondStepHold {
-            orgs: vec![root],
-            ..Default::default()
-        };
-        let observed = session.clone().held_for_second_step(hold.clone());
-        let admitted = observed.clone().with_current_admission(&proof).unwrap();
-        assert_eq!(admitted.caller(), &proof);
-        assert_eq!(admitted.groups(), observed.groups());
-        assert_eq!(admitted.member_of(), observed.member_of());
-        assert_eq!(admitted.suspension(), observed.suspension());
-        assert_eq!(admitted.second_step_hold(), Some(&hold));
-        assert_eq!(admitted.now(), observed.now());
-        assert!(
-            observed
-                .clone()
-                .with_current_admission(&proof.clone().with_admin_mode(false))
-                .is_err()
-        );
-        let other = Caller::session(ada)
-            .admit_facets(&facets)
-            .unwrap()
-            .into_caller();
-        assert!(observed.clone().with_current_admission(&other).is_err());
-        let other = Caller::token(bob, crate::TokenGrant::everything())
-            .admit_facets(&facets)
-            .unwrap()
-            .into_caller();
-        assert!(observed.with_current_admission(&other).is_err());
-
         let token = Principal::load(
             &mut conn,
             Caller::token(bob, crate::TokenGrant::everything()),

@@ -56,7 +56,7 @@ pub async fn may_add(
         Err(orch_chat::Error::Db(error)) => return Err(error.into()),
         Err(_) => return Ok(false),
     };
-    let allowed = outsiders_allowed(conn, loaded.row.home()).await?;
+    let allowed = outsiders_allowed(conn, loaded.row.org_id).await?;
     match chats::can_add_member(conn, &act, &loaded, requester, allowed).await {
         Ok(_) => Ok(true),
         Err(orch_chat::Error::Db(error)) => Err(error.into()),
@@ -80,7 +80,7 @@ pub async fn deciders(
     let members = rows::members(conn, chat).await?;
     let mut candidates: Vec<_> = members
         .iter()
-        .filter(|member| member.active_at(at.get()) && member.manager)
+        .filter(|member| member.active_at(at.get()) && !member.guest)
         .map(|member| member.user_id)
         .collect();
     candidates.extend(
@@ -95,21 +95,6 @@ pub async fn deciders(
         )
         .await?,
     );
-    let graph = orch_authz::engine::Graph::load(conn, &[row.home()]).await?;
-    if let Some(home) = graph.site_of(row.home()) {
-        candidates.extend(
-            orch_authz::approvals::permission_deciders(
-                conn,
-                ObjectRef {
-                    kind: home.kind,
-                    id: home.id,
-                },
-                orch_access_contract::permissions::Permission::ChatManage,
-                at,
-            )
-            .await?,
-        );
-    }
     candidates.sort_unstable();
     candidates.dedup();
     let mut people = Vec::new();
@@ -283,33 +268,17 @@ impl Engine {
                 error: orch_authz::requests::AskError::Nobody,
             });
         }
-        let mut people: Vec<_> = rows::members(conn, chat)
-            .await?
-            .into_iter()
-            .filter(|member| {
-                member.manager && member.active_at(now.get()) && eligible.contains(&member.user_id)
-            })
-            .map(|member| member.user_id)
-            .collect();
-        people.sort_unstable();
-        people.dedup();
-        if people.is_empty() {
-            let graph = orch_authz::engine::Graph::load(conn, &[row.home()]).await?;
-            let home = graph
-                .site_of(row.home())
-                .ok_or_else(|| EngineError::unreadable("the group home is unavailable"))?;
-            people = orch_authz::approvals::owners_to_tell_beside(
-                conn,
-                orch_db::queries::access::PageKey::new("chat", chat, "live"),
-                ObjectRef {
-                    kind: home.kind,
-                    id: home.id,
-                },
-                &eligible,
-                now,
-            )
-            .await?;
-        }
+        let people = orch_authz::approvals::owners_to_tell_beside(
+            &mut *conn,
+            orch_db::queries::access::PageKey::new("chat", chat, "live"),
+            ObjectRef {
+                kind: ObjectKind::Org,
+                id: row.org_id,
+            },
+            &eligible,
+            now,
+        )
+        .await?;
         let days = get::<i64>(&mut *conn, Place::System, keys::ACCESS_REQUEST_EXPIRY_DAYS)
             .await
             .map_err(EngineError::from)?
@@ -402,14 +371,6 @@ impl Engine {
             at: now.get(),
         };
         notifications::tell(&mut tx, &event, &people, Some(org)).await?;
-        orch_db::idempotency::creation::observe_with(
-            &mut tx,
-            Some(requester),
-            "chat_join_request",
-            batch,
-            json!({"chat":chat,"approvals":[approval.id]}),
-        )
-        .await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         self.inner.live.approvals_changed(&eligible);
         Ok(Raised {

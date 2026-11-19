@@ -16,15 +16,6 @@ import { useViewChoice } from '@/lib/viewChoices';
 
 interface ChatReader { shown: boolean; scope: string; chatId: string | null }
 
-/** Restored list presentation does not replace the destination that admitted Defaults metadata. */
-function metadataAddress(href: string | null): string | null {
-  const target = href === null ? null : parsePageAddress(href);
-  if (target === null) return null;
-  const search = Object.entries(target.search).filter(([key]) => key !== 'list' && key !== '_list')
-    .toSorted(([one], [other]) => one.localeCompare(other));
-  return JSON.stringify([target.pathname, search, target.hash]);
-}
-
 export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, capable = true) {
   const instance = useViewInstance();
   const cache = useQueryClient();
@@ -33,18 +24,17 @@ export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, cap
   const tab = owner === null ? null : findTab(state.layout, owner)?.tab ?? null;
   const href = tab === null ? null : contentAddress(tab);
   const target = href === null ? null : parsePageAddress(href);
-  const routeNavigation = target === null ? null : settingsNavigation(target.pathname, target.search);
-  const navigation = routeNavigation !== null && (routeNavigation.kind === 'org' || routeNavigation.kind === 'project' || routeNavigation.kind === 'topic') ? routeNavigation : null;
+  const navigation = target === null ? null : settingsNavigation(target.pathname, target.search);
   const unfiltered = target?.search.setting === undefined || target.search.setting === '';
   const known = nodeId === null ? undefined : cache.getQueryData<Node>(nodeKey(nodeId));
   const settingsOnly = navigation?.kind === 'org' && navigation.current === 'members'
-    && known?.kind === 'org' && known.access.permissions.includes('members.manage');
-  const relevant = capable && unfiltered && nodeId !== null && owner !== null && (navigation?.current === 'defaults' || settingsOnly)
-    && (navigation.kind === 'org' || navigation.id === nodeId);
+    && known?.kind === 'org' && known.access?.permissions?.includes('members.manage') === true;
+  const relevant = capable && unfiltered && nodeId !== null && owner !== null && (navigation?.current === 'policies' || settingsOnly)
+    && (navigation?.kind === 'org' || navigation?.id === nodeId);
   const candidates = relevant ? allTabs(state.layout).filter((candidate) => {
     if (candidate.view !== 'chat') return false;
     if (candidate.of?.node !== undefined) return candidate.of.node === nodeId;
-    if (candidate.scope?.mode === 'fixed') return candidate.scope.target.id === nodeId && candidate.scope.target.kind === navigation.kind;
+    if (candidate.scope?.mode === 'fixed') return candidate.scope.target.id === nodeId && candidate.scope.target.kind === navigation?.kind;
     return state.activeContent === owner;
   }).map((candidate) => candidate.id) : [];
   const contentOpening = useShownViewOpening(relevant ? [owner] : []);
@@ -71,13 +61,13 @@ export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, cap
   const linked = target?.search.chat;
   const chatId = chat?.chatId ?? requested ?? (typeof linked === 'string' && linked !== '' ? linked : null);
   const demand = eligible || admitted && settingsOnly ? { defaults: true, ...(settingsOnly ? { settings_only: true } : {}), secret_names: !settingsOnly, default_provider_name: !settingsOnly,
-    embeddings_provider_name: !settingsOnly && navigation.kind === 'org' } : undefined;
+    embeddings_provider_name: !settingsOnly && navigation?.kind === 'org' } : undefined;
   const owned = admitted ? { content: contentOpening, chat: chatOpening, href } : null;
   const current = () => {
     if (owned === null) return false;
     if (shownViewOpening(owned.content.view) !== owned.content.nonce || shownViewOpening(owned.chat.view) !== owned.chat.nonce) return false;
     const now = findTab(useWorkbench.getState().layout, owned.content.view);
-    return now !== null && metadataAddress(contentAddress(now.tab)) === metadataAddress(owned.href);
+    return now !== null && contentAddress(now.tab) === owned.href;
   };
   const opening = useQuery({ ...nodeChatOpeningQuery(nodeId ?? '', chat?.scope ?? storedScope, chatId, demand, current),
     enabled: nodeId !== null && (chat === undefined ? eligible : chat.shown) });

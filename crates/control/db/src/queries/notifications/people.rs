@@ -524,25 +524,6 @@ pub async fn announce(
     announce_with(conn, new, None::<fn() -> Result<(), DbError>>).await
 }
 
-/// A bounded delivery batch applies current kind choices once before outward dispatch.
-/// Mandatory Inbox materialization does not grant an external delivery.
-pub async fn outward_kinds(
-    conn: &mut Conn,
-    user: Id,
-    kinds: &[String],
-) -> Result<Vec<String>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT DISTINCT k.kind FROM unnest($2::text[]) AS k(kind)
-        JOIN users u ON u.id=$1 AND u.kind='human' AND u.status='active'
-        LEFT JOIN notification_prefs p ON p.user_id=u.id
-        WHERE NOT COALESCE(p.disabled_kinds ? k.kind,false)",
-    )
-    .bind(user)
-    .bind(kinds)
-    .fetch_all(conn)
-    .await?)
-}
-
 /// The same announce producer, with an opaque check after receiver and absence reads.
 /// A deduplicated row consumes no first-effect check. The existing user lock pins absence.
 pub async fn announce_with<E, F>(

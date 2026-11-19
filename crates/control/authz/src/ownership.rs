@@ -85,12 +85,11 @@ pub enum Making {
     Refused(Why),
 }
 
-/// Whether the caller may make a resource of the kind `kind` whose home is `home` (none: a
+/// Whether the caller may make a resource of the kind `kind` whose home is the org `home` (none: a
 /// resource of the system). `members_make` is the setting `resources.created_by_members` resolved
 /// at that org: the kinds any member may make there as their own; as shipped all five.
 ///
-/// A member makes a resource in their domain or an org inside it. Providers and skills may also
-/// have a project home there, where the member can work.
+/// A member makes a resource in their domain, or in an org inside it, and that org is its home.
 /// Where the kind is left out at that org, or for an agent profile, the caller needs
 /// `settings.manage` on the org. For the system, a system admin; a provider has no such thing.
 pub async fn may_make(
@@ -135,9 +134,8 @@ pub async fn may_make(
     let graph = Graph::load(conn, &[home]).await?;
     let node = graph.get(home).ok_or(Error::NotFound(home))?.clone();
     let site = graph.site_of(home).ok_or(Error::NotFound(home))?;
-    // Providers and skills can belong to the project whose work they serve.
-    let project_home = matches!(kind, ResourceKind::Skill | ResourceKind::Provider)
-        && node.kind == NodeKind::Project;
+    // A skill may also belong to a project, whose work it is made for.
+    let project_home = kind == ResourceKind::Skill && node.kind == NodeKind::Project;
     if node.kind != NodeKind::Org && !project_home {
         return Ok(Making::Refused(Why::HomeIsNoOrg));
     }
@@ -185,50 +183,6 @@ pub async fn may_make(
             Some(_) => Why::KeptByAdmins(Box::new(refusal)),
         })),
     }
-}
-
-/// The ordinary native resource creation rule with its actual current home settings.
-/// HTTP creators and later native checkpoints share this resolver and the same `may_make`.
-pub async fn may_make_here(
-    conn: &mut Conn,
-    principal: &Principal,
-    kind: ResourceKind,
-    home: Option<Id>,
-) -> Result<Making, Error> {
-    let setting_error = |error| match error {
-        orch_settings::Error::Db(error) => Error::Db(error),
-        other => Error::Stored(other.to_string()),
-    };
-    let (members, policy) = match home {
-        None => (Vec::new(), Policy::default()),
-        Some(id) => {
-            let at = orch_settings::Place::Node(id);
-            let names = orch_settings::resolver::get::<Vec<String>>(
-                conn,
-                at,
-                "resources.created_by_members",
-            )
-            .await
-            .map_err(setting_error)?
-            .unwrap_or_default();
-            let external = orch_settings::resolver::get::<bool>(conn, at, "sharing.allow_external")
-                .await
-                .map_err(setting_error)?
-                .unwrap_or(true);
-            let holders = orch_settings::resolver::get::<bool>(conn, at, "sharing.allow_holders")
-                .await
-                .map_err(setting_error)?
-                .unwrap_or(true);
-            (
-                names.iter().filter_map(|name| name.parse().ok()).collect(),
-                Policy {
-                    owners_name_outsiders: external,
-                    holders_share: holders,
-                },
-            )
-        }
-    };
-    may_make(conn, principal, kind, home, &members, policy).await
 }
 
 // ---- Whose it is --------------------------------------------------------------------------------

@@ -191,26 +191,6 @@ pub async fn resolved_for_new(
     })
 }
 
-/// The actual enabled mount identities from the same prospective environment setting resolution.
-pub async fn mount_ids_for_new(
-    conn: &mut Conn,
-    home: Id,
-    own: &Json,
-) -> Result<Vec<Id>, EngineError> {
-    Ok(resolved_for_new(conn, home, own, keys::ENV_MOUNTS)
-        .await?
-        .as_ref()
-        .and_then(Json::as_object)
-        .map(|named| {
-            named
-                .iter()
-                .filter(|(_, mode)| **mode != Json::Bool(false))
-                .filter_map(|(id, _)| id.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default())
-}
-
 /// What a new environment of `template` with the own values `own`, at `home`, would be made with.
 pub async fn wanted(
     conn: &mut Conn,
@@ -221,7 +201,7 @@ pub async fn wanted(
     let needs_own = resolved_for_new(conn, home, own, keys::ENV_NEEDS).await?;
     let limits_own = resolved_for_new(conn, home, own, keys::ENV_RESOURCES).await?;
     let storage = resolved_for_new(conn, home, own, keys::ENV_STORAGE).await?;
-    let mounts = mount_ids_for_new(conn, home, own).await?;
+    let mounts = resolved_for_new(conn, home, own, keys::ENV_MOUNTS).await?;
     let limits = limits_of(&template.spec, limits_own.as_ref());
     let needs = needs_of(&template.spec, needs_own.as_ref(), Some(&limits));
     let storages = storage
@@ -231,6 +211,17 @@ pub async fn wanted(
             named
                 .values()
                 .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mounts = mounts
+        .as_ref()
+        .and_then(Json::as_object)
+        .map(|named| {
+            named
+                .iter()
+                .filter(|(_, mode)| **mode != Json::Bool(false))
+                .filter_map(|(id, _)| id.parse().ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -648,7 +639,7 @@ async fn host_places_inner(
             .collect::<Vec<_>>();
         if capped {
             allowed.sort_unstable();
-            allowed.truncate(HOSTS_MAX);
+            allowed.truncate(usize::try_from(HOSTS_MAX).unwrap_or(usize::MAX));
         }
         allowed
     } else {
@@ -869,7 +860,6 @@ async fn host_places_inner(
             mount_sources: names.iter().map(|(id, _)| *id).collect(),
             owner: host.owner_id,
             place: PlaceHost {
-                grouping: Default::default(),
                 host: HostRef {
                     id: host.id,
                     name: host.name.clone(),

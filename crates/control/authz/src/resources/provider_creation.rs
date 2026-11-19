@@ -1,4 +1,4 @@
-//! The account's placement grants inside one already-admitted native provider creator.
+//! The account's placement grants inside one already-admitted ProviderCreate.
 //!
 //! Host/Template Use is an internal dependency of creating this provider, not another
 //! token endpoint. The original provider/home credential gate remains mandatory. This
@@ -13,28 +13,8 @@ async fn admitted_home(
     provider: Id,
 ) -> Result<bool, Error> {
     let caller = principal.caller();
-    let (operation, action, source_action) = match caller.admitted_operation() {
-        Some("ProviderCreate") => ("ProviderCreate", KeyAction::Manage, None),
-        Some("ProviderDuplicate") => ("ProviderDuplicate", KeyAction::Write, Some(KeyAction::Read)),
-        Some("ProviderMoveOut") => ("ProviderMoveOut", KeyAction::Write, Some(KeyAction::Manage)),
-        _ => return Ok(false),
-    };
-    if let Some(source_action) = source_action {
-        let sources = caller
-            .admitted_facets()
-            .unwrap_or_default()
-            .iter()
-            .filter(|facet| {
-                facet.operation == operation
-                    && facet.action == source_action
-                    && facet.resource_kind == KeyTargetKind::Object(ObjectKind::Provider)
-                    && facet.target.object.kind == KeyTargetKind::Object(ObjectKind::Provider)
-                    && facet.target.object.id.is_some_and(|id| id != provider)
-            })
-            .count();
-        if sources != 1 {
-            return Ok(false);
-        }
+    if caller.admitted_operation() != Some("ProviderCreate") {
+        return Ok(false);
     }
     let object = ObjectRef {
         kind: ObjectKind::Provider,
@@ -56,13 +36,10 @@ async fn admitted_home(
         .unwrap_or_default()
         .iter()
         .filter(|facet| {
-            facet.operation == operation
-                && facet.action == action
+            facet.operation == "ProviderCreate"
+                && facet.action == KeyAction::Manage
                 && facet.resource_kind == KeyTargetKind::Object(ObjectKind::Provider)
-                && matches!(
-                    facet.target.object.kind,
-                    KeyTargetKind::Object(ObjectKind::Org | ObjectKind::Project)
-                )
+                && facet.target.object.kind == KeyTargetKind::Object(ObjectKind::Org)
                 && facet.target.object.id == Some(home)
         });
     if homes.next().is_none() || homes.next().is_some() {
@@ -127,7 +104,7 @@ async fn dependency(
     Ok(account_has(&frame, &site, permission))
 }
 
-/// The current account's exact selected host Use, solely within this admitted native provider creator.
+/// The current account's exact selected host Use, solely within this ProviderCreate.
 pub async fn provider_creation_host_use(
     conn: &mut Conn,
     principal: &Principal,
@@ -147,7 +124,7 @@ pub async fn provider_creation_host_use(
     .await
 }
 
-/// The current account's exact selected template Use, solely within this admitted native provider creator.
+/// The current account's exact selected template Use, solely within this ProviderCreate.
 pub async fn provider_creation_template_use(
     conn: &mut Conn,
     principal: &Principal,

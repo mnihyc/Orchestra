@@ -115,13 +115,11 @@ impl Fixture {
         retain(
             &mut tx,
             &origin,
-            CreatedProvision {
-                thread,
-                environment: world.environment,
-                home: world.topic,
-                job: row.id,
-                new_created: true,
-            },
+            thread,
+            world.environment,
+            world.topic,
+            row.id,
+            true,
             Time::new(world.clock.now()),
         )
         .await?;
@@ -175,8 +173,7 @@ impl Fixture {
             command.key.wire().as_deref(),
             command.kind.as_str(),
             &body,
-            self.world.clock.as_ref(),
-            self.world.access.as_ref(),
+            Time::new(self.world.clock.now()),
         )
         .await?;
         tx.rollback().await?;
@@ -195,32 +192,6 @@ impl Fixture {
             },
         )?)
     }
-}
-
-#[tokio::test]
-async fn the_original_flat_creator_record_stays_readable_but_known_missing_sources_never_become_native()
--> TestResult {
-    let s = Fixture::new().await?;
-    let command = s.stat()?;
-    s.reserve(&command).await?;
-    sqlx::query("UPDATE jobs SET plan=plan-'creator_provision_version' WHERE id=$1")
-        .bind(s.job.id())
-        .execute(s.world.pool.pool())
-        .await?;
-    assert!(
-        s.allows(&command).await?,
-        "the existing flat ThreadCreate payload needs no new version field"
-    );
-    sqlx::query("UPDATE jobs SET plan=plan-'creator_provision' WHERE id=$1")
-        .bind(s.job.id())
-        .execute(s.world.pool.pool())
-        .await?;
-    assert!(
-        !s.allows(&command).await?,
-        "its retained native command journal proves this is known creator work"
-    );
-    s.engine.stop();
-    Ok(())
 }
 
 #[tokio::test]
@@ -339,14 +310,12 @@ async fn current_scope_and_exact_new_prefix_are_required_without_attaching_exist
         retain(
             &mut tx,
             &s.origin,
-            CreatedProvision {
-                thread: s.thread,
-                environment: s.world.environment,
-                home: s.world.topic,
-                job: s.job.id(),
-                new_created: false,
-            },
-            Time::new(s.world.clock.now()),
+            s.thread,
+            s.world.environment,
+            s.world.topic,
+            s.job.id(),
+            false,
+            Time::new(s.world.clock.now())
         )
         .await
         .is_err()
@@ -457,8 +426,7 @@ async fn revoked_creator_refuses_new_forward_work_but_owned_make_compensation_st
             actual.key.as_deref(),
             &actual.kind,
             &actual.body,
-            s.world.clock.as_ref(),
-            s.world.access.as_ref(),
+            Time::new(s.world.clock.now())
         )
         .await?,
         "the exact existing compensation command is outside forward creator authority"
@@ -469,37 +437,5 @@ async fn revoked_creator_refuses_new_forward_work_but_owned_make_compensation_st
         "old queued forward work stays refused throughout cleanup"
     );
     s.engine.stop();
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_real_thread_creator_cannot_be_relabelled_as_standalone_or_gain_that_version()
--> TestResult {
-    let fixture = Fixture::new().await?;
-    let row = fixture
-        .job
-        .row()
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    assert!(read(&row)?.is_some());
-    for marker in [Json::Null, json!(false), json!(true)] {
-        let mut changed = row.clone();
-        changed.plan[FIELD]["standalone"] = marker;
-        assert!(
-            read(&changed).is_err(),
-            "the real Thread parent and standalone parent cannot coexist"
-        );
-    }
-    let mut changed = row.clone();
-    changed.plan[VERSION] = json!(3);
-    assert!(
-        read(&changed).is_err(),
-        "the standalone version cannot authorize a Thread parent"
-    );
-    let original = read(&row)?.ok_or("the original Thread parent disappeared")?;
-    assert!(
-        serde_json::to_value(original)?.get("standalone").is_none(),
-        "old Thread wire data keep the field absent"
-    );
     Ok(())
 }

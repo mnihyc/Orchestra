@@ -13,7 +13,7 @@ export function Gateways() {
   const save = async (body: GatewayCatalogueUpdateBody) => {
     await updateGatewayCatalogue(body);
   };
-  if (query.isPending) return <SkeletonRows read={query} rows={3} />;
+  if (query.isPending) return <SkeletonRows rows={3} />;
   if (query.data === undefined) return <ErrorState compact title={t('regionalGateways.loadFailed')} error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   return <div className="flex min-w-0 flex-col gap-3">
     {query.isError && <ErrorState compact title={t('regionalGateways.loadFailed')} error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />}

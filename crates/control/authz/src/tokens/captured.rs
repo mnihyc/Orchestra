@@ -23,13 +23,6 @@ pub struct CapturedCaller {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Credential {
-    OwnerRead {
-        source: Id,
-    },
-    MachineOwner {
-        machine: Id,
-        transaction: i64,
-    },
     Session {
         as_admin: bool,
     },
@@ -51,15 +44,6 @@ enum Credential {
 }
 
 fn captured(caller: &Caller) -> Credential {
-    if let Some(source) = caller.owner_read_source() {
-        return Credential::OwnerRead { source };
-    }
-    if let Some(machine) = caller.native_machine() {
-        return Credential::MachineOwner {
-            machine,
-            transaction: caller.native_transaction().unwrap_or_default(),
-        };
-    }
     match caller.grant() {
         None => Credential::Session {
             as_admin: caller.as_admin(),
@@ -75,27 +59,6 @@ fn captured(caller: &Caller) -> Credential {
             kept_out: grant.kept_out.clone(),
         },
     }
-}
-
-tokio::task_local! { static LIVE_OWNER_READ: (Id, Id); }
-
-/// Runs only while the native entry retains its real owner-only source.
-/// The API checks that sealed source before every snapshot and final publication;
-/// a captured caller cannot turn this request-local scope into a background grant.
-pub async fn with_owner_read_source<T>(
-    owner: Id,
-    source: Id,
-    work: impl std::future::Future<Output = T>,
-) -> T {
-    LIVE_OWNER_READ.scope((owner, source), work).await
-}
-
-fn current_owner_read(owner: Id, source: Id) -> Option<Caller> {
-    LIVE_OWNER_READ
-        .try_with(|actual| *actual == (owner, source))
-        .ok()
-        .filter(|current| *current)
-        .map(|_| Caller::owner_read(owner, source))
 }
 
 impl CapturedCaller {
@@ -127,20 +90,6 @@ impl CapturedCaller {
         Ok(result)
     }
 
-    /// Conjoin two retained snapshots of this actor without removing any earlier credential.
-    pub fn intersect(&self, current: &Self) -> Result<Self, KeyScopeRefusal> {
-        if self.user != current.user {
-            return Err(KeyScopeRefusal::DifferentAccount);
-        }
-        let mut result = self.clone();
-        for credential in &current.credentials {
-            if !result.credentials.contains(credential) {
-                result.credentials.push(credential.clone());
-            }
-        }
-        Ok(result)
-    }
-
     /// Restores the same original/current restrictions using the application clock. A row
     /// lock or policy lookup may wait, so the minimum recorded key deadline is checked again
     /// AFTER all restoration awaits. This returns no operation/target admission.
@@ -166,39 +115,6 @@ impl CapturedCaller {
         let mut restored: Option<Caller> = None;
         for credential in &self.credentials {
             let mut next = match credential {
-                Credential::OwnerRead { source } => match current_owner_read(self.user, *source) {
-                    Some(current) => current,
-                    None => return Ok(None),
-                },
-                Credential::MachineOwner {
-                    machine,
-                    transaction,
-                } => {
-                    if !orch_db::queries::transaction_guard::in_transaction(conn) {
-                        return Ok(None);
-                    }
-                    let actual =
-                        orch_db::queries::transaction_guard::current_transaction_id(conn).await?;
-                    if actual != *transaction {
-                        return Ok(None);
-                    }
-                    orch_db::queries::transaction_guard::share_machine(conn, *machine).await?;
-                    let row = orch_db::queries::resources::machine(conn, *machine).await?;
-                    if row.is_none_or(|row| {
-                        row.owner_id != Some(self.user)
-                            || row.placement != "connected"
-                            || !row.is_active()
-                    }) {
-                        return Ok(None);
-                    }
-                    if orch_db::queries::identity::user_by_id(conn, self.user)
-                        .await?
-                        .is_none_or(|user| user.status != "active")
-                    {
-                        return Ok(None);
-                    }
-                    Caller::machine_owner(*machine, self.user, *transaction)
-                }
                 Credential::Session { as_admin } => {
                     Caller::session(self.user).with_admin_mode(*as_admin)
                 }
@@ -286,48 +202,5 @@ impl CapturedCaller {
             });
         }
         Ok(restored)
-    }
-}
-
-#[cfg(test)]
-mod owner_read_tests {
-    use super::*;
-    #[tokio::test]
-    async fn native_owner_reads_have_no_session_token_admin_or_restorable_lease()
-    -> Result<(), KeyScopeRefusal> {
-        let owner = orch_types::new_id();
-        let source = orch_types::new_id();
-        let native = Caller::owner_read(owner, source).with_admin_mode(true);
-        assert!(native.grant().is_none());
-        assert!(!native.as_admin());
-        assert_eq!(
-            native.credential(),
-            orch_access_contract::roles::Credential::OwnerRead
-        );
-        assert!(
-            native
-                .intersect_restrictions(&Caller::session(owner))
-                .is_err()
-        );
-        assert!(
-            native
-                .intersect_restrictions(&Caller::owner_read(owner, orch_types::new_id()))
-                .is_err()
-        );
-        assert_eq!(
-            native.intersect_restrictions(&native)?.owner_read_source(),
-            Some(source)
-        );
-        assert!(
-            matches!(captured(&native), Credential::OwnerRead {source: actual} if actual == source)
-        );
-        assert!(current_owner_read(owner, source).is_none());
-        with_owner_read_source(owner, source, async {
-            assert!(current_owner_read(owner, source).is_some());
-            assert!(current_owner_read(owner, orch_types::new_id()).is_none());
-        })
-        .await;
-        assert!(current_owner_read(owner, source).is_none());
-        Ok(())
     }
 }

@@ -127,25 +127,17 @@ test.describe('a person’s own settings', () => {
   });
 
   test('a code by mail is offered where the orgs allow it, switched on with the code that was mailed', async ({ page }) => {
-    // A known second-step method stays visible with its policy refusal when these orgs do not allow it.
+    // Ada's orgs allow no such code: the way is not on her page at all.
     await open(page, '/settings/security');
     await expect(page.getByRole('switch', { name: 'Authenticator app' })).toBeVisible();
-    const unavailable = page.getByRole('switch', { name: 'Code by mail', exact: true });
-    await expect(unavailable).toBeVisible();
-    await expect(unavailable).toBeDisabled();
-    await expect(page.getByText('Not allowed by sign-in policy', { exact: true })).toBeVisible();
-    await expect(page.getByRole('dialog', { name: 'Use a code by mail as a second step' })).toHaveCount(0);
+    await expect(page.getByRole('switch', { name: 'Code by mail' })).toHaveCount(0);
     await signOut(page);
 
     await signIn(page, PEOPLE.dora);
     await page.goto('/settings/security');
     const mail = page.getByRole('switch', { name: 'Code by mail' });
     await expect(mail).not.toBeChecked();
-    // Compact second-step switches keep their complete explanation on hover and keyboard focus.
-    await mail.scrollIntoViewIfNeeded();
-    await mail.focus();
-    await expect(page.getByRole('tooltip')).toHaveText('We send a code to dora@example.org. This protects you from somebody who has your password, not from somebody who reads your mail.');
-    await mail.press('Escape');
+    await expect(page.getByText('We send a code to dora@example.org. This protects you from somebody who has your password, not from somebody who reads your mail.')).toBeVisible();
     await mail.click();
     const dialog = page.getByRole('dialog', { name: 'Use a code by mail as a second step' });
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.dora.password);
@@ -162,10 +154,7 @@ test.describe('a person’s own settings', () => {
     await page.getByLabel('Username or email address').fill(PEOPLE.dora.login);
     await page.getByLabel('Password', { exact: true }).fill(PEOPLE.dora.password);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    // Sign-in keeps mail delivery conditional so it does not disclose the account's address state.
-    await expect(page.getByRole('status').filter({ hasText: 'If a code can be sent, it is on its way to your address.' })).toBeVisible();
-    await expect(page.getByRole('textbox', { name: 'Code', exact: true })).toBeVisible();
-    await expect(page).toHaveURL(/\/login(?:\?|$)/);
+    await expect(page.getByText('We sent a code to your address.')).toBeVisible();
   });
 
   test('a token is made with exact operations and a target, shown once, and revoked', async ({ page }) => {
@@ -389,8 +378,6 @@ test.describe('an org’s settings', () => {
   const settingsOf = (slug: string, section: string) => `/org/${slug}/settings/${section}`;
 
   test('the sections are the same at every level, and a department opens from its parent', async ({ page }) => {
-    // Keep the short-name column admitted beside the workbench's navigation and side views.
-    await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'general'));
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
     await settingsSections(page, 'Acme', ['General', 'Departments', 'Members', 'Groups', 'Roles and access', 'Defaults', 'Tags', 'Service accounts', 'Audit', 'Everything', 'Outside Orch']);
@@ -400,11 +387,10 @@ test.describe('an org’s settings', () => {
     await settingsSection(page, 'Acme', 'Departments');
     const row = page.getByRole('row', { name: /Research/ });
     await expect(row.getByText('research', { exact: true })).toBeVisible();
-    await expect(row.getByRole('link', { name: 'Research', exact: true })).toHaveAttribute('href', '/org/acme.research/settings/general');
     const destination = row.getByRole('link', { name: 'Open the settings of Research' });
     await expect(destination).toHaveAttribute('href', '/org/acme.research/settings/general');
     await destination.click();
-    await expect(page).toHaveURL(/\/org\/acme\.research\/settings\/general(?:\?|$)/);
+    await expect(page).toHaveURL(/\/org\/acme\.research\/settings\/general$/);
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
     // A department has a Departments section of its own, and a root org's channels are one line there.
     await settingsSections(page, 'Research', ['Departments']);
@@ -442,7 +428,7 @@ test.describe('an org’s settings', () => {
     await page.keyboard.press('Escape');
 
     // The policies are read as they are, switched off, with the same sentence.
-    await page.goto(settingsOf('acme', 'defaults'));
+    await page.goto(settingsOf('acme', 'policies'));
     const row = page.locator('[data-setting="terminal.max_per_person"]');
     await expect(row).toHaveAttribute('data-setting-readonly', 'true');
     await expect(row).toContainText('4');
@@ -454,8 +440,6 @@ test.describe('an org’s settings', () => {
   });
 
   test('a member is moved to another domain, after the dialog says what that changes', async ({ page }) => {
-    // Domain is a responsive table column; retain it beside the workbench's other views.
-    await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'members'));
     const row = page.getByRole('row', { name: /Grace Hopper/ });
     await expect(row).toContainText('Acme');
@@ -530,22 +514,14 @@ test.describe('an org’s settings', () => {
   test('an invitation is made by the org’s rules, which are changed under Policies', async ({ page }) => {
     // Usage is a desktop table column; give this policy-flow check room for its count assertion.
     await page.setViewportSize({ width: 1920, height: 1000 });
-    await open(page, settingsOf('acme', 'defaults'));
+    await open(page, settingsOf('acme', 'policies'));
     const forms = page.locator('[data-setting="invitations.forms"]');
     await forms.getByRole('button', { name: /^Edit / }).click();
-    // A joining editor starts with this org's empty own contribution, apart from the inherited choices.
-    await expect(forms.getByRole('checkbox', { name: 'Email', exact: true })).not.toBeChecked();
-    await expect(forms.getByRole('checkbox', { name: 'Link', exact: true })).not.toBeChecked();
-    await forms.getByRole('checkbox', { name: 'Link', exact: true }).click();
-    // The compound value commits explicitly; closing its retained editor alone does not save it.
-    const savedForms = page.waitForResponse((response) => response.request().method() === 'PUT' && new URL(response.url()).pathname.endsWith('/settings/invitations.forms'));
-    await forms.getByRole('checkbox', { name: 'Link', exact: true }).press('Control+Enter');
-    expect((await savedForms).ok()).toBe(true);
+    await forms.getByRole('checkbox', { name: 'Email', exact: true }).click();
+    await forms.getByRole('button', { name: /^Edit / }).click();
     await expect(forms.getByText('Saved', { exact: true })).toBeVisible();
     await forms.getByRole('button', { name: /^Edit / }).click();
-    await expect(forms.getByRole('checkbox', { name: 'Link', exact: true })).toBeChecked();
     await expect(forms.getByRole('checkbox', { name: 'Email', exact: true })).not.toBeChecked();
-    await expect(forms.getByRole('checkbox', { name: 'Link', exact: true })).toBeChecked();
 
     await page.goto(settingsOf('acme', 'members'));
     await expect(page.getByText('Forms allowed: A link to share.')).toBeVisible();
@@ -563,7 +539,7 @@ test.describe('an org’s settings', () => {
   });
 
   test('a setting is set here, shown as coming from here, removed, and falls back to what is above', async ({ page }) => {
-    await open(page, settingsOf('acme.research', 'defaults'));
+    await open(page, settingsOf('acme.research', 'policies'));
     const row = page.locator('[data-setting="env.idle_stop_minutes"]');
     // Edit the value directly; the short link identifies its actual source.
     await expect(row.getByRole('link', { name: 'Inherited from Acme' })).toHaveAttribute('href', /setting=env.idle_stop_minutes/);
@@ -598,7 +574,7 @@ test.describe('an org’s settings', () => {
   });
 
   test('a key locked above is shown as locked, with where, and cannot be changed below', async ({ page }) => {
-    await open(page, settingsOf('acme.research', 'defaults'));
+    await open(page, settingsOf('acme.research', 'policies'));
     const row = page.locator('[data-setting="sandbox.mode"]');
     await expect(row.getByRole('link', { name: 'Locked at Acme' })).toHaveAttribute('href', /setting=sandbox.mode/);
     await expect(row.getByRole('switch')).toHaveCount(0);
@@ -607,7 +583,7 @@ test.describe('an org’s settings', () => {
     await expectAccessibleSettled(page);
 
     // Where it is locked it is set, and the lock can be lifted by whoever makes the rules there.
-    await page.goto(settingsOf('acme', 'defaults'));
+    await page.goto(settingsOf('acme', 'policies'));
     const here = page.locator('[data-setting="sandbox.mode"]');
     // The server names the lock of this very row as the one that decides the key; at the place that holds it, it is not a lock from above.
     await expect(here.getByRole('link', { name: 'Locked at Acme' })).toHaveCount(0);
@@ -620,17 +596,13 @@ test.describe('an org’s settings', () => {
     await here.getByRole('button', { name: /^More about / }).click();
     await expect(page.getByRole('menuitemcheckbox', { name: 'Lock for places below' })).not.toBeChecked();
     await page.keyboard.press('Escape');
-    await page.goto(settingsOf('acme.research', 'defaults'));
+    await page.goto(settingsOf('acme.research', 'policies'));
     await expect(page.locator('[data-setting="sandbox.mode"]').getByRole('combobox')).toBeEnabled();
   });
 
   test('a secret is written, listed by name, and never shown', async ({ page }) => {
-    await open(page, settingsOf('acme', 'defaults'));
+    await open(page, settingsOf('acme', 'policies'));
     const secrets = page.getByRole('region', { name: 'Secrets' });
-    await expect(secrets).toBeVisible();
-    // The joined opening may already supply authorized names; an absent projection needs the explicit reader.
-    const readHereNames = secrets.getByRole('button', { name: 'Show secret names', exact: true });
-    if (await readHereNames.isVisible()) await readHereNames.click();
     await expect(secrets.getByText('REGISTRY_TOKEN')).toBeVisible();
     await expect(secrets.getByText('value hidden').first()).toBeVisible();
     await secrets.getByRole('button', { name: 'New secret…' }).click();
@@ -651,18 +623,11 @@ test.describe('an org’s settings', () => {
     expect(Object.values(written)).toContain('correct-horse-staple');
 
     // One that is set here is replaced or removed; one that came from above is left alone.
-    await expect(secrets).toBeVisible();
-    if (await readHereNames.isVisible()) await readHereNames.click();
-    await expect(secrets.getByText('DB_PASSWORD', { exact: true })).toBeVisible();
     await page.getByRole('region', { name: 'Secrets' }).getByRole('button', { name: 'Delete DB_PASSWORD', exact: true }).click();
     await page.getByRole('alertdialog', { name: 'Delete DB_PASSWORD?' }).getByRole('button', { name: 'Delete DB_PASSWORD', exact: true }).click();
     await expect(page.getByRole('region', { name: 'Secrets' }).getByText('DB_PASSWORD')).toHaveCount(0);
-    await page.goto(settingsOf('acme.research', 'defaults'));
+    await page.goto(settingsOf('acme.research', 'policies'));
     const below = page.getByRole('region', { name: 'Secrets' });
-    await expect(below).toBeVisible();
-    // The joined opening may already supply names; an absent projection still needs the explicit reader.
-    const readNames = below.getByRole('button', { name: 'Show secret names', exact: true });
-    if (await readNames.isVisible()) await readNames.click();
     await expect(below.getByText('REGISTRY_TOKEN')).toBeVisible();
     await expect(below.getByText('set in Acme')).toBeVisible();
     await expect(below.getByRole('button', { name: 'Delete REGISTRY_TOKEN', exact: true })).toHaveCount(0);
@@ -691,29 +656,20 @@ test.describe('an org’s settings', () => {
   });
 
   test('the groups of an org keep their people, who are added by name and taken out', async ({ page }) => {
-    // The count of people is a table column that a narrow pane folds away; give the list the room of a desktop.
-    await page.setViewportSize({ width: 1920, height: 1000 });
     await open(page, settingsOf('acme', 'groups'));
     const table = page.getByRole('table', { name: 'Groups of Acme' });
-    // People are loaded through the explicit membership view; the compact group row no longer preloads a count.
-    await expect(table.getByRole('button', { name: 'The people in Backend team', exact: true })).toBeVisible();
+    await expect(table.getByRole('row', { name: /Backend team/ })).toContainText('3 people');
     await expectAccessibleSettled(page);
     await table.getByRole('button', { name: 'The people in Backend team' }).click();
     const dialog = page.getByRole('dialog', { name: 'People in Backend team' });
-    await expect(dialog.getByRole('button', { name: /^Remove .+ from the group$/ })).toHaveCount(3);
     await expect(dialog.getByText('Grace Hopper')).toBeVisible();
     await dialog.getByRole('combobox', { name: 'Add members', exact: true }).fill('vera');
     await page.getByRole('option', { name: /Vera Rubin/ }).click();
     await expect(dialog.getByText('Vera Rubin')).toBeVisible();
     await dialog.getByRole('button', { name: 'Remove Grace Hopper from the group', exact: true }).click();
     await expect(dialog.getByText('Grace Hopper')).toHaveCount(0);
-    await expect(dialog.getByRole('button', { name: /^Remove .+ from the group$/ })).toHaveCount(3);
     await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
-    await table.getByRole('button', { name: 'The people in Backend team', exact: true }).click();
-    await expect(dialog.getByRole('button', { name: /^Remove .+ from the group$/ })).toHaveCount(3);
-    await expect(dialog.getByText('Vera Rubin')).toBeVisible();
-    await expect(dialog.getByText('Grace Hopper')).toHaveCount(0);
-    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
+    await expect(table.getByRole('row', { name: /Backend team/ })).toContainText('3 people');
 
     // A new group, then taken away after saying what goes with it.
     await page.getByRole('button', { name: 'New group' }).click();
@@ -799,7 +755,7 @@ test.describe('an org’s settings', () => {
     await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Web');
     await expect(page.getByText('Delete Web')).toBeVisible();
     await settingsSection(page, 'Web', 'Defaults');
-    await expect(page).toHaveURL(/section=defaults/);
+    await expect(page).toHaveURL(/section=policies/);
     await expect(page.locator('[data-setting="env.idle_stop_minutes"]').getByRole('link', { name: 'Inherited from Acme' })).toBeVisible();
     await expectAccessibleSettled(page);
 
@@ -813,14 +769,12 @@ test.describe('an org’s settings', () => {
     else await expect(sections.getByRole('link', { name: 'General', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(page.locator('[data-setting="env.thread_default"]')).toHaveCount(0);
     await settingsSection(page, 'Fix login', 'Defaults');
-    await expect(page).toHaveURL(/section=defaults/);
+    await expect(page).toHaveURL(/section=policies/);
     await expect(page.locator('[data-setting="env.thread_default"]')).toBeVisible();
     await settingsSection(page, 'Fix login', 'Outside Orch');
     await expect(page.getByRole('heading', { name: 'Outside Orch', level: 1 })).toBeVisible();
     await settingsSection(page, 'Fix login', 'General');
-    // General is the canonical default section, so its address may omit that redundant choice.
-    await expect(page).toHaveURL((address) => address.pathname === `/topic/${ACME.fixLogin}` && address.searchParams.get('tab') === 'settings'
-      && (address.searchParams.get('section') ?? 'general') === 'general');
+    await expect(page).toHaveURL(/section=general/);
     await expect(sections).toHaveAttribute('data-current-section', 'general');
     await expect(page.getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
   });

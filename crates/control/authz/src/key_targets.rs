@@ -157,38 +157,6 @@ pub async fn page_object(
     Ok(target)
 }
 
-/// The same live resource-page subjects as `page_object`, resolved in one native batch.
-/// Every requested kind must match its actual row; absent/deleted/home-less facts fail closed.
-pub async fn resource_objects(
-    conn: &mut Conn,
-    objects: &[ObjectRef],
-) -> Result<Vec<KeyResolvedTarget>, TargetError> {
-    if objects.is_empty() {
-        return Ok(Vec::new());
-    }
-    if objects
-        .iter()
-        .any(|object| object.kind.node().is_some() || object.kind.is_document())
-    {
-        return Err(TargetError::Missing);
-    }
-    let ids: Vec<_> = objects.iter().map(|object| object.id).collect();
-    let mut graph = Graph::default();
-    let rows = crate::resources::read_into(conn, &mut graph, &ids).await?;
-    let rows: HashMap<_, _> = rows.into_iter().map(|row| (row.object(), row)).collect();
-    objects
-        .iter()
-        .map(|object| {
-            let row = rows
-                .get(object)
-                .filter(|row| !row.deleted)
-                .ok_or(TargetError::Missing)?;
-            let site = crate::resources::site_of(&graph, row).ok_or(TargetError::Missing)?;
-            from_site(&graph, &site).ok_or(TargetError::Missing)
-        })
-        .collect()
-}
-
 /// The exact stored resource identity and its complete current home, including retained rows.
 /// This grants no page visibility, restoration or runtime access. Custody readers whose ordinary
 /// permission survives removal use these facts before applying their unchanged ordinary door.
@@ -307,7 +275,7 @@ pub async fn from_chat(
     conn: &mut Conn,
     chat: &chats::ChatRow,
 ) -> Result<KeyResolvedTarget, TargetError> {
-    let place = chat.home();
+    let place = chat.node_id.unwrap_or(chat.org_id);
     let graph = Graph::load(conn, &[place]).await?;
     from_chat_graph(&graph, chat)
 }
@@ -317,12 +285,10 @@ pub fn from_chat_graph(
     graph: &Graph,
     chat: &chats::ChatRow,
 ) -> Result<KeyResolvedTarget, TargetError> {
-    let place = chat.home();
+    let place = chat.node_id.unwrap_or(chat.org_id);
     let site = graph.site_of(place).ok_or(TargetError::Missing)?;
     let mut target = from_site(graph, &site).ok_or(TargetError::Missing)?;
-    if chat.kind == chats::KIND_DIRECT
-        && target.object.kind != KeyTargetKind::Object(ObjectKind::Org)
-    {
+    if chat.node_id.is_none() && target.object.kind != KeyTargetKind::Object(ObjectKind::Org) {
         return Err(TargetError::Missing);
     }
     target.object = reference(KeyTargetKind::Identity(KeyIdentityKind::Chat), chat.id);
@@ -339,10 +305,8 @@ pub async fn chat(conn: &mut Conn, id: Id) -> Result<KeyResolvedTarget, TargetEr
 /// for already accepted work; it neither reads message contents nor grants chat visibility.
 pub async fn chat_identity(conn: &mut Conn, id: Id) -> Result<KeyResolvedTarget, TargetError> {
     let row = chats::chat(conn, id).await?.ok_or(TargetError::Missing)?;
-    let mut target = node_identity(conn, row.home()).await?;
-    if row.kind == chats::KIND_DIRECT
-        && target.object.kind != KeyTargetKind::Object(ObjectKind::Org)
-    {
+    let mut target = node_identity(conn, row.node_id.unwrap_or(row.org_id)).await?;
+    if row.node_id.is_none() && target.object.kind != KeyTargetKind::Object(ObjectKind::Org) {
         return Err(TargetError::Missing);
     }
     target.object = reference(KeyTargetKind::Identity(KeyIdentityKind::Chat), row.id);

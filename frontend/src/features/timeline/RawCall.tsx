@@ -13,8 +13,6 @@ import { CopyButton } from '@/ui/CopyButton';
 import { Input } from '@/ui/Input';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { JsonTree } from '@/ui/JsonTree';
-import { FileAttachment } from '@/features/files/FileChip';
-import { blobSource } from '@/features/files/source';
 
 type RawItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -43,27 +41,25 @@ export function RawCall({ item }: { item: RawItem }) {
       <section className="flex flex-col gap-1">
         <h2 className="flex items-center justify-between text-xs font-medium text-text-muted">
           {t('timeline.raw.input')}
-          {raw.input.inline !== '' && <CopyButton value={raw.input.inline} label={t(raw.input.truncated ? 'timeline.raw.copyInputShown' : 'timeline.raw.copyInput')} />}
+          <CopyButton value={raw.input.inline} label={t('timeline.raw.copyInput')} />
         </h2>
-        {raw.input.inline === '' && raw.input.blob !== null ? null : input.ok ? <JsonTree value={input.value} search={search} label={t('timeline.raw.input')} /> : <CodeBlock code={raw.input.inline} />}
-        {raw.input.truncated && raw.input.blob === null && <p className="text-xs text-text-subtle">{t('timeline.raw.cut')}</p>}
-        {raw.input.blob !== null && <FileAttachment thumbnail={false} source={blobSource('thread', item.thread_id, raw.input.blob, t('timeline.raw.fullInput'), raw.input.total_len, 'text/plain')} />}
+        {input.ok ? <JsonTree value={input.value} search={search} label={t('timeline.raw.input')} /> : <CodeBlock code={raw.input.inline} />}
+        {raw.input.truncated && <p className="text-xs text-text-subtle">{t('timeline.raw.cut')}</p>}
       </section>
       <section className="flex flex-col gap-1">
         <h2 className="flex items-center justify-between text-xs font-medium text-text-muted">
           {t('timeline.raw.output')}
-          {output !== null && output.inline !== '' && <CopyButton value={output.inline} label={t(output.truncated ? 'timeline.raw.copyOutputShown' : 'timeline.raw.copyOutput')} />}
+          {output !== null && <CopyButton value={output.inline} label={t('timeline.raw.copyOutput')} />}
         </h2>
         {raw.is_error && <InlineAlert tone="danger">{t('timeline.raw.error')}</InlineAlert>}
         {output === null ? (
           <p className="text-sm text-text-muted">{item.status === 'in_progress' ? t('timeline.raw.running') : t('timeline.raw.noOutput')}</p>
-        ) : output.inline === '' && output.blob !== null ? null : result?.ok === true && typeof result.value === 'object' && result.value !== null ? (
+        ) : result?.ok === true && typeof result.value === 'object' && result.value !== null ? (
           <JsonTree value={result.value} search={search} label={t('timeline.raw.output')} />
         ) : (
           <CodeBlock code={output.inline} maxHeight="24rem" />
         )}
-        {output?.truncated === true && output.blob === null && <p className="text-xs text-text-subtle">{t('timeline.raw.cut')}</p>}
-        {output?.blob !== undefined && output.blob !== null && <FileAttachment thumbnail={false} source={blobSource('thread', item.thread_id, output.blob, t('timeline.raw.fullOutput'), output.total_len, 'text/plain')} />}
+        {output?.truncated === true && <p className="text-xs text-text-subtle">{t('timeline.raw.cut')}</p>}
       </section>
     </div>
   );

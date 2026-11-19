@@ -8,9 +8,8 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-// The modal deliberately hides the background tree from accessibility while its live icon attributes update.
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads', includeHidden: true });
-const webIcon = (page: Page) => tree(page).getByRole('treeitem', { name: /^Web\b/, includeHidden: true }).locator('[data-node-icon]').first();
+const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const webIcon = (page: Page) => tree(page).getByRole('treeitem', { name: /^Web\b/ }).locator('[data-node-icon]').first();
 
 test('the large icon opens the colour, and a colour of its own is drawn in the tree and on the page', async ({ page }) => {
   await signIn(page);

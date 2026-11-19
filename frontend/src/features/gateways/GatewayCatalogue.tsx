@@ -88,8 +88,7 @@ export function GatewayCatalogueView({ catalogue, writable = false, onSave, onRe
         <Button variant="primary" pending={pending} disabled={!writable} onClick={() => void save()}>{t('common.save')}</Button></>}>
       <div className="flex min-w-0 flex-col gap-3 py-2">
         {error !== null && <ErrorAlert error={error} />}
-        <ol role="list" aria-label={t('regionalGateways.catalogue')} className="flex list-none flex-col gap-3">
-        {draft.map(({ key, existing, gateway }, index) => <li key={key}><fieldset className="flex min-w-0 flex-col gap-3 rounded-lg border border-border p-3">
+        {draft.map(({ key, existing, gateway }, index) => <fieldset key={key} className="flex min-w-0 flex-col gap-3 rounded-lg border border-border p-3">
           <legend className="px-1 text-sm font-medium">{t('regionalGateways.gatewayNumber', { number: index + 1 })}</legend>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="ghost" disabled={pending || index === 0} aria-label={t('regionalGateways.moveUp', { label: gateway.label })} onClick={() => move(key, -1)}>{t('regionalGateways.up')}</Button>
@@ -103,8 +102,7 @@ export function GatewayCatalogueView({ catalogue, writable = false, onSave, onRe
             <Input label={t('regionalGateways.region')} value={gateway.region} disabled={pending}
               onChange={(event) => change(key, (value) => ({ ...value, region: event.target.value }))} />
           </div>
-          <ol role="list" aria-label={t('regionalGateways.endpointsFor', { label: gateway.label })} className="flex list-none flex-col gap-2">
-          {gateway.endpoints.map((endpoint, at) => <li key={at} className="flex min-w-0 flex-wrap items-end gap-2">
+          {gateway.endpoints.map((endpoint, at) => <div key={at} className="flex min-w-0 flex-wrap items-end gap-2">
             <Input label={t('regionalGateways.endpointNumber', { number: at + 1 })} value={endpoint.url} disabled={pending} fieldClassName="min-w-0 flex-[1_1_14rem]"
               onChange={(event) => change(key, (value) => ({ ...value, endpoints: value.endpoints.map((old, n) => n === at ? { ...old, url: event.target.value } : old) }))} />
             <Select<GatewayEndpointTrust> label={t('regionalGateways.trustLabel')} value={endpoint.trust} disabled={pending} fieldClassName="min-w-[7rem] flex-[0_1_8rem]"
@@ -112,15 +110,13 @@ export function GatewayCatalogueView({ catalogue, writable = false, onSave, onRe
               onValueChange={(trust) => change(key, (value) => ({ ...value, endpoints: value.endpoints.map((old, n) => n === at ? { ...old, trust } : old) }))} />
             <Button size="sm" variant="ghost" disabled={pending} aria-label={t('regionalGateways.removeEndpointNumber', { number: at + 1, label: gateway.label })}
               onClick={() => change(key, (value) => ({ ...value, endpoints: value.endpoints.filter((_, n) => n !== at) }))}>{t('regionalGateways.remove')}</Button>
-          </li>)}
-          </ol>
+          </div>)}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Button size="sm" variant="ghost" disabled={pending} onClick={() => change(key, (value) => ({ ...value, endpoints: [...value.endpoints, { url: '', trust: 'pinned' }] }))}>{t('regionalGateways.addEndpoint')}</Button>
             <Button size="sm" variant="ghost" disabled={pending} aria-label={t('regionalGateways.removeGateway', { label: gateway.label })}
               onClick={() => setDraft((current) => current.filter((row) => row.key !== key))}>{t('regionalGateways.removeGateway', { label: gateway.label })}</Button>
           </div>
-        </fieldset></li>)}
-        </ol>
+        </fieldset>)}
         <Button size="sm" variant="secondary" disabled={pending || draft.length >= GATEWAYS_MAX} onClick={add}>{t('regionalGateways.addGateway')}</Button>
       </div>
     </Dialog>

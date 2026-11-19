@@ -27,10 +27,6 @@ use serde_json::json;
 
 mod live;
 mod observations;
-pub mod operation;
-mod planning;
-
-pub use planning::PlanningObservation;
 
 /// A plan is short lived because the template, host and permissions can change meanwhile.
 pub const PLAN_MINUTES: i64 = 15;
@@ -120,34 +116,6 @@ impl From<DbError> for UpdateError {
     fn from(error: DbError) -> Self {
         Self::Internal(error.into())
     }
-}
-
-fn environment_template(state: &envs::EnvironmentState) -> Option<Id> {
-    state
-        .config
-        .get(keys::ENV_TEMPLATE_ID)
-        .and_then(Json::as_str)
-        .and_then(|id| id.parse().ok())
-        .or(state.template_id)
-}
-/// The native current template selection, before external observations or a plan DTO.
-pub async fn environment_update_template(
-    conn: &mut Conn,
-    environment: Id,
-) -> Result<Option<(Id, Id)>, EngineError> {
-    let Some(state) = envs::environment(conn, environment)
-        .await?
-        .filter(|state| state.deleted_at.is_none())
-    else {
-        return Ok(None);
-    };
-    let Some(old) = envs::live_runtime(conn, environment).await? else {
-        return Ok(None);
-    };
-    Ok(Some((
-        environment_template(&state).unwrap_or(old.template_id),
-        old.template_id,
-    )))
 }
 
 /// A provider runtime's actual owner must currently be eligible to use its
@@ -554,61 +522,6 @@ impl Engine {
             .await
     }
 
-    /// Resolve external planning observations once, outside retryable preparation.
-    /// Even a native skip retains its observation so replay cannot perform another lookup.
-    pub async fn observe_update(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        target: Target,
-        reason: UpdatePreflightReason,
-        given: Option<&ChangeOptions>,
-        source: &mut operation::Input,
-    ) -> (Result<Draft, UpdateError>, PlanningObservation) {
-        let mut observation = PlanningObservation::default();
-        if target != Target::Environment(source.environment()) {
-            return (Err(UpdateError::Denied), observation);
-        }
-
-        let result = match may_manage(conn, principal, target).await {
-            Ok(false) => Err(UpdateError::Denied),
-            Err(error) => Err(error.into()),
-            Ok(true) => {
-                let mut planning = planning::Planning::Observe {
-                    observation: &mut observation,
-                    source: Some(source),
-                };
-                self.inspect_update_planning(conn, principal, target, reason, given, &mut planning)
-                    .await
-            }
-        };
-        (result, observation)
-    }
-
-    /// Reuse the native inspector with exact recorded observations and no external IO.
-    pub async fn replay_update(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        target: Target,
-        reason: UpdatePreflightReason,
-        given: Option<&ChangeOptions>,
-        observation: &PlanningObservation,
-    ) -> Result<Draft, UpdateError> {
-        if !may_manage(conn, principal, target).await? {
-            return Err(UpdateError::Denied);
-        }
-        self.inspect_update_planning(
-            conn,
-            principal,
-            target,
-            reason,
-            given,
-            &mut planning::Planning::Replay(observation),
-        )
-        .await
-    }
-
     pub(crate) async fn inspect_update(
         &self,
         conn: &mut Conn,
@@ -617,37 +530,18 @@ impl Engine {
         reason: UpdatePreflightReason,
         given: Option<&ChangeOptions>,
     ) -> Result<Draft, UpdateError> {
-        let mut observation = PlanningObservation::default();
-        self.inspect_update_planning(
-            conn,
-            principal,
-            target,
-            reason,
-            given,
-            &mut planning::Planning::Observe {
-                observation: &mut observation,
-                source: None,
-            },
-        )
-        .await
-    }
-
-    async fn inspect_update_planning(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        target: Target,
-        reason: UpdatePreflightReason,
-        given: Option<&ChangeOptions>,
-        planning: &mut planning::Planning<'_>,
-    ) -> Result<Draft, UpdateError> {
         let (old, owner, template_id, own_resources, old_facts, stopped) = match target {
             Target::Environment(id) => {
                 let state = envs::environment(conn, id)
                     .await?
                     .filter(|s| s.deleted_at.is_none())
                     .ok_or(UpdateError::NotFound)?;
-                let template = environment_template(&state);
+                let template = state
+                    .config
+                    .get(keys::ENV_TEMPLATE_ID)
+                    .and_then(Json::as_str)
+                    .and_then(|id| id.parse().ok())
+                    .or(state.template_id);
                 let resources = get::<Json>(conn, target.place(), keys::ENV_RESOURCES)
                     .await
                     .map_err(EngineError::from)?;
@@ -772,31 +666,28 @@ impl Engine {
                 &providers::system_harness_kinds(conn).await?,
             ),
         };
+        let services = self
+            .host_services()
+            .ok_or_else(|| EngineError::unreadable("no host services are attached"))?;
         let tools = if reason == UpdatePreflightReason::Recreate && !held_tools.is_empty() {
             held_tools.clone()
+        } else if reason == UpdatePreflightReason::Recreate {
+            // Legacy records are checked against their recorded build names below. A later
+            // profile edit must not substitute its pin into the original definition.
+            services
+                .tools(conn, &host.platform_os, &host.platform_arch, &wanted)
+                .await
+                .map_err(|error| {
+                    UpdateError::Blocked(vec![blocker("build_unavailable", error.to_string())])
+                })?
         } else {
-            let requests = if reason == UpdatePreflightReason::Recreate {
-                // Original recorded builds must not pick up a later profile pin.
-                planning::ToolRequests::Original(wanted)
-            } else {
-                planning::ToolRequests::Current(
-                    crate::hosting::harness_requests(conn, target, &wanted).await?,
-                )
-            };
-            planning
-                .tools(
-                    self,
-                    conn,
-                    planning::ToolInput {
-                        target,
-                        runtime: old.id,
-                        template: template_id,
-                        os: host.platform_os.clone(),
-                        arch: host.platform_arch.clone(),
-                        requests,
-                    },
-                )
-                .await?
+            let requested = crate::hosting::harness_requests(conn, target, &wanted).await?;
+            services
+                .requested_tools(conn, &host.platform_os, &host.platform_arch, &requested)
+                .await
+                .map_err(|error| {
+                    UpdateError::Blocked(vec![blocker("build_unavailable", error.to_string())])
+                })?
         };
         let mut missing_old_build = false;
         if reason == UpdatePreflightReason::Recreate {
@@ -1060,9 +951,7 @@ impl Engine {
                 .and_then(Json::as_str)
                 != Some("restart");
         let keep_estimate = if records_files && host.online {
-            planning
-                .keep_estimate(self, host.machine_id, old.id)
-                .await?
+            self.estimate_runtime_files(host.machine_id, old.id).await?
         } else {
             None
         };

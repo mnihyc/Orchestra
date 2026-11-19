@@ -2,7 +2,6 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used, reason = "a test fails by panicking")]
 
-use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
@@ -27,21 +26,12 @@ fn context(directory: &Path, program: &Path) -> EnvironmentContext {
 
 fn program(directory: &Path, body: &str) -> std::path::PathBuf {
     let path = directory.join("controlled-codex");
-    // Publish the response atomically without rewriting an executable between
-    // native probes. Its path and launcher metadata stay fixed as its version changes.
-    let mut response = tempfile::NamedTempFile::new_in(directory).unwrap();
-    writeln!(response, "{body}").unwrap();
-    response
-        .persist(directory.join("controlled-codex-response"))
-        .unwrap();
-    if !path.exists() {
-        std::fs::write(
-            &path,
-            "#!/bin/sh\nif [ \"$1\" != --version ]; then exit 1; fi\n. \"${0%/*}/controlled-codex-response\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nif [ \"$1\" != --version ]; then exit 1; fi\n{body}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     path
 }
 

@@ -159,9 +159,6 @@ pub enum ShareTo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShareWithAgents {
-    /// Optional validated composer context for this explicit grant, recorded with its server actor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_origin: Option<orch_access_contract::audit::LinkOrigin>,
     /// Separately give ordinary document Read to each recipient thread's current and future
     /// viewers. Unticked unless requested, only for live document material sent to individual
     /// threads. This human grant is independent of the agent's current-giver loan.
@@ -272,34 +269,6 @@ pub enum AgentShareCurrentReason {
     /// A real recipient thread is needed to assess this holder's effective rights.
     RecipientContextRequired,
     /// The exact source could not be loaded for this assessment.
-    SourceUnavailable,
-}
-
-/// The recipient's effective read before a proposed grant, across every current giver and
-/// native right. This is neither the sender's ledger entry nor the proposal's contribution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AgentReadBefore {
-    /// Null means an aggregate place or missing recipient needs a more specific check.
-    pub readable: Option<bool>,
-    /// Why a read is unavailable or was not assessed, without naming another giver.
-    pub reason: Option<AgentReadBeforeReason>,
-}
-
-/// Safe current facts at the exact native agent-reading boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentReadBeforeReason {
-    /// No current native or giver-bound entry permits reading this object.
-    CurrentLimits,
-    /// Shared-reading tools are switched off at the recipient.
-    ToolsOff,
-    /// The recipient's harness cannot receive those tools.
-    NoTools,
-    /// A place destination does not identify one actual recipient thread.
-    RecipientContextRequired,
-    /// A source place must be assessed separately at its individual objects.
-    PerTarget,
-    /// The actual source or recipient is no longer available.
     SourceUnavailable,
 }
 
@@ -552,28 +521,6 @@ pub struct ThreadSharedGetReply {
     pub read_first_paths: Vec<ReadFirstPath>,
     /// The shares that name it.
     pub shares: Vec<AgentShare>,
-    /// Read-only personal-skill policy, independent of any private skill inventory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub personal_skills: Option<PersonalSkillsPolicy>,
-}
-
-/// Current policy facts only; this does not grant or enumerate a starter's personal skills.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum PersonalSkillsPolicy {
-    /// Policy permits candidates; their actual current Use and native delivery remain separate.
-    Allowed,
-    /// The effective inherited policy keeps personal candidates out.
-    Off {
-        /// Public cause, currently policy_off; never a private diagnostic.
-        reason: String,
-        /// Actual nonignored restricting contributors, with private identities omitted.
-        sources: Vec<crate::settings::SettingSource>,
-    },
-    /// The policy read failed; existing shared material is still returned.
-    Unavailable,
-    /// This server does not declare the policy.
-    Unsupported,
 }
 
 /// Material resolved from stable source and recipient identities at the current moment.
@@ -705,7 +652,6 @@ crate::endpoints! {
                 Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
             ] },
             Variant { name: "snapshot", selector: "mode=snapshot; comment is absent or blank", facets: &[
-                Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("response_source")),
                 Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("snapshot_source_orgs")),
                 Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("snapshot_source_projects")),
                 Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("snapshot_source_topics")),
@@ -722,7 +668,6 @@ crate::endpoints! {
                 Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
             ] },
             Variant { name: "snapshot_comment", selector: "mode=snapshot; nonblank comment is supplied", facets: &[
-                Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("response_source")),
                 Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("snapshot_source_orgs")),
                 Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("snapshot_source_projects")),
                 Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("snapshot_source_topics")),
@@ -965,7 +910,7 @@ mod tests {
         let written = json!({
             "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e01",
             "what": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e02", "kind": "group", "org_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e03",
-                      "node": null, "name": "Release", "visibility": "private" },
+                      "node": null, "name": "Release" },
             "to": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e04", "kind": "thread", "name": "Fix the build", "redacted": false },
             "mode": "snapshot",
             "inside": false,
@@ -1043,7 +988,7 @@ mod tests {
         let written = json!({
             "id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e01",
             "what":{"id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e02","kind":"group","org_id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e03",
-                "node":null,"name":"Release","visibility":"private"},
+                "node":null,"name":"Release"},
             "to":{"id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e04","kind":"thread","name":"Fix the build","redacted":false},
             "mode":"live","inside":false,"download":false,"read_first":false,
             "parts":{"chat":"manage"},

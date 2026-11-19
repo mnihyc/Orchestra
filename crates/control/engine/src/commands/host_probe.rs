@@ -243,26 +243,6 @@ impl HostPortsProbe {
         Ok(value)
     }
 
-    /// Exact native operation captured by this real proposal source.
-    pub fn origin(&self) -> &CapturedOperation {
-        &self.origin
-    }
-
-    /// Factual source rows precede the canonical command; missing sources grant no authority.
-    pub(crate) async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
-        let _ = sqlx::query("SELECT id FROM hosts WHERE id=$1 FOR SHARE")
-            .bind(self.physical.host)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
-        let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
-            .bind(self.physical.machine)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
-        Ok(())
-    }
-
     /// Current native reader and raw session lifetime, also used before caching its answer.
     pub async fn current(
         &self,

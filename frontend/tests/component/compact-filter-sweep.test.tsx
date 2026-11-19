@@ -1,4 +1,3 @@
-import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** Compact screen selectors retain their meaning, visible filter labels and existing acts in every appearance. */
 import type * as UserStoreModule from '@/realtime/stores/user';
 import type * as UsageBoardModule from '@/features/usage/Board';
@@ -47,7 +46,7 @@ const fixture = vi.hoisted(() => ({ inventory:vi.fn<(filter:EverythingFilter)=>v
 function rowsQuery(key: readonly unknown[]) { return { queryKey: key, queryFn: () => Promise.resolve([]) }; }
 function pageQuery(key: readonly unknown[]) { return { queryKey: key, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), initialPageParam: null, getNextPageParam: () => undefined }; }
 function agentData(): Agent {
-  return { ...unjudgedProvenance(), id: id(9, 1), name: 'Codex', address: 'system.Codex', harness_kind: 'codex', harness: harnessName('codex'), home: null, owner: null, org_id: null, machine: null,
+  return { id: id(9, 1), name: 'Codex', address: 'system.Codex', harness_kind: 'codex', harness: harnessName('codex'), home: null, owner: null, org_id: null, machine: null,
     access: { administers: false, participating: true, admin_only: [], permissions: ['agent.view'], through: [] },
     disabled: false, profile: {}, descriptor: {}, descriptor_overridden: [], revision: 1,
     created_at: '2026-10-15T12:00:00Z', updated_at: '2026-10-15T12:00:00Z' };

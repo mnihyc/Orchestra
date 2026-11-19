@@ -10,7 +10,6 @@
 //! | `provider` | The `rate` of the provider's own entry for the model |
 //! | `rate_card` | The entry of `usage.rates` that matches the model, as resolved at the thread's place |
 //! | `catalogue` | The entry of the shipped catalogue that matches, times `usage.catalogue_scale`, where `usage.catalogue` is on: an estimate |
-//! | `reported` | An actual vendor total in the catalogue's matching unit, converted by the same scale in place of the estimate; explicit provider/card prices stay in force |
 //!
 //! Patterns of the rate card and the catalogue name models by the one rule of `models`; of the patterns that
 //! match, the one with the most characters that are not `*` counts. When none has a rate, the row has none and
@@ -56,8 +55,6 @@ pub enum Source {
     RateCard,
     /// The shipped catalogue: an estimate.
     Catalogue,
-    /// A vendor-reported total converted in the matching catalogue unit, without quoted fees added.
-    Reported,
 }
 
 impl Source {
@@ -68,7 +65,6 @@ impl Source {
             Self::Provider => ledger::rate_source::PROVIDER,
             Self::RateCard => ledger::rate_source::RATE_CARD,
             Self::Catalogue => ledger::rate_source::CATALOGUE,
-            Self::Reported => ledger::rate_source::REPORTED,
         }
     }
 
@@ -208,8 +204,6 @@ struct Prices {
     input: Dec,
     cached: Dec,
     cache_write: Dec,
-    cache_write_1h: Option<Dec>,
-    cache_write_12h: Option<Dec>,
     output: Dec,
 }
 
@@ -247,22 +241,12 @@ impl Prices {
             Some(price) => Dec::parse(price)?,
             None => input,
         };
-        let cache_write_1h = match &rate.cache_write_1h_per_mtok {
-            Some(price) => Some(Dec::parse(price)?),
-            None => None,
-        };
-        let cache_write_12h = match &rate.cache_write_12h_per_mtok {
-            Some(price) => Some(Dec::parse(price)?),
-            None => None,
-        };
         let step = context_step(rate, context_tokens);
         let Some(step) = step else {
             return Some(Self {
                 input,
                 cached,
                 cache_write,
-                cache_write_1h,
-                cache_write_12h,
                 output,
             });
         };
@@ -276,14 +260,6 @@ impl Prices {
             cache_write: match &step.cache_write_per_mtok {
                 Some(price) => Dec::parse(price)?,
                 None => step_input,
-            },
-            cache_write_1h: match &step.cache_write_1h_per_mtok {
-                Some(price) => Some(Dec::parse(price)?),
-                None => cache_write_1h,
-            },
-            cache_write_12h: match &step.cache_write_12h_per_mtok {
-                Some(price) => Some(Dec::parse(price)?),
-                None => cache_write_12h,
             },
             output: Dec::parse(&step.output_per_mtok)?,
         })
@@ -311,42 +287,19 @@ fn token_charge(
     context_tokens: Option<i64>,
     tier: Option<&str>,
 ) -> Option<Dec> {
-    token_charge_with_lifetimes(rate, tokens, context_tokens, tier, 0, 0)
-}
-fn token_charge_with_lifetimes(
-    rate: &Rate,
-    tokens: &Tokens,
-    context_tokens: Option<i64>,
-    tier: Option<&str>,
-    hourly: i64,
-    twelve_hour: i64,
-) -> Option<Dec> {
     let prices = Prices::of(rate, context_tokens)?;
     let cached = tokens.cached_input.max(0);
     let written = tokens.cache_write.max(0);
-    if hourly < 0 || twelve_hour < 0 || hourly.checked_add(twelve_hour)? > written {
-        return None;
-    }
     let fresh = (tokens.input - cached - written).max(0);
     let terms = [
         (fresh, prices.input),
         (cached, prices.cached),
-        (written - hourly - twelve_hour, prices.cache_write),
+        (written, prices.cache_write),
         (tokens.output.max(0), prices.output),
     ];
     let mut sum = Dec::whole(0);
     for (count, price) in terms {
         sum = sum.add(price.mul(Dec::whole(i128::from(count)))?)?;
-    }
-    if hourly > 0 {
-        sum = sum.add(prices.cache_write_1h?.mul(Dec::whole(i128::from(hourly)))?)?;
-    }
-    if twelve_hour > 0 {
-        sum = sum.add(
-            prices
-                .cache_write_12h?
-                .mul(Dec::whole(i128::from(twelve_hour)))?,
-        )?;
     }
     let mut credits = sum.shifted(PRICE_PLACES)?;
     let multiple = match tier.and_then(|tier| rate.tiers.as_ref()?.get(tier)) {
@@ -369,7 +322,6 @@ pub fn for_tier(rate: &Rate, tier: Option<&str>) -> Option<Rate> {
     };
     let mut applied = scaled(rate, multiple)?;
     applied.web_search_per_call = rate.web_search_per_call.clone();
-    applied.web_fetch_per_call = rate.web_fetch_per_call.clone();
     applied.tiers = None;
     Some(applied)
 }
@@ -395,8 +347,6 @@ fn scaled(rate: &Rate, scale: Dec) -> Option<Rate> {
                         cached_input_per_mtok: optional(&step.cached_input_per_mtok)?,
                         output_per_mtok: price(&step.output_per_mtok)?,
                         cache_write_per_mtok: optional(&step.cache_write_per_mtok)?,
-                        cache_write_1h_per_mtok: optional(&step.cache_write_1h_per_mtok)?,
-                        cache_write_12h_per_mtok: optional(&step.cache_write_12h_per_mtok)?,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?,
@@ -405,15 +355,11 @@ fn scaled(rate: &Rate, scale: Dec) -> Option<Rate> {
     };
     Some(Rate {
         web_search_per_call: optional(&rate.web_search_per_call)?,
-        web_fetch_per_call: optional(&rate.web_fetch_per_call)?,
         input_per_mtok: price(&rate.input_per_mtok)?,
         cached_input_per_mtok: price(&rate.cached_input_per_mtok)?,
         output_per_mtok: price(&rate.output_per_mtok)?,
         cache_write_per_mtok: optional(&rate.cache_write_per_mtok)?,
-        cache_write_1h_per_mtok: optional(&rate.cache_write_1h_per_mtok)?,
-        cache_write_12h_per_mtok: optional(&rate.cache_write_12h_per_mtok)?,
         tiers: rate.tiers.clone(),
-        capacity_tiers: rate.capacity_tiers.clone(),
         above,
     })
 }
@@ -448,15 +394,6 @@ fn best<'a>(candidates: &'a [(String, Rate)], model: &str) -> Option<&'a Rate> {
     )
 }
 
-/// Exact existing-ledger pricing of a service quantity, with an immutable applied unit quote.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PricedService {
-    /// Unknown quantity, quote or currency leaves the total unknown.
-    pub credits: Option<String>,
-    /// Full-precision applied credits per unit; rounding occurs only on the final row total.
-    pub credits_per_unit: Option<String>,
-}
-
 /// The rates of a place that are not the provider's: its rate card, and the settings that govern the
 /// catalogue. The catalogue itself is read only when nothing before it has a rate.
 #[derive(Debug, Clone)]
@@ -464,12 +401,6 @@ pub struct RateBook {
     card: Vec<(String, Rate)>,
     use_catalogue: bool,
     scale: Dec,
-}
-
-/// Actual request measurements and the native caller's wire-format fallback for pricing.
-pub(crate) struct Observation<'a> {
-    pub timing: &'a orch_api_contract::usage::RequestTiming,
-    pub protocol: Option<&'a str>,
 }
 
 impl RateBook {
@@ -506,55 +437,6 @@ impl RateBook {
             use_catalogue: false,
             scale: Dec::ONE,
         }
-    }
-
-    /// Price one selected service quote with the same exact decimal and catalogue policy.
-    /// A declaration supplies no currency conversion or provider-price override.
-    pub async fn price_service(
-        &self,
-        conn: &mut Conn,
-        quote: Option<&orch_provider_contract::capabilities::Price>,
-        source: Source,
-        unit: &str,
-        quantity: &orch_api_contract::usage::UsageMeasurement<i64>,
-    ) -> Result<PricedService, EngineError> {
-        let Some(quote) = quote.filter(|quote| quote.unit == unit) else {
-            return Ok(PricedService::default());
-        };
-        let scale = if source == Source::Catalogue {
-            if !self.use_catalogue {
-                return Ok(PricedService::default());
-            }
-            let catalogue = keeper::rate_catalogue(conn).await?;
-            if catalogue
-                .as_ref()
-                .and_then(|doc| doc.get("unit"))
-                .and_then(Json::as_str)
-                != Some(quote.currency.as_str())
-            {
-                return Ok(PricedService::default());
-            }
-            self.scale
-        } else if quote.currency.eq_ignore_ascii_case("credits") {
-            Dec::ONE
-        } else {
-            return Ok(PricedService::default());
-        };
-        let applied = Dec::parse(&quote.amount).and_then(|value| value.mul(scale));
-        let credits_per_unit = applied.and_then(|value| value.text(value.scale));
-        let credits = quantity
-            .value()
-            .filter(|count| **count >= 0)
-            .and_then(|count| {
-                applied?
-                    .mul(Dec::whole(i128::from(*count)))?
-                    .rounded(CREDIT_PLACES)?
-                    .text(CREDIT_PLACES)
-            });
-        Ok(PricedService {
-            credits,
-            credits_per_unit,
-        })
     }
 
     /// The rate for `model`: the provider's own entry (`own`), else the rate card, else the shipped
@@ -635,10 +517,10 @@ impl RateBook {
         model: &str,
         tokens: &Tokens,
         context: (i64, i64),
-        observation: Observation<'_>,
+        timing: &orch_api_contract::usage::RequestTiming,
+        protocol: Option<&str>,
     ) -> Result<(Option<String>, Priced), EngineError> {
         use orch_api_contract::usage::UsageMeasurement;
-        let Observation { timing, protocol } = observation;
         let tier = timing
             .reported_service_tier
             .value()
@@ -665,201 +547,27 @@ impl RateBook {
             return Ok((tier.map(str::to_owned), Priced::default()));
         };
         materialize_alias(&mut found.rate, tier, alias);
-        if found.source == Source::Catalogue {
-            if timing.native_prices.contains_key("web_search") {
-                found.rate.web_search_per_call = None;
-            }
-            if timing.native_prices.contains_key("page_fetch") {
-                found.rate.web_fetch_per_call = None;
-            }
+        if unavailable || !same_context_band(&found.rate, context.0, context.1) {
+            return Ok((
+                tier.map(str::to_owned),
+                Priced {
+                    found: Some(found),
+                    credits: None,
+                },
+            ));
         }
-        let capacity = for_capacity_observation(&found.rate, timing, protocol);
-        let mut priced = if unavailable
-            || capacity.is_none()
-            || !same_context_band(&found.rate, context.0, context.1)
-        {
-            Priced {
-                found: Some(found),
-                credits: None,
-            }
-        } else {
-            found.rate = capacity
-                .ok_or_else(|| EngineError::unreadable("the capacity price disappeared"))?;
-            let mut priced = price_found(found, model, tokens, Some(context.1), tier);
-            if let Some(rate) = priced.found.as_ref() {
-                priced.credits =
-                    if rate.source == Source::Catalogue && !timing.native_prices.is_empty() {
-                        let document = keeper::rate_catalogue(conn).await?;
-                        let unit = document
-                            .as_ref()
-                            .and_then(|doc| doc.get("unit"))
-                            .and_then(Json::as_str);
-                        credits_with_native_prices(
-                            &rate.rate,
-                            tokens,
-                            Some(context.1),
-                            tier,
-                            timing,
-                            unit,
-                            self.scale,
-                        )
-                    } else {
-                        credits_with_timing(&rate.rate, tokens, Some(context.1), tier, timing)
-                    };
-            }
-            priced
-        };
-        self.apply_reported_total(conn, timing, &mut priced).await?;
+        let mut priced = price_found(found, model, tokens, Some(context.1), tier);
+        if let Some(rate) = priced.found.as_ref() {
+            priced.credits = credits_with_searches(
+                &rate.rate,
+                tokens,
+                Some(context.1),
+                tier,
+                &timing.web_searches,
+            );
+        }
         Ok((tier.map(str::to_owned), priced))
     }
-
-    /// Original vendor totals replace catalogue estimates only. Explicit manager/card credit rates remain authoritative.
-    pub(crate) async fn apply_reported_total(
-        &self,
-        conn: &mut Conn,
-        timing: &orch_api_contract::usage::RequestTiming,
-        priced: &mut Priced,
-    ) -> Result<(), EngineError> {
-        let source = priced.found.as_ref().map(|found| found.source);
-        if let Some((actual, unit)) = self.reported_cost(conn, timing, source, None).await? {
-            apply_reported_total(priced, actual, Some(&unit), self.scale);
-        }
-        Ok(())
-    }
-
-    /// The same total-conversion policy for a selected service's original catalogue quote.
-    pub(crate) async fn reported_total(
-        &self,
-        conn: &mut Conn,
-        timing: &orch_api_contract::usage::RequestTiming,
-        source: Option<Source>,
-        original_currency: &str,
-    ) -> Result<Option<String>, EngineError> {
-        let Some((actual, unit)) = self
-            .reported_cost(conn, timing, source, Some(original_currency))
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(converted_reported_total(
-            source,
-            actual,
-            Some(&unit),
-            self.scale,
-        ))
-    }
-
-    async fn reported_cost<'t>(
-        &self,
-        conn: &mut Conn,
-        timing: &'t orch_api_contract::usage::RequestTiming,
-        source: Option<Source>,
-        original_currency: Option<&str>,
-    ) -> Result<Option<(&'t orch_api_contract::usage::ReportedCost, String)>, EngineError> {
-        if !self.use_catalogue || source != Some(Source::Catalogue) {
-            return Ok(None);
-        }
-        if timing
-            .reported_tokens
-            .as_ref()
-            .is_none_or(|tokens| tokens.is_empty())
-            && timing
-                .outcome
-                .value()
-                .is_some_and(|outcome| outcome != "done")
-        {
-            return Ok(None);
-        }
-        let Some(actual) = timing.reported_cost.value() else {
-            return Ok(None);
-        };
-        let Some(document) = keeper::rate_catalogue(conn).await? else {
-            return Ok(None);
-        };
-        let Some(unit) = document
-            .get("unit")
-            .and_then(Json::as_str)
-            .filter(|unit| !unit.is_empty())
-        else {
-            return Ok(None);
-        };
-        if original_currency.is_some_and(|currency| currency != unit) {
-            return Ok(None);
-        }
-        Ok(Some((actual, unit.to_owned())))
-    }
-}
-
-fn apply_reported_total(
-    priced: &mut Priced,
-    actual: &orch_api_contract::usage::ReportedCost,
-    catalogue_unit: Option<&str>,
-    scale: Dec,
-) {
-    let Some(credits) = converted_reported_total(
-        priced.found.as_ref().map(|found| found.source),
-        actual,
-        catalogue_unit,
-        scale,
-    ) else {
-        return;
-    };
-    priced.credits = Some(credits);
-    if let Some(found) = &mut priced.found {
-        found.source = Source::Reported;
-    }
-}
-
-fn converted_reported_total(
-    source: Option<Source>,
-    actual: &orch_api_contract::usage::ReportedCost,
-    catalogue_unit: Option<&str>,
-    scale: Dec,
-) -> Option<String> {
-    if source != Some(Source::Catalogue) {
-        return None;
-    }
-    let unit = actual.unit.as_deref().filter(|unit| !unit.is_empty())?;
-    if Some(unit) != catalogue_unit.filter(|unit| !unit.is_empty()) {
-        return None;
-    }
-    Dec::parse(&actual.amount)?
-        .mul(scale)?
-        .rounded(CREDIT_PLACES)?
-        .text(CREDIT_PLACES)
-}
-
-/// Apply only an actual reported capacity multiplier. Legacy/unaware sources keep their prior rate.
-fn for_capacity_observation(
-    rate: &Rate,
-    timing: &orch_api_contract::usage::RequestTiming,
-    protocol: Option<&str>,
-) -> Option<Rate> {
-    use orch_api_contract::usage::UsageMeasurement;
-    if timing.reported_capacity_tier == UsageMeasurement::Unsupported
-        && timing.requested_capacity_tier.is_none()
-    {
-        return Some(rate.clone());
-    }
-    let reported = timing.reported_capacity_tier.value()?;
-    let ordinary = timing
-        .wire_protocol
-        .as_deref()
-        .or(protocol)
-        .is_some_and(|protocol| {
-            orch_model_contract::parameters::ordinary_capacity_tier(protocol, reported)
-        });
-    let multiple = if ordinary {
-        Dec::ONE
-    } else {
-        Dec::parse(rate.capacity_tiers.as_ref()?.get(reported)?)?
-    };
-    let mut applied = scaled(rate, multiple)?;
-    // Native tool fees are independent of both inference speed and capacity.
-    applied.web_search_per_call = rate.web_search_per_call.clone();
-    applied.web_fetch_per_call = rate.web_fetch_per_call.clone();
-    applied.capacity_tiers = None;
-    Some(applied)
 }
 
 /// Search fees are additional and are not multiplied by a model's processing tier.
@@ -871,195 +579,30 @@ pub fn credits_with_searches(
     tier: Option<&str>,
     searches: &orch_api_contract::usage::UsageMeasurement<i64>,
 ) -> Option<String> {
-    credits_with_web_tools(
-        rate,
-        tokens,
-        context,
-        tier,
-        searches,
-        &orch_api_contract::usage::UsageMeasurement::Unsupported,
-    )
-}
-/// Native tool fees share the same decimal kernel and retain independent quantities.
-#[must_use]
-pub fn credits_with_web_tools(
-    rate: &Rate,
-    tokens: &Tokens,
-    context: Option<i64>,
-    tier: Option<&str>,
-    searches: &orch_api_contract::usage::UsageMeasurement<i64>,
-    fetches: &orch_api_contract::usage::UsageMeasurement<i64>,
-) -> Option<String> {
-    finish_with_web_tools(
-        rate,
-        token_charge(rate, tokens, context, tier)?,
-        searches,
-        fetches,
-    )
-}
-/// Measured longer-lived subsets are never charged again as ordinary cache writes.
-pub(crate) fn credits_with_timing(
-    rate: &Rate,
-    tokens: &Tokens,
-    context: Option<i64>,
-    tier: Option<&str>,
-    timing: &orch_api_contract::usage::RequestTiming,
-) -> Option<String> {
-    finish_with_web_tools(
-        rate,
-        token_charge_observed(rate, tokens, context, tier, timing)?,
-        &timing.web_searches,
-        &timing.web_fetches,
-    )
-}
-
-fn token_charge_observed(
-    rate: &Rate,
-    tokens: &Tokens,
-    context: Option<i64>,
-    tier: Option<&str>,
-    timing: &orch_api_contract::usage::RequestTiming,
-) -> Option<Dec> {
     use orch_api_contract::usage::UsageMeasurement;
-    let hourly = match timing.cache_write_1h_tokens.as_ref() {
-        None | Some(UsageMeasurement::Unsupported) => 0,
-        Some(UsageMeasurement::Told { value }) => *value,
-        _ if tokens.cache_write == 0 => 0,
+    let tokens = token_charge(rate, tokens, context, tier)?;
+    let count = match searches {
+        UsageMeasurement::Told { value } if *value >= 0 => *value,
+        UsageMeasurement::Unsupported => return tokens.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES),
         _ => return None,
     };
-    let twelve_hour = match timing.cache_write_12h_tokens.as_ref() {
-        Some(UsageMeasurement::Told { value }) => *value,
-        Some(UsageMeasurement::Unsupported) => 0,
-        _ if tokens.cache_write == 0 => 0,
-        None if rate.cache_write_12h_per_mtok.is_none()
-            && context_step(rate, context)
-                .is_none_or(|step| step.cache_write_12h_per_mtok.is_none()) =>
-        {
-            0
-        }
-        _ => return None,
-    };
-    token_charge_with_lifetimes(rate, tokens, context, tier, hourly, twelve_hour)
-}
-
-fn measured_counter(timing: &orch_api_contract::usage::RequestTiming, name: &str) -> Option<i128> {
-    let measured = match name {
-        "web_searches" => &timing.web_searches,
-        "web_fetches" => &timing.web_fetches,
-        _ => timing.declared_counters.get(name)?,
-    };
-    measured
-        .value()
-        .copied()
-        .filter(|value| *value >= 0)
-        .map(i128::from)
-}
-
-fn native_charge(
-    quote: &orch_provider_contract::capabilities::pricing::NativePrice,
-    timing: &orch_api_contract::usage::RequestTiming,
-    unit: Option<&str>,
-    scale: Dec,
-) -> Option<Dec> {
-    if quote.currency.is_empty() || Some(quote.currency.as_str()) != unit || quote.terms.is_empty()
-    {
-        return None;
+    if count == 0 {
+        return tokens.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES);
     }
-    let mut total = Dec::whole(0);
-    for term in &quote.terms {
-        let mut quantity = measured_counter(timing, &term.counter)?;
-        if let Some(included) = &term.included {
-            let allowance = measured_counter(timing, &included.counter)?
-                .checked_mul(i128::from(included.each))?;
-            quantity = quantity.checked_sub(allowance)?.max(0);
-        }
-        total = total.add(
-            Dec::parse(&term.amount)?
-                .mul(scale)?
-                .mul(Dec::whole(quantity))?,
-        )?;
-    }
-    Some(total)
-}
-
-/// Only catalogue pricing uses these request-selected terms. Explicit credit rates use the ordinary path.
-fn credits_with_native_prices(
-    rate: &Rate,
-    tokens: &Tokens,
-    context: Option<i64>,
-    tier: Option<&str>,
-    timing: &orch_api_contract::usage::RequestTiming,
-    unit: Option<&str>,
-    scale: Dec,
-) -> Option<String> {
-    use orch_api_contract::usage::UsageMeasurement;
-    let mut total = token_charge_observed(rate, tokens, context, tier, timing)?;
-    for (capability, count, price) in [
-        (
-            "web_search",
-            &timing.web_searches,
-            &rate.web_search_per_call,
-        ),
-        ("page_fetch", &timing.web_fetches, &rate.web_fetch_per_call),
-    ] {
-        let count = match count {
-            UsageMeasurement::Told { value } if *value >= 0 => *value,
-            UsageMeasurement::Unsupported if !timing.native_prices.contains_key(capability) => 0,
-            _ => return None,
-        };
-        if count == 0 {
-            continue;
-        }
-        let charge = match timing.native_prices.get(capability) {
-            Some(quote) => native_charge(quote.as_ref()?, timing, unit, scale)?,
-            None => Dec::parse(price.as_deref()?)?.mul(Dec::whole(i128::from(count)))?,
-        };
-        total = total.add(charge)?;
-    }
-    total.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES)
-}
-fn finish_with_web_tools(
-    rate: &Rate,
-    mut total: Dec,
-    searches: &orch_api_contract::usage::UsageMeasurement<i64>,
-    fetches: &orch_api_contract::usage::UsageMeasurement<i64>,
-) -> Option<String> {
-    use orch_api_contract::usage::UsageMeasurement;
-    for (count, price) in [
-        (searches, &rate.web_search_per_call),
-        (fetches, &rate.web_fetch_per_call),
-    ] {
-        let count = match count {
-            UsageMeasurement::Told { value } if *value >= 0 => *value,
-            UsageMeasurement::Unsupported => 0,
-            _ => return None,
-        };
-        if count > 0 {
-            total =
-                total.add(Dec::parse(price.as_deref()?)?.mul(Dec::whole(i128::from(count)))?)?;
-        }
-    }
-    total.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES)
-}
-
-/// A declared native unit uses the same exact decimal kernel and row rounding, without a token-tier multiplier.
-#[must_use]
-pub fn credits_for_counter(price: &str, count: i64) -> Option<String> {
-    if count < 0 {
-        return None;
-    }
-    Dec::parse(price)?
-        .mul(Dec::whole(i128::from(count)))?
+    let price = Dec::parse(rate.web_search_per_call.as_deref()?)?;
+    tokens
+        .add(price.mul(Dec::whole(i128::from(count)))?)?
         .rounded(CREDIT_PLACES)?
         .text(CREDIT_PLACES)
 }
 
 fn materialize_alias(rate: &mut Rate, tier: Option<&str>, alias: Option<&str>) {
-    if let (Some(tier), Some(alias), Some(tiers)) = (tier, alias, rate.tiers.as_mut())
-        && !tiers.contains_key(tier)
-        && let Some(multiplier) = tiers.get(alias).cloned()
-    {
-        tiers.insert(tier.to_owned(), multiplier);
+    if let (Some(tier), Some(alias), Some(tiers)) = (tier, alias, rate.tiers.as_mut()) {
+        if !tiers.contains_key(tier)
+            && let Some(multiplier) = tiers.get(alias).cloned()
+        {
+            tiers.insert(tier.to_owned(), multiplier);
+        }
     }
 }
 
@@ -1104,35 +647,6 @@ fn families_of(document: &Json) -> Vec<(String, Rate)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_counter_quotes_use_exact_unit_prices_without_token_tier_multipliers() {
-        assert_eq!(credits_for_counter("0.01", 3).as_deref(), Some("0.030000"));
-        assert_eq!(
-            credits_for_counter("0.0000005", 1).as_deref(),
-            Some("0.000001")
-        );
-        assert_eq!(credits_for_counter("0.01", 0).as_deref(), Some("0.000000"));
-        assert_eq!(credits_for_counter("bad", 2), None);
-        assert_eq!(credits_for_counter("-1", 2), None);
-        assert_eq!(credits_for_counter("1", -1), None);
-    }
-    #[test]
-    fn separately_counted_rows_keep_their_original_rounding_instead_of_becoming_one_aggregate() {
-        let one = credits_for_counter("0.0000005", 1).unwrap();
-        assert_eq!(one, "0.000001");
-        let rows = Dec::parse(&one)
-            .unwrap()
-            .mul(Dec::whole(3))
-            .unwrap()
-            .text(CREDIT_PLACES)
-            .unwrap();
-        assert_eq!(rows, "0.000003");
-        assert_eq!(
-            credits_for_counter("0.0000005", 3).as_deref(),
-            Some("0.000002")
-        );
-    }
     use serde_json::json;
 
     fn rate(value: &Json) -> Rate {
@@ -1149,310 +663,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hourly_cache_is_a_subset_not_a_second_write_and_missing_hourly_prices_stay_unknown() {
-        use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
-        let quoted = rate(
-            &json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1","cache_write_per_mtok":"1.25",
-            "cache_write_1h_per_mtok":"2","output_per_mtok":"2","web_search_per_call":"0.01","web_fetch_per_call":"0.02"}),
-        );
-        let mut used = tokens(1000, 100, 200);
-        used.cache_write = 300;
-        let mut timing = RequestTiming {
-            cache_write_1h_tokens: Some(UsageMeasurement::Told { value: 200 }),
-            ..Default::default()
-        };
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, None, &timing),
-            Some("0.001535".into())
-        );
-        timing.web_searches = UsageMeasurement::Told { value: 1 };
-        timing.web_fetches = UsageMeasurement::Told { value: 2 };
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, None, &timing),
-            Some("0.051535".into())
-        );
-        timing.web_searches = UsageMeasurement::Unsupported;
-        timing.web_fetches = UsageMeasurement::Unsupported;
-        let mut unquoted = quoted.clone();
-        unquoted.cache_write_1h_per_mtok = None;
-        assert!(credits_with_timing(&unquoted, &used, None, None, &timing).is_none());
-        for state in [
-            UsageMeasurement::Empty,
-            UsageMeasurement::Unread,
-            UsageMeasurement::Told { value: -1 },
-            UsageMeasurement::Told { value: 301 },
-        ] {
-            timing.cache_write_1h_tokens = Some(state);
-            assert!(credits_with_timing(&quoted, &used, None, None, &timing).is_none());
-        }
-        timing.cache_write_1h_tokens = Some(UsageMeasurement::Unsupported);
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, None, &timing),
-            Some("0.001385".into())
-        );
-        timing.cache_write_1h_tokens = None;
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, None, &timing),
-            credits(&quoted, &used, None, None)
-        );
-    }
-
-    #[test]
-    fn default_cache_writes_use_the_write_premium_and_twelve_hour_parts_are_disjoint() {
-        use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
-        let quoted = rate(&json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1",
-            "output_per_mtok":"2","cache_write_per_mtok":"1.25","cache_write_12h_per_mtok":"2.5",
-            "tiers":{"fast":"2"},"above":[{"context_tokens":272000,"input_per_mtok":"2",
-            "cached_input_per_mtok":"0.2","output_per_mtok":"3","cache_write_per_mtok":"2.5",
-            "cache_write_12h_per_mtok":"5"}]}));
-        let mut used = tokens(1_000_000, 0, 0);
-        used.cache_write = 1_000_000;
-        let mut timing = RequestTiming {
-            cache_write_12h_tokens: Some(UsageMeasurement::Told { value: 0 }),
-            ..Default::default()
-        };
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, None, &timing).as_deref(),
-            Some("1.250000")
-        );
-        used = tokens(12000, 4000, 0);
-        used.cache_write = 7000;
-        timing.cache_write_12h_tokens = Some(UsageMeasurement::Told { value: 4000 });
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, None, &timing).as_deref(),
-            Some("0.015150")
-        );
-        assert_eq!(
-            credits_with_timing(&quoted, &used, None, Some("fast"), &timing).as_deref(),
-            Some("0.030300")
-        );
-        assert_eq!(
-            credits_with_timing(&quoted, &used, Some(272001), None, &timing).as_deref(),
-            Some("0.030300")
-        );
-        let mut missing_quote = quoted.clone();
-        missing_quote.cache_write_12h_per_mtok = None;
-        assert!(credits_with_timing(&missing_quote, &used, None, None, &timing).is_none());
-        for state in [
-            None,
-            Some(UsageMeasurement::Unread),
-            Some(UsageMeasurement::Empty),
-            Some(UsageMeasurement::Told { value: -1 }),
-            Some(UsageMeasurement::Told { value: 7001 }),
-        ] {
-            timing.cache_write_12h_tokens = state;
-            assert!(credits_with_timing(&quoted, &used, None, None, &timing).is_none());
-        }
-        timing.cache_write_1h_tokens = Some(UsageMeasurement::Told { value: 4000 });
-        timing.cache_write_12h_tokens = Some(UsageMeasurement::Told { value: 4000 });
-        assert!(credits_with_timing(&quoted, &used, None, None, &timing).is_none());
-    }
-
-    #[test]
-    fn actual_capacity_and_inference_speed_price_independently_without_scaling_native_tool_fees() {
-        use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
-        let original = rate(
-            &json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1","output_per_mtok":"2",
-            "web_search_per_call":"0.01","tiers":{"fast":"2"},"capacity_tiers":{"priority":"3"}}),
-        );
-        let mut timing = RequestTiming {
-            wire_protocol: Some("anthropic-messages".into()),
-            requested_capacity_tier: Some("auto".into()),
-            reported_capacity_tier: UsageMeasurement::Told {
-                value: "priority".into(),
-            },
-            ..Default::default()
-        };
-        let applied = for_capacity_observation(&original, &timing, None).unwrap();
-        assert_eq!(
-            credits_with_searches(
-                &applied,
-                &tokens(1_000_000, 0, 0),
-                None,
-                Some("fast"),
-                &UsageMeasurement::Told { value: 2 }
-            ),
-            Some("6.020000".into())
-        );
-        assert_eq!(original.input_per_mtok, "1");
-        assert_eq!(original.capacity_tiers.as_ref().unwrap()["priority"], "3");
-        timing.reported_capacity_tier = UsageMeasurement::Told {
-            value: "standard".into(),
-        };
-        let standard = for_capacity_observation(&original, &timing, None).unwrap();
-        assert_eq!(
-            credits(&standard, &tokens(1_000_000, 0, 0), None, Some("fast")),
-            Some("2.000000".into())
-        );
-        for state in [
-            UsageMeasurement::Empty,
-            UsageMeasurement::Unread,
-            UsageMeasurement::Told {
-                value: "unpriced".into(),
-            },
-        ] {
-            timing.reported_capacity_tier = state;
-            assert!(for_capacity_observation(&original, &timing, None).is_none());
-        }
-        timing.reported_capacity_tier = UsageMeasurement::Told {
-            value: "priority".into(),
-        };
-        let mut unpriced = original.clone();
-        unpriced.capacity_tiers = None;
-        assert!(for_capacity_observation(&unpriced, &timing, None).is_none());
-        assert_eq!(
-            for_capacity_observation(&original, &RequestTiming::default(), None),
-            Some(original)
-        );
-    }
-
     fn plain() -> Rate {
         rate(
             &json!({ "input_per_mtok": "2.50", "cached_input_per_mtok": "0.25", "output_per_mtok": "15" }),
         )
-    }
-
-    #[test]
-    fn reported_totals_replace_only_matching_catalogue_estimates_without_adding_search_quotes() {
-        use orch_api_contract::usage::ReportedCost;
-        let make = |source| Priced {
-            found: Some(Found {
-                rate: plain(),
-                source,
-            }),
-            credits: Some("9.000000".into()),
-        };
-        let actual = ReportedCost {
-            amount: "0.0071".into(),
-            unit: Some("USD".into()),
-        };
-        let scale = Dec::parse("2").unwrap();
-        let mut catalogue = make(Source::Catalogue);
-        apply_reported_total(&mut catalogue, &actual, Some("USD"), scale);
-        assert_eq!(catalogue.credits.as_deref(), Some("0.014200"));
-        assert_eq!(catalogue.found.as_ref().unwrap().source, Source::Reported);
-        assert!(!Source::Reported.is_estimate());
-        for source in [Source::Provider, Source::RateCard] {
-            let mut explicit = make(source);
-            apply_reported_total(&mut explicit, &actual, Some("USD"), scale);
-            assert_eq!(explicit, make(source));
-        }
-        for (unit, catalogue_unit) in [
-            (Some("USD"), Some("EUR")),
-            (None, Some("USD")),
-            (Some("USD"), None),
-            (Some(""), Some("")),
-        ] {
-            let mut unknown = make(Source::Catalogue);
-            apply_reported_total(
-                &mut unknown,
-                &ReportedCost {
-                    amount: "0.0071".into(),
-                    unit: unit.map(str::to_owned),
-                },
-                catalogue_unit,
-                scale,
-            );
-            assert_eq!(unknown, make(Source::Catalogue));
-        }
-        for amount in ["-1", "NaN", "not-a-cost"] {
-            let mut invalid = make(Source::Catalogue);
-            apply_reported_total(
-                &mut invalid,
-                &ReportedCost {
-                    amount: amount.into(),
-                    ..actual.clone()
-                },
-                Some("USD"),
-                scale,
-            );
-            assert_eq!(invalid, make(Source::Catalogue));
-        }
-        let mut free = make(Source::Catalogue);
-        apply_reported_total(
-            &mut free,
-            &ReportedCost {
-                amount: "0".into(),
-                ..actual.clone()
-            },
-            Some("USD"),
-            scale,
-        );
-        assert_eq!(free.credits.as_deref(), Some("0.000000"));
-    }
-
-    #[test]
-    fn native_fetches_and_searches_have_independent_exact_prices_without_tier_multiplication() {
-        use orch_api_contract::usage::UsageMeasurement as Measured;
-        let rate = rate(
-            &json!({"input_per_mtok":"2.50","cached_input_per_mtok":"0.25","output_per_mtok":"15","tiers":{"fast":"2"},"web_search_per_call":"0.01","web_fetch_per_call":"0.00075"}),
-        );
-        let used = tokens(1_000_000, 0, 0);
-        assert_eq!(
-            credits_with_web_tools(
-                &rate,
-                &used,
-                None,
-                Some("fast"),
-                &Measured::Told { value: 2 },
-                &Measured::Told { value: 3 }
-            )
-            .as_deref(),
-            Some("5.022250")
-        );
-        assert_eq!(
-            credits_with_web_tools(
-                &rate,
-                &used,
-                None,
-                Some("fast"),
-                &Measured::Told { value: 0 },
-                &Measured::Told { value: 0 }
-            )
-            .as_deref(),
-            Some("5.000000")
-        );
-        assert!(
-            credits_with_web_tools(
-                &rate,
-                &used,
-                None,
-                None,
-                &Measured::Told { value: 0 },
-                &Measured::Unread
-            )
-            .is_none()
-        );
-        assert!(
-            credits_with_web_tools(
-                &rate,
-                &used,
-                None,
-                None,
-                &Measured::Told { value: 0 },
-                &Measured::Told { value: -1 }
-            )
-            .is_none()
-        );
-        let mut missing = rate.clone();
-        missing.web_fetch_per_call = None;
-        assert!(
-            credits_with_web_tools(
-                &missing,
-                &used,
-                None,
-                None,
-                &Measured::Told { value: 0 },
-                &Measured::Told { value: 1 }
-            )
-            .is_none()
-        );
-        assert_eq!(
-            credits_with_searches(&rate, &used, None, None, &Measured::Told { value: 2 })
-                .as_deref(),
-            Some("2.520000")
-        );
     }
 
     #[test]
@@ -1783,96 +997,6 @@ mod tests {
                 &UsageMeasurement::Told { value: 1 }
             ),
             None
-        );
-    }
-
-    #[test]
-    fn conditional_native_quotes_need_actual_counts_and_use_one_exact_total_without_a_tier_multiplier()
-     {
-        use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
-        let rate:Rate=serde_json::from_value(json!({"input_per_mtok":"0","cached_input_per_mtok":"0","output_per_mtok":"0","web_search_per_call":"99","tiers":{"fast":"9"}})).unwrap();
-        let mut timing = RequestTiming {
-            web_searches: UsageMeasurement::Told { value: 2 },
-            ..Default::default()
-        };
-        timing.native_prices=serde_json::from_value(json!({"web_search":{"currency":"USD","terms":[
-            {"amount":"0.007","counter":"web_searches"},
-            {"amount":"0.001","counter":"web_search_results","included":{"counter":"web_searches","each":10}}
-        ]}})).unwrap();
-        assert_eq!(
-            credits_with_native_prices(
-                &rate,
-                &Tokens::default(),
-                None,
-                Some("fast"),
-                &timing,
-                Some("USD"),
-                Dec::ONE
-            ),
-            None,
-            "result count is missing, not the requested maximum or number of citations"
-        );
-        timing.declared_counters.insert(
-            "web_search_results".into(),
-            UsageMeasurement::Told { value: 27 },
-        );
-        assert_eq!(
-            credits_with_native_prices(
-                &rate,
-                &Tokens::default(),
-                None,
-                Some("fast"),
-                &timing,
-                Some("USD"),
-                Dec::whole(2)
-            )
-            .as_deref(),
-            Some("0.042000")
-        );
-        assert_eq!(
-            credits_with_native_prices(
-                &rate,
-                &Tokens::default(),
-                None,
-                None,
-                &timing,
-                Some("EUR"),
-                Dec::ONE
-            ),
-            None
-        );
-        assert_eq!(
-            credits_with_timing(&rate, &Tokens::default(), None, None, &timing).as_deref(),
-            Some("198.000000"),
-            "the ordinary explicit-credit path ignores catalogue quote terms"
-        );
-        timing.native_prices.insert("web_search".into(), None);
-        assert_eq!(
-            credits_with_native_prices(
-                &rate,
-                &Tokens::default(),
-                None,
-                None,
-                &timing,
-                Some("USD"),
-                Dec::ONE
-            ),
-            None,
-            "automatic/native has no inferred engine price"
-        );
-        timing.web_searches = UsageMeasurement::Told { value: 0 };
-        assert_eq!(
-            credits_with_native_prices(
-                &rate,
-                &Tokens::default(),
-                None,
-                None,
-                &timing,
-                Some("USD"),
-                Dec::ONE
-            )
-            .as_deref(),
-            Some("0.000000")
         );
     }
 }

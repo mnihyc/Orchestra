@@ -42,7 +42,31 @@ pub async fn session_hold(
     user: &UserRow,
     session: Option<Id>,
 ) -> Result<Option<orch_authz::suspension::SecondStepHold>, EngineError> {
-    orch_authz::http_origin::session_hold(conn, user, session)
-        .await
-        .map_err(error)
+    if user.kind == "service" {
+        return Ok(None);
+    }
+    let set_up = configured(user);
+    if set_up {
+        match session {
+            None => return Ok(None),
+            Some(session)
+                if orch_db::queries::second_step::session_given_at(conn, session)
+                    .await?
+                    .is_some() =>
+            {
+                return Ok(None);
+            }
+            Some(_) => {}
+        }
+    }
+    let requirement = requirement(conn, user).await?;
+    if requirement.orgs.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(orch_authz::suspension::SecondStepHold {
+        orgs: requirement.orgs,
+        setup: !set_up,
+        sources: requirement.sources,
+        methods: Vec::new(),
+    }))
 }

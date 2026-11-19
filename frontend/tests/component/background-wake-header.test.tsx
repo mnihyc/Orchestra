@@ -20,7 +20,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(within(work).getByText('Review auth')).toBeVisible();
     expect(within(work).getByText(i18n.t('backgroundWake.cannotEnd'))).toBeVisible();
     expect(within(work).getByText(i18n.t('backgroundWake.willWake'))).toBeVisible();
-    expect(within(work).getByText(i18n.t('backgroundWake.overlapBilling'))).toBeVisible();
     await userEvent.click(within(work).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
     expect(setting).toHaveBeenCalledOnce();
     await userEvent.click(within(work).getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
@@ -34,7 +33,6 @@ it.each(['running', 'completed', 'failed', 'stopped', 'lost'] as const)('shows t
   expect(screen.getAllByText(i18n.t(`backgroundWake.states.${state}`)).length).toBeGreaterThan(0);
   expect(screen.queryByRole('button', { name: 'End Build web' }) !== null).toBe(state === 'running');
   if (state === 'lost') { expect(screen.getByText(i18n.t('backgroundWake.lost'))).toBeVisible(); expect(screen.queryByText(i18n.t('backgroundWake.willWake'))).not.toBeInTheDocument(); }
-  expect(screen.queryByText(i18n.t('backgroundWake.overlapBilling')) !== null).toBe(state === 'running');
 });
 
 it('shows effective and pending values without offering management or End to a viewer', () => {
@@ -75,12 +73,4 @@ it.each(['ambiguous source', 'lost source', 'exact run'] as const)('keeps a late
   show(<NativeBackgroundCommands roster={backgroundRoster({ items })} represented={[task]} mayEnd onEnd={vi.fn()} />);
   expect(screen.getByText('Later run')).toBeVisible();
   expect(screen.queryByText('First run') !== null).toBe(association === 'ambiguous source');
-});
-
-it.each(['en', 'zh-CN'] as const)('keeps a program-reported unavailable terminal cause beside its recorded work (%s)', async (locale) => {
-  await setLocale(locale);
-  const reason = 'This Codex version cannot end background terminals.';
-  show(<BackgroundWorkLine status={backgroundWake({ tasks: [backgroundWork({ can_end: false })] })} endUnavailableReason={reason} canManage mayEnd onSetting={vi.fn()} onEnd={vi.fn()} />);
-  expect(screen.getByText(i18n.t('running.unavailableWithReason', { reason }), { exact: true })).toBeVisible();
-  expect(screen.queryByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: 'Build web' }) })).not.toBeInTheDocument();
 });

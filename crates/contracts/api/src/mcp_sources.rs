@@ -16,10 +16,6 @@ pub enum Source {
     Subject,
     /// The owning environment when the native change also requires Environment Manage.
     Parent,
-    /// The actual environment whose harness reads this protected definition.
-    ImportEnvironment,
-    /// The actual physical recipient of the protected native copy.
-    ImportMachine,
     /// Native environment and physical reference payloads.
     References,
     /// Group payloads in native permission metadata.
@@ -229,60 +225,4 @@ pub const UPDATE: Declaration<Source> = Declaration {
             cardinality: Cardinality::Collection,
         },
     ],
-};
-
-/// Existing-definition imports retain the same stored subject and optional native response.
-pub const IMPORT_FACETS: [FacetSpec; 11] = [
-    UPDATE_FACETS[0],
-    UPDATE_FACETS[1],
-    UPDATE_FACETS[2],
-    UPDATE_FACETS[3],
-    UPDATE_FACETS[4],
-    UPDATE_FACETS[5],
-    UPDATE_FACETS[6],
-    UPDATE_FACETS[7],
-    UPDATE_FACETS[8],
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Environment)],
-        TargetResolver::ResolvedCollection("mcp_import_environment"),
-    ),
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Machine)],
-        TargetResolver::ResolvedCollection("mcp_import_machine"),
-    ),
-];
-const IMPORT_BINDINGS: &[Binding<Source>] = &[
-    UPDATE.bindings[0],
-    UPDATE.bindings[1],
-    UPDATE.bindings[2],
-    UPDATE.bindings[3],
-    UPDATE.bindings[4],
-    UPDATE.bindings[5],
-    UPDATE.bindings[6],
-    UPDATE.bindings[7],
-    UPDATE.bindings[8],
-    Binding {
-        source: Source::ImportEnvironment,
-        target: TargetResolver::ResolvedCollection("mcp_import_environment"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::Collection,
-    },
-    Binding {
-        source: Source::ImportMachine,
-        target: TargetResolver::ResolvedCollection("mcp_import_machine"),
-        usage: FacetUsage::Required,
-        cardinality: Cardinality::Collection,
-    },
-];
-/// One declaration for taking the actual current native source again.
-pub const REIMPORT: Declaration<Source> = Declaration {
-    operation: "McpServerReimport",
-    bindings: IMPORT_BINDINGS,
-};
-/// One declaration for selecting the particular offering a manager reviewed.
-pub const OFFERING_USE: Declaration<Source> = Declaration {
-    operation: "McpOfferingUse",
-    bindings: IMPORT_BINDINGS,
 };

@@ -33,7 +33,6 @@ vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: null, c
 vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: vi.fn(), setHideHistory: vi.fn() }) }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: () => <textarea aria-label="Thread draft" /> }));
 vi.mock('@/features/composer/QueueTray', () => ({ QueueTray: () => null }));
-vi.mock('@/features/schedules/Schedules', () => ({ PendingAgentSchedules: () => null }));
 vi.mock('@/features/thread/ConnectionBanner', () => ({ ConnectionBanner: () => null }));
 vi.mock('@/features/thread/LockBanner', () => ({ LockBanner: () => <p>Native lock progress</p> }));
 vi.mock('@/features/thread/CallRecovery', () => ({ ThreadCallRecovery: () => <p>Native call recovery</p> }));

@@ -11,7 +11,7 @@ import { Plugin, Selection } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { Dropcursor, Gapcursor, UndoRedo } from '@tiptap/extensions';
 import { EditorContent, useEditor } from '@tiptap/react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 
@@ -57,14 +57,10 @@ import { commentOnSelection, TextBar, linkFieldOf } from '@/features/documents/T
 import { togetherExtension } from '@/features/documents/Together';
 import type { Document, DocumentBlock } from '@/generated/api-types';
 import { documentStateNow, useDocumentState } from '@/realtime/stores/document';
-import { referenceChoices, type ReferenceContext } from '@/features/documents/referenceChoices';
-
+import { referenceChoices } from '@/features/documents/referenceChoices';
 import { ContextMenu } from '@/ui/ContextMenu';
 
 import './editor.css';
-
-/** The committed reader belongs to the live editor instance and retires with it. */
-const referenceContexts = new WeakMap<Editor, ReferenceContext>();
 
 /** How many blocks a page has before it is laid out where it is looked at, and not all at once. */
 const LARGE_PAGE = 300;
@@ -176,6 +172,9 @@ function LoadedEditor({ document: doc, editable, fixed, inspection = false, onRe
   const marks = useDocumentMarksStore();
   const { t } = useTranslation();
   const [pasteNotice, setPasteNotice] = useState<PasteNotice | null>(null);
+  const shown = useViewShown();
+  const referenceContext = useRef({ document: doc, enabled: editable && !inspection && shown });
+  referenceContext.current = { document: doc, enabled: editable && !inspection && shown };
 
   const extensions = useMemo(
     () => [
@@ -186,7 +185,7 @@ function LoadedEditor({ document: doc, editable, fixed, inspection = false, onRe
       Dropcursor.configure({ width: 2, class: 'ProseMirror-dropcursor' }),
       Gapcursor,
       Suggestions.configure({ people: async (query, cursor) => await queryClient.query({ ...documentReadersQuery(doc.id, query, cursor), staleTime: 0 }),
-        places: (query, editor) => referenceChoices(() => referenceContexts.get(editor), query) }),
+        places: (query) => referenceChoices(() => referenceContext.current, query) }),
       Habits,
       PasteMarkdown.configure({ report: setPasteNotice, convert: (format, text) => convertText(doc.id, format, text) }),
       ...(inspection ? [] : [Keys]),
@@ -251,11 +250,6 @@ function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, edit
 }) {
   const marks = useDocumentMarksStore();
   const { t } = useTranslation();
-  const shown = useViewShown();
-  useLayoutEffect(() => {
-    referenceContexts.set(editor, { document: doc, enabled: editable && !inspection && shown });
-    return () => { referenceContexts.delete(editor); };
-  }, [editor, doc, editable, inspection, shown]);
   useEffect(() => bindEditorMarks(editor, marks), [editor, marks]);
 
   const fileInput = useRef<HTMLInputElement>(null);
@@ -274,7 +268,7 @@ function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, edit
       handlePaste: (view, event) => {
         const files = event.clipboardData?.files;
         if (!view.editable || files === undefined || files.length === 0) return false;
-        event.preventDefault(); putFiles(Array.from(files)); return true;
+        event.preventDefault(); putFiles(files); return true;
       },
       handleDrop: (view, event) => {
         if (!view.editable || event.dataTransfer === null || !carriesFiles(event.dataTransfer) && !carriesReference(event.dataTransfer)) return false;
@@ -314,7 +308,7 @@ function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, edit
         {pasteNotice.text}
       </InlineAlert>}
       {(editable || uploads.blocked || fileDrops.blocked) && <div className="mb-2 flex flex-col gap-2">
-        <input ref={fileInput} type="file" multiple hidden data-document-files aria-label={t('uploads.choose')} onChange={(event) => { if (event.target.files !== null) putFiles(Array.from(event.target.files)); event.target.value = ''; }} />
+        <input ref={fileInput} type="file" multiple hidden data-document-files aria-label={t('uploads.choose')} onChange={(event) => { if (event.target.files !== null) putFiles(event.target.files); event.target.value = ''; }} />
         {editable && <span className="inline-flex items-center gap-1"><AttachButton help="documents" label={t('documents.files.attachTo', { name: doc.title || t('documents.page.untitled') })} onPress={() => { if (fileInput.current !== null) { fileInput.current.accept = ''; fileInput.current.click(); } }} /><Hint id="people-mentions" popover /></span>}
         <UploadChips queue={uploads} />
         {fileDrops.progress}

@@ -20,9 +20,7 @@ import { EventCredits } from '@/features/usage/Amounts';
 import { type Span, type UsageScope, type UsageSearch, recordsParams } from '@/features/usage/search';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
-import { RequestFacts, TokenFacts } from './RequestFacts';
 import { tierAvailable, tierLabel } from './tier';
-import { purposeLabel } from './words';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber, formatTokens } from '@/lib/format';
 import { IconButton } from '@/ui/IconButton';
@@ -45,8 +43,6 @@ export function stepReached(rate: Rate, contextTokens: number | null): number | 
 function RateWords({ event }: { event: UsageEvent }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
-  if(event.timing?.service_usage!==undefined && event.timing.service_usage!==null) return null;
-  if (event.rate_source === 'reported') return <p>{t('usage.records.fromReported')}</p>;
   if (event.rate === null || event.rate_source === null) return <p>{t('usage.records.noRate')}</p>;
   const rate = event.rate;
   const step = stepReached(rate, event.context_tokens);
@@ -93,11 +89,9 @@ function RecordButton({ event }: { event: UsageEvent }) {
           <dt>{t('usage.records.reportedBy')}</dt>
           <dd className="text-text">{t(`usage.records.origin.${event.origin}`)}</dd>
         </dl>
-        <TokenFacts event={event} />
-        <RequestFacts event={event} details />
-        {(event.timing?.service_usage===undefined || event.timing.service_usage===null) && <div className="border-t border-border pt-2">
+        <div className="border-t border-border pt-2">
           <RateWords event={event} />
-        </div>}
+        </div>
       </div>
     </Popover>
   );
@@ -110,7 +104,7 @@ function Thread({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
   if (event.thread === null) {
     return (
       <span className="flex min-w-0 flex-col">
-        <span className="wrap-anywhere text-text">{event.purpose==='summary' || event.purpose==='embeddings'?t(event.purpose==='embeddings'?'usage.records.embeddings':'usage.records.summary'):purposeLabel(event.purpose,t)}</span>
+        <span className="wrap-anywhere text-text">{t(event.purpose === 'embeddings' ? 'usage.records.embeddings' : 'usage.records.summary')}</span>
         {!(scope.kind==='node' && scope.id===event.topic.id) && <span className="wrap-anywhere text-sm text-text-muted">{topic}</span>}
       </span>
     );
@@ -143,7 +137,7 @@ function ModelLine({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
   return (
     <span className="flex min-w-0 flex-col">
       <span className="wrap-anywhere text-text">
-        {event.timing?.service_usage?.offering??modelDisplayName(event.model_display,t)}
+        {modelDisplayName(event.model_display,t)}
       </span>
       {parts.map((part)=><span key={part.name} className="flex flex-wrap gap-x-2 gap-y-1 text-sm wrap-anywhere text-text-muted"><span>{part.name}</span><span>{part.value}</span></span>)}
     </span>
@@ -171,19 +165,16 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
       id: 'thread',
       header: t('usage.records.thread'),
       cell: (event, shown) => {
-        const tokensShown = shown.has('tokens');
         const folded = [
           ...(shown.has('when') ? [] : [<RelativeTime key="when" at={event.at} />]),
           // One's own records are all one's own.
           ...(shown.has('who') || scope.kind === 'me' ? [] : [event.user === null ? t('usage.key.nobody') : event.user.display_name]),
-          ...(shown.has('model') ? [] : [event.timing?.service_usage?.offering??modelDisplayName(event.model_display,t)]),
-          ...(tokensShown || event.timing?.service_usage!==undefined && event.timing.service_usage!==null ? [] : [formatTokens(event.tokens.total_tokens, locale)]),
+          ...(shown.has('model') ? [] : [modelDisplayName(event.model_display,t)]),
+          ...(shown.has('tokens') ? [] : [formatTokens(event.tokens.total_tokens, locale)]),
         ];
         return (
-          <div className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 flex-col">
             <Thread event={event} scope={scope} />
-            <RequestFacts event={event} speed />
-            {!tokensShown && <TokenFacts event={event} />}
             {folded.length > 0 && (
               <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
                 {folded.map((part, at) => (
@@ -192,7 +183,7 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
                 ))}
               </span>
             )}
-          </div>
+          </span>
         );
       },
     },
@@ -207,17 +198,16 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
             cell: (event: UsageEvent) => (event.user === null ? <span className="text-text-muted">{t('usage.key.nobody')}</span> : <UserChip user={event.user} size={24} />),
           },
         ]),
-    { id: 'model', header: rows.some((row)=>row.timing?.service_usage!==undefined && row.timing.service_usage!==null)?t('usagePerf.choices.splits.offering.name'):t('usage.records.model'), from: 'md', cell: (event) => <ModelLine event={event} scope={scope} /> },
+    { id: 'model', header: t('usage.records.model'), from: 'md', cell: (event) => <ModelLine event={event} scope={scope} /> },
     {
       id: 'tokens',
       header: t('usage.records.tokens'),
       from: 'md',
       align: 'end',
       cell: (event) => (
-        <div className="tabular-nums" title={event.context_tokens === null ? undefined : t('usage.records.prompt', { tokens: formatNumber(event.context_tokens, locale) })}>
-          {event.timing?.service_usage!==undefined && event.timing.service_usage!==null?'–':formatTokens(event.tokens.total_tokens, locale)}
-          <TokenFacts event={event} />
-        </div>
+        <span className="tabular-nums" title={event.context_tokens === null ? undefined : t('usage.records.prompt', { tokens: formatNumber(event.context_tokens, locale) })}>
+          {formatTokens(event.tokens.total_tokens, locale)}
+        </span>
       ),
     },
     {
@@ -238,7 +228,7 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
     <Section id="usage-records" title={t('usage.records.title')} className={className}>
       {depth==='summary' && scope.kind==='node' && <p className="text-sm text-text-muted">{t('usage.records.ownOnly')}</p>}
       {query.isPending ? (
-        <SkeletonRows read={query} rows={5} />
+        <SkeletonRows rows={5} />
       ) : query.isError && rows.length === 0 ? (
         <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />
       ) : rows.length === 0 ? (

@@ -70,7 +70,7 @@ pub enum Actor<'a> {
     },
 }
 
-/// Organization operations. Delete and MoveOut consume a complete native deletion plan.
+/// Organization operations. Only Delete consumes a separately obtained complete deletion plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
@@ -80,8 +80,6 @@ pub enum Command {
     Copy,
     /// Move an item or a complete tree, optionally changing its basename.
     Move,
-    /// Copy into another root and delete the source under the same complete native plan.
-    MoveOut,
     /// Rename one text document under its ordinary Edit authority.
     Rename,
     /// Soft-delete the complete selected trees.

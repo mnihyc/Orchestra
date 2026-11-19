@@ -22,7 +22,6 @@ use crate::{
 };
 
 pub mod operation;
-pub mod touched;
 
 /// Explicit writer waiting precedes the only filesystem effect; the last phase releases writers.
 pub const PHASES: [Phase; 4] = [

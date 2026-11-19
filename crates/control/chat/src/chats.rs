@@ -5,19 +5,18 @@
 //! messages, and asks the access engine once what the caller may do in it.
 //! A direct or a group chat that the caller may not read does not exist for
 //! them. The rest is the making of direct and group chats, a group's name,
-//! and who is in it: current managers change its name, home and membership,
-//! and hand management to another member before the last manager leaves. Somebody from outside the
+//! and who is in it: any member adds another member of the root org, and may
+//! leave; the person who made it removes others; somebody from outside the
 //! org comes in as a guest only when the caller may bring an outsider in, and
 //! sees that chat and nothing else of the tree.
 
-use crate::following;
 use crate::messages;
 use crate::notifications;
 use crate::{Acting, Error, Why};
 use chrono::{DateTime, Utc};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::permissions::Permission;
-use orch_api_contract::chats::{CHAT_NAME_MAX_CHARS, ChatSystemEvent, ChatVisibility};
+use orch_api_contract::chats::{CHAT_NAME_MAX_CHARS, ChatSystemEvent};
 use orch_authz::chats::{Cannot, ChatPolicy, Standing};
 use orch_authz::epoch;
 use orch_db::audit::{self, Actor, Entry};
@@ -86,7 +85,7 @@ impl Loaded {
             Err(Cannot::Closed) => Err(Error::NotAllowed(Why::Closed)),
             Err(Cannot::NoPermission) => Err(Error::Lacks {
                 // The node of a node's chat; the root org for the chats among its people.
-                node: self.row.home(),
+                node: self.row.node_id.unwrap_or(self.row.org_id),
                 permission: Permission::ChatInteract,
             }),
             Err(Cannot::Inspecting) => Err(Error::Inspecting),
@@ -95,42 +94,11 @@ impl Loaded {
 
     /// Locks the chat's row and reads it again, as a change needs it. A
     /// writer that also needs the thread's sequence takes that first.
-    pub async fn lock(&mut self, conn: &mut Conn, act: &Acting<'_>) -> Result<(), Error> {
-        let row = rows::lock(conn, self.row.id)
+    pub async fn lock(&mut self, conn: &mut Conn) -> Result<(), Error> {
+        self.row = rows::lock(conn, self.row.id)
             .await?
             .ok_or(Error::NotFound)?;
-        *self = read_selected(conn, act, row).await?;
         Ok(())
-    }
-
-    /// A live flag from the native membership snapshot, never the group's historic creator.
-    #[must_use]
-    pub fn is_manager(&self, user: Id) -> bool {
-        self.row.kind == rows::KIND_GROUP
-            && self
-                .members
-                .iter()
-                .any(|row| row.user_id == user && row.is_in() && row.manager)
-    }
-
-    /// Group management through the current flag or existing native administrative reach.
-    pub fn ensure_manager(&self, act: &Acting<'_>) -> Result<(), Error> {
-        ensure_group(self)?;
-        if self.is_manager(act.user()) || self.standing.manage {
-            Ok(())
-        } else {
-            Err(Error::ManagerRequired)
-        }
-    }
-
-    /// Management remains available to an administrative reader without silently joining them.
-    pub fn ensure_manage_change(&self, act: &Acting<'_>) -> Result<(), Error> {
-        self.ensure_manager(act)?;
-        if self.standing.sending == Err(Cannot::Inspecting) {
-            Ok(())
-        } else {
-            self.ensure_send()
-        }
     }
 
     /// The people in the chat who are guests, who are not members of the org.
@@ -249,9 +217,6 @@ pub struct PreparedOpen {
     actor: Id,
     others: Vec<Id>,
     name: Option<String>,
-    home: Option<Id>,
-    visibility: Option<ChatVisibility>,
-    copy_source: Option<Id>,
 }
 
 impl PreparedOpen {
@@ -259,11 +224,6 @@ impl PreparedOpen {
     #[must_use]
     pub fn root(&self) -> Id {
         self.root
-    }
-    /// Actual native home used by the source producer, including the root fallback.
-    #[must_use]
-    pub fn home(&self) -> Id {
-        self.home.unwrap_or(self.root)
     }
 }
 
@@ -292,31 +252,20 @@ pub fn direct_key(one: Id, other: Id) -> String {
 pub(crate) async fn tell_members(
     conn: &mut Conn,
     chat: Id,
+    seq: Seq,
     at: DateTime<Utc>,
     members: &[Id],
 ) -> Result<(), Error> {
-    let Some(row) = rows::chat(conn, chat).await? else {
-        return Ok(());
-    };
     notifications::tell_users(
         conn,
         members,
         &UserEvent::Chat {
             chat_id: chat,
-            seq: row.last_message_seq,
-            at: Time::new(row.last_message_at.unwrap_or(at)),
+            seq,
+            at: Time::new(at),
         },
     )
-    .await?;
-    let current = rows::effective_members(&rows::members(conn, chat).await?, at);
-    let mut readers =
-        orch_authz::chats::readers_among(conn, &row, &current, members, Time::new(at)).await?;
-    readers.sort_unstable();
-    readers.dedup();
-    for (user, state) in following::member_states(conn, &row, &readers).await? {
-        notifications::tell_users(conn, &[user], &UserEvent::ChatState { state }).await?;
-    }
-    Ok(())
+    .await
 }
 
 async fn audit_chat(
@@ -335,9 +284,6 @@ async fn audit_chat(
         summary,
     );
     entry.org_id = Some(chat.org_id);
-    if chat.kind == rows::KIND_GROUP {
-        entry.node_id = Some(chat.home());
-    }
     entry.details = details;
     audit::append(conn, &entry, act.origin, act.now).await?;
     Ok(())
@@ -370,85 +316,8 @@ pub async fn prepare_open(
     users: &[Id],
     name: Option<&str>,
 ) -> Result<PreparedOpen, Error> {
-    prepare_open_at(conn, act, root, users, name, None).await
-}
-
-/// Prepare the same group opening at a factual home within its keeping tree.
-pub async fn prepare_open_at(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    root: Id,
-    users: &[Id],
-    name: Option<&str>,
-    home: Option<Id>,
-) -> Result<PreparedOpen, Error> {
-    prepare_open_visible(conn, act, root, users, name, home, None).await
-}
-
-/// The same prepared native opening, with an explicit group visibility.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one native opening and its optional group choice"
-)]
-pub async fn prepare_open_visible(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    root: Id,
-    users: &[Id],
-    name: Option<&str>,
-    home: Option<Id>,
-    visibility: Option<ChatVisibility>,
-) -> Result<PreparedOpen, Error> {
-    prepare_open_native(conn, act, root, users, name, home, visibility, None).await
-}
-
-/// A source-qualified copy starts with its maker alone, without copying the source roster.
-/// Ordinary group creation retains its existing requirement to name another person.
-pub async fn prepare_copy(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    source: Id,
-    root: Id,
-    home: Id,
-    name: &str,
-) -> Result<PreparedOpen, Error> {
-    prepare_open_native(
-        conn,
-        act,
-        root,
-        &[],
-        Some(name),
-        Some(home),
-        None,
-        Some(source),
-    )
-    .await
-}
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one native opening and its exact current copy source"
-)]
-async fn prepare_open_native(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    root: Id,
-    users: &[Id],
-    name: Option<&str>,
-    home: Option<Id>,
-    visibility: Option<ChatVisibility>,
-    copy_source: Option<Id>,
-) -> Result<PreparedOpen, Error> {
-    if let Some(source) = copy_source {
-        let source = load(conn, act, source, Mode::Read).await?;
-        if source.row.kind != rows::KIND_GROUP {
-            return Err(Error::Unsupported("only a group chat is duplicated"));
-        }
-    }
     check_opening_root(conn, act, root).await?;
     let me = act.user();
-    if let Some(home) = home {
-        check_home(conn, act, root, home).await?;
-    }
     let name = name_of(name)?;
     let mut others: Vec<Id> = Vec::new();
     for user in users {
@@ -456,7 +325,7 @@ async fn prepare_open_native(
             others.push(*user);
         }
     }
-    if others.is_empty() && copy_source.is_none() {
+    if others.is_empty() {
         return Err(Error::invalid("user_ids", "name at least one other person"));
     }
     if !rows::lock_opening_root(conn, root).await? {
@@ -478,7 +347,7 @@ async fn prepare_open_native(
             return Err(Error::NotAllowed(Why::Closed));
         }
     }
-    if !(others.len() == 1 && name.is_none() && home.is_none() && visibility.is_none()) {
+    if !(others.len() == 1 && name.is_none()) {
         let most = group_max(conn).await?;
         if i64::try_from(others.len() + 1).unwrap_or(i64::MAX) > most {
             return Err(Error::NotAllowed(Why::Full));
@@ -489,40 +358,7 @@ async fn prepare_open_native(
         actor: me,
         others,
         name,
-        home,
-        visibility,
-        copy_source,
     })
-}
-
-/// The home is a live node of this keeping root; its chat View is the mover's ordinary right.
-async fn check_home(conn: &mut Conn, act: &Acting<'_>, root: Id, home: Id) -> Result<(), Error> {
-    let graph = orch_authz::engine::Graph::load(conn, &[home]).await?;
-    let site = graph.site_of(home).ok_or(Error::NotFound)?;
-    let decision = orch_authz::nodes::check(
-        conn,
-        act.principal,
-        home,
-        Permission::ChatView,
-        orch_authz::Act::Use,
-        orch_authz::Policy::default(),
-    )
-    .await?;
-    if !decision.is_allowed() {
-        return Err(Error::Lacks {
-            node: home,
-            permission: Permission::ChatView,
-        });
-    }
-    if site.root != Some(root) {
-        return Err(Error::MoveCrossesOrg);
-    }
-    if let Some(node) = site.archived_node {
-        return Err(Error::Archived { node });
-    }
-    // A node cannot move or be removed while the same prepared group write is applied.
-    rows::lock_homes(conn, &site.path.unwrap_or_default()).await?;
-    Ok(())
 }
 
 async fn check_opening_root(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Result<(), Error> {
@@ -556,15 +392,12 @@ pub async fn check_open_preparation(
     if act.user() != prepared.actor {
         return Err(Error::NotFound);
     }
-    let _ = prepare_open_native(
+    let _ = prepare_open(
         conn,
         act,
         prepared.root,
         &prepared.others,
         prepared.name.as_deref(),
-        prepared.home,
-        prepared.visibility,
-        prepared.copy_source,
     )
     .await?;
     Ok(())
@@ -580,11 +413,7 @@ pub async fn apply_open(
     if act.user() != prepared.actor {
         return Err(Error::NotFound);
     }
-    if prepared.others.len() == 1
-        && prepared.name.is_none()
-        && prepared.home.is_none()
-        && prepared.visibility.is_none()
-    {
+    if prepared.others.len() == 1 && prepared.name.is_none() {
         open_direct(conn, act, prepared.root, prepared.others[0]).await
     } else {
         open_group(
@@ -593,8 +422,6 @@ pub async fn apply_open(
             prepared.root,
             &prepared.others,
             prepared.name.as_deref(),
-            prepared.home,
-            prepared.visibility.unwrap_or_default(),
         )
         .await
     }
@@ -655,7 +482,7 @@ async fn open_direct(
     }
     rows::stamp_state(conn, chat.id, seq).await?;
     rows::notify(conn, chat.id, seq).await?;
-    tell_members(conn, chat.id, act.now, &[me, other]).await?;
+    tell_members(conn, chat.id, seq, act.now, &[me, other]).await?;
     Ok(Opened {
         chat: rows::chat(conn, chat.id).await?.unwrap_or(chat),
         created: true,
@@ -668,11 +495,9 @@ async fn open_group(
     root: Id,
     others: &[Id],
     name: Option<&str>,
-    home: Option<Id>,
-    visibility: ChatVisibility,
 ) -> Result<Opened, Error> {
     let me = act.user();
-    let chat = rows::insert_chat_at(
+    let chat = rows::insert_chat(
         conn,
         &NewChat {
             id: orch_types::new_id(),
@@ -683,11 +508,9 @@ async fn open_group(
             created_by: me,
             at: act.now,
         },
-        home,
     )
     .await?
     .ok_or_else(|| Error::Internal("a group chat was not made".to_owned()))?;
-    rows::set_visibility(conn, chat.id, visibility.as_str()).await?;
     let page = orch_db::queries::access::PageKey::new("chat", chat.id, "live");
     orch_db::queries::access::insert_entry(
         conn,
@@ -726,7 +549,6 @@ async fn open_group(
         )
         .await?;
     }
-    rows::set_manager(conn, chat.id, me, true, seq, act.now).await?;
     rows::stamp_state(conn, chat.id, seq).await?;
     let line = messages::system(
         conn,
@@ -751,7 +573,7 @@ async fn open_group(
     )
     .await?;
     rows::notify(conn, chat.id, line.seq_created).await?;
-    tell_members(conn, chat.id, act.now, &everyone).await?;
+    tell_members(conn, chat.id, seq, act.now, &everyone).await?;
     Ok(Opened {
         chat: rows::chat(conn, chat.id).await?.unwrap_or(chat),
         created: true,
@@ -769,16 +591,13 @@ pub async fn group_max(conn: &mut Conn) -> Result<i64, Error> {
     Ok(
         orch_settings::get::<i64>(conn, Place::System, "chat.group_max_members")
             .await?
-            .unwrap_or(
-                orch_settings_contract::registry::get("chat.group_max_members")
-                    .and_then(|definition| definition.default_value())
-                    .and_then(|value| value.as_i64())
-                    .ok_or_else(|| {
-                        Error::Internal("the group size default is not declared".into())
-                    })?,
-            ),
+            .unwrap_or(DEFAULT_GROUP_MAX),
     )
 }
+
+/// How many people a group holds where the system says nothing: what the
+/// setting ships as.
+const DEFAULT_GROUP_MAX: i64 = 10;
 
 // ------------------------------------------------------------------ a group's name and people
 
@@ -793,7 +612,8 @@ fn ensure_group(loaded: &Loaded) -> Result<(), Error> {
     }
 }
 
-/// A person leaves only a group they currently belong to.
+/// Only somebody who is in the group may change it, and a guest may not add
+/// anybody.
 fn ensure_in(loaded: &Loaded, act: &Acting<'_>) -> Result<(), Error> {
     if loaded.has(act.user()) || loaded.standing.moderate {
         Ok(())
@@ -806,9 +626,7 @@ fn ensure_in(loaded: &Loaded, act: &Acting<'_>) -> Result<(), Error> {
 #[derive(Debug, Clone)]
 pub struct PreparedRename {
     name: Option<String>,
-    home: Option<Id>,
     unchanged: bool,
-    visibility: String,
 }
 
 /// The complete native rename prefix, with no sequence or persistent mutation.
@@ -818,60 +636,14 @@ pub async fn prepare_rename(
     loaded: &mut Loaded,
     name: Option<&str>,
 ) -> Result<PreparedRename, Error> {
-    prepare_update(conn, act, loaded, Some(name), None).await
-}
-
-/// The native group patch, with explicit absent/null fields and actual destination authority.
-pub async fn prepare_update(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    loaded: &mut Loaded,
-    name: Option<Option<&str>>,
-    home: Option<Option<Id>>,
-) -> Result<PreparedRename, Error> {
-    prepare_update_visible(conn, act, loaded, name, home, None).await
-}
-
-/// All group controls share the same fresh manager and locked native patch.
-pub async fn prepare_update_visible(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    loaded: &mut Loaded,
-    name: Option<Option<&str>>,
-    home: Option<Option<Id>>,
-    visibility: Option<ChatVisibility>,
-) -> Result<PreparedRename, Error> {
     ensure_group(loaded)?;
-    loaded.ensure_manage_change(act)?;
-    loaded.lock(conn, act).await?;
-    loaded.ensure_manage_change(act)?;
-    let name = match name {
-        Some(name) => name_of(name)?,
-        None => loaded.row.name.clone(),
-    };
-    let home = match home {
-        None => loaded.row.home_id,
-        Some(home) => {
-            check_home(
-                conn,
-                act,
-                loaded.row.org_id,
-                home.unwrap_or(loaded.row.org_id),
-            )
-            .await?;
-            home.filter(|id| *id != loaded.row.org_id)
-        }
-    };
-    let visibility = visibility
-        .map(|value| value.as_str().to_owned())
-        .unwrap_or_else(|| loaded.row.visibility.clone());
+    ensure_in(loaded, act)?;
+    loaded.ensure_send()?;
+    let name = name_of(name)?;
+    loaded.lock(conn).await?;
     Ok(PreparedRename {
-        unchanged: loaded.row.name == name
-            && loaded.row.home_id == home
-            && loaded.row.visibility == visibility,
+        unchanged: loaded.row.name == name,
         name,
-        home,
-        visibility,
     })
 }
 
@@ -885,72 +657,33 @@ pub async fn apply_rename(
     if prepared.unchanged {
         return Ok(loaded.row.clone());
     }
-    let visibility_changed = loaded.row.visibility != prepared.visibility;
     let name = prepared.name;
-    let moved = loaded.row.home_id != prepared.home;
-    let renamed = loaded.row.name != name;
-    let old_home = loaded.row.home();
     let seq = take(conn, loaded.id()).await?;
-    rows::update_group(conn, loaded.id(), name.as_deref(), prepared.home).await?;
-    rows::set_visibility(conn, loaded.id(), &prepared.visibility).await?;
+    rows::rename(conn, loaded.id(), name.as_deref()).await?;
     rows::stamp_state(conn, loaded.id(), seq).await?;
-    if visibility_changed {
-        audit_chat(
-            conn,
-            act,
-            &loaded.row,
-            orch_db::audit::action!(AuditAction::ChatVisibilityChanged),
-            "changed a group chat visibility",
-            serde_json::json!({"visibility":prepared.visibility}),
-        )
-        .await?;
-        let epoch = epoch::bump(conn).await?;
-        sequences::notify_epoch(conn, epoch).await?;
-        orch_db::queries::hierarchy::stamp(conn, loaded.row.home()).await?;
-    }
-    if renamed {
-        messages::system(
-            conn,
-            &loaded.row,
-            seq,
-            &messages::Line {
-                event: ChatSystemEvent::Renamed,
-                by: Some(act.user()),
-                user: None,
-                name: name.as_deref(),
-            },
-            act.now,
-        )
-        .await?;
-        audit_chat(
-            conn,
-            act,
-            &loaded.row,
-            orch_db::audit::action!(AuditAction::ChatRenamed),
-            "renamed a group chat",
-            serde_json::json!({"name":name}),
-        )
-        .await?;
-    }
-    if moved {
-        let new_home = prepared.home.unwrap_or(loaded.row.org_id);
-        audit_chat(
-            conn,
-            act,
-            &loaded.row,
-            orch_db::audit::action!(AuditAction::ChatMoved),
-            "moved a group chat",
-            serde_json::json!({"from":old_home,"to":new_home}),
-        )
-        .await?;
-        for home in std::collections::BTreeSet::from([old_home, new_home]) {
-            orch_db::queries::hierarchy::stamp(conn, home).await?;
-        }
-        let epoch = epoch::bump(conn).await?;
-        sequences::notify_epoch(conn, epoch).await?;
-    }
-    rows::notify(conn, loaded.id(), seq).await?;
-    tell_members(conn, loaded.id(), act.now, &loaded.present()).await?;
+    let line = messages::system(
+        conn,
+        &loaded.row,
+        seq,
+        &messages::Line {
+            event: ChatSystemEvent::Renamed,
+            by: Some(act.user()),
+            user: None,
+            name: name.as_deref(),
+        },
+        act.now,
+    )
+    .await?;
+    audit_chat(
+        conn,
+        act,
+        &loaded.row,
+        orch_db::audit::action!(AuditAction::ChatRenamed),
+        "renamed a group chat",
+        serde_json::json!({ "name": name }),
+    )
+    .await?;
+    rows::notify(conn, loaded.id(), line.seq_created).await?;
     let row = rows::chat(conn, loaded.id())
         .await?
         .ok_or(Error::NotFound)?;
@@ -969,7 +702,8 @@ pub async fn rename(
     apply_rename(conn, act, loaded, prepared).await
 }
 
-/// Puts a person in a group through its current manager; somebody from outside it comes in as a guest
+/// Puts a person in a group. A member of the root org is let in by any member
+/// of the group who is one too; somebody from outside it comes in as a guest
 /// only when the caller may bring an outsider in
 /// ([`orch_authz::chats::may_bring_in_outsider`], with `owners_name_outsiders`
 /// the policy `sharing.allow_external` there).
@@ -992,7 +726,14 @@ pub async fn can_add_member(
     owners_name_outsiders: bool,
 ) -> Result<bool, Error> {
     ensure_group(loaded)?;
-    loaded.ensure_manage_change(act)?;
+    ensure_in(loaded, act)?;
+    if matches!(
+        loaded.standing.reading,
+        Some(orch_authz::chats::Reading::Guest)
+    ) {
+        return Err(Error::NotFound);
+    }
+    loaded.ensure_send()?;
     let people = rows::standing(conn, loaded.row.org_id, &[user]).await?;
     let person = people
         .first()
@@ -1044,9 +785,8 @@ pub async fn prepare_add_member(
     if expires_at.is_some_and(|end| end <= act.now) {
         return Err(Error::invalid("expires_at", "must be in the future"));
     }
-    let _ = can_add_member(conn, act, loaded, user, owners_name_outsiders).await?;
-    loaded.lock(conn, act).await?;
     let guest = can_add_member(conn, act, loaded, user, owners_name_outsiders).await?;
+    loaded.lock(conn).await?;
     let members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
     let already_present = members.iter().any(|row| row.user_id == user && row.is_in());
     if !already_present {
@@ -1174,29 +914,15 @@ pub async fn prepare_remove_member(
     user: Id,
 ) -> Result<PreparedRemoveMember, Error> {
     ensure_group(loaded)?;
-    loaded.lock(conn, act).await?;
+    ensure_in(loaded, act)?;
     let leaving = user == act.user();
-    if leaving {
-        ensure_in(loaded, act)?;
-    } else {
-        loaded.ensure_manager(act)?;
+    if !leaving && loaded.row.created_by != Some(act.user()) && !loaded.standing.moderate {
+        return Err(Error::NotTheAuthor);
     }
     if let Err(archived @ Error::Archived { .. }) = loaded.ensure_send() {
         return Err(archived);
     }
-    let target = loaded
-        .members
-        .iter()
-        .find(|row| row.user_id == user && row.is_in())
-        .ok_or(Error::NotFound)?;
-    if target.manager
-        && !loaded
-            .members
-            .iter()
-            .any(|row| row.user_id != user && row.is_in() && row.manager)
-    {
-        return Err(Error::LastManager);
-    }
+    loaded.lock(conn).await?;
     Ok(PreparedRemoveMember { user, leaving })
 }
 
@@ -1248,7 +974,7 @@ pub async fn apply_remove_member(
     Ok(())
 }
 
-/// Takes a person out of a group: the person themself, to leave, or a current manager.
+/// Takes a person out of a group: the person themself, to leave, or the one who made it.
 pub async fn remove_member(
     conn: &mut Conn,
     act: &Acting<'_>,
@@ -1257,87 +983,6 @@ pub async fn remove_member(
 ) -> Result<(), Error> {
     let prepared = prepare_remove_member(conn, act, loaded, user).await?;
     apply_remove_member(conn, act, loaded, prepared).await
-}
-
-/// Native prepared promotion or demotion on the same serialized group membership.
-#[derive(Debug, Clone)]
-pub struct PreparedManager {
-    user: Id,
-    manager: bool,
-    unchanged: bool,
-}
-
-/// A manager acts on an existing member and cannot leave the group without a manager.
-pub async fn prepare_manager(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    loaded: &mut Loaded,
-    user: Id,
-    manager: bool,
-) -> Result<PreparedManager, Error> {
-    loaded.lock(conn, act).await?;
-    loaded.ensure_manage_change(act)?;
-    let target = loaded
-        .members
-        .iter()
-        .find(|row| row.user_id == user && row.is_in())
-        .ok_or(Error::NotFound)?;
-    if !manager
-        && target.manager
-        && !loaded
-            .members
-            .iter()
-            .any(|row| row.user_id != user && row.is_in() && row.manager)
-    {
-        return Err(Error::LastManager);
-    }
-    Ok(PreparedManager {
-        user,
-        manager,
-        unchanged: target.manager == manager,
-    })
-}
-
-/// Apply those current prepared operands, beginning with the native sequence write.
-pub async fn apply_manager(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    loaded: &mut Loaded,
-    prepared: PreparedManager,
-) -> Result<(), Error> {
-    if prepared.unchanged {
-        return Ok(());
-    }
-    let seq = take(conn, loaded.id()).await?;
-    if !rows::set_manager(
-        conn,
-        loaded.id(),
-        prepared.user,
-        prepared.manager,
-        seq,
-        act.now,
-    )
-    .await?
-    {
-        return Err(Error::NotFound);
-    }
-    rows::stamp_state(conn, loaded.id(), seq).await?;
-    audit_chat(
-        conn,
-        act,
-        &loaded.row,
-        orch_db::audit::action!(AuditAction::ChatManagerChanged),
-        if prepared.manager {
-            "made a chat member a manager"
-        } else {
-            "removed a chat member's manager role"
-        },
-        serde_json::json!({"user":prepared.user,"manager":prepared.manager}),
-    )
-    .await?;
-    changed_people(conn, loaded.id(), seq, act.now, &[prepared.user]).await?;
-    loaded.members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
-    Ok(())
 }
 
 /// What follows from a change of who is in a chat: the authorization epoch
@@ -1360,7 +1005,7 @@ async fn changed_people(
         .map(|row| row.user_id)
         .chain(concerned.iter().copied())
         .collect();
-    tell_members(conn, chat, at, &present).await
+    tell_members(conn, chat, seq, at, &present).await
 }
 
 // ------------------------------------------------------------------ lists
@@ -1368,7 +1013,7 @@ async fn changed_people(
 /// Which chats of a root org a list holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// The caller's conversations and public groups of readable homes, unless hidden.
+    /// The caller's direct and group chats that are not off their list.
     Mine,
     /// The direct and group chats the caller is not in and may read through
     /// `directs.view`.
@@ -1445,50 +1090,30 @@ async fn list_matching(
     {
         return Err(Error::Suspended { org: closing.org() });
     }
-    let mut cursor = after;
-    let mut chats = Vec::new();
-    loop {
-        let page = match scope {
-            Scope::Mine => {
-                rows::mine_selected(conn, me, root, !in_tree, cursor, limit + 1, selected).await?
-            }
-            Scope::Others { of } => {
-                let tree = rows::orgs_of_tree(conn, root).await?;
-                let held = orch_authz::chats::inspection_orgs(conn, act.principal, &tree).await?;
-                let orgs = match of {
-                    Some(of) if !tree.contains(&of) => return Err(Error::NotFound),
-                    Some(of) if !held.contains(&of) => {
-                        return Err(Error::Lacks {
-                            node: of,
-                            permission: Permission::DirectsView,
-                        });
-                    }
-                    Some(of) => vec![of],
-                    None => held,
-                };
-                rows::others_among_selected(conn, me, root, &orgs, cursor, limit + 1, selected)
-                    .await?
-            }
-            Scope::Nodes => {
-                return list_nodes(conn, act, root, after, limit, selected).await;
-            }
-        };
-        let next = page.last().map(|row| After {
-            at: row.active_at(),
-            id: row.id,
-        });
-        let exhausted = i64::try_from(page.len()).unwrap_or(i64::MAX) <= limit;
-        let readable = orch_authz::chats::listed_access(conn, act.principal, &page).await?;
-        chats.extend(
-            page.into_iter()
-                .filter(|row| readable.contains_key(&row.id)),
-        );
-        if i64::try_from(chats.len()).unwrap_or(i64::MAX) > limit || exhausted {
-            break;
+    let mut chats = match scope {
+        Scope::Mine => {
+            rows::mine_selected(conn, me, root, !in_tree, after, limit + 1, selected).await?
         }
-        cursor = next;
-    }
-
+        Scope::Others { of } => {
+            let tree = rows::orgs_of_tree(conn, root).await?;
+            let held = orch_authz::chats::inspection_orgs(conn, act.principal, &tree).await?;
+            let orgs = match of {
+                Some(of) if !tree.contains(&of) => return Err(Error::NotFound),
+                Some(of) if !held.contains(&of) => {
+                    return Err(Error::Lacks {
+                        node: of,
+                        permission: Permission::DirectsView,
+                    });
+                }
+                Some(of) => vec![of],
+                None => held,
+            };
+            rows::others_among_selected(conn, me, root, &orgs, after, limit + 1, selected).await?
+        }
+        Scope::Nodes => {
+            return list_nodes(conn, act, root, after, limit, selected).await;
+        }
+    };
     let more = i64::try_from(chats.len()).unwrap_or(i64::MAX) > limit;
     chats.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     let next = more.then(|| chats.last()).flatten().map(|last| After {
@@ -1646,157 +1271,5 @@ pub async fn expire_memberships(
         audit::append(conn, &entry, &orch_db::audit::Origin::default(), now).await?;
         changed_people(conn, id, seq, now, &[user]).await?;
     }
-    Ok(())
-}
-
-/// The native prerequisite of public self-join; it grants no manager or guest privileges.
-pub async fn check_join(conn: &mut Conn, act: &Acting<'_>, row: &ChatRow) -> Result<(), Error> {
-    if row.kind != rows::KIND_GROUP
-        || row.visibility != "public"
-        || !act.principal.is_in_tree(row.org_id)
-    {
-        return Err(Error::NotFound);
-    }
-    check_home(conn, act, row.org_id, row.home()).await?;
-    if !direct_allowed(conn, row.org_id).await? {
-        return Err(Error::NotAllowed(Why::DirectOff));
-    }
-    let members = rows::effective_members(&rows::members(conn, row.id).await?, act.now);
-    if members
-        .iter()
-        .any(|member| member.user_id == act.user() && member.is_in())
-    {
-        return Ok(());
-    }
-    if i64::try_from(members.iter().filter(|member| member.is_in()).count()).unwrap_or(i64::MAX)
-        >= group_max(conn).await?
-    {
-        return Err(Error::NotAllowed(Why::Full));
-    }
-    Ok(())
-}
-/// Native first effect is the shared sequence write; the caller checks its live deadline immediately before.
-pub async fn join_public_before<E, F>(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    row: &ChatRow,
-    before: F,
-) -> Result<(), orch_authz::pages::EffectFailure<Error, E>>
-where
-    F: FnOnce() -> Result<(), E> + Send,
-    E: Send,
-{
-    let members = rows::effective_members(
-        &rows::members(conn, row.id)
-            .await
-            .map_err(Error::from)
-            .map_err(orch_authz::pages::EffectFailure::Native)?,
-        act.now,
-    );
-    if members
-        .iter()
-        .any(|member| member.user_id == act.user() && member.is_in())
-    {
-        return Ok(());
-    }
-    before().map_err(orch_authz::pages::EffectFailure::BeforeEffect)?;
-    join_public_with_members(conn, act, row, members)
-        .await
-        .map_err(orch_authz::pages::EffectFailure::Native)
-}
-async fn join_public_with_members(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    row: &ChatRow,
-    members: Vec<MemberRow>,
-) -> Result<(), Error> {
-    let seq = take(conn, row.id).await?;
-    rows::add_member(
-        conn,
-        &NewMember {
-            chat_id: row.id,
-            user_id: act.user(),
-            added_by: Some(act.user()),
-            guest: false,
-            seq,
-            at: act.now,
-            expires_at: None,
-        },
-    )
-    .await?;
-    rows::stamp_state(conn, row.id, seq).await?;
-    messages::system(
-        conn,
-        row,
-        seq,
-        &messages::Line {
-            event: ChatSystemEvent::MemberAdded,
-            by: Some(act.user()),
-            user: Some(act.user()),
-            name: None,
-        },
-        act.now,
-    )
-    .await?;
-    audit_chat(
-        conn,
-        act,
-        row,
-        orch_db::audit::action!(AuditAction::ChatMemberAdded),
-        "joined a public group chat",
-        serde_json::json!({"user_id":act.user()}),
-    )
-    .await?;
-    rows::notify(conn, row.id, seq).await?;
-    let mut everyone = members
-        .into_iter()
-        .filter(|member| member.is_in())
-        .map(|member| member.user_id)
-        .collect::<Vec<_>>();
-    everyone.push(act.user());
-    tell_members(conn, row.id, act.now, &everyone).await?;
-    let epoch = epoch::bump(conn).await?;
-    sequences::notify_epoch(conn, epoch).await?;
-    Ok(())
-}
-
-/// Native ending exists only inside an actual cross-root Move and its freshly created copy.
-/// Groups have no separate retained deletion lifecycle; callers preview this irreversible history ending.
-pub async fn end_after_move(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    prepared: &PreparedOpen,
-    opened: &Opened,
-) -> Result<(), Error> {
-    let source = prepared
-        .copy_source
-        .ok_or_else(|| Error::invalid("source", "a group ending needs its original native copy"))?;
-    if act.principal.caller().admitted_operation() != Some("ChatMoveOut")
-        || act.principal.caller().admitted_required_roles().is_none()
-        || prepared.actor != act.user()
-        || !opened.created
-        || opened.chat.id == source
-        || opened.chat.kind != rows::KIND_GROUP
-        || opened.chat.created_by != Some(act.user())
-        || opened.chat.org_id != prepared.root
-    {
-        return Err(Error::ManagerRequired);
-    }
-    let source = rows::lock(conn, source).await?.ok_or(Error::NotFound)?;
-    if source.kind != rows::KIND_GROUP
-        || source.org_id == opened.chat.org_id
-        || !rows::is_manager(conn, source.id, act.user(), act.now).await?
-    {
-        return Err(Error::ManagerRequired);
-    }
-    audit_chat(conn,act,&source,orch_db::audit::action!(AuditAction::ChatEnded),
-        AuditAction::ChatEnded.as_str(),serde_json::json!({"chat":source.id,"name":source.name,"created":opened.chat.id,"history_ended":true})).await?;
-    if !rows::end_moved_group(conn, source.id, act.user(), act.now).await? {
-        return Err(Error::NotFound);
-    }
-    let epoch = epoch::bump(conn).await?;
-    sequences::notify_epoch(conn, epoch).await?;
-    orch_db::queries::hierarchy::stamp(conn, source.home()).await?;
-    rows::notify(conn, source.id, source.next_seq).await?;
     Ok(())
 }

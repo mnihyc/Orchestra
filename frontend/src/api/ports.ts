@@ -70,7 +70,7 @@ export async function previewPublication(id: string, port: number, transports: V
 export async function publishPort(id: string, port: number, client_id: string, preflight_id: string, _http: View.PortHttp): Promise<View.PortOpening> { return openingView((await createOpening(id, port, client_id, preflight_id)).opening); }
 /** The opening's revision goes in the body, as the contract has it. */
 export async function closePort(opening: View.PortOpening): Promise<View.PortOpening> { return openingView(await ok(api.DELETE('/port-openings/{opening_id}', { params: { path: { opening_id: opening.id } }, body: { expected_revision: opening.revision } }))); }
-export function enterPort(id: string, port: number, clientKey: string = crypto.randomUUID()): Promise<{ url: string; expires_at: string }> { return ok(api.POST('/environments/{id}/ports/{port}/enter', { params: portPath(id, port), headers: { 'Idempotency-Key': clientKey }, body: {} })); }
+export function enterPort(id: string, port: number): Promise<{ url: string; expires_at: string }> { return ok(api.POST('/environments/{id}/ports/{port}/enter', { params: portPath(id, port), body: {} })); }
 export function updatePortProgram(id: string, port: number, program: PortProgram, expected_revision: number): Promise<PortTarget> { return ok(api.PATCH('/environments/{id}/ports/{port}/program', { params: portPath(id, port), body: { program, expected_revision } })); }
 export const portConnectionsQuery = (environmentId: string, openingId: string, insidePort?: number) => queryOptions({ queryKey: ['port-connections', environmentId, openingId, insidePort] as const, retry: false, queryFn: async ({ signal }): Promise<View.PortConnections> => connectionsView(await ok(api.GET('/environments/{id}/ports/connections', { params: { path: { id: environmentId }, query: { opening_id: openingId, ...(insidePort === undefined ? {} : { inside_port: insidePort }) } }, signal }))) });
 /** The same live reader narrows either to an opening or a port, including own uses with no opening. */
@@ -78,7 +78,8 @@ export const connectionFactsQuery = (environmentId: string, openingId: string | 
  const query = { limit: 128, ...(openingId === null ? {} : { opening_id: openingId }), ...(insidePort === undefined ? {} : { inside_port: insidePort }), ...(port === undefined ? {} : { port }) };
  return ok(api.GET('/environments/{id}/ports/connections', { params: { path: { id: environmentId }, query }, signal }));
 } });
-export const hostPortsQuery = (id: string) => queryOptions({ ...hostQuery(id), retry: false, select: (host): View.HostPortsReview => {
+export const hostPortsQuery = (id: string) => queryOptions({ queryKey: ['host-ports', id] as const, retry: false, queryFn: async (): Promise<View.HostPortsReview> => {
+ const host: Host = await queryClient.query(hostQuery(id));
  const proposal = host.ports_proposal; const values = proposal?.values;
  return { current: host.ports === null ? null : { bind: host.ports.listen, address: host.ports.incoming_address, ranges: host.ports.ranges }, proposal: { bind: values?.listen ?? '', address: values?.incoming_address ?? '', ranges: values?.ranges ?? [] }, allocations: host.ports === null && host.ports_revision === 0 ? [] : null, revision: host.revision, acknowledged: null, can_edit: host.access.permissions.includes('host.manage'), reason: proposal?.reason ?? null, sources: proposal?.sources, as_of: proposal?.as_of, limits: proposal?.limits };
 } });

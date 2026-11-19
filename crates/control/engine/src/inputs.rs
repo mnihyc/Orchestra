@@ -21,7 +21,7 @@
 //! what a pending announcement or share notice adds to the text of a turn is left
 //! out until those parts exist (see `instructions`).
 
-use crate::access::{ProviderUse, RunsIn};
+use crate::access::ProviderUse;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::preflight::Outcome as PreflightOutcome;
@@ -44,7 +44,6 @@ use orch_types::{Clock, Hash, Id, Json, Seq, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-mod agent_schedule;
 mod authority;
 mod authority_work;
 /// Current authority for one actual retained input command before first native publication.
@@ -180,14 +179,6 @@ pub(crate) struct Made<'a> {
     pub source: &'a str,
     /// The goal the input belongs to, with what the goal said of itself in it.
     pub goal: Option<(Id, &'a Json)>,
-    /// The real producer's trigger, independent of the person whose authority authors the input.
-    pub trigger: InputTrigger,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputTrigger {
-    Person,
-    Automatic,
 }
 
 impl Made<'_> {
@@ -195,14 +186,6 @@ impl Made<'_> {
     pub(crate) const USER: Made<'static> = Made {
         source: "user",
         goal: None,
-        trigger: InputTrigger::Person,
-    };
-
-    /// A managed occurrence retains its author without claiming a fresh person's gesture.
-    pub(crate) const AGENT_SCHEDULE: Made<'static> = Made {
-        source: "user",
-        goal: None,
-        trigger: InputTrigger::Automatic,
     };
 }
 
@@ -782,7 +765,6 @@ pub(crate) async fn check_sender_for_turn(
                         },
                         |turn| turn.effort.as_deref(),
                     ),
-                    runs_in: RunsIn::of(thread.environment_id),
                 },
             )
             .await
@@ -805,42 +787,7 @@ pub(crate) async fn check_sender_for_turn(
     ))))
 }
 
-fn steered_input_turn(
-    active: Option<&TurnRow>,
-    queue_locked: bool,
-    delivery: Delivery,
-    plan: bool,
-) -> Option<&TurnRow> {
-    active.filter(|turn| {
-        !queue_locked
-            && delivery == Delivery::Steer
-            && turn.state == threads::turn_state::RUNNING
-            && turn.plan == plan
-    })
-}
-
 impl Engine {
-    /// Checks the ordinary sender policy before resolving fresh input operands. This reads only;
-    /// the accepting writer repeats it under its actual thread lock and first-effect boundary.
-    /// Held inputs still need only Interact, and a steer uses its actual running turn's model.
-    pub async fn check_input_sender_in(
-        &self,
-        conn: &mut orch_db::Conn,
-        caller: &Caller,
-        thread: &ThreadRow,
-        delivery: Delivery,
-        plan: bool,
-    ) -> Result<(), InputError> {
-        let active = threads::active_turn(conn, thread.node_id).await?;
-        let queue_locked =
-            thread.queue_held || crate::locks::held_by(conn, thread.node_id).await?.is_some();
-        let turn = steered_input_turn(active.as_ref(), queue_locked, delivery, plan);
-        let mut unit = Unit::new(conn, self.inner.clock.now());
-        self.check_author_for_turn(&mut unit, caller, thread, turn)
-            .await
-            .map(|_| ())
-    }
-
     pub(crate) async fn check_content(
         &self,
         unit: &mut Unit<'_>,
@@ -1257,6 +1204,10 @@ impl Engine {
         .full()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the existing authored request and trusted response projection stay separate on one writer"
+    )]
     #[allow(
         clippy::too_many_arguments,
         reason = "one existing guarded input writer carries its exact request and trusted source/projection operands"
@@ -1751,12 +1702,12 @@ impl Engine {
                 bypass = checked;
             }
         }
-        if !execution.callers().iter().all(Caller::as_admin)
-            && let Some(entries) = bypass.as_mut().and_then(Json::as_array_mut)
-        {
-            for entry in entries {
-                if let Some(entry) = entry.as_object_mut() {
-                    entry.remove("as_admin");
+        if !execution.callers().iter().all(Caller::as_admin) {
+            if let Some(entries) = bypass.as_mut().and_then(Json::as_array_mut) {
+                for entry in entries {
+                    if let Some(entry) = entry.as_object_mut() {
+                        entry.remove("as_admin");
+                    }
                 }
             }
         }
@@ -1870,21 +1821,26 @@ impl Engine {
         if operands.and_then(|prepared| prepared.replayed).is_some() {
             return Err(orch_db::DbError::Retry.into());
         }
-        if made.trigger == InputTrigger::Person {
+        if made.source == "user" {
             self.release_background_wakes(unit, thread_id).await?;
         }
         let thread = threads::thread(unit.conn, thread_id)
             .await?
             .ok_or(InputError::NotFound)?;
         let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
-        let queue_locked =
-            thread.queue_held || crate::locks::held_by(unit.conn, thread_id).await?.is_some();
-        let steered_turn = steered_input_turn(
-            active.as_ref(),
-            queue_locked,
-            request.delivery,
-            request.plan,
-        );
+        let background_wait =
+            crate::background_wake::other_author(unit.conn, thread_id, Some(execution.user()))
+                .await?
+                .is_some();
+        let queue_locked = thread.queue_held
+            || background_wait
+            || crate::locks::held_by(unit.conn, thread_id).await?.is_some();
+        let steered_turn = active.as_ref().filter(|turn| {
+            !queue_locked
+                && request.delivery == Delivery::Steer
+                && turn.state == threads::turn_state::RUNNING
+                && turn.plan == request.plan
+        });
         let PreparedInputWork {
             serving,
             verified,
@@ -1976,6 +1932,10 @@ impl Engine {
                 EngineError::unreadable("an input that was not there could not be made").into(),
             );
         };
+        if background_wait {
+            threads::hold_input(unit.conn, row.id, Some("background_author"), seq).await?;
+            row.state_detail = Some("background_author".to_owned());
+        }
         if let Some((goal, facts)) = made.goal {
             orch_db::queries::goals::tie_input(&mut *unit.conn, row.id, goal, facts).await?;
         }
@@ -2053,6 +2013,7 @@ impl Engine {
             .await?;
         }
         if !row.queue_held
+            && !background_wait
             && !without_model
             && request.delivery == Delivery::Interrupt
             && let Some(turn) = &active
@@ -2063,7 +2024,7 @@ impl Engine {
         }
         // Explicit new work supersedes an attention stop or a cached quota-reset
         // wait; a goal loop does not, and ordinary non-quota backoff still binds.
-        if made.trigger == InputTrigger::Person {
+        if made.source == "user" {
             crate::calls::supersede_for_input(&mut *unit.conn, thread_id).await?;
         }
         // A turn might start: the checks run in this transaction.
@@ -2658,9 +2619,18 @@ impl Engine {
                     seq,
                 )
                 .await?;
-                let candidate = threads::input(&mut *unit.conn, input_id)
+                let mut candidate = threads::input(&mut *unit.conn, input_id)
                     .await?
                     .ok_or(InputError::NotFound)?;
+                let background_wait =
+                    crate::background_wake::other_author(unit.conn, thread_id, candidate.answers())
+                        .await?
+                        .is_some();
+                if background_wait && candidate.state_detail.is_none() {
+                    threads::hold_input(unit.conn, input_id, Some("background_author"), seq)
+                        .await?;
+                    candidate.state_detail = Some("background_author".to_owned());
+                }
                 if delivery == Delivery::Steer
                     && !without_model
                     && let Some(turn) = active.as_ref().filter(|turn| {
@@ -2734,6 +2704,7 @@ impl Engine {
                     }
                 }
                 if delivery == Delivery::Interrupt
+                    && !background_wait
                     && !without_model
                     && let Some(turn) = &active
                 {

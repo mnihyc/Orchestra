@@ -30,7 +30,6 @@ fn ask(
     client: &str,
 ) -> ShareWithAgents {
     ShareWithAgents {
-        link_origin: None,
         viewers_read: None,
         read_first: None,
         download,

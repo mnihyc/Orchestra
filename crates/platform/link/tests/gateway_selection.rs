@@ -198,65 +198,7 @@ async fn automatic_limits_concurrent_probes_and_rejects_another_gateways_entranc
 }
 
 #[tokio::test(start_paused = true)]
-async fn automatic_without_measurements_uses_declared_entrances_and_reconnects_last_success_first()
-{
-    let catalogue = gateways();
-    let prober = Probes::new(&catalogue);
-    prober.observations.lock().unwrap().clear();
-    let endpoints = entrances(&catalogue);
-    let policy = PrimaryGateway {
-        choice: GatewayChoice::default(),
-        catalogue,
-    };
-    let (fresh, measurements) = policy.candidates(&prober, &endpoints, None).await.unwrap();
-    assert!(measurements.is_empty());
-    assert_eq!(fresh.len(), endpoints.len());
-    assert_eq!(fresh[0].endpoint, endpoints[0]);
-    assert_eq!(fresh[0].gateway_id.as_deref(), Some("eu"));
-    let (reconnect, measurements) = policy
-        .candidates(&prober, &endpoints, Some(&endpoints[4].url))
-        .await
-        .unwrap();
-    assert!(measurements.is_empty());
-    assert_eq!(reconnect[0].endpoint, endpoints[4]);
-    assert_eq!(reconnect[0].gateway_id.as_deref(), Some("us"));
-    assert_eq!(policy.choice, GatewayChoice::default());
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_unmeasured_local_alias_still_requires_an_advertised_identity() {
-    let catalogue = gateways();
-    let prober = Probes::new(&catalogue);
-    let endpoint = Endpoint {
-        url: "wss://local-entrance.test:9443".into(),
-        trust: Trust::Pinned,
-    };
-    let policy = PrimaryGateway {
-        choice: GatewayChoice::default(),
-        catalogue,
-    };
-    let (candidates, measurements) = policy
-        .candidates(&prober, std::slice::from_ref(&endpoint), None)
-        .await
-        .unwrap();
-    assert!(measurements.is_empty());
-    assert!(
-        candidates
-            .iter()
-            .all(|candidate| candidate.endpoint == endpoint)
-    );
-    assert_eq!(
-        candidates
-            .iter()
-            .map(|candidate| candidate.gateway_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("eu"), Some("asia"), Some("us")],
-        "an alias never removes the pre-authentication gateway identity check"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_unresponsive_probe_is_bounded_without_blocking_primary_attachment() {
+async fn an_unresponsive_probe_expires_at_the_existing_connection_bound() {
     let catalogue = gateways();
     let mut prober = Probes::new(&catalogue);
     prober.delay = Duration::from_secs(11);
@@ -264,16 +206,11 @@ async fn an_unresponsive_probe_is_bounded_without_blocking_primary_attachment() 
         choice: GatewayChoice::default(),
         catalogue: catalogue.clone(),
     };
-    let started = tokio::time::Instant::now();
-    let (candidates, measurements) = policy
-        .candidates(&prober, &catalogue[0].endpoints[..1], None)
-        .await
-        .unwrap();
-    assert!(measurements.is_empty());
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].gateway_id.as_deref(), Some("eu"));
-    let bound = Duration::from_secs(u64::from(orch_link_contract::session::CONNECT_TIMEOUT_SECS));
-    assert!(started.elapsed() >= bound);
-    assert!(started.elapsed() < prober.delay);
+    assert!(
+        policy
+            .candidates(&prober, &catalogue[0].endpoints[..1], None)
+            .await
+            .is_err()
+    );
     assert_eq!(prober.active.load(Ordering::SeqCst), 0);
 }

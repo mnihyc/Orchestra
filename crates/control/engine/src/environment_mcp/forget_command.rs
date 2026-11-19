@@ -18,7 +18,7 @@ mod recorded_deletion;
 pub use recorded_deletion::RecordedDeletionCustody;
 
 /// Distinct native custody proofs for the same connector command.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     content = "proof",
@@ -35,29 +35,18 @@ pub enum ForgetCustody {
     },
     /// A cleanup command journaled atomically with the accepted resource deletion.
     RecordedDeletion(Box<RecordedDeletionCustody>),
-    /// This real recorded server ended while its exact accepted copy was completing.
-    UnfiledDuplicate {
-        copy: Box<super::duplicating::Command>,
-        until: Time,
-    },
-    AbandonedExistingCopy {
-        copy: Box<super::existing::Command>,
-        until: Time,
-    },
 }
 impl std::fmt::Debug for ForgetCustody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::UnfiledCopy { .. } => "UnfiledMcpCopy([owned])",
             Self::RecordedDeletion(_) => "RecordedMcpDeletion([owned])",
-            Self::AbandonedExistingCopy { .. } => "AbandonedExistingMcpCopy([owned])",
-            Self::UnfiledDuplicate { .. } => "UnfiledMcpDuplicate([owned])",
         })
     }
 }
 
 /// Native inverse custody, with no actor or renewed authority to create anything.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ForgetCommand {
     custody: ForgetCustody,
     canonical: Json,
@@ -74,9 +63,7 @@ impl Serialize for ForgetCommand {
                 value.serialize_field("until", until)?;
                 value.end()
             }
-            ForgetCustody::RecordedDeletion(_)
-            | ForgetCustody::AbandonedExistingCopy { .. }
-            | ForgetCustody::UnfiledDuplicate { .. } => {
+            ForgetCustody::RecordedDeletion(_) => {
                 let mut value = serializer.serialize_struct("ForgetCommand", 2)?;
                 value.serialize_field("custody", &self.custody)?;
                 value.serialize_field("canonical", &self.canonical)?;
@@ -127,96 +114,6 @@ impl std::fmt::Debug for ForgetCommand {
     }
 }
 impl ForgetCommand {
-    /// Inverse of this exact successful new snapshot, only while no public resource owns it.
-    pub async fn capture_duplicate(
-        conn: &mut Conn,
-        clock: &dyn Clock,
-        copy: super::duplicating::Command,
-        command: &Outgoing,
-    ) -> Result<Self, EngineError> {
-        if command.id == copy.input().id()
-            || command.kind != McpForget::KIND
-            || command.machine != copy.input().machine()
-            || command.key != SerialKey::Machine
-            || command.body
-                != serde_json::to_value(McpForget {
-                    server_id: copy.input().server(),
-                })?
-            || copy.completed(conn).await?.is_none()
-            || mcp::recorded(conn, copy.input().server()).await?
-        {
-            return Err(EngineError::unreadable(
-                "The inverse does not own this unfiled native duplicate.",
-            ));
-        }
-        let until = Time::new(
-            clock.now() + chrono::Duration::seconds(i64::from(McpForget::KIND.deadline_secs())),
-        );
-        Ok(Self {
-            custody: ForgetCustody::UnfiledDuplicate {
-                copy: Box::new(copy),
-                until,
-            },
-            canonical: crate::jobs::command_identity::canonical(
-                command.id,
-                command.machine,
-                command.key.wire().as_deref(),
-                command.kind.as_str(),
-                &command.body,
-            )?,
-        })
-    }
-    /// Only the real completed stored-resource copy can remove its file after that target ended.
-    /// No active resource, fabricated creator or renewed invoker is admitted by this inverse.
-    pub async fn capture_abandoned_existing(
-        conn: &mut Conn,
-        clock: &dyn Clock,
-        copy: super::existing::Command,
-        command: &Outgoing,
-    ) -> Result<Self, EngineError> {
-        if command.id == copy.input().id()
-            || command.kind != McpForget::KIND
-            || command.machine != copy.input().machine()
-            || command.key != SerialKey::Machine
-            || command.body
-                != serde_json::to_value(McpForget {
-                    server_id: copy.input().server(),
-                })?
-            || copy.completed(conn).await?.is_none()
-            || !mcp::servers(conn, &[copy.input().server()])
-                .await?
-                .is_empty()
-        {
-            return Err(EngineError::unreadable(
-                "the inverse does not own an ended server's exact successful copy",
-            ));
-        }
-        let until = Time::new(
-            clock.now() + chrono::Duration::seconds(i64::from(McpForget::KIND.deadline_secs())),
-        );
-        Ok(Self {
-            custody: ForgetCustody::AbandonedExistingCopy {
-                copy: Box::new(copy),
-                until,
-            },
-            canonical: crate::jobs::command_identity::canonical(
-                command.id,
-                command.machine,
-                command.key.wire().as_deref(),
-                command.kind.as_str(),
-                &command.body,
-            )?,
-        })
-    }
-    pub(crate) async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
-        if let ForgetCustody::UnfiledDuplicate { copy, .. } = &self.custody {
-            copy.lock_source(conn).await?;
-        }
-        if let ForgetCustody::AbandonedExistingCopy { copy, .. } = &self.custody {
-            copy.lock_source(conn).await?;
-        }
-        Ok(())
-    }
     /// Own only a real successful, canonical, privately recorded copy which was never filed.
     /// The ordinary native Forget budget bounds its cleanup; the ended invoker is not restored.
     pub async fn capture(
@@ -291,8 +188,6 @@ impl ForgetCommand {
         match &self.custody {
             ForgetCustody::UnfiledCopy { until, .. } => Some(*until),
             ForgetCustody::RecordedDeletion(_) => None,
-            ForgetCustody::AbandonedExistingCopy { until, .. }
-            | ForgetCustody::UnfiledDuplicate { until, .. } => Some(*until),
         }
     }
 
@@ -302,54 +197,6 @@ impl ForgetCommand {
         command: &NewCommand<'_>,
         clock: &dyn Clock,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
-        if let ForgetCustody::UnfiledDuplicate { copy, until } = &self.custody {
-            if command.kind != "mcp.forget"
-                || command.deadline_at != until.get()
-                || clock.now() >= until.get()
-                || crate::jobs::command_identity::canonical(
-                    command.id,
-                    command.machine_id,
-                    command.serial_key,
-                    command.kind,
-                    command.body,
-                )? != self.canonical
-            {
-                return Ok(None);
-            }
-            copy.lock_source(conn).await?;
-            if copy.completed(conn).await?.is_none()
-                || mcp::recorded(conn, copy.input().server()).await?
-                || clock.now() >= until.get()
-            {
-                return Ok(None);
-            }
-            return Ok(Some(vec![(None, Some(*until))]));
-        }
-        if let ForgetCustody::AbandonedExistingCopy { copy, until } = &self.custody {
-            if command.kind != "mcp.forget"
-                || command.deadline_at != until.get()
-                || clock.now() >= until.get()
-                || crate::jobs::command_identity::canonical(
-                    command.id,
-                    command.machine_id,
-                    command.serial_key,
-                    command.kind,
-                    command.body,
-                )? != self.canonical
-            {
-                return Ok(None);
-            }
-            copy.lock_source(conn).await?;
-            if copy.completed(conn).await?.is_none()
-                || !mcp::servers(conn, &[copy.input().server()])
-                    .await?
-                    .is_empty()
-                || clock.now() >= until.get()
-            {
-                return Ok(None);
-            }
-            return Ok(Some(vec![(None, Some(*until))]));
-        }
         let ForgetCustody::UnfiledCopy { copy, until } = &self.custody else {
             // An accepted deletion owns only the forget inserted by its native transaction.
             return Ok(None);

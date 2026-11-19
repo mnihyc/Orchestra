@@ -3,8 +3,8 @@ import declarations from '../../../../shared/protocol-options.json';
 
 interface Declaration { modes: Record<string, unknown> }
 interface Registry {
-  protocols: Record<string, { web_search?: Declaration; [member: string]: unknown }>;
-  harnesses: Record<string, { web_search?: string[]; [member: string]: unknown }>;
+  protocols: Record<string, { web_search?: Declaration }>;
+  harnesses: Record<string, { web_search?: string[] }>;
 }
 const registry: Registry = declarations;
 

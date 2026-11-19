@@ -6,11 +6,25 @@ use orch_db::queries::provider_facts as rows;
 
 /// One minute bounds interactive vendor reads even when a vendor refuses them.
 pub const PAGE_READ_INTERVAL: Duration = Duration::minutes(1);
-/// Deployment-selected interactive observation interval. Scheduled reads use provider settings.
+/// Five minutes keeps plan percentages useful before a long turn is begun.
+pub const ACTIVE_READ_INTERVAL: Duration = Duration::minutes(5);
+/// A thread that has run in the last quarter hour keeps its provider on the active cadence.
+pub const RECENT_ACTIVITY: Duration = Duration::minutes(15);
+/// An hour keeps idle credentials and available resets current with twenty-four reads a day.
+pub const IDLE_READ_INTERVAL: Duration = Duration::hours(1);
+/// Deployment-selected provider observation intervals with the shipped default reasons above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadConfig {
     /// Interactive Refresh coalescing; ordinary page/list reads never observe a machine.
     pub page: Duration,
+    /// Recent-work observation interval.
+    pub active: Duration,
+    /// Recent-work grace.
+    pub recent: Duration,
+    /// Idle observation interval.
+    pub idle: Duration,
+    /// Refused-credential recovery interval.
+    pub refused: Duration,
 }
 
 impl ReadConfig {
@@ -22,6 +36,19 @@ impl ReadConfig {
         };
         Self {
             page: span(config.engine.provider_facts_page_secs, PAGE_READ_INTERVAL),
+            active: span(
+                config.engine.provider_facts_active_secs,
+                ACTIVE_READ_INTERVAL,
+            ),
+            recent: span(
+                config.engine.provider_facts_active_recent_secs,
+                RECENT_ACTIVITY,
+            ),
+            idle: span(config.engine.provider_facts_idle_secs, IDLE_READ_INTERVAL),
+            refused: span(
+                config.engine.provider_facts_refused_secs,
+                ACTIVE_READ_INTERVAL,
+            ),
         }
     }
 }
@@ -418,67 +445,6 @@ pub fn source_can_verify(sources: &orch_types::Json, native_keeper: bool) -> boo
 }
 
 impl Engine {
-    /// Inspects the due batch without claiming reads or starting runtimes. All four settings for
-    /// all candidates share one ancestor/settings pass; the result limit applies after resolution.
-    pub async fn due_provider_fact_reads(
-        &self,
-        conn: &mut orch_db::Conn,
-        now: chrono::DateTime<chrono::Utc>,
-        limit: i64,
-    ) -> Result<Vec<orch_types::Id>, EngineError> {
-        use orch_settings_contract::registry::{self, keys};
-        let candidates = rows::read_candidates(conn, now).await?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        let providers: Vec<_> = candidates
-            .iter()
-            .map(|provider| orch_settings::ProviderAt {
-                id: provider.id,
-                home_id: provider.home_id,
-                runtime_config: &provider.runtime_config,
-                revision: provider.revision,
-            })
-            .collect();
-        let snapshots = orch_settings::snapshots_at_providers(
-            conn,
-            &providers,
-            &[
-                keys::PROVIDERS_FACTS_IDLE_MINUTES,
-                keys::PROVIDERS_FACTS_ACTIVE_MINUTES,
-                keys::PROVIDERS_FACTS_RECENT_MINUTES,
-                keys::PROVIDERS_FACTS_REFUSED_MINUTES,
-            ],
-        )
-        .await?;
-        let mut schedules = Vec::with_capacity(snapshots.len());
-        for (provider_id, snapshot) in snapshots {
-            let minutes = |key| -> Result<i64, EngineError> {
-                let def = registry::get(key).ok_or_else(|| {
-                    EngineError::unreadable("a provider facts setting is missing")
-                })?;
-                snapshot
-                    .resolve(def)
-                    .value
-                    .and_then(|value| value.as_i64())
-                    .filter(|value| *value >= 1)
-                    .ok_or_else(|| {
-                        EngineError::unreadable(
-                            "a provider facts interval is not a positive number of minutes",
-                        )
-                    })
-            };
-            schedules.push(rows::ReadSchedule {
-                provider_id,
-                idle: minutes(keys::PROVIDERS_FACTS_IDLE_MINUTES)?,
-                active: minutes(keys::PROVIDERS_FACTS_ACTIVE_MINUTES)?,
-                recent: minutes(keys::PROVIDERS_FACTS_RECENT_MINUTES)?,
-                refused: minutes(keys::PROVIDERS_FACTS_REFUSED_MINUTES)?,
-            });
-        }
-        Ok(rows::due_reads(conn, now, &schedules, limit).await?)
-    }
-
     /// Runs credential-expiry upkeep on the engine's clock, including the short-token notice rule.
     pub async fn watch_provider_credential_ends(&self) -> Result<(), EngineError> {
         self.watch_token_ends().await
@@ -662,14 +628,27 @@ impl Engine {
         let now = self.inner.clock.now();
         let due = {
             let mut conn = self.inner.db.acquire().await?;
-            self.due_provider_fact_reads(&mut conn, now, READ_BATCH)
-                .await?
+            rows::due_reads(
+                &mut conn,
+                now,
+                rows::ReadSchedule {
+                    recent: self.inner.config.provider_facts.recent,
+                    active: self.inner.config.provider_facts.active,
+                    idle: self.inner.config.provider_facts.idle,
+                    refused: self.inner.config.provider_facts.refused,
+                },
+                READ_BATCH,
+            )
+            .await?
         };
         for provider in due {
             let engine = self.clone();
             tokio::spawn(async move {
-                if let Err(error) = engine.refresh_scheduled_provider(provider).await {
+                if let Err(error) = engine.refresh_provider(provider).await {
                     tracing::debug!(%provider,%error,"a scheduled provider observation was not available");
+                }
+                if let Err(error) = engine.discover_provider_models(provider).await {
+                    tracing::debug!(%provider,%error,"a scheduled model source observation was not available");
                 }
             });
         }

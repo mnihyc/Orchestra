@@ -1,11 +1,8 @@
-//! Native reviewer protocol, effects and exact model admission on the existing controlled model.
+//! Fixed native reviewer protocol, effects and model admission on the existing controlled model.
 //! The adapter supplies observed wire facts. A result here never substitutes for the real-plan trial.
 
 use super::*;
-use orch_agent_contract::conformance::{
-    NativeAutoReview, NativeNotificationReview, NativeRequestPattern,
-};
-use orch_agent_contract::credentials::CredentialPath;
+use orch_agent_contract::conformance::{NativeAutoReview, NativeNotificationReview};
 use orch_agent_contract::review::REVIEW_TOOL;
 
 const MARKER_TEXT: &str = "orch-auto-native";
@@ -51,15 +48,8 @@ async fn exercise_notifications(
         .approval_reviewer
         .as_ref()
         .ok_or("the adapter declares no reviewer model")?;
-    let review_model = recipe.model.as_deref().unwrap_or(MODEL);
-    let valid_selection = match &recipe.model {
-        Some(model) => declared.model == *model,
-        None => declared
-            .session_model_paths
-            .contains(&CredentialPath::Forwarded),
-    };
-    if declared.settable || !valid_selection {
-        return Err("this case requires its declared native reviewer selection".into());
+    if declared.settable || declared.model != recipe.model || recipe.model == MODEL {
+        return Err("this case requires the observed fixed reviewer distinct from its fixture session model".into());
     }
     if !started
         .descriptor
@@ -74,24 +64,14 @@ async fn exercise_notifications(
     // This must reach the existing model policy check, not merely the closed feature gate.
     let mut excluded = session(fixture, check, protocol);
     excluded.settings.approval_mode = ApprovalMode::Auto;
-    excluded
-        .settings
-        .available_models
-        .retain(|model| model != review_model);
-    if recipe.model.is_none() {
-        excluded
-            .settings
-            .available_models
-            .push(declared.model.clone());
-    }
     let before = (fixture.requests)().len();
     let error = adapter
         .open_session(excluded)
         .await
         .err()
-        .ok_or("a session admitted its excluded native reviewer model")?;
+        .ok_or("a session admitted an excluded fixed reviewer model")?;
     if error.code() != "unsupported"
-        || !error.to_string().contains(review_model)
+        || !error.to_string().contains(&recipe.model)
         || (fixture.requests)().len() != before
     {
         return Err(format!(
@@ -112,14 +92,7 @@ async fn exercise_notifications(
         spec.settings.directory = work.display().to_string();
         spec.settings.cwd = work.display().to_string();
         spec.settings.workspace_root = work.display().to_string();
-        if !spec
-            .settings
-            .available_models
-            .iter()
-            .any(|model| model == review_model)
-        {
-            spec.settings.available_models.push(review_model.to_owned());
-        }
+        spec.settings.available_models.push(recipe.model.clone());
         // Exact native review correlation is evidence even when the caller does not print raw frames.
         spec.settings.raw_events = true;
         let opened = adapter
@@ -129,7 +102,7 @@ async fn exercise_notifications(
         if !opened
             .approval_reviewer
             .as_ref()
-            .is_some_and(|reviewer| reviewer.model == review_model)
+            .is_some_and(|reviewer| reviewer.model == recipe.model)
         {
             return Err("the opened session lost its admitted reviewer identity".into());
         }
@@ -152,17 +125,9 @@ async fn exercise_notifications(
             } else {
                 &recipe.deny_response
             };
-            control(ModelControl::QueueMatching {
-                model: Some(review_model.to_owned()),
+            control(ModelControl::Queue {
+                model: recipe.model.clone(),
                 script: format!("say {reply}"),
-                times: 1,
-                pattern: NativeRequestPattern {
-                    equals: std::collections::BTreeMap::from([(
-                        recipe.schema_pointer.clone(),
-                        recipe.response_schema.clone(),
-                    )]),
-                    ..NativeRequestPattern::default()
-                },
             })?;
         }
         control(ModelControl::Default {
@@ -224,7 +189,6 @@ fn validate(
     seen: &[SessionEvent],
     requests: &[ModelRequest],
 ) -> Result<(), String> {
-    let review_model = recipe.model.as_deref().unwrap_or(MODEL);
     let raw: Vec<_> = seen
         .iter()
         .filter_map(|event| match event {
@@ -273,17 +237,14 @@ fn validate(
     }
     let reviewed: Vec<_> = requests
         .iter()
-        .filter(|request| {
-            request.body.pointer(&recipe.schema_pointer) == Some(&recipe.response_schema)
-        })
+        .filter(|request| request.body["model"] == recipe.model)
         .collect();
     if reviewed.is_empty() || (decision != "unavailable" && reviewed.len() != 1) {
         return Err("the expected native reviewer requests were not observed".into());
     }
     let status = if decision == "unavailable" { 403 } else { 200 };
     if reviewed.iter().any(|request| {
-        request.body["model"] != review_model
-            || request.status != Some(status)
+        request.status != Some(status)
             || request.body.pointer(&recipe.schema_pointer) != Some(&recipe.response_schema)
     }) {
         return Err(
@@ -294,7 +255,7 @@ fn validate(
     if requests.iter().any(|request| {
         request.body["model"]
             .as_str()
-            .is_some_and(|model| model != MODEL && model != review_model)
+            .is_some_and(|model| model != MODEL && model != recipe.model)
     }) {
         return Err("native review requested an additional unallowed model".into());
     }
@@ -326,7 +287,7 @@ fn validate(
         .payload
         .pointer("/tool/result")
         .ok_or("native review item lost its result")?;
-    if result["model"] != review_model
+    if result["model"] != recipe.model
         || result["outcome"] != expected
         || result["reason"] != ended["review"]["rationale"]
         || result["action"] != ended["action"]

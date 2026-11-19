@@ -94,7 +94,6 @@ impl Engine {
         let accepted = {
             let mut unit = Unit::with_first_effect(&mut tx, self.inner.clock.now(), before);
             let accepted = admission::apply(self, &mut unit, principal, prepared).await?;
-            retain_creation(&mut unit, principal, &accepted).await?;
             unit.finish().await?;
             accepted
         };
@@ -119,31 +118,4 @@ impl Engine {
         unit.finish().await?;
         Ok(accepted)
     }
-}
-
-/// Only accepted identities and generated acknowledgement facts, never prompt content.
-pub fn creation_identity(
-    value: &ThreadContinuationAccepted,
-) -> orch_db::idempotency::creation::Created {
-    orch_db::idempotency::creation::Created {
-        kind: "continuation_operation".into(),
-        id: value.operation_id,
-        data: serde_json::json!({"continuation":value.continuation_id,"input":value.input_id,"job":value.job,"seq":value.seq}),
-    }
-}
-async fn retain_creation(
-    unit: &mut Unit<'_>,
-    principal: &Principal,
-    value: &ThreadContinuationAccepted,
-) -> Result<(), Error> {
-    let identity = creation_identity(value);
-    orch_db::idempotency::creation::observe_with(
-        unit.conn,
-        Some(principal.caller().user()),
-        &identity.kind,
-        identity.id,
-        identity.data,
-    )
-    .await?;
-    Ok(())
 }

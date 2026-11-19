@@ -2,7 +2,7 @@
 import { expect, test, type Request } from '@playwright/test';
 import { resourceFixtures } from '../../e2e/layout-fixtures.ts';
 import { INVENTORY_KINDS } from '../../src/features/resources/inventory.ts';
-import { scenario, signIn, arrived } from '../e2e/support.ts';
+import { scenario, signIn } from '../e2e/support.ts';
 
 const kinds = ['providers', 'agents', 'environments', 'hosts', 'templates', 'mcp', 'mounts', 'machines', 'skills'] as const;
 function record(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
@@ -34,14 +34,13 @@ for (const width of [1440, 400]) for (const kind of kinds) {
     let inventory: unknown = null;
     let coldComplete = false, warmComplete = false;
     try {
-      const own = arrived(page.waitForResponse((response) => {
+      const own = page.waitForResponse((response) => {
         const url = new URL(response.url());
         return response.request().method() === 'GET' && url.pathname === '/api/v1/everything'
           && url.searchParams.get('parent') === 'resources' && url.searchParams.get('kinds') === INVENTORY_KINDS[kind]
           && url.searchParams.get('resource_details') === 'true';
-      }));
-      // The shell's one admission read carries the authority; the cold path reads /me/authority no more (below).
-      const checked = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/me/bootstrap');
+      });
+      const checked = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/me/authority');
       await page.goto(path);
       const response = await own;
       expect(response.status()).toBe(200);

@@ -45,7 +45,6 @@ export interface NewPageProps {
   preset: NewPagePreset;
   onPresetChange: (preset: NewPagePreset) => void;
   letIntoEnvironment: boolean;
-  letIntoEnvironmentTooltip?: string;
   onLetIntoEnvironmentChange: (checked: boolean) => void;
   /** A project creates a new topic first; its audience is that new topic, rather than the project. */
   audienceName?: string;
@@ -55,7 +54,7 @@ export interface NewPageProps {
   fork?: { source: string; value: 'original' | 'place'; onChange: (value: 'original' | 'place') => void } | undefined;
 }
 
-export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvironment, letIntoEnvironmentTooltip, onLetIntoEnvironmentChange, audienceName, summary, fork }: NewPageProps) {
+export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvironment, onLetIntoEnvironmentChange, audienceName, summary, fork }: NewPageProps) {
   const { t } = useTranslation();
   const defaults = useQuery({ ...defaultsQuery(place.id), enabled: summary === undefined });
   const catalogue = useQuery(permissionsQuery);
@@ -81,7 +80,7 @@ export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvir
     <div className="flex flex-col gap-3">
       <GeneralAccessControl catalogue={index} kind="thread" place={audienceName ?? place.name} value={preset} onChange={onPresetChange}
         summary={said}
-        environment={{ checked: letIntoEnvironment, onChange: onLetIntoEnvironmentChange, tooltip:letIntoEnvironmentTooltip }} />
+        environment={{ checked: letIntoEnvironment, onChange: onLetIntoEnvironmentChange }} />
       {fork !== undefined && (
         <ChoiceField label={t('access.newPage.forkLabel')} options={forkOptions}>
         <RadioGroup<'original' | 'place'>

@@ -1,8 +1,7 @@
 /** A team owner's setup choice, scoped facts and portable dismissal; personal spaces have no team-setup card. */
 import { expect, test } from '@playwright/test';
-import type { OrgOverviewResponse } from '../../src/generated/api-types.ts';
 
-import { ACME, deny, expectAccessibleInBothThemes, PEOPLE, replySent, scenario, signIn, screenAddress } from './support.ts';
+import { ACME, deny, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 const CONTROL_TIMEOUT_MS = 10_000;
@@ -40,8 +39,7 @@ test('many readable teams keep personal fallback without setup guidance and canc
   await control('/org', { name: 'Another team', slug: 'another-team' });
   await control('/landing', { org: '00000000-0000-4000-8000-ffffffffffff' });
   await signIn(page);
-  // Org homes retain their list choices in the address, in either query-key order.
-  await expect(page).toHaveURL(screenAddress('/org/ada'));
+  await expect(page).toHaveURL(/\/org\/ada$/);
   const first = page.getByTestId('first-steps');
   await expect(first).toHaveCount(0);
   const create = page.getByRole('main').getByRole('button', { name: 'New project', exact: true });
@@ -50,7 +48,7 @@ test('many readable teams keep personal fallback without setup guidance and canc
   await expect(page.getByRole('dialog', { name: 'New project in Ada Lovelace' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
-  await expect(page).toHaveURL(screenAddress('/org/ada'));
+  await expect(page).toHaveURL(/\/org\/ada$/);
   await expect(first).toHaveCount(0);
 });
 
@@ -64,16 +62,12 @@ test('a readable saved department remains the landing place without changing the
   await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   expect(reads).toEqual([]);
-  expect((await control('/state'))?.reads).toBe(0);
 });
 
 test('an established root has no setup card even before a mode was chosen', async ({ page }) => {
-  // Setup is supplied by the joined org opening instead of a separate request.
-  const read = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/orgs/${ACME.org}/overview`);
+  const read = page.waitForResponse((response) => response.url().includes('/me/first-steps') && response.url().includes(ACME.org));
   await signIn(page);
-  // Several readable teams make the personal org the default landing place.
-  await page.goto('/org/acme');
-  expect(await replySent(await read)).toMatchObject({ mode: 'overview', data: { first_steps: { status: 'ready' } } });
+  await read;
   await expect(page.getByRole('heading', { name: 'Acme', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
 });
@@ -86,7 +80,6 @@ test('a member never requests or receives the owner’s setup card', async ({ pa
   await expect(page.getByRole('heading', { name: 'Acme', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   expect(reads).toEqual([]);
-  expect((await control('/state', { username: 'vera' }))?.reads).toBe(0);
 });
 
 test('an unfinished root offers setup without repeating its name or probing a model', async ({ page }) => {
@@ -121,7 +114,7 @@ test('an incomplete team keeps its own facts and remembers dismissal on another 
     await peer.goto('/org/setup-team');
     await expect(peer.getByRole('button', { name: 'Dismiss', exact: true })).toBeVisible();
     const reads: string[] = [];
-    peer.on('request', (request) => { if (request.method() === 'GET' && (/\/me\/(first-steps|state)(?:\?|$)/.test(request.url()) || request.url().includes(`/orgs/${team}/overview`))) reads.push(request.url()); });
+    peer.on('request', (request) => { if (request.method() === 'GET' && /\/me\/(first-steps|state)(?:\?|$)/.test(request.url())) reads.push(request.url()); });
     const writes: string[] = [];
     page.on('request', (request) => { if (request.method() !== 'GET' && request.url().includes('/me/first-steps')) writes.push(request.method()); });
     await first.getByRole('button', { name: 'Dismiss', exact: true }).click();
@@ -136,11 +129,11 @@ test('an incomplete team keeps its own facts and remembers dismissal on another 
   try {
     const second = await other.newPage();
     await signIn(second);
-    await expect(second).toHaveURL(screenAddress('/org/setup-team'));
+    await expect(second).toHaveURL(/\/org\/setup-team$/);
     await expect(second.getByRole('button', { name: 'Show first steps' })).toBeVisible();
     await second.getByRole('button', { name: 'Show first steps' }).click();
     await expect(second.getByTestId('first-steps').locator('[data-step="provider"]')).toContainText('Not done yet');
-    await expect(page).toHaveURL(screenAddress('/org/setup-team'));
+    await expect(page).toHaveURL(/\/org\/setup-team$/);
   } finally { await other.close(); }
 });
 
@@ -155,7 +148,7 @@ test('a new team is created in the existing form before its first provider or in
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('First steps team');
   await dialog.getByRole('textbox', { name: 'Short name', exact: true }).fill('first-steps-team');
   await dialog.getByRole('button', { name: 'Create org', exact: true }).click();
-  await expect(page).toHaveURL(screenAddress('/org/first-steps-team'));
+  await expect(page).toHaveURL(/\/org\/first-steps-team$/);
   const first = page.getByTestId('first-steps');
   await first.getByRole('button', { name: 'Use this team', exact: true }).click();
   await expect(first.locator('[data-step="provider"]')).toContainText('Not done yet');
@@ -181,11 +174,7 @@ test('loading or failed observations do not invent missing setup, and lost View 
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   await expect(page.getByTestId('first-steps').locator('[data-step="provider"]')).toContainText('Not done yet');
   await control('/set', { delayMs: 0, failed: true });
-  const failedRead = page.waitForResponse(async (response) => {
-    if (new URL(response.url()).pathname !== `/api/v1/orgs/${org}/overview` || !response.ok()) return false;
-    const opening = await replySent(response) as OrgOverviewResponse;
-    return opening.mode === 'overview' && opening.data.first_steps.status === 'failed';
-  });
+  const failedRead = page.waitForResponse((response) => response.url().includes('/me/first-steps') && response.status() >= 400);
   await page.reload();
   await failedRead;
   await expect(page.getByTestId('first-steps')).toHaveCount(0);

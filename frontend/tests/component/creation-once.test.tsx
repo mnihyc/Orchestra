@@ -1,5 +1,3 @@
-import type * as RouterModule from '@tanstack/react-router';
-import type * as OrgState from '@/shell/org';
 /** UA-07: each screen keeps one creation entry, including empty lists and inline starters. */
 import type * as OrgOverviewModule from '@/api/orgOverview';
 import type * as FirstStepsModule from '@/api/firstSteps';
@@ -48,7 +46,7 @@ function emptyPages(key: readonly unknown[]) {
   return { queryKey: key, initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined };
 }
 
-vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),
+vi.mock('@tanstack/react-router', () => ({
   Link: ({ to, params, children, className }: { to: string; params?: Record<string, string>; children: ReactNode; className?: string }) => <a href={`${to}/${Object.values(params ?? {}).join('/')}`} className={className}>{children}</a>,
   // The project's "…" names its Settings and goes there with the router.
   useRouter: () => ({ navigate: vi.fn() }),
@@ -75,7 +73,7 @@ vi.mock('@/api/chats', async (original) => ({ ...await original<object>(), orgCh
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/realtime/stores/tree', async (original) => ({ ...await original<object>(), useOrgTree: () => ({ nodes, loaded: true, error: null }) }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
-vi.mock('@/shell/org', async (load) => ({ ...await load<typeof OrgState>(), selectOrg: vi.fn() }));
+vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
 vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: calls.dialog }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),

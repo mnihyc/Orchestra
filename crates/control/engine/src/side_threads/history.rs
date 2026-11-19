@@ -950,7 +950,7 @@ async fn verify_child(
         },
     )?;
     read.deadline = creation.deadline;
-    let (cut, boundary) = {
+    let boundary = {
         let mut tx = engine.db().begin().await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
         let side = threads::lock(&mut tx, snap.thread.node_id)
@@ -1019,7 +1019,7 @@ async fn verify_child(
         }
         cuts::hold_command(&mut tx, cut.id, read.id, read.machine).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
-        (cut, boundary)
+        boundary
     };
     let actual = crate::commands::run(engine.inner.commands.as_ref(), read.clone()).await?;
     {
@@ -1050,7 +1050,7 @@ async fn verify_child(
     };
     let child: orch_link_contract::commands::AgentReadSessionResult =
         serde_json::from_value(value)?;
-    crate::fork_history::cut::verify_native_record(engine, &cut, &boundary, &child).await?;
+    crate::fork_history::cut::verify_native_record(engine, &boundary, &child).await?;
     let mut tx = engine.db().begin().await?;
     if let Outcome::Succeeded(value) = &actual {
         link::finish_command(

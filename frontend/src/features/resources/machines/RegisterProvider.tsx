@@ -1,4 +1,3 @@
-import { ResourcePicker } from '@/ui/ResourcePicker';
 /** The dialog that registers a provider from a machine: the login a harness already holds there, or an API key that is typed on the machine, with the command that types it.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -8,13 +7,12 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 
-import { providerSetupQuery, registerProvider, type MachineProviderRegistration } from '@/api/resources';
+import { providerSetupQuery, registerProvider } from '@/api/resources';
 import { CommandBox } from '@/features/resources/Facts';
-import { resourceGroupMeta, resourceHomeLabel } from '@/features/resources/groups';
 import { HomePicker } from '@/features/resources/HomePicker';
 import { type EndpointDraft, EndpointsEditor, endpointFault, newEndpoint, upstreamOf } from '@/features/resources/providers/Endpoints';
 import { Hint } from '@/features/help/Hint';
-import type { Machine, Provider, ProviderSetupProtocol } from '@/generated/api-types';
+import type { Machine, MachineProviderCreateBody, Provider, ProviderSetupProtocol } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
@@ -22,6 +20,7 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { RadioGroup } from '@/ui/RadioGroup';
+import { Select } from '@/ui/Select';
 import { toast } from '@/ui/Toast';
 
 type Uses = 'login' | 'key';
@@ -43,10 +42,7 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
   const [name, setName] = useState('');
   const [nameError, setNameError] = useState<string | undefined>(undefined);
   const [home, setHome] = useState('');
-  const machineHome = resourceGroupMeta(machine);
-  const defaultHomeName = (machineHome.home === null || machineHome.home === undefined) ? '' : resourceHomeLabel(machineHome,t);
-  const setupHome = home === '' ? machineHome.home?.id ?? '' : home;
-  const setup = useQuery({ ...providerSetupQuery(setupHome), enabled: open && setupHome !== '' });
+  const setup = useQuery({ ...providerSetupQuery(home), enabled: open && home !== '' });
   // The key is typed on the machine, so a header whose value is a secret has no place in this request.
   const protocols = useMemo(
     () => (setup.data?.protocols ?? FALLBACK_PROTOCOLS).map((protocol) => ({ ...protocol, endpoint_options: protocol.endpoint_options.filter((field) => field.type !== 'secret_map') })),
@@ -58,7 +54,7 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
   const httpAllowed = setup.data?.http_allowed ?? false;
 
   const register = useMutation({
-    mutationFn: (body: MachineProviderRegistration) => registerProvider(machine.id, body, key(body)),
+    mutationFn: (body: MachineProviderCreateBody) => registerProvider(machine.id, body, key(body)),
     onSuccess: (provider) => {
       toast({ tone: 'success', title: t('machines.provider.done', { name: provider.name }) });
       if (provider.kind === 'api') {
@@ -73,10 +69,10 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
   const submit = () => {
     const trimmed = name.trim();
     setNameError(trimmed === '' ? t('machines.provider.nameEmpty') : undefined);
-    if (trimmed === '') return;
+    if (trimmed === '' || home === '') return;
     if (uses === 'login') {
       if (agentId === '') return;
-      register.mutate({ ...(home === '' ? {} : {home_id: home}), kind: 'subscription', name: trimmed, agent_id: agentId });
+      register.mutate({ home_id: home, kind: 'subscription', name: trimmed, agent_id: agentId });
       return;
     }
     const faults: Record<string, string> = {};
@@ -87,7 +83,7 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
     setEndpointErrors(faults);
     if (Object.keys(faults).length > 0) return;
     register.mutate({
-      ...(home === '' ? {} : {home_id: home}),
+      home_id: home,
       kind: 'api',
       name: trimmed,
       upstreams: endpoints.map((row) => upstreamOf(row, protocols.find((protocol) => protocol.name === row.protocol)).upstream),
@@ -109,7 +105,7 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
             <Button disabled={pending} onClick={onClose}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" pending={pending} blocked={uses === 'login' && agentId === ''} onClick={submit}>
+            <Button variant="primary" pending={pending} blocked={home === '' || (uses === 'login' && agentId === '')} onClick={submit}>
               {t('machines.provider.submit')}
             </Button>
           </>
@@ -145,16 +141,14 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
             ]}
           />
           <Input label={t('machines.provider.name')} value={name} error={nameError} onChange={(event) => setName(event.target.value)} autoComplete="off" />
-          <HomePicker value={home} onChange={setHome} disabled={pending}
-            defaultChoice={t(defaultHomeName===''?'resourceGroups.machineHome':'resourceGroups.machineHomeNamed',{name:defaultHomeName})}
-            places={(machineHome.home === null || machineHome.home === undefined) || machineHome.home.redacted ? [] : [{id:machineHome.home.id,name:defaultHomeName}]} />
+          <HomePicker value={home} onChange={setHome} />
           {uses === 'login' ? (
-            <ResourcePicker pickerKey="machine-provider-profile"
+            <Select
               label={t('machines.provider.profile')}
               hint={t('machines.provider.profileHint')}
               value={agentId}
               onValueChange={setAgentId}
-              options={machine.agents.map((agent) => ({ value: agent.id, label: agent.name, resource:{kind:'agent',id:agent.id,data:agent}, description: agent.harness_kind }))}
+              options={machine.agents.map((agent) => ({ value: agent.id, label: agent.name, description: agent.harness_kind }))}
             />
           ) : (
             <div className="flex flex-col gap-2">

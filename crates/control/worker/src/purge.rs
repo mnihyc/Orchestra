@@ -108,18 +108,7 @@ pub async fn expired(
         .max(config.auth.address_failure_window_secs);
     let throttle =
         identity::prune_throttle(&mut tx, now, spans::seconds(window), NOTICE_KEPT).await?;
-    let window = orch_settings::get::<i64>(&mut tx, Place::System, keys::API_IDEMPOTENCY_WINDOW)
-        .await?
-        .ok_or_else(|| DbError::Rule {
-            constraint: "idempotency_window_missing".into(),
-        })?;
-    let modern_before = Duration::try_hours(window)
-        .and_then(|span| now.checked_sub_signed(span))
-        .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let legacy_before = now
-        .checked_sub_signed(ttl_of_keys(config))
-        .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let idempotency_keys = idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
+    let idempotency_keys = idempotency::purge(&mut tx, now - ttl_of_keys(config)).await?;
     let link_codes = routes::drop_expired_codes(&mut tx, now).await?;
     tx.commit().await.map_err(DbError::from)?;
     let (deliveries, inbox) = deliveries_and_inbox(db, now).await?;

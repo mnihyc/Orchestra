@@ -6,8 +6,6 @@
 )]
 
 mod common;
-#[path = "skills/recording.rs"]
-mod recording;
 
 use std::sync::Arc;
 

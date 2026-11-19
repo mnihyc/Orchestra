@@ -9,9 +9,6 @@ mod common;
 mod hosting;
 mod native_tools;
 
-#[path = "orch_capabilities/recreation_scopes.rs"]
-mod recreation_scopes;
-
 use common::{World, eventually, queued};
 use orch_api_contract::approvals::{ApprovalDecision, CapabilityDecision};
 use orch_authz::Caller;
@@ -406,7 +403,7 @@ async fn a_live_grant_reports_available_now_after_the_node_applies_it_and_sends_
     let initial_open = world.commands.issued_bodies("session.open")[0].1.clone();
     assert_eq!(
         initial_open["orch_tools"],
-        json!(["read_shared", "request_capability", "orch_docs"])
+        json!(["read_shared", "request_capability"])
     );
     assert!(
         initial_open["instructions"]

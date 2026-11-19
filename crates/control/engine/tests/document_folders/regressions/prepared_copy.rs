@@ -118,20 +118,7 @@ async fn prepared_copy_cut_precedes_header_files_history_and_replay_never_repeat
     let complete = material(&mut tx, copy.id, &request.request_ref, attached.hash).await?;
     assert_eq!(complete.0, 1);
     assert_eq!(complete.2, 1);
-    assert!(complete.1 > 0);
-    assert_eq!(
-        complete.3, 0,
-        "initial copied blocks are an open history span, before any version cut"
-    );
-    let copied = orch_db::queries::documents::get(&mut tx, copy.id)
-        .await?
-        .ok_or("the copied document is absent")?;
-    assert!(!copied.span().is_empty());
-    assert_eq!(
-        copied.span().authors,
-        vec![orch_documents::versions::Writer::User(area.world.ada)]
-    );
-    assert!(complete.4 > 0);
+    assert!(complete.1 > 0 && complete.3 > 0 && complete.4 > 0);
     assert_eq!(complete.8, before.8 + 1);
     tx.commit().await?;
     let mut tx = area.world.pool.begin().await?;

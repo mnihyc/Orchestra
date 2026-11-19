@@ -17,8 +17,8 @@ pub fn mode(value: &Json) -> Result<&str, &'static str> {
         return Err("web search must be a mode or a configuration object");
     };
     match selected {
-        "disabled" | "cached" | "indexed" | "live" => Ok(selected),
-        _ => Err("web search mode must be disabled, cached, indexed or live"),
+        "disabled" | "cached" | "live" => Ok(selected),
+        _ => Err("web search mode must be disabled, cached or live"),
     }
 }
 

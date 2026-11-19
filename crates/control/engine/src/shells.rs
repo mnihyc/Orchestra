@@ -1282,6 +1282,10 @@ impl Shells {
 
     /// The same local CAS/recording/history writer on its actor's existing native transaction.
     /// The no-queue branch has no machine result or supplier IO and consumes its first check here.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "native pending result, actor, connection and first-effect seam are independent operands"
+    )]
     async fn finish_result_in(
         &self,
         conn: &mut orch_db::Conn,

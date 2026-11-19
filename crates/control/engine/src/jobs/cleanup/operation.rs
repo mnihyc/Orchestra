@@ -2,7 +2,6 @@
 use super::*;
 use crate::operation_scope::{
     continuing::{self, Error, Source},
-    http_origin::HttpOrigin,
     sources::Facts,
 };
 use futures::future::BoxFuture;
@@ -40,9 +39,6 @@ pub struct Origin {
     pub operation: CapturedOperation,
     /// The actual browser session, absent for a token.
     pub session: Option<Id>,
-    /// A saved preview keeps its actual raw transport, independently of a later confirmation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<HttpOrigin>,
 }
 impl Origin {
     /// Capture only an admitted native caller and its transport's genuine sign-in.
@@ -55,7 +51,6 @@ impl Origin {
         Ok(Self {
             operation: CapturedOperation::capture(caller).map_err(EngineError::unreadable)?,
             session,
-            checkpoint: None,
         })
     }
     async fn raw(
@@ -244,34 +239,35 @@ async fn association(conn: &mut Conn, input: &Input) -> Result<Json, Error> {
                     .resources
                     .iter()
                     .find(|item| item.resource == *resource)
-            }) && let Some(expected) = input.sources.associations.get(key)
-            {
-                if expected.object.kind == KeyTargetKind::Object(ObjectKind::Host)
-                    && expected.object.id != Some(*host)
-                {
-                    return Err(unavailable());
-                }
-                if expected.object.kind != KeyTargetKind::Object(ObjectKind::Host) {
-                    let runtime = native
-                        .labels
-                        .get(orch_driver_contract::runtime::LABEL_RUNTIME_ID)
-                        .and_then(|id| id.parse::<Id>().ok())
-                        .ok_or_else(unavailable)?;
-                    let owner:Option<(Option<Id>,Option<Id>)>=sqlx::query_as("SELECT environment_id,provider_id FROM runtimes WHERE id=$1 AND host_id=$2").bind(runtime).bind(host).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
-                    let owner = owner
-                        .and_then(|(environment, provider)| {
-                            environment
-                                .map(|id| (ObjectKind::Environment, id))
-                                .or_else(|| provider.map(|id| (ObjectKind::Provider, id)))
-                        })
-                        .ok_or_else(unavailable)?;
-                    if expected.object
-                        != (KeyObjectRef {
-                            kind: KeyTargetKind::Object(owner.0),
-                            id: Some(owner.1),
-                        })
+            }) {
+                if let Some(expected) = input.sources.associations.get(key) {
+                    if expected.object.kind == KeyTargetKind::Object(ObjectKind::Host)
+                        && expected.object.id != Some(*host)
                     {
                         return Err(unavailable());
+                    }
+                    if expected.object.kind != KeyTargetKind::Object(ObjectKind::Host) {
+                        let runtime = native
+                            .labels
+                            .get(orch_driver_contract::runtime::LABEL_RUNTIME_ID)
+                            .and_then(|id| id.parse::<Id>().ok())
+                            .ok_or_else(unavailable)?;
+                        let owner:Option<(Option<Id>,Option<Id>)>=sqlx::query_as("SELECT environment_id,provider_id FROM runtimes WHERE id=$1 AND host_id=$2").bind(runtime).bind(host).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
+                        let owner = owner
+                            .and_then(|(environment, provider)| {
+                                environment
+                                    .map(|id| (ObjectKind::Environment, id))
+                                    .or_else(|| provider.map(|id| (ObjectKind::Provider, id)))
+                            })
+                            .ok_or_else(unavailable)?;
+                        if expected.object
+                            != (KeyObjectRef {
+                                kind: KeyTargetKind::Object(owner.0),
+                                id: Some(owner.1),
+                            })
+                        {
+                            return Err(unavailable());
+                        }
                     }
                 }
             }
@@ -642,18 +638,10 @@ pub async fn check_preview(
     origin: &Origin,
     sources: &sources::Sources,
 ) -> Result<Deadline, EngineError> {
-    let checkpoint = origin.checkpoint.as_ref().ok_or_else(|| {
-        EngineError::unreadable("the saved cleanup preview has no original HTTP checkpoint")
-    })?;
-    if checkpoint.origin() != &origin.operation || checkpoint.session() != origin.session {
-        return Err(EngineError::unreadable(
-            "the saved cleanup preview's original transport changed",
-        ));
-    }
-    let frame = continuing::checkpoint::<Previewing>(
+    let frame = continuing::prepare::<Previewing>(
         conn,
         clock,
-        checkpoint,
+        &origin.operation,
         Input {
             sources: sources.clone(),
             work: None,
@@ -661,10 +649,10 @@ pub async fn check_preview(
     )
     .await
     .map_err(EngineError::unreadable)?;
-    let raw = frame
-        .http_origin()
-        .ok_or_else(|| EngineError::unreadable("the cleanup preview lost its HTTP checkpoint"))?
-        .until();
+    let raw = origin
+        .raw(conn, frame.principal().caller(), clock.time())
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the cleanup preview's browser sign-in ended"))?;
     let parts = frame.into_parts();
     let callers = vec![parts.principal.caller().clone()];
     parts

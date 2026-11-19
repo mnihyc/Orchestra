@@ -1048,7 +1048,6 @@ impl FileStates {
                             entries.clone(),
                         )?;
                         let root = StateRoot {
-                            selected_paths: None,
                             snapshot_id: request.snapshot_id,
                             request_hash: Some(Hash::of(
                                 &serde_json::to_vec(request)
@@ -1129,7 +1128,6 @@ impl FileStates {
             .checked_add_signed(days)
             .ok_or_else(|| HostError::Unsupported("undo expiry is too large".to_owned()))?;
         let root = StateRoot {
-            selected_paths: None,
             snapshot_id: request.snapshot_id,
             request_hash: Some(Hash::of(
                 &serde_json::to_vec(request)

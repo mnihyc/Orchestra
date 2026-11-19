@@ -19,7 +19,7 @@ import { useStore } from 'zustand';
 import { client } from '@/api/client';
 import { usageQuery, type UsageParams } from '@/api/usage';
 import type { UsageAnalytics, UsageDimension, UsageFigures } from '@/generated/api-types';
-import { creditsState, decimal, ESTIMATE_MARK, formatCredits, isEmpty, measureOf } from '@/features/usage/figures';
+import { creditsState, decimal, ESTIMATE_MARK, formatCredits, measureOf } from '@/features/usage/figures';
 import { keyId, keyLabel } from '@/features/usage/keys';
 import { spanOf, today, type UsageSearch } from '@/features/usage/search';
 import { useFormatContext } from '@/lib/appearance';
@@ -32,7 +32,6 @@ import { Select } from '@/ui/Select';
 import { Skeleton } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 import { UsageVisibility } from './Visibility';
-import { serviceUnitsWords } from './services';
 
 /** The periods the board offers. */
 export const BOARD_PERIODS = ['day', 'week', 'last_week', 'month', 'year', 'all'] as const;
@@ -42,7 +41,7 @@ export type BoardPeriod = (typeof BOARD_PERIODS)[number];
 const DEFAULT_PERIOD: BoardPeriod = 'week';
 
 /** The other ways the board divides the same total. */
-const OTHER_WAYS = ['model','offering','purpose', 'provider', 'agent', 'environment'] as const satisfies readonly UsageDimension[];
+const OTHER_WAYS = ['model', 'provider', 'agent', 'environment'] as const satisfies readonly UsageDimension[];
 type OtherWay = (typeof OTHER_WAYS)[number];
 
 /** How many people the board lists before "Show all". */
@@ -146,9 +145,8 @@ export interface UsageBoardProps {
 /** The overview and its native board use identical restored controls and bounds. */
 export function useUsageBoardParams(nodeId: string): UsageParams {
   const [now] = useState(Date.now);
-  // Read to ask for what the screen shows, whichever screen it is: no control of the board is here to put its choice into the address.
-  const [period] = useListChoice<BoardPeriod>('usage-board', 'period', DEFAULT_PERIOD, 'address', false);
-  const [other] = useListChoice<OtherWay>('usage-board', 'other', 'model', 'address', false);
+  const [period] = useListChoice<BoardPeriod>('usage-board', 'period', DEFAULT_PERIOD);
+  const [other] = useListChoice<OtherWay>('usage-board', 'other', 'model');
   return { scope: `node:${nodeId}`, ...boardSpan(period, now), breakdowns: ['person', other], limit: PEOPLE_ASKED, filters: {} };
 }
 
@@ -204,9 +202,7 @@ export function UsageBoard({ nodeId, name, className }: UsageBoardProps) {
             t('usage.board.tokens', { tokens: formatTokens(analytics.totals.tokens.total_tokens, locale) }),
             creditsState(analytics.totals).none ? t('usage.board.noCredits') : `${formatCredits(decimal(analytics.totals.credits), locale)} ${unit}`,
           ].map((value,index)=><li key={index}>{value}</li>)}
-          {Object.keys(analytics.totals.service_units??{}).length>0 && <li>{serviceUnitsWords(analytics.totals.service_units,t,locale)}</li>}
           </ul>
-          {(analytics.totals.unrated_services??0)>0 && <span>{t('usage.serviceUnits.unpriced',{count:analytics.totals.unrated_services??0,value:formatNumber(analytics.totals.unrated_services??0,locale)})}</span>}
           {analytics.totals.unrated_tokens > 0 && !creditsState(analytics.totals).none && <span> {t('usage.board.unrated', { tokens: formatTokens(analytics.totals.unrated_tokens, locale) })}</span>}
         </div>
       )}
@@ -224,7 +220,7 @@ export function UsageBoard({ nodeId, name, className }: UsageBoardProps) {
         </div>
       ) : query.isError ? (
         <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />
-      ) : analytics === undefined ? null : isEmpty(analytics.totals) ? (
+      ) : analytics === undefined ? null : analytics.totals.turns === 0 ? (
         <EmptyState compact title={t('usage.board.nothing', { name })} />
       ) : (
         <>
@@ -312,7 +308,6 @@ function WeeklyUsage({ nodeId }: { nodeId: string }) {
     {query.data.depth === 'own' && <span>{t('usage.title.me')}</span>}
     <span className="tabular-nums">{t('usage.tables.turnsCount', { count: figures.turns })}</span>
     <span className="tabular-nums">{t('usage.board.tokens', { tokens: formatTokens(figures.tokens.total_tokens, locale) })}</span>
-    {Object.keys(figures.service_units??{}).length>0 && <span className="tabular-nums">{serviceUnitsWords(figures.service_units,t,locale)}</span>}
     <span className="tabular-nums">{creditsState(figures).none ? t('usage.board.noCredits') : creditsShort(figures, locale, t('usage.board.credits'))}</span>
   </Link>;
 }

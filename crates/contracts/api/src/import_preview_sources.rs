@@ -17,10 +17,6 @@ pub enum Source {
     Destination,
     /// One actual selected native saved-byte family, independent of the content hash.
     Bytes(upload_sources::Source),
-    /// Actual live rows consulted while matching the source to the destination.
-    Existing,
-    /// Actual accounts matched by the native people producer.
-    Accounts,
 }
 
 const fn byte_binding(index: usize) -> Binding<Source> {
@@ -72,58 +68,3 @@ pub const PREVIEW_FACETS: [FacetSpec; 6] = {
         bytes[4],
     ]
 };
-
-/// Planning reads the uploaded source and its complete native conflict context.
-pub const PREFLIGHT: Declaration<Source> = Declaration {
-    operation: "NodeImportPreflight",
-    bindings: &[
-        PREVIEW.bindings[0],
-        byte_binding(0),
-        byte_binding(1),
-        byte_binding(2),
-        byte_binding(3),
-        byte_binding(4),
-        Binding {
-            source: Source::Existing,
-            target: TargetResolver::ResolvedCollection("import_existing_targets"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::Accounts,
-            target: TargetResolver::ResolvedCollection("import_matched_accounts"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
-
-/// Uploaded package identifiers supply no live destination or account authority.
-pub const PREFLIGHT_FACETS: [FacetSpec; 8] = [
-    PREVIEW_FACETS[0],
-    PREVIEW_FACETS[1],
-    PREVIEW_FACETS[2],
-    PREVIEW_FACETS[3],
-    PREVIEW_FACETS[4],
-    PREVIEW_FACETS[5],
-    FacetSpec::required(
-        KeyAction::Read,
-        &[
-            KeyTargetKind::Object(ObjectKind::Org),
-            KeyTargetKind::Object(ObjectKind::Project),
-            KeyTargetKind::Object(ObjectKind::Topic),
-            KeyTargetKind::Object(ObjectKind::Thread),
-            KeyTargetKind::Object(ObjectKind::Document),
-            KeyTargetKind::Object(ObjectKind::DocumentContainer),
-            KeyTargetKind::Identity(orch_access_contract::key_scope::KeyIdentityKind::Chat),
-        ],
-        TargetResolver::ResolvedCollection("import_existing_targets"),
-    ),
-    FacetSpec::required(
-        KeyAction::Read,
-        &[KeyTargetKind::Identity(
-            orch_access_contract::key_scope::KeyIdentityKind::Account,
-        )],
-        TargetResolver::ResolvedCollection("import_matched_accounts"),
-    ),
-];

@@ -44,7 +44,6 @@ async fn the_taught_path_reads_searches_and_downloads_own_history_before_and_aft
             thread,
             Event::TurnPhase(TurnPhase {
                 turn_id: active.turn_id,
-                retry_attempt: None,
                 kind: TurnPhaseKind::Compacting,
                 at: Time::new(world.clock.now()),
             }),
@@ -58,7 +57,6 @@ async fn the_taught_path_reads_searches_and_downloads_own_history_before_and_aft
             thread,
             Event::TurnPhase(TurnPhase {
                 turn_id: active.turn_id,
-                retry_attempt: None,
                 kind: TurnPhaseKind::Working,
                 at: Time::new(world.clock.now()),
             }),

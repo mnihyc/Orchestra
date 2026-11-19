@@ -19,9 +19,8 @@ leave certificate verification enabled.
 ## Addresses
 
 `[system] public_url` is the address people open; `[edge] ports_domain` is the separate suffix for
-published environment ports. The default machine list, `[[gateway.endpoints]]`, holds only
-`wss://gateway.example.com:9443` with `trust = "pinned"`, and an example address is told to no machine:
-replace it with a reachable name or IP, or "Add machine" makes no command and environments cannot connect.
+published environment ports. The default machine list, `[[gateway.endpoints]]`, advertises only
+`wss://gateway.example.com:9443` with `trust = "pinned"`. Replace the example with a reachable name or IP.
 `ORCH_GATEWAY_PUBLISH` publishes that direct door. If its host port differs from 9443, set the same port in
 the bundled `[gateway] managed_endpoint` so its Docker runtimes can reach it; keep `[node] gateway_url` on
 the internal Compose port 9443. Add `wss://<people's-name>/link` with
@@ -31,11 +30,8 @@ controls advertising and preference, not listener availability.
 A machine's `[[endpoints]]` list overrides the system list. With no local list it receives a fresh
 system list at every connection. Clear an existing local list to follow the system instead. A node's `[node] gateway_url` is its local scalar address override;
 leave it empty to follow the system. An explicit connector list takes precedence over that scalar. Its units follow the node by default. `[gateway] managed_endpoint`
-in that node's configuration can select another unit address. The bundled node dials `[node] gateway_url`,
-`wss://gateway:9443`, the gateway's Compose service name; keep it. `gateway.orch.internal` and the Docker
-`gateway_host` mapping are what the units it makes are told, by `[gateway] managed_endpoint`; keep those too.
-The first time, the node asks its `gateway_url` for the system's list and enrolls through an advertised entrance
-that answers, or at that address when none is advertised.
+in that node's configuration can select another unit address. The bundled node explicitly uses
+`gateway.orch.internal` and its Docker `gateway_host` mapping; keep those local settings.
 Connector programs and Orch-served builds are downloaded through the machine's verified connection,
 so a node need not reach the people's address to provision environments.
 

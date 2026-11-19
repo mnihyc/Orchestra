@@ -379,30 +379,18 @@ pub(crate) async fn remember_command(job: &Job, command: &Outgoing) -> Result<()
     Ok(())
 }
 
-/// The borrowed wire identity already compared as one unit at publication.
-pub(super) struct CommandRef<'a> {
-    pub(super) id: Id,
-    pub(super) machine: Id,
-    pub(super) key: Option<&'a str>,
-    pub(super) kind: &'a str,
-    pub(super) body: &'a Json,
-}
-
 /// Called under the existing final-wire action/command locks. Accepted rows use the
 /// dispatcher's factual receipt path; no new command can borrow this origin or journal.
 pub(super) async fn command_authorized(
     conn: &mut Conn,
     row: &JobRow,
-    command: CommandRef<'_>,
+    id: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
     now: Time,
 ) -> Result<bool, EngineError> {
-    let CommandRef {
-        id,
-        machine,
-        key,
-        kind,
-        body,
-    } = command;
     let checked: Result<bool, Stop> = async {
         let plan = recipe(row)?;
         let command = expected(row, &plan)?;

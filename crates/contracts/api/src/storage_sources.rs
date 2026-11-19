@@ -39,7 +39,6 @@ pub const KINDS: &[T] = &[
     T::Identity(I::Account),
     T::Identity(I::System),
     T::Identity(I::Export),
-    T::Identity(I::Import),
     T::Identity(I::Upload),
 ];
 /// Management remains the report's native question; live reference names have their own Read.

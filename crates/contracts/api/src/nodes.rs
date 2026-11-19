@@ -314,11 +314,13 @@ pub struct NodeBase<K> {
     pub owners: i64,
     /// Who maintains the title.
     pub title_source: FieldSource,
+    /// Who maintains the description.
+    pub description_source: FieldSource,
     /// Tags assigned to this place, regardless of its kind.
     pub tags: Vec<Tag>,
     /// Who maintains its assigned tags.
     pub tags_source: FieldSource,
-    /// When automation last wrote the title or tags.
+    /// When automation last wrote the title or the description.
     pub auto_updated_at: Option<Time>,
     /// How its permission page stands against the defaults.
     pub page: PageState,
@@ -464,14 +466,14 @@ pub struct Topic {
     pub status: TopicStatus,
     /// When it was marked done.
     pub done_at: Option<Time>,
-    /// How many main threads this reader may view; side threads do not count.
+    /// How many threads it holds.
     pub thread_count: i64,
-    /// Running, approval and blocked counts among those readable main threads.
+    /// How many of them need a look.
     pub attention: TopicAttention,
     /// Work flags are separate from running, approval and blocked counts.
     #[serde(default)]
     pub work_attention: TopicWorkAttention,
-    /// Latest activity among those readable main threads; null when none is readable.
+    /// When something last happened in it.
     pub last_activity_at: Option<Time>,
     /// The sequence of the topic's feed (`topic:<id>`): how far a reader of that feed has come.
     pub seq: Seq,
@@ -1028,6 +1030,8 @@ pub enum NewNodeAccess {
 pub enum AutoField {
     /// The title.
     Title,
+    /// The description.
+    Description,
     /// The tags.
     Tags,
 }
@@ -1102,30 +1106,11 @@ pub struct AgentAccessAvailability {
     pub choices: Vec<AgentAccessChoice>,
 }
 
-/// An interactive control-plane program, independent of a native agent profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateThreadProgram {
-    /// The genuine built-in declaration.
-    pub id: crate::threads::BuiltinThreadProgramId,
-    /// Saved API model preference; absent follows the governing root's current default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<crate::ask::AskModel>,
-}
-
 /// Everything that makes a thread, all of it optional: where the topic has
 /// defaults, `{}` makes a thread that is ready, and `first_input` starts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateThread {
-    /// Direct thread creation may choose an interactive built-in program without an environment.
-    /// Native binding, workspace and initial agent-contribution fields do not apply to this choice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub program: Option<CreateThreadProgram>,
-    /// Give the prospective thread's viewers the environment's View doors in the same birth.
-    /// Refusal leaves no new thread or gift. Omission preserves the environment's page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub let_into_environment: Option<bool>,
     /// Its name; `New thread` until renamed, with its title kept by automation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -2262,7 +2247,6 @@ crate::endpoints! {
                     Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
                     Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-                    Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
                     Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
                     Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
@@ -2295,7 +2279,6 @@ crate::endpoints! {
                     Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
                     Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-                    Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
                     Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
                     Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
                     Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
@@ -2494,6 +2477,7 @@ mod tests {
             "owner": user(),
             "owners": 1,
             "title_source": "user",
+            "description_source": "auto",
             "tags": [], "tags_source": "auto",
             "auto_updated_at": "2026-10-09T08:00:00.000Z",
             "page": "follows",
@@ -2650,29 +2634,5 @@ mod tests {
         let by_person: AuditActor =
             serde_json::from_value(json!({ "kind": "user", "user": user() })).unwrap();
         assert!(matches!(by_person, AuditActor::User { .. }));
-    }
-}
-
-#[cfg(test)]
-mod written_description_tests {
-    use super::NodeAutoBody;
-    use serde_json::json;
-
-    #[test]
-    fn descriptions_cannot_be_resumed_or_refreshed_by_automation() {
-        for action in ["resume", "refresh"] {
-            assert!(
-                serde_json::from_value::<NodeAutoBody>(
-                    json!({"field":"description","action":action})
-                )
-                .is_err()
-            );
-            for field in ["title", "tags"] {
-                assert!(
-                    serde_json::from_value::<NodeAutoBody>(json!({"field":field,"action":action}))
-                        .is_ok()
-                );
-            }
-        }
     }
 }

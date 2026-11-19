@@ -1,5 +1,5 @@
 /** The ordinary agent Share form preserves exact area choices and keeps control extras separately authorized. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type * as AccessApi from '@/api/access';
@@ -7,11 +7,9 @@ import type * as ShareApi from '@/api/share';
 import { ShareWithAgentsDialog } from '@/features/access/ShareWithAgents';
 import { areasOf, partsOfLevel } from '@/features/access/agentShares';
 import type { PermissionPage, ShareParts, SharePreview } from '@/generated/api-types';
-import { currentLocale, i18n, setLocale } from '@/i18n';
+import { i18n } from '@/i18n';
 import { CATALOGUE, pageFor } from '../unit/general-access-fixtures';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 const calls = vi.hoisted(() => ({ review: vi.fn<typeof AccessApi.previewShare>(), share: vi.fn<typeof ShareApi.shareWithAgents>() }));
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), previewShare: calls.review,
@@ -130,27 +128,4 @@ it('does not carry the viewer Read option into a copy or treat View as permissio
   });
   await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('access.agents.dialog.button.copyOne', { name: 'Receiving thread' }) })).toHaveAttribute('aria-disabled', 'true'));
   expect(calls.share).not.toHaveBeenCalled();
-});
-
-
-it.each(['en', 'zh-CN'] as const)('keeps repeated Manage choices attached to their own share areas in %s', async (locale) => {
-  const previous = currentLocale();
-  await setLocale(locale);
-  try {
-    show(<ShareWithAgentsDialog target={target} page={page('topic')} open onClose={vi.fn()} initialRecipient={{ id: 'recipient', name: 'Receiving thread' }} />);
-    await userEvent.click(screen.getByRole('button', { name: i18n.t('access.agents.dialog.byArea') }));
-    const group = screen.getByRole('group', { name: i18n.t('access.agents.dialog.byAreaLabel') });
-    const rows = within(group).getAllByRole('listitem');
-    expect(rows).toHaveLength(3);
-    for (const [index, area] of ['timeline', 'chat', 'documents'].entries()) {
-      const row = rows[index];
-      if (row === undefined) throw new Error('Every share area has its own readable row.');
-      const label = i18n.t(`access.agents.area.${area}`);
-      await userEvent.click(within(row).getByRole('combobox', { name: label }));
-      await userEvent.click(screen.getByRole('option', { name: i18n.t('choiceCatalog.agentStep.manage.name') }));
-      expect(within(row).getByRole('combobox', { name: label })).toHaveTextContent(i18n.t('choiceCatalog.agentStep.manage.name'));
-    }
-    await waitFor(() => expect(parts()).toMatchObject({ timeline: 'manage', chat: 'manage', documents: 'manage' }));
-    expect(calls.share).not.toHaveBeenCalled();
-  } finally { await setLocale(previous); }
 });

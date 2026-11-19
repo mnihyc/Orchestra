@@ -135,25 +135,6 @@ pub async fn touch_blob(conn: &mut Conn, hash: &Hash, at: DateTime<Utc>) -> Resu
     Ok(())
 }
 
-/// Locks exactly the existing native pin rows before its owner's first-effect callback.
-/// Missing rows stay missing; this neither pins nor proves future source custody.
-pub async fn prepare_pin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<usize, DbError> {
-    let mut ordered = hashes.to_vec();
-    ordered.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    ordered.dedup();
-    let mut found = 0;
-    for batch in ordered.chunks(PIN_BATCH) {
-        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT hash FROM blobs WHERE hash=ANY($1) ORDER BY hash FOR UPDATE",
-        )
-        .bind(raw_hashes(batch))
-        .fetch_all(&mut *conn)
-        .await?;
-        found += rows.len();
-    }
-    Ok(found)
-}
-
 /// Adds one pin to each of `hashes` (each once, however often it is listed) and says how many had a
 /// row to pin. A pinned blob is never evicted and never goes with the grace.
 pub async fn pin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<u64, DbError> {
@@ -356,7 +337,7 @@ pub async fn prepare_unpin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<boo
     ordered.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     ordered.dedup();
     for batch in ordered.chunks(PIN_BATCH) {
-        let counts: Vec<i32> = sqlx::query_scalar(
+        let counts: Vec<i64> = sqlx::query_scalar(
             "SELECT pin_count FROM blobs WHERE hash=ANY($1) ORDER BY hash FOR UPDATE",
         )
         .bind(raw_hashes(batch))
@@ -654,20 +635,18 @@ pub struct SessionRow {
     pub received: i64,
     /// When it began.
     pub created_at: DateTime<Utc>,
-    /// When a piece was last committed; initially its creation time.
-    pub updated_at: DateTime<Utc>,
     /// When it ends.
     pub expires_at: DateTime<Utc>,
 }
 
 const SESSION_COLUMNS: &str =
-    "id, user_id, name, media_type, size, received, created_at, updated_at, expires_at";
+    "id, user_id, name, media_type, size, received, created_at, expires_at";
 
 /// Begins an upload session.
 pub async fn begin_session(conn: &mut Conn, session: &SessionRow) -> Result<(), DbError> {
     sqlx::query(
-        "INSERT INTO upload_sessions (id, user_id, name, media_type, size, received, created_at, expires_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO upload_sessions (id, user_id, name, media_type, size, received, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(session.id)
     .bind(session.user_id)
@@ -677,7 +656,6 @@ pub async fn begin_session(conn: &mut Conn, session: &SessionRow) -> Result<(), 
     .bind(session.received)
     .bind(session.created_at)
     .bind(session.expires_at)
-    .bind(session.updated_at)
     .execute(conn)
     .await?;
     Ok(())
@@ -704,16 +682,10 @@ pub async fn lock_session(conn: &mut Conn, id: Id) -> Result<Option<SessionRow>,
 }
 
 /// Records that `received` bytes of the session have arrived.
-pub async fn advance_session(
-    conn: &mut Conn,
-    id: Id,
-    received: i64,
-    at: DateTime<Utc>,
-) -> Result<(), DbError> {
-    sqlx::query("UPDATE upload_sessions SET received = $2,updated_at=$3 WHERE id = $1")
+pub async fn advance_session(conn: &mut Conn, id: Id, received: i64) -> Result<(), DbError> {
+    sqlx::query("UPDATE upload_sessions SET received = $2 WHERE id = $1")
         .bind(id)
         .bind(received)
-        .bind(at)
         .execute(conn)
         .await?;
     Ok(())
@@ -1043,11 +1015,7 @@ pub async fn input_carrying(
     let attachments = serde_json::json!([{ "attachments": [{ "blob": blob }] }]);
     Ok(sqlx::query_scalar(
         "SELECT content FROM thread_inputs
-          WHERE thread_id = $1 AND (content @> $2 OR content @> $3 OR content @> $4)
-          UNION ALL SELECT payload->'parts' FROM items
-          WHERE thread_id=$1 AND kind='user_message'
-            AND (payload->'parts' @> $2 OR payload->'parts' @> $3 OR payload->'parts' @> $4)
-          LIMIT 1",
+          WHERE thread_id = $1 AND (content @> $2 OR content @> $3 OR content @> $4) LIMIT 1",
     )
     .bind(thread)
     .bind(&direct)
@@ -1251,42 +1219,6 @@ pub async fn snapshots_of_thread(
     .bind(at)
     .bind(id)
     .bind(limit)
-    .fetch_all(conn)
-    .await?;
-    raw.into_iter().map(SnapshotRow::try_from).collect()
-}
-
-/// Real whole-workspace custody is filtered before the cursor and page allowance.
-pub async fn snapshots_of_environment(
-    conn: &mut Conn,
-    environment: Id,
-    maker: Id,
-    administrative: bool,
-    after: Option<(DateTime<Utc>, Id)>,
-    limit: i64,
-) -> Result<Vec<SnapshotRow>, DbError> {
-    let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
-    let raw: Vec<RawSnapshot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE environment_id=$1 AND thread_id IS NULL
-          AND (created_by=$2 OR $3) AND ($4::timestamptz IS NULL OR (created_at,id)<($4,$5))
-          ORDER BY created_at DESC,id DESC LIMIT $6"
-    )))
-    .bind(environment)
-    .bind(maker)
-    .bind(administrative)
-    .bind(at)
-    .bind(id)
-    .bind(limit)
-    .fetch_all(conn)
-    .await?;
-    raw.into_iter().map(SnapshotRow::try_from).collect()
-}
-
-/// Real retained whole-workspace exports across environments for the administrative storage source.
-pub async fn environment_exports(conn: &mut Conn) -> Result<Vec<SnapshotRow>, DbError> {
-    let raw: Vec<RawSnapshot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE thread_id IS NULL"
-    )))
     .fetch_all(conn)
     .await?;
     raw.into_iter().map(SnapshotRow::try_from).collect()

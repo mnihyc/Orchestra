@@ -189,8 +189,7 @@ def inputs(root):
                 matches.extend((match.start(),match.end(),reference) for match in re.finditer(re.escape(reference),text))
             matches.extend(match for match in re.finditer(r'''\b[A-Z_]*IMAGE=["']?([a-z0-9][^\s"'$]+)''',text) if ':' in match[1] or '/' in match[1])
             if path.suffix in {'.json','.toml'}:
-                # Only a value shaped like an image reference: a schema's field mapping such as "image": "image[]" names no image.
-                matches.extend(re.finditer(r'''(?m)(?:["']image["']\s*:|\bimage\s*=)\s*["']([A-Za-z0-9][A-Za-z0-9._/:@-]*)["']''',text))
+                matches.extend(re.finditer(r'''(?m)(?:["']image["']\s*:|\bimage\s*=)\s*["']([^\s"']+)''',text))
         for match in matches:
             start, end, reference = match if isinstance(match, tuple) else (match.start(1), match.end(1), match[1].strip("\"'"))
             if reference.startswith(("$", "${{")):

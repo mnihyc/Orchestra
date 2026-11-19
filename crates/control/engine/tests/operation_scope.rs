@@ -66,28 +66,11 @@ fn scoped(user: Id, rules: Vec<KeyRule>) -> Caller {
 }
 
 fn copy() -> Prepared {
-    // This generic control deliberately tests required non-collection slots. The native
-    // mixed tree row has its own explicit collections and native route controls.
-    const SPEC: OperationSpec = OperationSpec::variants(&[operations::VariantSpec {
-        name: "copy",
-        selector: "native copy control",
-        facets: &[
-            FacetSpec::required(
-                KeyAction::Read,
-                &[DOCUMENT],
-                TargetResolver::Resolved("sources"),
-            ),
-            FacetSpec::required(
-                KeyAction::Write,
-                &[DOCUMENT],
-                TargetResolver::Resolved("destination"),
-            ),
-            FacetSpec::response_content(&[DOCUMENT], TargetResolver::Resolved("created_entries")),
-        ],
-    }]);
-    let mut route = orch_api_contract::document_tree::DocumentTreeOperate::ROUTE;
-    route.operation = Some(SPEC);
-    Prepared::new(route, COPY).unwrap()
+    Prepared::new(
+        orch_api_contract::document_tree::DocumentTreeOperate::ROUTE,
+        COPY,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -112,14 +95,8 @@ fn compound_copy_requires_every_source_and_destination_after_partial_preparation
         )
         .is_err()
     );
-    let discovery = prepared.preparation_caller(&key).unwrap();
-    assert!(discovery.admitted_operation().is_none());
-    assert!(discovery.admitted_required_roles().is_none());
-    assert!(orch_authz::CapturedOperation::capture(&discovery).is_err());
-    assert!(prepared.admit(&discovery, false).is_err());
-    prepared
-        .bind(1, DOCUMENT, std::slice::from_ref(&destination))
-        .unwrap();
+    assert!(prepared.preparation_caller(&key).is_err());
+    prepared.bind(1, DOCUMENT, &[destination.clone()]).unwrap();
     let preparation = prepared.preparation_caller(&key).unwrap();
     assert_eq!(preparation.user(), user);
     assert_eq!(preparation.grant(), key.grant());
@@ -127,12 +104,12 @@ fn compound_copy_requires_every_source_and_destination_after_partial_preparation
     assert!(prepared.admit(&preparation, false).is_err());
     assert!(
         prepared
-            .permits_binding(&key, 0, DOCUMENT, std::slice::from_ref(&source))
+            .permits_binding(&key, 0, DOCUMENT, &[source.clone()])
             .unwrap()
     );
     assert!(
         !prepared
-            .permits_binding(&key, 0, DOCUMENT, std::slice::from_ref(&other_source))
+            .permits_binding(&key, 0, DOCUMENT, &[other_source.clone()])
             .unwrap()
     );
 
@@ -142,9 +119,7 @@ fn compound_copy_requires_every_source_and_destination_after_partial_preparation
         .bind(0, DOCUMENT, &[source.clone(), other_source])
         .unwrap();
     assert!(expanded.admit(&key, false).is_err());
-    prepared
-        .bind(0, DOCUMENT, std::slice::from_ref(&source))
-        .unwrap();
+    prepared.bind(0, DOCUMENT, &[source.clone()]).unwrap();
     let admitted = prepared.admit(&key, false).unwrap();
     assert_eq!(admitted.admitted_facets().unwrap().len(), 2);
     assert_eq!(admitted.admitted_operation(), Some(COPY));
@@ -166,7 +141,7 @@ fn invalid_or_duplicate_source_bindings_cannot_erase_a_required_effect() {
     let destination = target(KeyTargetKind::Object(ObjectKind::Topic));
     let mut prepared = copy();
     assert!(matches!(
-        prepared.bind(0, THREAD, std::slice::from_ref(&source)),
+        prepared.bind(0, THREAD, &[source.clone()]),
         Err(BindingError::Refused)
     ));
     assert!(prepared.bind(0, DOCUMENT, &[]).is_err());
@@ -174,20 +149,12 @@ fn invalid_or_duplicate_source_bindings_cannot_erase_a_required_effect() {
         prepared.bind_empty(0).is_err(),
         "sources is not a collection declaration"
     );
-    assert!(
-        prepared
-            .bind(99, DOCUMENT, std::slice::from_ref(&source))
-            .is_err()
-    );
+    assert!(prepared.bind(99, DOCUMENT, &[source.clone()]).is_err());
     assert!(prepared.required_facets().is_err());
-    prepared
-        .bind(0, DOCUMENT, std::slice::from_ref(&source))
-        .unwrap();
+    prepared.bind(0, DOCUMENT, &[source.clone()]).unwrap();
     assert!(prepared.bind(0, DOCUMENT, &[target(DOCUMENT)]).is_err());
     assert!(prepared.bind_empty(0).is_err());
-    prepared
-        .bind(1, DOCUMENT, std::slice::from_ref(&destination))
-        .unwrap();
+    prepared.bind(1, DOCUMENT, &[destination.clone()]).unwrap();
     let facts = prepared.required_facets().unwrap();
     assert_eq!(facts.len(), 2);
     assert_eq!(facts[0].target, source);
@@ -247,9 +214,7 @@ fn legacy_admission_and_permission_bounds_survive_the_common_binder() {
     )
     .unwrap();
     let key_kind = KeyTargetKind::Identity(KeyIdentityKind::Key);
-    issue
-        .bind(0, key_kind, std::slice::from_ref(&account))
-        .unwrap();
+    issue.bind(0, key_kind, &[account.clone()]).unwrap();
     let explicit = scoped(
         user,
         vec![rule(&account, "MeTokenCreate", &[KeyAction::Manage])],
@@ -297,9 +262,7 @@ fn scoped_response_admission_requires_every_declared_response_target() {
         ],
     );
     let mut prepared = Prepared::new(route, route.name).unwrap();
-    prepared
-        .bind(0, DOCUMENT, std::slice::from_ref(&destination))
-        .unwrap();
+    prepared.bind(0, DOCUMENT, &[destination.clone()]).unwrap();
     prepared.bind(1, DOCUMENT, &[destination]).unwrap();
     assert_eq!(prepared.response_coverage(&key), None);
     assert!(prepared.response_facets().is_err());

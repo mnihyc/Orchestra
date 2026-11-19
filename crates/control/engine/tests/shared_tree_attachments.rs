@@ -61,8 +61,6 @@ async fn both_chat_file_directories_are_discoverable_immutable_and_match_the_wri
             r#type: ForwardedType::Forwarded,
             from: ForwardedFrom::Chat {
                 chat: ChatRef {
-                    visibility: orch_api_contract::chats::ChatVisibility::Private,
-                    home: None,
                     id: new_id(),
                     kind: ChatKind::Group,
                     org_id: world.root,

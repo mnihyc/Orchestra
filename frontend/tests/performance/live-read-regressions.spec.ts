@@ -1,13 +1,11 @@
 /** Production request counts for Defaults, resource changes, deliberate tree expansion and hidden team chat. */
 import { expect, test, type APIRequestContext, type Page, type Request } from '@playwright/test';
-import { ACME, PEOPLE, scenario, signIn, arrived } from '../e2e/support.ts';
+import { ACME, PEOPLE, scenario, signIn } from '../e2e/support.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
 
 const API = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/api/v1`;
 const IDLE_MS = 60_000;
 const FIRST_LOAD = 8;
-/** The topic shows its team chat beside its settings: that chat's catch-up summary and generated subject are two reads more. */
-const TOPIC_FIRST_LOAD = FIRST_LOAD + 2;
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function traffic(page: Page) {
@@ -34,7 +32,7 @@ async function actor(request: APIRequestContext, person: { login: string; passwo
   return { token: body.access_token, userId: body.user.id };
 }
 
-for (const path of ['/org/acme/settings/defaults', `/project/${ACME.web}/settings?section=defaults`, `/topic/${ACME.fixLogin}?tab=settings&section=defaults`]) {
+for (const path of ['/org/acme/settings/policies', `/project/${ACME.web}/settings?section=policies`, `/topic/${ACME.fixLogin}?tab=settings&section=policies`]) {
   test(`Defaults at ${path} reads no closed options and makes no request in an idle minute`, async ({ page }) => {
     await scenario(); await signIn(page);
     const measured = traffic(page);
@@ -42,7 +40,7 @@ for (const path of ['/org/acme/settings/defaults', `/project/${ACME.web}/setting
       await page.goto(path);
       await expect(page.locator('[data-setting-row]').first()).toBeVisible();
       await settled(page);
-      expect(measured.requests.length, measured.lines().join('\n')).toBeLessThanOrEqual(path.startsWith('/topic/') ? TOPIC_FIRST_LOAD : FIRST_LOAD);
+      expect(measured.requests.length, measured.lines().join('\n')).toBeLessThanOrEqual(FIRST_LOAD);
       expect(measured.requests.filter(({ method, url }) => method === 'GET' && /^\/api\/v1\/(hosts|templates|providers)$/.test(url.pathname))).toEqual([]);
       const initial = measured.requests.length;
       await page.clock.install(); await page.clock.fastForward(IDLE_MS); await settled(page);
@@ -151,7 +149,7 @@ test('a closed right bar makes no team-chat reads; showing and expanding it shar
     const initial = measured.requests.length;
     await page.clock.install(); await page.clock.fastForward(IDLE_MS); await settled(page);
     expect(measured.requests.slice(initial)).toEqual([]);
-    const opened = arrived(page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/v1/nodes/${ACME.web}/chat-opening`));
+    const opened = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/v1/nodes/${ACME.web}/chat-opening`);
     await page.getByRole('button', { name: 'Right bar', exact: true }).click();
     const opening = await opened; expect(opening.ok()).toBe(true);
     expect(await opening.json()).toMatchObject({ opening: { sync: { chat: { node: { id: ACME.web, kind: 'project' } }, messages: [] }, draft: null } });

@@ -211,7 +211,6 @@ pub struct Api {
     pub app: App,
     pub port: u16,
     pub applier: Arc<RecordingApplier>,
-    listener: Option<std::net::TcpListener>,
     stop: CancellationToken,
     task: Option<JoinHandle<std::io::Result<()>>>,
 }
@@ -220,22 +219,9 @@ impl Api {
     pub async fn stop(&mut self) {
         self.stop.cancel();
         self.link.shutdown();
-        drop(self.listener.take());
-        join_stopped(&mut self.task).await;
-    }
-}
-
-/// A timed-out JoinHandle must be aborted and joined, not detached while it still owns a listener.
-async fn join_stopped<T>(slot: &mut Option<JoinHandle<T>>) {
-    let Some(mut task) = slot.take() else {
-        return;
-    };
-    if tokio::time::timeout(Duration::from_secs(15), &mut task)
-        .await
-        .is_err()
-    {
-        task.abort();
-        let _ = task.await;
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(15), task).await;
+        }
     }
 }
 
@@ -250,7 +236,9 @@ pub struct Running {
 impl Running {
     pub async fn stop(&mut self) {
         self.gateway.shutdown();
-        join_stopped(&mut self.task).await;
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(15), task).await;
+        }
     }
 }
 
@@ -278,12 +266,6 @@ fn loopback(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Keep an immediate restart's listening socket reserved; a real outage drops it instead.
-enum ApiListener {
-    Bind(u16),
-    Retained(std::net::TcpListener),
-}
-
 async fn start_api(
     db: &Db,
     clock: &Arc<dyn Clock>,
@@ -291,7 +273,7 @@ async fn start_api(
     config: &Arc<ServerConfig>,
     content: Router<App>,
     master: [u8; 32],
-    listen: ApiListener,
+    port: Option<u16>,
 ) -> Api {
     let link = Link::new(LinkParts {
         db: db.clone(),
@@ -329,13 +311,9 @@ async fn start_api(
     .unwrap();
     // A restart takes the same port back, as the program would: the gateway
     // dials an address it was given.
-    let listener = match listen {
-        ApiListener::Bind(port) => bind_with_retry(&loopback(port)).await,
-        ApiListener::Retained(listener) => TcpListener::from_std(listener).unwrap(),
-    };
+    let bind = loopback(port.unwrap_or(0));
+    let listener = bind_with_retry(&bind).await;
     let port = listener.local_addr().unwrap().port();
-    let retained = listener.into_std().unwrap();
-    let listener = TcpListener::from_std(retained.try_clone().unwrap()).unwrap();
     let stop = CancellationToken::new();
     let task = tokio::spawn(server::serve_tls(listener, tls, router, stop.clone()));
     Api {
@@ -343,7 +321,6 @@ async fn start_api(
         app,
         port,
         applier,
-        listener: Some(retained),
         stop,
         task: Some(task),
     }
@@ -365,8 +342,8 @@ async fn start_gateway(
     world_clock: &Arc<dyn Clock>,
     secrets: &Secrets,
     api_port: u16,
-    pinned: TcpListener,
-    edge: TcpListener,
+    pinned: Option<SocketAddr>,
+    edge: Option<SocketAddr>,
     identity: Option<TlsIdentity>,
 ) -> Running {
     let settings = Settings {
@@ -386,6 +363,8 @@ async fn start_gateway(
         clock: Arc::clone(world_clock),
     })
     .unwrap();
+    let pinned = bind_with_retry(&pinned.map_or_else(|| loopback(0), |a| a.to_string())).await;
+    let edge = bind_with_retry(&edge.map_or_else(|| loopback(0), |a| a.to_string())).await;
     let (pinned_addr, edge_addr) = (pinned.local_addr().unwrap(), edge.local_addr().unwrap());
     let running = gateway.clone();
     let task = tokio::spawn(async move { running.run(pinned, edge).await });
@@ -423,12 +402,10 @@ impl World {
                 .await
                 .unwrap()
         };
-        // Own both advertised addresses through API startup and gateway handoff.
-        // Dropping a port probe would let another fixture take the same address.
-        let pinned = bind_with_retry(&loopback(0)).await;
-        let edge = bind_with_retry(&loopback(0)).await;
-        let pinned_port = pinned.local_addr().unwrap().port();
-        let edge_port = edge.local_addr().unwrap().port();
+        // The ports of the gateway are known before the API is, because the
+        // API tells machines about them when they enroll.
+        let pinned_port = reserve_port();
+        let edge_port = reserve_port();
         let mut config = ServerConfig::default();
         config.gateway.gateway_id = "test-gateway".to_owned();
         // Renewal must issue the same deployment names that the fixture's original services use.
@@ -454,10 +431,18 @@ impl World {
             &config,
             content.clone(),
             master,
-            ApiListener::Bind(0),
+            None,
         )
         .await;
-        let gateway = start_gateway(&clock, &secrets, api.port, pinned, edge, None).await;
+        let gateway = start_gateway(
+            &clock,
+            &secrets,
+            api.port,
+            Some(loopback(pinned_port).parse().unwrap()),
+            Some(loopback(edge_port).parse().unwrap()),
+            None,
+        )
+        .await;
         gateway.gateway.wait_for_backplane().await;
         Self {
             db,
@@ -480,11 +465,6 @@ impl World {
     /// port, with a link made anew from what the database holds.
     pub async fn restart_api(&mut self) {
         let port = self.api.port;
-        let listen = self
-            .api
-            .listener
-            .take()
-            .map_or(ApiListener::Bind(port), ApiListener::Retained);
         self.api.stop().await;
         self.refused_before += self.api.applier.refused.load(Ordering::SeqCst);
         self.applied_before += self.api.applier.applied.load(Ordering::SeqCst);
@@ -495,10 +475,9 @@ impl World {
             &self.config,
             self.content.clone(),
             self.master,
-            listen,
+            Some(port),
         )
         .await;
-        assert_eq!(self.api.port, port);
     }
 
     /// The API goes away, and the gateway is left holding its sessions.
@@ -518,7 +497,7 @@ impl World {
             &self.config,
             self.content.clone(),
             self.master,
-            ApiListener::Bind(port),
+            Some(port),
         )
         .await;
     }
@@ -527,14 +506,12 @@ impl World {
     pub async fn restart_gateway(&mut self) {
         let (pinned, edge) = (self.gateway.pinned, self.gateway.edge);
         self.gateway.stop().await;
-        let pinned = bind_with_retry(&pinned.to_string()).await;
-        let edge = bind_with_retry(&edge.to_string()).await;
         self.gateway = start_gateway(
             &self.clock,
             &self.secrets,
             self.api.port,
-            pinned,
-            edge,
+            Some(pinned),
+            Some(edge),
             None,
         )
         .await;
@@ -545,14 +522,12 @@ impl World {
     pub async fn restart_gateway_with(&mut self, identity: TlsIdentity) {
         let (pinned, edge) = (self.gateway.pinned, self.gateway.edge);
         self.gateway.stop().await;
-        let pinned = bind_with_retry(&pinned.to_string()).await;
-        let edge = bind_with_retry(&edge.to_string()).await;
         self.gateway = start_gateway(
             &self.clock,
             &self.secrets,
             self.api.port,
-            pinned,
-            edge,
+            Some(pinned),
+            Some(edge),
             Some(identity),
         )
         .await;
@@ -758,59 +733,6 @@ impl World {
         gateway: orch_link::gateways::PrimaryGateway,
         denied_tunnel_urls: Vec<String>,
     ) -> Machine {
-        self.start_ranked_machine(
-            enrolled,
-            endpoints,
-            roles,
-            dir,
-            gateway,
-            denied_tunnel_urls,
-            None,
-        )
-    }
-
-    /// Actual TLS/proof probes with authored RTT rankings; no claim of a physical WAN delay.
-    pub fn start_automatic_machine(&self, enrolled: &Enrolled, scores: ProbeScores) -> Machine {
-        let catalogue = self.config.gateway.advertised_gateways();
-        let endpoints = catalogue
-            .iter()
-            .flat_map(|gateway| gateway.endpoints.iter())
-            .filter(|endpoint| endpoint.trust == Trust::Pinned)
-            .cloned()
-            .collect();
-        let dir = self
-            .machines_dir
-            .path()
-            .join(format!("{}-automatic", enrolled.identity.machine_id));
-        std::fs::create_dir_all(&dir).unwrap();
-        self.start_ranked_machine(
-            enrolled,
-            endpoints,
-            vec![Role::Agent],
-            &dir,
-            orch_link::gateways::PrimaryGateway {
-                choice: Default::default(),
-                catalogue,
-            },
-            Vec::new(),
-            Some(scores),
-        )
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one native machine fixture also permits controlled verified probe rankings"
-    )]
-    fn start_ranked_machine(
-        &self,
-        enrolled: &Enrolled,
-        endpoints: Vec<Endpoint>,
-        roles: Vec<Role>,
-        dir: &Path,
-        gateway: orch_link::gateways::PrimaryGateway,
-        denied_tunnel_urls: Vec<String>,
-        probe_scores: Option<ProbeScores>,
-    ) -> Machine {
         let public = public_client_config(
             root_store(&[self.secrets.ca_certificate()]).unwrap(),
             Arc::clone(&self.clock),
@@ -868,7 +790,6 @@ impl World {
             Arc::new(Reachable {
                 dialer,
                 denied_tunnel_urls,
-                probe_scores,
             }),
             Arc::clone(&self.clock),
         )
@@ -898,10 +819,7 @@ impl World {
     }
 }
 
-pub type ProbeScores = Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>;
-
 struct Reachable {
-    probe_scores: Option<ProbeScores>,
     dialer: TlsDialer,
     denied_tunnel_urls: Vec<String>,
 }
@@ -924,13 +842,7 @@ impl Dialer for Reachable {
         &self,
         endpoint: &Endpoint,
     ) -> Result<orch_link_contract::gateways::GatewayMeasurement, DialError> {
-        let mut sample = self.dialer.probe(endpoint).await?;
-        if let Some(scores) = &self.probe_scores
-            && let Some(score) = scores.lock().unwrap().get(&sample.gateway_id)
-        {
-            sample.round_trip_ms = *score;
-        }
-        Ok(sample)
+        self.dialer.probe(endpoint).await
     }
 }
 

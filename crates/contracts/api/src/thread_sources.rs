@@ -28,8 +28,6 @@ pub enum Source {
     OpeningControls,
     /// Current provenance labels selected by the opening's bounded native name producer.
     OpeningNames,
-    /// The pending schedules and actual topic clock of the current thread.
-    OpeningSchedules,
 }
 
 /// Setting a goal has independent effect and same-operation response roles.
@@ -70,12 +68,6 @@ pub const OPENING: Declaration<Source> = Declaration {
         Binding {
             source: Source::OpeningNames,
             target: TargetResolver::ResolvedCollection("opening_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::OpeningSchedules,
-            target: TargetResolver::ResolvedCollection("opening_schedules"),
             usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
         },

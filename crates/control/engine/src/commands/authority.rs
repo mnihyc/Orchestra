@@ -38,30 +38,12 @@ pub enum CommandAuthority {
     InputSteer(InputSteerAuthority),
     /// Only the actual immutable live-capability job/direction; origin stays on its job.
     CapabilityChange(Box<CapabilityChangeAuthority>),
-    /// An exact accepted capability removal and its owned native replacement command.
-    CapabilityRecreation(Box<crate::jobs::recreate::capability_revocation::Authority>),
-    /// An exact retained reservation and its current native command.
-    RetainedLifecycle(Box<crate::jobs::retained::operation::Authority>),
     /// The original reader and native source of a generated semantic query.
     SemanticQuery(Box<crate::semantic::query_origin::QueryAuthority>),
-    /// The exact resource-summary act and its current native model command.
-    ResourceSummary(Box<crate::summaries::resource::command::Authority>),
     /// The native prompt-transition job and its exact forward/recovery command.
     Continuation(Box<crate::continuations::command::Authority>),
     /// The canonical native phase of an accepted side-history creation.
     SideHistory(Box<crate::side_threads::command::Authority>),
-    /// The retained native fork job and its exact startup/history command.
-    ForkNative(Box<crate::jobs::fork::command::Authority>),
-    /// The actual binding descriptor/startup phase and exact native command.
-    RebindPreparation(Box<crate::binding::operation::Command>),
-    /// The original native fork/switch planner and its exact bounded supplier.
-    ForkPreparation(Box<crate::fork_plan::command::Authority>),
-    /// The actual first-Make owner and exact native sign-in keeper startup.
-    ProviderCreator(Box<crate::jobs::provider_provision::CreatorCommand>),
-    /// The same native measurement job/phase and its retained domain source.
-    Measurement(Box<crate::jobs::measurement::preparation::CommandEvidence>),
-    /// The actual raw HTTP identity, conjunctive with its native command/source evidence.
-    Http(Box<super::HttpCommand>),
     /// The actual administrative index request and its immutable embedding command.
     SemanticEmbedding(Box<crate::semantic::administration::EmbeddingCommand>),
     /// The original workspace measurement and its exact current native source.
@@ -84,44 +66,12 @@ pub enum CommandAuthority {
     AdoptionPreparation(Box<crate::adoption::operation::CommandEvidence>),
     /// The original recycling operation and exact native process probe.
     RecycleProbe(Box<crate::recycle::operation::CommandEvidence>),
-    /// The original update operation and its exact native file-size observation.
-    UpdatePlanningProbe(Box<crate::updates::operation::CommandEvidence>),
-    /// Earlier private probe spelling, verified by the same canonical native source.
-    UpdateMeasurement(Box<crate::updates::operation::CommandEvidence>),
-    /// Original global batch review/confirmation and its exact native command.
-    UpdateJob(Box<crate::jobs::recreate::environment_authority::Command>),
-    /// One actual accepted Environment replacement and its exact native canonical proposal.
-    EnvironmentUpdate(Box<crate::jobs::recreate::batch_authority::environment::Command>),
-    /// Exact native node move or Host-parent proposal and its real original confirmation.
-    Lifecycle(Box<crate::jobs::lifecycle_commands::Evidence>),
     /// The actual Host Get reader and its exact once-only native proposal.
     HostPortsProbe(Box<super::HostPortsProbe>),
-    /// Original native Machine facts observation.
-    MachineProbe(Box<super::MachineProbeAuthority>),
-    /// Original native program mutation.
-    MachinePrograms(Box<super::MachineProgramsAuthority>),
-    /// Original delegated role selection.
-    MachineRoles(Box<super::MachineRolesAuthority>),
-    /// Original key-by-key policy choice.
-    MachinePolicy(Box<super::MachinePolicyAuthority>),
-    /// Actual Host operation retained on its native policy synchronization.
-    HostPolicy(Box<super::HostPolicyAuthority>),
-    /// The actual manual Host request and its exact deferred physical update.
-    ComponentUpdate(Box<crate::component_update_authority::UpdateCommand>),
-    /// The selected proposal Host, original creation authority and exact archive sources.
-    TemplateImport(Box<crate::template_imports::Command>),
     /// The original environment import and its exact native definition-copy command.
-    McpImport(Box<crate::environment_mcp::ImportCommand>),
+    McpImport(Box<crate::environment_mcp::CopyCommand>),
     /// One exact unfiled native copy or a journaled resource deletion owns its removal.
     McpForget(Box<crate::environment_mcp::ForgetCommand>),
-    /// The actual running tool receipt, original input callers and exact paid service command.
-    CapabilityService(Box<crate::tools::capability_service::ServiceCommand>),
-    /// The actual generated image and its source-bound workspace delivery.
-    ImageWrite(Box<crate::tools::image_generation::delivery::Write>),
-    /// The actual workspace image selected by a running tool and its exact native reader.
-    ImageInput(Box<crate::tools::image_generation::inputs::Read>),
-    /// The exact ordinary helper session and its original requesting tool condition.
-    CapabilitySession(Box<crate::tools::capability_service::delegation::SessionAuthority>),
 }
 impl std::fmt::Debug for CommandAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -174,59 +124,10 @@ impl Serialize for CommandAuthority {
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
-            Self::ResourceSummary(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "resource_summary")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
             Self::SideHistory(authority) => {
                 let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
                 value.serialize_field("version", &1_u8)?;
                 value.serialize_field("kind", "side_history")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::ForkNative(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "fork_native")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::RebindPreparation(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "rebind_preparation")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::ForkPreparation(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "fork_preparation")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::ProviderCreator(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "provider_creator")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::Http(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "http_origin")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::Measurement(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "measurement")?;
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
@@ -293,90 +194,6 @@ impl Serialize for CommandAuthority {
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
-            Self::MachineProbe(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "machine_probe")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::MachinePrograms(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "machine_programs")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::MachineRoles(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "machine_roles")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::MachinePolicy(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "machine_policy")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::HostPolicy(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "host_policy")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::Lifecycle(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "lifecycle")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::EnvironmentUpdate(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "environment_update")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::UpdateMeasurement(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "update_measurement")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::UpdateJob(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "environment_update_job")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::UpdatePlanningProbe(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "update_planning_probe")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::ComponentUpdate(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "component_update")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::TemplateImport(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "template_import")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
             Self::RecycleProbe(authority) => {
                 let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
                 value.serialize_field("version", &1_u8)?;
@@ -412,52 +229,10 @@ impl Serialize for CommandAuthority {
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
-            Self::RetainedLifecycle(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "retained_lifecycle")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::CapabilityRecreation(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "capability_recreation")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
             Self::McpForget(authority) => {
                 let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
                 value.serialize_field("version", &1_u8)?;
                 value.serialize_field("kind", "mcp_forget")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::CapabilityService(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "capability_service")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::ImageWrite(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "image_write")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::ImageInput(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "image_input")?;
-                value.serialize_field("authority", authority)?;
-                value.end()
-            }
-            Self::CapabilitySession(authority) => {
-                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
-                value.serialize_field("version", &1_u8)?;
-                value.serialize_field("kind", "capability_session")?;
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
@@ -506,29 +281,8 @@ impl<'de> Deserialize<'de> for CommandAuthority {
                 "semantic_query" => serde_json::from_value(value.authority)
                     .map(|authority| Self::SemanticQuery(Box::new(authority)))
                     .map_err(D::Error::custom),
-                "resource_summary" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ResourceSummary(Box::new(authority)))
-                    .map_err(D::Error::custom),
                 "side_history" => serde_json::from_value(value.authority)
                     .map(|authority| Self::SideHistory(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "fork_native" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ForkNative(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "rebind_preparation" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::RebindPreparation(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "http_origin" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::Http(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "measurement" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::Measurement(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "fork_preparation" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ForkPreparation(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "provider_creator" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ProviderCreator(Box::new(authority)))
                     .map_err(D::Error::custom),
                 "continuation" => serde_json::from_value(value.authority)
                     .map(|authority| Self::Continuation(Box::new(authority)))
@@ -557,44 +311,8 @@ impl<'de> Deserialize<'de> for CommandAuthority {
                 "host_ports_probe" => serde_json::from_value(value.authority)
                     .map(|authority| Self::HostPortsProbe(Box::new(authority)))
                     .map_err(D::Error::custom),
-                "machine_probe" => serde_json::from_value(value.authority)
-                    .map(|value| Self::MachineProbe(Box::new(value)))
-                    .map_err(D::Error::custom),
-                "machine_programs" => serde_json::from_value(value.authority)
-                    .map(|value| Self::MachinePrograms(Box::new(value)))
-                    .map_err(D::Error::custom),
-                "machine_roles" => serde_json::from_value(value.authority)
-                    .map(|value| Self::MachineRoles(Box::new(value)))
-                    .map_err(D::Error::custom),
-                "machine_policy" => serde_json::from_value(value.authority)
-                    .map(|value| Self::MachinePolicy(Box::new(value)))
-                    .map_err(D::Error::custom),
-                "host_policy" => serde_json::from_value(value.authority)
-                    .map(|value| Self::HostPolicy(Box::new(value)))
-                    .map_err(D::Error::custom),
-                "component_update" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ComponentUpdate(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "template_import" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::TemplateImport(Box::new(authority)))
-                    .map_err(D::Error::custom),
                 "storage_cleanup" => serde_json::from_value(value.authority)
                     .map(|authority| Self::Cleanup(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "lifecycle" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::Lifecycle(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "environment_update" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::EnvironmentUpdate(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "update_measurement" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::UpdateMeasurement(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "environment_update_job" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::UpdateJob(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "update_planning_probe" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::UpdatePlanningProbe(Box::new(authority)))
                     .map_err(D::Error::custom),
                 "recycle_probe" => serde_json::from_value(value.authority)
                     .map(|authority| Self::RecycleProbe(Box::new(authority)))
@@ -608,26 +326,8 @@ impl<'de> Deserialize<'de> for CommandAuthority {
                 "mcp_import" => serde_json::from_value(value.authority)
                     .map(|authority| Self::McpImport(Box::new(authority)))
                     .map_err(D::Error::custom),
-                "retained_lifecycle" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::RetainedLifecycle(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "capability_recreation" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::CapabilityRecreation(Box::new(authority)))
-                    .map_err(D::Error::custom),
                 "mcp_forget" => serde_json::from_value(value.authority)
                     .map(|authority| Self::McpForget(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "capability_service" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::CapabilityService(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "image_write" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ImageWrite(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "image_input" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::ImageInput(Box::new(authority)))
-                    .map_err(D::Error::custom),
-                "capability_session" => serde_json::from_value(value.authority)
-                    .map(|authority| Self::CapabilitySession(Box::new(authority)))
                     .map_err(D::Error::custom),
                 _ => Err(D::Error::custom("unknown private command authority kind")),
             }
@@ -650,37 +350,8 @@ impl CommandAuthority {
     /// This grants nothing; the live verifier still restores and checks the original source.
     pub async fn lock_native_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
         match self {
-            Self::ResourceSummary(authority) => authority.lock_source(conn).await,
             Self::SideHistory(authority) => authority.lock_source(conn).await,
-            Self::ForkNative(authority) => authority.lock_source(conn).await,
-            Self::RebindPreparation(authority) => authority.lock_source(conn).await,
-            Self::ForkPreparation(authority) => authority.lock_source(conn).await,
-            Self::ProviderCreator(authority) => authority.lock_source(conn).await,
-            Self::Measurement(authority) => Box::pin(authority.lock_source(conn)).await,
-            Self::Http(authority) => Box::pin(authority.lock_source(conn)).await,
-            Self::HostPortsProbe(authority) => authority.lock_source(conn).await,
-            Self::AdoptionPreparation(authority) => authority.lock_source(conn).await,
-            Self::UpdatePlanningProbe(authority) | Self::UpdateMeasurement(authority) => {
-                authority.lock_source(conn).await
-            }
-            Self::UpdateJob(authority) => authority.lock_source(conn).await,
-            Self::EnvironmentUpdate(authority) => authority.lock_source(conn).await,
-            Self::Lifecycle(authority) => Box::pin(authority.lock_source(conn)).await,
             Self::Continuation(authority) => authority.lock_source(conn).await,
-            Self::MachineProbe(authority) => authority.lock_source(conn).await,
-            Self::MachinePrograms(authority) => authority.lock_source(conn).await,
-            Self::MachineRoles(authority) => authority.lock_source(conn).await,
-            Self::MachinePolicy(authority) => authority.lock_source(conn).await,
-            Self::HostPolicy(authority) => authority.lock_source(conn).await,
-            Self::CapabilityRecreation(authority) => authority.lock_source(conn).await,
-            Self::RetainedLifecycle(authority) => authority.lock_source(conn).await,
-            Self::ComponentUpdate(authority) => authority.lock_source(conn).await,
-            Self::McpImport(authority) => authority.lock_source(conn).await,
-            Self::McpForget(authority) => authority.lock_source(conn).await,
-            Self::CapabilityService(authority) => authority.lock_source(conn).await,
-            Self::ImageWrite(authority) => authority.lock_source(conn).await,
-            Self::ImageInput(authority) => authority.lock_source(conn).await,
-            Self::CapabilitySession(authority) => authority.lock_source(conn).await,
             _ => Ok(()),
         }
     }
@@ -690,27 +361,11 @@ impl CommandAuthority {
     pub fn requires_issue_checkpoint(&self) -> bool {
         matches!(
             self,
-            Self::ResourceSummary(_)
-                | Self::Cleanup(_)
-                | Self::CapabilityRecreation(_)
-                | Self::RetainedLifecycle(_)
+            Self::Cleanup(_)
                 | Self::Continuation(_)
-                | Self::ForkNative(_)
-                | Self::RebindPreparation(_)
-                | Self::ProviderCreator(_)
-                | Self::ForkPreparation(_)
-                | Self::Measurement(_)
-                | Self::Http(_)
                 | Self::SideHistory(_)
                 | Self::SemanticEmbedding(_)
                 | Self::HostPortsProbe(_)
-                | Self::MachineProbe(_)
-                | Self::MachinePrograms(_)
-                | Self::MachineRoles(_)
-                | Self::MachinePolicy(_)
-                | Self::HostPolicy(_)
-                | Self::ComponentUpdate(_)
-                | Self::TemplateImport(_)
                 | Self::Setting(_)
                 | Self::HarnessCheck(_)
                 | Self::Workspace(_)
@@ -720,17 +375,8 @@ impl CommandAuthority {
                 | Self::WorkspaceRestore(_)
                 | Self::AdoptionPreparation(_)
                 | Self::RecycleProbe(_)
-                | Self::UpdatePlanningProbe(_)
-                | Self::UpdateMeasurement(_)
-                | Self::UpdateJob(_)
-                | Self::EnvironmentUpdate(_)
-                | Self::Lifecycle(_)
                 | Self::McpImport(_)
                 | Self::McpForget(_)
-                | Self::CapabilityService(_)
-                | Self::ImageWrite(_)
-                | Self::ImageInput(_)
-                | Self::CapabilitySession(_)
         )
     }
 
@@ -743,41 +389,7 @@ impl CommandAuthority {
         access: &dyn crate::access::ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         match self {
-            Self::ResourceSummary(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock)).await
-            }
             Self::Cleanup(authority) => authority.current_issue_callers(conn, command, clock).await,
-            Self::CapabilityService(authority) => {
-                authority
-                    .current_issue_callers(conn, command, clock, access)
-                    .await
-            }
-            Self::ImageWrite(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::ImageInput(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::CapabilitySession(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::EnvironmentUpdate(authority) => {
-                authority
-                    .current_issue_callers(conn, command, clock, access)
-                    .await
-            }
-            Self::UpdateMeasurement(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::UpdateJob(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock)).await
-            }
-            Self::Lifecycle(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::UpdatePlanningProbe(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
             Self::RecycleProbe(authority) => {
                 authority.current_issue_callers(conn, command, clock).await
             }
@@ -791,24 +403,6 @@ impl CommandAuthority {
                     .current_issue_callers(conn, command, clock, access)
                     .await
             }
-            Self::ForkNative(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::RebindPreparation(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::ForkPreparation(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::ProviderCreator(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::Http(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
-            Self::Measurement(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock, access)).await
-            }
             Self::Continuation(authority) => {
                 authority
                     .current_issue_callers(conn, command, clock, access)
@@ -817,34 +411,7 @@ impl CommandAuthority {
             Self::HostPortsProbe(authority) => {
                 authority.current_issue_callers(conn, command, clock).await
             }
-            Self::MachineProbe(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::MachinePrograms(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::MachineRoles(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::MachinePolicy(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::HostPolicy(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::ComponentUpdate(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
-            Self::TemplateImport(authority) => {
-                authority.current_issue_callers(conn, command, clock).await
-            }
             Self::McpImport(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock)).await
-            }
-            Self::RetainedLifecycle(authority) => {
-                Box::pin(authority.current_issue_callers(conn, command, clock)).await
-            }
-            Self::CapabilityRecreation(authority) => {
                 authority.current_issue_callers(conn, command, clock).await
             }
             Self::McpForget(authority) => {
@@ -902,37 +469,6 @@ impl CommandAuthority {
         clock: &dyn Clock,
         access: &dyn crate::access::ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
-        if let Self::ImageWrite(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::ImageInput(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::CapabilitySession(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::CapabilityService(authority) = self {
-            return authority
-                .current_callers(conn, command, clock, access)
-                .await;
-        }
-        if let Self::Lifecycle(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::EnvironmentUpdate(authority) = self {
-            return authority
-                .current_callers(conn, command, clock, access)
-                .await;
-        }
-        if let Self::UpdateMeasurement(authority) = self {
-            return authority.current_callers(conn, command, clock).await;
-        }
-        if let Self::UpdateJob(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock)).await;
-        }
-        if let Self::UpdatePlanningProbe(authority) = self {
-            return authority.current_callers(conn, command, clock).await;
-        }
         if let Self::RecycleProbe(authority) = self {
             return authority.current_callers(conn, command, clock).await;
         }
@@ -940,13 +476,13 @@ impl CommandAuthority {
             return authority.current_callers(conn, command, clock).await;
         }
         if let Self::InputSteer(authority) = self {
-            return Box::pin(crate::inputs::native_delivery::current_callers(
+            return crate::inputs::native_delivery::current_callers(
                 conn,
                 command,
                 Some(authority.input_id),
                 clock,
                 access,
-            ))
+            )
             .await;
         }
         if let Self::CapabilityChange(authority) = self {
@@ -957,31 +493,10 @@ impl CommandAuthority {
                 .current_callers(conn, command, clock, access)
                 .await;
         }
-        if let Self::ForkNative(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::RebindPreparation(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::Http(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::Measurement(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::ForkPreparation(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
-        if let Self::ProviderCreator(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock, access)).await;
-        }
         if let Self::Continuation(authority) = self {
             return authority
                 .current_callers(conn, command, clock, access)
                 .await;
-        }
-        if let Self::ResourceSummary(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock)).await;
         }
         if let Self::SemanticQuery(authority) = self {
             return authority
@@ -1014,27 +529,6 @@ impl CommandAuthority {
         if let Self::HostPortsProbe(authority) = self {
             return authority.current_callers(conn, command, clock).await;
         }
-        if let Self::MachineProbe(value) = self {
-            return value.current_callers(conn, command, clock).await;
-        }
-        if let Self::MachinePrograms(value) = self {
-            return value.current_callers(conn, command, clock).await;
-        }
-        if let Self::MachineRoles(value) = self {
-            return value.current_callers(conn, command, clock).await;
-        }
-        if let Self::MachinePolicy(value) = self {
-            return value.current_callers(conn, command, clock).await;
-        }
-        if let Self::HostPolicy(value) = self {
-            return value.current_callers(conn, command, clock).await;
-        }
-        if let Self::ComponentUpdate(authority) = self {
-            return authority.current_callers(conn, command, clock).await;
-        }
-        if let Self::TemplateImport(authority) = self {
-            return authority.current_callers(conn, command, clock).await;
-        }
         if let Self::Cleanup(authority) = self {
             return authority.current_callers(conn, command, clock).await;
         }
@@ -1042,12 +536,6 @@ impl CommandAuthority {
             return authority.current_callers(conn, command, clock).await;
         }
         if let Self::McpImport(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock)).await;
-        }
-        if let Self::RetainedLifecycle(authority) = self {
-            return Box::pin(authority.current_callers(conn, command, clock)).await;
-        }
-        if let Self::CapabilityRecreation(authority) = self {
             return authority.current_callers(conn, command, clock).await;
         }
         if let Self::McpForget(authority) = self {
@@ -1066,17 +554,8 @@ impl CommandAuthority {
             Self::SnapshotRead(authority) => authority.current_callers(conn, clock).await,
             Self::InputSteer(_)
             | Self::CapabilityChange(_)
-            | Self::CapabilityRecreation(_)
-            | Self::RetainedLifecycle(_)
             | Self::SemanticQuery(_)
-            | Self::ResourceSummary(_)
             | Self::Continuation(_)
-            | Self::ForkNative(_)
-            | Self::RebindPreparation(_)
-            | Self::ProviderCreator(_)
-            | Self::ForkPreparation(_)
-            | Self::Measurement(_)
-            | Self::Http(_)
             | Self::SideHistory(_)
             | Self::SemanticEmbedding(_)
             | Self::Workspace(_)
@@ -1087,27 +566,11 @@ impl CommandAuthority {
             | Self::WorkspaceRestore(_)
             | Self::AdoptionPreparation(_)
             | Self::RecycleProbe(_)
-            | Self::UpdatePlanningProbe(_)
-            | Self::UpdateMeasurement(_)
-            | Self::UpdateJob(_)
-            | Self::EnvironmentUpdate(_)
-            | Self::Lifecycle(_)
             | Self::Setting(_)
             | Self::HostPortsProbe(_)
-            | Self::MachineProbe(_)
-            | Self::MachinePrograms(_)
-            | Self::MachineRoles(_)
-            | Self::MachinePolicy(_)
-            | Self::HostPolicy(_)
-            | Self::ComponentUpdate(_)
-            | Self::TemplateImport(_)
             | Self::McpImport(_)
             | Self::McpForget(_)
             | Self::HarnessCheck(_) => Ok(None),
-            Self::CapabilityService(_) => Ok(None),
-            Self::ImageWrite(_) => Ok(None),
-            Self::ImageInput(_) => Ok(None),
-            Self::CapabilitySession(_) => Ok(None),
         }
     }
 
@@ -1181,56 +644,10 @@ impl CommandAuthority {
     pub fn host_ports_probe(authority: super::HostPortsProbe) -> Self {
         Self::HostPortsProbe(Box::new(authority))
     }
-    /// Retain the exact native facts request.
-    pub fn machine_probe(value: super::MachineProbeAuthority) -> Self {
-        Self::MachineProbe(Box::new(value))
-    }
-    /// Retain the exact native program request.
-    pub fn machine_programs(value: super::MachineProgramsAuthority) -> Self {
-        Self::MachinePrograms(Box::new(value))
-    }
-    /// Retain the exact delegated role request.
-    pub fn machine_roles(value: super::MachineRolesAuthority) -> Self {
-        Self::MachineRoles(Box::new(value))
-    }
-    /// Retain the exact key-by-key Machine request.
-    pub fn machine_policy(value: super::MachinePolicyAuthority) -> Self {
-        Self::MachinePolicy(Box::new(value))
-    }
-    /// Retain the exact native Host policy request.
-    pub fn host_policy(value: super::HostPolicyAuthority) -> Self {
-        Self::HostPolicy(Box::new(value))
-    }
-
-    /// Keeps the original physical request separate from its connector wire bytes.
-    pub fn component_update(
-        authority: impl Into<crate::component_update_authority::UpdateCommand>,
-    ) -> Self {
-        Self::ComponentUpdate(Box::new(authority.into()))
-    }
-    /// Retains only the actual template proposal's private native source.
-    pub fn template_import(authority: crate::template_imports::Command) -> Self {
-        Self::TemplateImport(Box::new(authority))
-    }
 
     /// Retains the admitted definition-copy producer without putting authority on the wire.
     pub fn mcp_import(authority: crate::environment_mcp::CopyCommand) -> Self {
-        Self::McpImport(Box::new(crate::environment_mcp::ImportCommand::Creation(
-            Box::new(authority),
-        )))
-    }
-
-    /// Binds only the exact stored-snapshot duplicate of the native import family.
-    pub fn mcp_duplicate_import(source: crate::environment_mcp::duplicating::Command) -> Self {
-        Self::McpImport(Box::new(crate::environment_mcp::ImportCommand::Duplicate(
-            Box::new(source),
-        )))
-    }
-    /// The same native command carries the existing server's distinct source proof.
-    pub fn mcp_existing_import(authority: crate::environment_mcp::existing::Command) -> Self {
-        Self::McpImport(Box::new(crate::environment_mcp::ImportCommand::Existing(
-            Box::new(authority),
-        )))
+        Self::McpImport(Box::new(authority))
     }
 
     /// Owns only the exact copied file's inverse or accepted deletion, never a general MCP grant.
@@ -1248,142 +665,9 @@ impl CommandAuthority {
         Self::RecycleProbe(Box::new(authority))
     }
 
-    /// The native replacement runner seals its canonical proposal, retaining inner source evidence.
-    pub fn environment_update(
-        authority: crate::jobs::recreate::batch_authority::environment::Command,
-    ) -> Self {
-        Self::EnvironmentUpdate(Box::new(authority))
-    }
-
-    /// Only the native job runner seals a lifecycle proposal in its existing command journal.
-    pub fn lifecycle(authority: crate::jobs::lifecycle_commands::Command) -> Self {
-        Self::Lifecycle(Box::new(
-            crate::jobs::lifecycle_commands::Evidence::Execution(Box::new(authority)),
-        ))
-    }
-    /// The native environment preparation producer supplies its own immutable source/verifier.
-    pub fn lifecycle_preparation(
-        authority: crate::jobs::environment_move::preparation::CommandEvidence,
-    ) -> Self {
-        Self::Lifecycle(Box::new(
-            crate::jobs::lifecycle_commands::Evidence::preparation(authority),
-        ))
-    }
-
-    /// Only the native update supplier can construct this exact file-observation carrier.
-    pub fn update_planning_probe(authority: crate::updates::operation::CommandEvidence) -> Self {
-        Self::UpdatePlanningProbe(Box::new(authority))
-    }
-
     /// Only the native adoption supplier can construct this closed preparation carrier.
     pub fn adoption_preparation(authority: crate::adoption::operation::CommandEvidence) -> Self {
         Self::AdoptionPreparation(Box::new(authority))
-    }
-
-    /// Accepted raw/key limits may narrow; immutable native origin/source cannot be replaced.
-    pub fn same_origin(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Http(a), Self::Http(b)) => a.same_origin(b),
-            (Self::CapabilityService(a), Self::CapabilityService(b)) => a.same_origin(b),
-            _ => self == other,
-        }
-    }
-    pub(crate) fn paid_service(&self) -> Option<&crate::tools::capability_service::ServiceCommand> {
-        match self {
-            Self::CapabilityService(source) => Some(source),
-            Self::Http(source) => source.paid_evidence(),
-            _ => None,
-        }
-    }
-    pub(crate) fn paid_service_mut(
-        &mut self,
-    ) -> Option<&mut crate::tools::capability_service::ServiceCommand> {
-        match self {
-            Self::CapabilityService(source) => Some(source),
-            Self::Http(source) => source.paid_evidence_mut(),
-            _ => None,
-        }
-    }
-    /// Factual original native evidence retained beneath the shared paid guard.
-    /// This does not restore identity, check a source, or authorize a new effect or result read.
-    pub fn paid_service_native(&self) -> Option<&Self> {
-        match self {
-            Self::CapabilityService(source) => source.native(),
-            Self::Http(source) => source.paid_evidence().and_then(|source| source.native()),
-            _ => None,
-        }
-    }
-
-    /// Raw delivery is independent of completed Manage; the owner still checks Read/source/receipt.
-    pub async fn http_delivery(
-        &self,
-        conn: &mut Conn,
-        clock: &dyn Clock,
-        id: Id,
-    ) -> Result<crate::operation_scope::http_origin::HttpOrigin, EngineError> {
-        match self {
-            Self::Http(origin) => origin.delivery(conn, clock, id).await,
-            _ => Err(EngineError::unreadable(
-                "The native command has no original HTTP identity.",
-            )),
-        }
-    }
-
-    /// The domain's SAME current-source guard seals the actual worker budget and envelope.
-    pub(crate) async fn reprepare_measurement(
-        &self,
-        conn: &mut Conn,
-        clock: &dyn Clock,
-        access: &dyn crate::access::ResourceAccess,
-        origin: &CapturedOperation,
-        until: Option<Time>,
-        command: &Outgoing,
-    ) -> Result<(Self, CapturedOperation, Option<Time>), EngineError> {
-        match self {
-            Self::Lifecycle(source) => {
-                Box::pin(source.reprepare_measurement(conn, clock, access, origin, until, command))
-                    .await
-            }
-            Self::ForkPreparation(source) => {
-                source
-                    .reprepare_measurement(conn, clock, access, origin, until, command)
-                    .await
-            }
-            Self::Measurement(_) => Err(EngineError::BeforeEffect(Box::new(
-                crate::operation_scope::continuing::Error::Refused,
-            ))),
-            _ => {
-                // Every other domain keeps its own exact command/source verifier. This bridge
-                // only reapplies retained restrictions to its fresh, fully resolved native proof.
-                let serial = command.key.wire();
-                let proposed = orch_db::queries::link::NewCommand {
-                    id: command.id,
-                    machine_id: command.machine,
-                    kind: command.kind.as_str(),
-                    serial_key: serial.as_deref(),
-                    body: &command.body,
-                    deadline_at: command
-                        .deadline
-                        .ok_or_else(|| {
-                            EngineError::unreadable("The native measurement lost its allowance.")
-                        })?
-                        .get(),
-                };
-                let callers = Box::pin(self.current_issue_callers(conn, &proposed, clock, access))
-                    .await?
-                    .ok_or_else(|| {
-                        EngineError::BeforeEffect(Box::new(
-                            crate::operation_scope::continuing::Error::Refused,
-                        ))
-                    })?;
-                let (origin, until) =
-                    crate::jobs::measurement::preparation::retain_current_callers(
-                        conn, clock, origin, until, &callers,
-                    )
-                    .await?;
-                Ok((self.clone(), origin, until))
-            }
-        }
     }
 
     /// The native kind belongs to the typed producer, never an incoming key claim.
@@ -1391,29 +675,14 @@ impl CommandAuthority {
         match self {
             Self::AdoptionPreparation(authority) => authority.command_kind(),
             Self::RecycleProbe(_) => "proc.list",
-            Self::UpdatePlanningProbe(_) | Self::UpdateMeasurement(_) => {
-                "node.runtime.keep-estimate"
-            }
-            Self::UpdateJob(authority) => authority.command_kind(),
-            Self::EnvironmentUpdate(authority) => authority.command_kind(),
-            Self::Lifecycle(authority) => authority.command_kind(),
             Self::Login(authority) => authority.command_kind(),
             Self::TerminalClose(_) => "pty.close",
             Self::TerminalCreation(authority) => authority.command_kind(),
             Self::SnapshotRead(_) => "fs.record.read",
             Self::InputSteer(_) => "turn.steer",
             Self::CapabilityChange(_) => "node.capabilities.apply",
-            Self::CapabilityRecreation(authority) => authority.command_kind(),
-            Self::RetainedLifecycle(authority) => authority.command_kind(),
             Self::SemanticQuery(_) => "provider.embed",
-            Self::ResourceSummary(_) => "provider.complete",
             Self::Continuation(authority) => authority.command_kind(),
-            Self::ForkNative(authority) => authority.command_kind(),
-            Self::RebindPreparation(authority) => authority.command_kind(),
-            Self::ForkPreparation(authority) => authority.command_kind(),
-            Self::ProviderCreator(authority) => authority.command_kind(),
-            Self::Measurement(authority) => authority.command_kind(),
-            Self::Http(authority) => authority.command_kind(),
             Self::SideHistory(authority) => authority.command_kind(),
             Self::SemanticEmbedding(_) => "provider.embed",
             Self::Workspace(_) => "fs.measure",
@@ -1425,18 +694,8 @@ impl CommandAuthority {
             Self::Setting(authority) => authority.command_kind(),
             Self::Cleanup(authority) => authority.command_kind(),
             Self::HostPortsProbe(_) => "host.ports",
-            Self::MachineProbe(_) => "machine.probe",
-            Self::MachinePrograms(_) => "machine.programs",
-            Self::MachineRoles(_) => "machine.roles.set",
-            Self::MachinePolicy(_) | Self::HostPolicy(_) => "machine.policy.set",
-            Self::ComponentUpdate(_) => "machine.update.now",
-            Self::TemplateImport(_) => "node.template.import",
             Self::McpImport(_) => "mcp.import",
             Self::McpForget(_) => "mcp.forget",
-            Self::CapabilityService(authority) => authority.command_kind(),
-            Self::ImageWrite(authority) => authority.command_kind(),
-            Self::ImageInput(authority) => authority.command_kind(),
-            Self::CapabilitySession(authority) => authority.command_kind(),
         }
     }
     /// New operation-owned native evidence may not adopt an older canonical missing origin.
@@ -1478,17 +737,8 @@ impl CommandAuthority {
             // A sampled Time cannot provide a final native acceptance proof.
             Self::InputSteer(_)
             | Self::CapabilityChange(_)
-            | Self::CapabilityRecreation(_)
-            | Self::RetainedLifecycle(_)
             | Self::SemanticQuery(_)
-            | Self::ResourceSummary(_)
             | Self::Continuation(_)
-            | Self::ForkNative(_)
-            | Self::RebindPreparation(_)
-            | Self::ProviderCreator(_)
-            | Self::ForkPreparation(_)
-            | Self::Measurement(_)
-            | Self::Http(_)
             | Self::SideHistory(_)
             | Self::SemanticEmbedding(_)
             | Self::Workspace(_)
@@ -1499,27 +749,11 @@ impl CommandAuthority {
             | Self::WorkspaceRestore(_)
             | Self::AdoptionPreparation(_)
             | Self::RecycleProbe(_)
-            | Self::UpdatePlanningProbe(_)
-            | Self::UpdateMeasurement(_)
-            | Self::UpdateJob(_)
-            | Self::EnvironmentUpdate(_)
-            | Self::Lifecycle(_)
             | Self::Setting(_)
             | Self::HostPortsProbe(_)
-            | Self::MachineProbe(_)
-            | Self::MachinePrograms(_)
-            | Self::MachineRoles(_)
-            | Self::MachinePolicy(_)
-            | Self::HostPolicy(_)
-            | Self::ComponentUpdate(_)
-            | Self::TemplateImport(_)
             | Self::McpImport(_)
             | Self::McpForget(_)
             | Self::HarnessCheck(_) => Ok(false),
-            Self::CapabilityService(_) => Ok(false),
-            Self::ImageWrite(_) => Ok(false),
-            Self::ImageInput(_) => Ok(false),
-            Self::CapabilitySession(_) => Ok(false),
         }
     }
 }

@@ -814,24 +814,6 @@ pub(crate) async fn load_principal(
     user: Id,
     token: Option<Id>,
 ) -> Result<Principal, Stop> {
-    let row = job.row().await?;
-    if crate::jobs::lifecycle_commands::environment::present(&row) {
-        let checked = crate::jobs::lifecycle_commands::environment::principal(
-            conn,
-            &row,
-            job.engine().inner.clock.as_ref(),
-            job.engine().inner.access.as_ref(),
-            None,
-        )
-        .await?;
-        if checked.principal.user() != user {
-            return Err(
-                Failure::new("access.denied", "The native lifecycle actor changed.").into(),
-            );
-        }
-        checked.check(job.engine().inner.clock.as_ref())?;
-        return Ok(checked.principal);
-    }
     load_principal_at(conn, user, token, Time::new(job.now())).await
 }
 
@@ -1222,16 +1204,7 @@ pub async fn creator_command_authorized(
     };
     if publication_authority::is_restricted(&owner) {
         return publication_authority::command_authorized(
-            conn,
-            &owner,
-            publication_authority::CommandRef {
-                id: command,
-                machine,
-                key,
-                kind,
-                body,
-            },
-            now,
+            conn, &owner, command, machine, key, kind, body, now,
         )
         .await;
     }
@@ -1380,31 +1353,33 @@ pub async fn creator_command_current_callers(
     clock: &dyn orch_types::Clock,
 ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
     let known = rows::lock_source_command_owners(conn, command).await?;
-    if known.len() == 1
-        && let Some(owner) = rows::job(conn, known[0]).await?
-        && operation::is_restricted(&owner)
-    {
-        let Some(private) = orch_db::queries::link::command_with_authority(conn, command).await?
-        else {
-            return Ok(None);
-        };
-        if private.command.machine_id != machine
-            || private.command.serial_key() != key
-            || private.command.kind != kind
-            || private.command.body != *body
+    if known.len() == 1 {
+        if let Some(owner) = rows::job(conn, known[0]).await?
+            && operation::is_restricted(&owner)
         {
+            let Some(private) =
+                orch_db::queries::link::command_with_authority(conn, command).await?
+            else {
+                return Ok(None);
+            };
+            if private.command.machine_id != machine
+                || private.command.serial_key() != key
+                || private.command.kind != kind
+                || private.command.body != *body
+            {
+                return Ok(None);
+            }
+            let Some(value) = private.authority else {
+                return Ok(None);
+            };
+            let authority: crate::commands::CommandAuthority = serde_json::from_value(value)?;
+            if let crate::commands::CommandAuthority::SourcePreparation(authority) = authority {
+                return authority
+                    .current_callers(conn, &private.command, clock)
+                    .await;
+            }
             return Ok(None);
         }
-        let Some(value) = private.authority else {
-            return Ok(None);
-        };
-        let authority: crate::commands::CommandAuthority = serde_json::from_value(value)?;
-        if let crate::commands::CommandAuthority::SourcePreparation(authority) = authority {
-            return authority
-                .current_callers(conn, &private.command, clock)
-                .await;
-        }
-        return Ok(None);
     }
     if !creator_command_authorized(conn, command, machine, key, kind, body, clock.time()).await? {
         return Ok(None);
@@ -1561,7 +1536,7 @@ pub(crate) async fn lock_attempt_at(
         return Ok(None);
     };
     let info: SourceInfo = serde_json::from_value(value.get("info").unwrap_or(value).clone())?;
-    let native_plan = serde_json::to_value(plan)?;
+    let native_plan = serde_json::to_value(&plan)?;
     if row.environment_id != Some(plan.environment)
         || row.workspace_dir != *directory
         || !matches!(info.state, SourceState::Pending | SourceState::Preparing)
@@ -1600,7 +1575,7 @@ pub(crate) async fn lock_attempt_at(
         }
         None
     };
-    if matching_target(conn, plan, pending).await?.is_none() {
+    if matching_target(conn, &plan, pending).await?.is_none() {
         return Ok(None);
     }
     Ok(Some(row))

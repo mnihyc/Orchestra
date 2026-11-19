@@ -551,13 +551,10 @@ impl Engine {
         before_commit: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
     ) -> Result<Started, SideError> {
         let (finished, started) = {
-            let parent = value.parent();
             let mut unit = Unit::with_first_effect(&mut tx, self.inner.clock.now(), before);
             let started = self
                 .apply_side_in(&mut unit, principal.caller(), value)
                 .await?;
-            orch_db::idempotency::creation::observe_with(unit.conn,Some(principal.caller().user()),"side_thread",started.thread,
-                serde_json::json!({"parent":parent,"input":started.submitted.input.id,"seq":started.submitted.seq})).await?;
             (unit.finish().await?, started)
         };
         before_commit()?;
@@ -721,15 +718,7 @@ impl Engine {
     /// parent's through the turn it was taken at, where the adapter does that; the history as items,
     /// otherwise; nothing, for an aside that was taken before the parent had said anything. A side thread
     /// whose session exists already, and any thread that is no side thread, is left to the ordinary way.
-    pub(crate) fn side_session<'a>(
-        &'a self,
-        snap: &'a crate::sessions::StartSnapshot,
-    ) -> futures::future::BoxFuture<'a, Result<Option<(SessionMode, SessionImport)>, EngineError>>
-    {
-        Box::pin(self.side_session_inner(snap))
-    }
-
-    async fn side_session_inner(
+    pub(crate) async fn side_session(
         &self,
         snap: &crate::sessions::StartSnapshot,
     ) -> Result<Option<(SessionMode, SessionImport)>, EngineError> {
@@ -768,11 +757,8 @@ impl Engine {
         // Current/frozen creator rights still gate verification and delivery.
         let recovered = history::recovered(self, snap, &cut).await?;
         let cut = {
-            let mut tx = self.db().begin().await?;
-            let cut =
-                history::authorize(self, &mut tx, &snap.thread, self.inner.clock.now()).await?;
-            tx.commit().await.map_err(orch_db::DbError::from)?;
-            cut
+            let mut conn = self.db().acquire().await?;
+            history::authorize(self, &mut conn, &snap.thread, self.inner.clock.now()).await?
         };
         if let Some(native) = recovered {
             return Ok(Some((

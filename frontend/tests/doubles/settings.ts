@@ -8,7 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
-import { narrowingMerge, resolvedParts } from './day100-settings.ts';
+import { resolvedParts } from './day100-settings.ts';
 import { SETTINGS_REGISTRY } from '../../src/generated/settings-registry.ts';
 import type { RecoveryCodeBatch, RecoveryCodeStatus } from '../../src/generated/api-types.ts';
 import { ACME, id, RUNS_ON, USUAL_MODEL, userRef } from './fixtures.ts';
@@ -45,10 +45,7 @@ function key(
   example: unknown = fallback,
 ): Key {
   // The server names every key it ships under the application's catalogue, as the registry does.
-  const declared = SETTINGS_REGISTRY.find((def) => def.key === name);
-  const rule = declared?.merge ?? merge;
-  const shown = declared?.display ?? display;
-  return { def: { key: name, title, description, group, schema: rule === 'stricter' ? declared?.schema ?? schema : schema, class: kind, scopes: [...at], merge: rule, default: fallback, example, ...(shown === undefined ? {} : { display: shown }), text_key: `day100.builtin.${name}`, keywords: [] }, at };
+  return { def: { key: name, title, description, group, schema, class: kind, scopes: [...at], merge, default: fallback, example, ...(display === undefined ? {} : { display }), text_key: `day100.builtin.${name}`, keywords: [] }, at };
 }
 
 const CHOICE = (...values: string[]) => ({ type: 'string', enum: values });
@@ -56,11 +53,10 @@ const SET_OF = (...values: string[]) => ({ type: 'array', items: CHOICE(...value
 
 /** A selection of the real registry that holds every shape of value the editor draws. */
 const REGISTRY: readonly Key[] = [
-  key('threads.let_viewers_in', 'Let thread viewers in', 'The initial confirmed choice to let thread viewers use its environment.', 'agent', 'parameter', ['system', 'org', 'project', 'topic'], { type: 'boolean' }, false),
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key === 'sharing.agent_messages' || def.key === 'env.host_id').map((def): Key => {
     if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
@@ -605,7 +601,7 @@ export class Settings implements Part {
     held.domain = plan.to.id;
     held.role = plan.role;
     held.revision += 1;
-    const member: Member = { terms_hash: null, terms_accepted_at: null,
+    const member: Member = {
       user: userRef(target.me),
       domain: plan.to,
       address: `${(plan.to.name ?? '').toLowerCase()}.${target.me.username}`,
@@ -690,7 +686,7 @@ export class Settings implements Part {
   private whereSet(nodeId: string, entry: Key) {
     const chain = this.world.places.pathTo(nodeId);
     const name = entry.def.key;
-    const honours = !narrowingMerge(entry.def.merge);
+    const honours = entry.def.merge !== 'intersect' && entry.def.merge !== 'min';
     const locking = chain.find((row) => honours && this.rows.get(row.id)?.get(name)?.locked === true);
     const above = locking !== undefined && locking.id !== nodeId ? locking : undefined;
     const deepest = [...chain].reverse().find((row) => this.rows.get(row.id)?.has(name) === true);
@@ -716,7 +712,7 @@ export class Settings implements Part {
       key: name,
       value: entry.def.merge === 'replace' ? row?.value ?? entry.def.default : joined.value,
       parts: joined.parts,
-      source: entry.def.merge === 'replace' ? from === undefined ? { scope: 'default', node: null } : { scope: from.kind, node: this.ref(from.id) } : joined.source,
+      source: from === undefined ? { scope: 'default', node: null } : { scope: from.kind, node: this.ref(from.id) },
       own: own === null ? null : { value: own.value, locked: own.locked, revision: own.revision },
       locked_by: locking === undefined ? null : { scope: locking.kind, node: this.ref(locking.id) },
       writable: above === undefined && this.mayWrite(person, nodeId, entry),
@@ -728,21 +724,7 @@ export class Settings implements Part {
   valueAt(nodeId: string, key: string): { value: unknown; lockedBy: string | null } {
     const entry = this.entryOf(key);
     const { locking, row } = this.whereSet(nodeId, entry);
-    const value = entry.def.merge === 'replace' ? row?.value ?? entry.def.default : resolvedParts(entry.def, [
-      { source: { scope: 'default', node: null }, value: entry.def.default, locked: false, ignored: false },
-      ...this.world.places.pathTo(nodeId).flatMap((place) => {
-        const part = this.rows.get(place.id)?.get(key);
-        return part === undefined ? [] : [{ source: { scope: place.kind, node: this.ref(place.id) }, value: part.value, locked: part.locked, ignored: false }];
-      }),
-    ]).value;
-    return { value, lockedBy: locking?.id ?? null };
-  }
-
-  /** The binding preview carries the same actual creation value and its setting provenance. */
-  viewerDefault(person: Person, nodeId: string): { value: boolean; source: ResolvedSetting['source'] } {
-    const setting = this.resolve(person,nodeId,this.entryOf('threads.let_viewers_in'));
-    if(typeof setting.value !== 'boolean') throw new Error('The viewer default must be a boolean');
-    return {value:setting.value,source:setting.source};
+    return { value: row?.value ?? entry.def.default, lockedBy: locking?.id ?? null };
   }
 
   /** Whether the registry has the key. */

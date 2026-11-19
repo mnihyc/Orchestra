@@ -119,7 +119,6 @@ async fn session_of(harness: Harness) -> Option<(ProviderRig, Arc<Containers>, o
     let home = format!("harness/{}/{}", p.rig.provider, p.rig.agent);
     let start: orch_link_contract::commands::AgentStart = serde_json::from_value(json!({
         "provider_id": p.rig.provider, "agent_id": p.rig.agent, "harness_kind": harness.kind(),
-        "provider_kind": "api",
         "profile": { "harness_version": null, "config": {}, "env": {} }, "home": home
     }))
     .unwrap();

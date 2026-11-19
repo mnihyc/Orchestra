@@ -16,37 +16,10 @@ use orch_db::{
 use orch_link_contract::policy::{LocalPolicy, PolicyKey};
 use orch_types::{Id, Json};
 
-/// The safe, non-secret origin fields of the actual selected harness configuration.
-pub struct ImportRecord<'a> {
-    pub source: &'a str,
-    pub scope: &'a Json,
-    pub directory: Option<&'a str>,
-    pub name: &'a str,
-}
-impl ImportRecord<'_> {
-    pub fn spec(
-        self,
-        reply: orch_link_contract::commands::McpImportResult,
-        by: Id,
-        at: orch_types::Time,
-    ) -> Json {
-        serde_json::json!({"transport":reply.transport,"imported":{
-            "source":self.source,"scope":self.scope,"directory":self.directory,
-            "name":self.name,"digest":reply.digest,"definition_fingerprint":reply.definition_fingerprint,
-            "tools":reply.tools,"at":at,"by":by
-        }})
-    }
-}
-
 mod copy_command;
 pub use copy_command::CopyCommand;
-mod import_command;
-pub use import_command::ImportCommand;
 mod forget_command;
 pub use forget_command::{ForgetCommand, ForgetCustody, RecordedDeletionCustody};
-pub mod deleting;
-pub mod duplicating;
-pub mod existing;
 /// Native copy input and the original-operation offering checkpoints.
 pub mod importing;
 
@@ -115,9 +88,7 @@ impl ImportSelection {
     pub fn command(&self, server: Id) -> orch_link_contract::commands::McpImport {
         orch_link_contract::commands::McpImport {
             expected_fingerprint: None,
-            stored: None,
-            transfer: None,
-            environment_id: Some(self.environment.id),
+            environment_id: self.environment.id,
             server_id: server,
             source: self.source.clone(),
             scope: self.machine_scope.clone(),
@@ -136,21 +107,6 @@ impl ImportSelection {
     /// Original offering name recorded by the native copy.
     pub fn name(&self) -> &str {
         &self.name
-    }
-    /// The same safe record for ordinary filing and native completion of this actual copy.
-    pub fn imported_spec(
-        &self,
-        reply: orch_link_contract::commands::McpImportResult,
-        by: Id,
-        at: orch_types::Time,
-    ) -> Json {
-        ImportRecord {
-            source: self.source(),
-            scope: self.api_scope(),
-            directory: self.directory(),
-            name: self.name(),
-        }
-        .spec(reply, by, at)
     }
     /// Original directory selection, absent for user scope.
     pub fn directory(&self) -> Option<&str> {

@@ -1,4 +1,4 @@
-//! Explicitly schema-declared synthetic controls retain ownership; unoffered pinned controls are never probed.
+//! Stop ends the current turn's terminals, and a vendor refusal ends the turn on its first notice.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -215,8 +215,6 @@ impl Scripted {
             }
         }));
         state.set(Arc::clone(&fake.state)).ok().unwrap();
-        // A separate future build of a later line proves that the controls stay on for it, on the embedded schema.
-        fake.state.set_version("0.170.0");
         let (sink, events) = EventSink::channel();
         let home = tempfile::tempdir().unwrap();
         let mut adapter = CodexAdapter::with_launcher(fake.clone());
@@ -224,7 +222,6 @@ impl Scripted {
             .start(
                 AgentStart {
                     provider_id: new_id(),
-                    provider_kind: None,
                     agent_id: new_id(),
                     harness_kind: "codex".into(),
                     profile: AgentProfile::default(),
@@ -293,7 +290,6 @@ impl Scripted {
         self.turns += 1;
         self.adapter
             .start_turn(TurnStart {
-                native_model: None,
                 native_wake: None,
                 plan: false,
                 thread_id: self.thread,

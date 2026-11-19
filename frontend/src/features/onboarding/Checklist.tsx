@@ -136,6 +136,7 @@ function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; 
   if (personal.isPending || !needsFirstSteps({ ...data, work_mode: mode }, org)) return null;
   const solo = orgs.data?.find((candidate) => candidate.id === me.data?.personal_org_id && candidate.access.permissions.includes('org.view'));
   return <div className="flex flex-col gap-4" data-testid="first-steps">
+    {loadError === null && <StartHere document={data.start_here} />}
     {!dismissed ? <section aria-label={t('firstSteps.title')} className={`${boxClasses} @container p-4`}>
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-[1_1_8rem]">
@@ -158,6 +159,5 @@ function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; 
           <StepList data={{ ...data, work_mode: mode }} contextPath={contextPath} />
         </details>}
     </section> : <Button action="show" className="self-start" size="sm" variant="ghost" pending={mutation.isPending} onClick={() => saveDismissal(false)}>{t('firstSteps.show')}</Button>}
-    {loadError === null && <StartHere document={data.start_here} />}
   </div>;
 }

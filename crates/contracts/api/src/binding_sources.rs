@@ -17,51 +17,6 @@ pub enum Source {
     OptionsThreads,
 }
 
-/// Source management and the destination's existing native profile/provider use requirements.
-pub enum NativeDestination {
-    Binding,
-}
-pub struct BindingRow {
-    pub sources: Declaration<Source>,
-    pub phase: Declaration<Source>,
-    pub destination: NativeDestination,
-}
-pub const REBIND: BindingRow = BindingRow {
-    destination: NativeDestination::Binding,
-    sources: Declaration {
-        operation: "ThreadBindingSet",
-        bindings: &[
-            Binding {
-                source: Source::Thread,
-                target: TargetResolver::Path("id"),
-                usage: FacetUsage::Required,
-                cardinality: Cardinality::One,
-            },
-            Binding {
-                source: Source::Thread,
-                target: TargetResolver::Path("id"),
-                usage: FacetUsage::ResponseContent,
-                cardinality: Cardinality::One,
-            },
-            Binding {
-                source: Source::ThreadContent,
-                target: TargetResolver::ResolvedCollection("bound_thread_content"),
-                usage: FacetUsage::ResponseContent,
-                cardinality: Cardinality::Collection,
-            },
-        ],
-    },
-    phase: Declaration {
-        operation: "ThreadBindingSet",
-        bindings: &[Binding {
-            source: Source::Thread,
-            target: TargetResolver::Path("id"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        }],
-    },
-};
-
 pub const PLACEMENT: Declaration<Source> = Declaration {
     operation: "ThreadEnvironmentSet",
     bindings: &[

@@ -14,21 +14,6 @@ const document: ReferenceContext['document'] = { id: 'current', node: { id: 'top
   path: [{ id: 'root', kind: 'org', name: 'Root', redacted: false }] };
 beforeEach(() => { wire.reader = 1; wire.read.mockReset().mockResolvedValue({ pages: [{ items: [{ id: 'other', title: 'Visible notes' }] }] }); });
 
-it('makes no read before a live editor has committed its reference context', async () => {
-  expect(await referenceChoices(() => undefined, '')).toEqual([]);
-  expect(wire.read).not.toHaveBeenCalled();
-});
-
-it('discards a pending answer when that exact editor is retired', async () => {
-  let finish: (value: { pages: { items: { id: string; title: string }[] }[] }) => void = () => { throw new Error('The reference read did not start'); };
-  wire.read.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-  let context: ReferenceContext | undefined = { document, enabled: true };
-  const pending = referenceChoices(() => context, '');
-  context = undefined;
-  finish({ pages: [{ items: [{ id: 'old', title: 'Retired editor choice' }] }] });
-  expect(await pending).toEqual([]);
-});
-
 it('does not read an inactive editor and loads native choices on its actual reference intent', async () => {
   const context: ReferenceContext = { document, enabled: false };
   expect(await referenceChoices(() => context, '')).toEqual([]);

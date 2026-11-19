@@ -20,7 +20,7 @@
 //! goal's line says so.
 //!
 //! **Limits** (`thread.goal.max_turns`, `thread.goal.max_minutes` and `thread.goal.max_credits`) default to none. A
-//! goal may tighten a place's limit but cannot raise it; reaching one that is set stops the goal and says which.
+//! goal's own limit stands unless a place locked the setting; reaching one that is set stops the goal and says which.
 
 mod check;
 mod drive;
@@ -217,22 +217,7 @@ async fn setting_limits(
     ))
 }
 
-/// Apply a goal's own budget through the same narrowing merge as its place's policy.
-fn below_policy(key: &str, policy: Json, own: Option<Json>) -> Result<Option<Json>, EngineError> {
-    use orch_settings_contract::{
-        merge::{self, Layer},
-        registry::{self, Scope},
-    };
-    let def = registry::get(key)
-        .ok_or_else(|| EngineError::unreadable("the goal budget policy is not registered"))?;
-    let mut layers = vec![Layer::<Id>::at(Scope::System, None, &policy, false)];
-    if let Some(own) = own.as_ref() {
-        layers.push(Layer::at(Scope::Thread, None, own, false));
-    }
-    Ok(merge::resolve(def, &layers).value)
-}
-
-/// A goal's stored choice stays editable; the effective budgets retain every place's bound.
+/// The limits that apply to `goal`: its own where the place has not locked the setting, else the setting's.
 pub(crate) async fn budgets(
     conn: &mut Conn,
     thread: Id,
@@ -240,34 +225,24 @@ pub(crate) async fn budgets(
 ) -> Result<Budgets, EngineError> {
     let (turns, minutes, credits, locked) = setting_limits(conn, thread).await?;
     Ok(Budgets {
-        max_turns: below_policy(
-            keys::THREAD_GOAL_MAX_TURNS,
-            serde_json::json!(turns),
-            goal.max_turns.map(Json::from),
-        )?
-        .as_ref()
-        .and_then(Json::as_i64)
-        .unwrap_or(0),
-        max_minutes: below_policy(
-            keys::THREAD_GOAL_MAX_MINUTES,
-            serde_json::json!(minutes),
-            goal.max_minutes.map(Json::from),
-        )?
-        .as_ref()
-        .and_then(Json::as_i64)
-        .unwrap_or(0),
-        max_credits: below_policy(
-            keys::THREAD_GOAL_MAX_CREDITS,
-            Json::String(credits),
+        max_turns: if locked[0] {
+            turns
+        } else {
+            goal.max_turns.unwrap_or(turns)
+        },
+        max_minutes: if locked[1] {
+            minutes
+        } else {
+            goal.max_minutes.unwrap_or(minutes)
+        },
+        max_credits: if locked[2] {
+            credits
+        } else {
             goal.max_credits
                 .clone()
                 .filter(|text| is_decimal(text))
-                .map(Json::String),
-        )?
-        .as_ref()
-        .and_then(Json::as_str)
-        .unwrap_or("0")
-        .to_owned(),
+                .unwrap_or(credits)
+        },
         locked: locked.iter().any(|held| *held),
     })
 }
@@ -868,14 +843,6 @@ impl Engine {
         let goal = rows::goal(unit.conn, goal.id)
             .await?
             .ok_or(GoalError::NotFound)?;
-        orch_db::idempotency::creation::observe_with(
-            unit.conn,
-            Some(caller.user()),
-            "goal",
-            goal.id,
-            serde_json::json!({"thread":thread.node_id}),
-        )
-        .await?;
         Ok((unit.finish().await?, CreatedGoal { thread, goal }))
     }
 

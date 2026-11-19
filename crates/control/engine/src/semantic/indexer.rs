@@ -30,11 +30,6 @@ use orch_types::{Id, new_id};
 use serde_json::json;
 use std::time::Instant;
 
-struct FillBudget {
-    started: Instant,
-    span: std::time::Duration,
-}
-
 /// The texts whose vectors show whether two endpoints serve the same model: a few short sentences of
 /// different scripts and kinds, made with the document prefix and no title.
 pub const PROBE: [&str; 6] = [
@@ -545,10 +540,8 @@ impl Engine {
             named,
             &target,
             generation_work.as_ref(),
-            FillBudget {
-                started,
-                span: budget,
-            },
+            started,
+            budget,
             rate,
         )
         .await
@@ -742,13 +735,10 @@ impl Engine {
         named: &Embeddings,
         target: &rows::GenerationRow,
         work: Option<&Work>,
-        budget: FillBudget,
+        started: Instant,
+        budget: std::time::Duration,
         rate: &mut Option<f64>,
     ) -> Result<Standing, EngineError> {
-        let FillBudget {
-            started,
-            span: budget,
-        } = budget;
         let org = chosen.org;
         let tuning = chosen.tuning;
         {

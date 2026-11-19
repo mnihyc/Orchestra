@@ -10,7 +10,7 @@ import { CancelledError } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { useStore } from 'zustand';
 
-import { applyChanges, type Change, followWith, people, resourceChanges, threadRowChanges, treeChanges, userEventChanges } from '@/api/acts';
+import { applyChanges, type Change, followWith, people, resourceChanges, treeChanges, userEventChanges } from '@/api/acts';
 import { feedSequences, record } from '@/api/cache';
 import { client } from '@/api/client';
 import { capturePeopleHint } from '@/api/peopleChanges';
@@ -18,21 +18,19 @@ import { scheduledReads } from '@/api/readScheduler';
 import { admittedOrOffline, dispatchPersonalEvent, followPersonalSource, retakePersonalBaseline, retirePersonalEvents } from '@/realtime/personalSource';
 import { fetchTree, splitListed, type TreeRows } from '@/api/nodes';
 import { fetchDocumentSync } from '@/api/documents';
-import { adoptDocumentSummaryOpening } from '@/api/summarySnapshots';
-import { summaryReaderKey } from '@/api/summaryReader';
 import { fetchNotifications, fetchSummary } from '@/api/notifications';
 import { queryClient } from '@/api/query';
 import { wantedResourceFeeds } from '@/realtime/resourceWants';
 import { sessionsQuery } from '@/api/users';
-import { fetchItem, parametersQuery } from '@/api/threads';
+import { fetchItem } from '@/api/threads';
 import { captureThreadRead } from '@/api/threadRead';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { isDefaultThreadRead, threadReadRegistryKey, threadReadTarget, type ThreadReadTarget } from '@/realtime/threadScope';
 import { applyThreadFeedRows, coordinateThreadReads, createThreadReadFeed, forgetThreadRead as forgetRead, type ThreadFeedData } from '@/realtime/threadFeed';
-import type { DocumentBlock, DocumentDiscussion, DocumentRef, Notification, Thread, ThreadParameters, UserRef } from '@/generated/api-types';
+import type { DocumentBlock, DocumentDiscussion, DocumentRef, Notification, UserRef } from '@/generated/api-types';
 import { createRealtimeSocket, type SocketStatus, type Subscription } from '@/realtime/socket';
 import { type DocumentRows, documentWriter } from '@/realtime/stores/document';
-import { setGapHandler, threadReadOnly, threadViewOf, threadWriter } from '@/realtime/stores/thread';
+import { setGapHandler, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import { type Counters, onUserEvent, tellUserEvent, useUserStore, userWriter } from '@/realtime/stores/user';
 import { outsideQuery } from '@/api/away';
@@ -126,28 +124,6 @@ function settle(changes: readonly Change[]): void {
   }, SETTLE_MS);
 }
 
-/**
- * What a person changed in how a thread runs (its model, its effort, a setting) is read again at once, the reads together. A control
- * of another window may be showing it open, and a choice is made once: it has no burst to gather, and the pause that gathers one
- * (a running thread restamps its row many times a second) would stand between the person who chose and the person who looks.
- */
-function settleAtOnce(changes: readonly Change[]): void {
-  for (const change of changes) void applyChanges([change]);
-}
-
-/**
- * The model and the effort that the row carries are written into the parameters held of the thread, so that a control open on them
- * shows them as the row does and does not wait for the read; what depends on them (the speed, the access, the context) is read again.
- */
-function carryChoice(row: Thread, earlier: Thread): void {
-  if (row.model === earlier.model && row.effort === earlier.effort) return;
-  queryClient.setQueryData<ThreadParameters>(parametersQuery(row.id).queryKey, (held) => held === undefined ? undefined : {
-    ...held,
-    ...(row.model === earlier.model ? {} : { model: { ...held.model, value: row.model } }),
-    ...(row.effort === earlier.effort ? {} : { effort: { ...held.effort, value: row.effort } }),
-  });
-}
-
 const treeKey = (orgId: string) => `org:${orgId}`;
 
 function treeFeed(orgId: string): DurableFeed<TreeRows> {
@@ -214,29 +190,11 @@ function takeThreadRows(threadId: ThreadReadTarget, data: ThreadFeedData, reset:
   const before = applyThreadFeedRows(threadId, data, reset);
   if (before === null) return;
   const previous = before.thread?.seq;
+  // The row's sequence is the existing settings signal, including a thread without history.
+  // Coalesce these independent reads; item/delta frames alone do not ask them again.
   const current = threadViewOf(threadId);
   const active = isDefaultThreadRead(threadId) && (current.read?.selection === null || current.read === null);
-  const changes: Change[] = [];
-  const chosen: Change[] = [];
-  const row = data.thread;
-  if (active && row !== undefined && row !== null && (previous === undefined || row.seq > previous)) changes.push(
-    { thread: row },
-    { missing: [{ key: ['thread-shared', row.id], exact: true }], cancelPending: true },
-  );
-  const earlier = before.thread;
-  const now = current.thread;
-  // Current workbench tabs have their own read keys and share the native choice readers.
-  if (earlier !== null && now !== null && !threadReadOnly(current) && current.read?.projection?.follows_active !== false) {
-    const modelChanged = now.model !== earlier.model || now.effort !== earlier.effort
-      || now.execution_revision !== earlier.execution_revision;
-    const settingRecorded = !reset && data.items?.some((item) =>
-      item.kind === 'marker' && (item.payload.marker === 'setting_changed' || item.payload.marker === 'model_changed')
-      && !before.items.has(item.id) && current.items.has(item.id));
-    if (modelChanged || settingRecorded) chosen.push(...threadRowChanges(now.id));
-    carryChoice(now, earlier);
-  }
-  settle(changes);
-  settleAtOnce(chosen);
+  if (active && data.thread !== undefined && data.thread !== null && (previous === undefined || data.thread.seq > previous)) settle([{ thread: data.thread }]);
   const running = active ? data.turns?.find((turn) => turn.state === 'running' && turn.id === current.thread?.current_turn_id) : undefined;
   if (running !== undefined && before.turns.get(running.id)?.state !== 'running') {
     if (!reset) {
@@ -332,10 +290,7 @@ function documentFeed(id: string): DurableFeed<DocumentRows> {
     feed: documentKey(id),
     invalidated: () => documentWriter.evict(id),
     load: async (since, signal) => {
-      const reader = summaryReaderKey();
-      const reply = await loadWithRetries(() => fetchDocumentSync(id, since, signal, since === null), signal);
-      signal.throwIfAborted();
-      if (since === null) adoptDocumentSummaryOpening(queryClient, reply, id, reader);
+      const reply = await loadWithRetries(() => fetchDocumentSync(id, since, signal), signal);
       return { seq: reply.seq, complete: reply.complete, data: { document: reply.document, blocks: reply.blocks, discussions: reply.discussions } };
     },
     reset: (rows, seq) => documentWriter.reset(id, rows, seq),
@@ -590,7 +545,6 @@ function reconcileResourceFeeds(): void {
     if (resourceFeeds.has(name)) continue;
     const [kind = '', id = ''] = name.split(':');
     let seq: number | null = null;
-    let baseline = true;
     resourceFeeds.set(
       name,
       socket.subscribe(`resource:${name}`, {
@@ -609,11 +563,7 @@ function reconcileResourceFeeds(): void {
             settle([{ value: { key: ['provider-login', id], data: frame.data.state } }]);
           } else if (record(frame.data.job) && typeof frame.data.job.id === 'string') {
             settle([{ row: { kind: 'job', id: frame.data.job.id, value: frame.data.job } }]);
-          } else if (frame.data.what === 'changed' || 'row' in frame.data || 'value' in frame.data || frame.data.deleted === true) {
-            const source = baseline ? 'baseline' : undefined;
-            baseline = false;
-            settle(resourceChanges(kind, id, frame.data, source));
-          }
+          } else if (frame.data.what === 'changed' || 'row' in frame.data || 'value' in frame.data || frame.data.deleted === true) settle(resourceChanges(kind, id, frame.data));
         },
       }),
     );

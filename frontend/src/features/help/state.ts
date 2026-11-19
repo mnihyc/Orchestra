@@ -35,5 +35,5 @@ export function showArticle(article: string | null, heading: string | null = nul
 }
 
 export function setHelpQuery(query: string): void {
-  useHelpState.setState({ query, article: null, heading: null });
+  useHelpState.setState({ query });
 }

@@ -474,7 +474,7 @@ const emoji: Source<EmojiEntry> = {
 
 /** The lists that open at the caret: blocks, people, places and documents, emoji. */
 type PlaceSuggestion = Place | { kind: 'retry'; query: string };
-export const Suggestions = Extension.create<{ people: ((query: string, cursor: string | null) => Promise<DocumentMentionPage>) | null; places: ((query: string, editor: Editor) => Promise<PlaceChoice[]>) | null }>({
+export const Suggestions = Extension.create<{ people: ((query: string, cursor: string | null) => Promise<DocumentMentionPage>) | null; places: ((query: string) => Promise<PlaceChoice[]>) | null }>({
   name: 'orchSuggestions',
   addOptions() { return { people: null, places: null }; },
   // An open list answers the arrow keys, Enter and Escape before the editor's own keys do.
@@ -490,7 +490,7 @@ export const Suggestions = Extension.create<{ people: ((query: string, cursor: s
     };
     const currentPlaces = this.options.places;
     const loadPlaces = async (query: string): Promise<PlaceSuggestion[]> => {
-      try { return currentPlaces === null ? await places.items(query) : await currentPlaces(query, this.editor); }
+      try { return currentPlaces === null ? await places.items(query) : await currentPlaces(query); }
       catch { return [{ kind: 'retry', query }]; }
     };
     const offeredPlaces: Source<PlaceSuggestion> = {

@@ -11,15 +11,15 @@ export interface ReferenceContext {
   enabled: boolean;
 }
 
-export async function referenceChoices(current: () => ReferenceContext | undefined, query: string): Promise<PlaceChoice[]> {
+export async function referenceChoices(current: () => ReferenceContext, query: string): Promise<PlaceChoice[]> {
   const before = current();
-  if (!before?.enabled) return [];
+  if (!before.enabled) return [];
   const reader = client.session.getState().readerVersion;
   const doc = before.document;
   const location = doc.path.map((one) => one.id).join('/');
   const page = doc.node.redacted ? null : await queryClient.infiniteQuery(documentsOfNodeQuery(doc.node.id, { under: true }));
   const after = current();
-  if (after === undefined || !after.enabled || after.document.id !== doc.id || after.document.node.id !== doc.node.id
+  if (!after.enabled || after.document.id !== doc.id || after.document.node.id !== doc.node.id
     || after.document.node.redacted !== doc.node.redacted || after.document.path.map((one) => one.id).join('/') !== location
     || client.session.getState().readerVersion !== reader) return [];
   const root = doc.path[0]?.id;

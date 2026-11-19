@@ -10,7 +10,6 @@ import { LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useTimelineContext } from '@/features/timeline/context';
-import { hasPausedService } from '@/features/timeline/rows';
 import { describeStep } from '@/features/timeline/titles';
 import { waitingWords } from '@/features/timeline/waiting';
 import { useFormatContext } from '@/lib/appearance';
@@ -40,7 +39,6 @@ export function StatusLine() {
     }
     return undefined;
   });
-  const pausedService = useThreadPart(threadId, hasPausedService);
   // A thread that starts has done so for as long as the turn it starts, or the message that asked for it, has waited.
   const askedAt = useThreadPart(threadId, (view) => waitingInputs(view)[0]?.created_at);
   const now = useRunningClock(readOnly !== true && thread !== null && (thread.state === 'running' || thread.state === 'starting' || thread.state === 'waiting_approval'));
@@ -61,8 +59,7 @@ export function StatusLine() {
         ? t('timeline.status.compacting', { time: since(turn.phase.since) })
         : `${t('statusItems.generating')}${step === undefined ? '' : `: ${describeStep(step, t).text}`}`;
   }
-  const serviceRecovery = pausedService ? <ThreadCallRecovery thread={thread} serviceOnly /> : null;
-  if (line === null) return serviceRecovery;
+  if (line === null) return null;
   const status = (
     <div data-status-line className="flex min-w-0 items-center justify-center gap-2 py-1 text-center text-sm text-text-muted">
       <StatusPlace place="live" threadId={threadId} activeLabel={line} role="status" fixed={[
@@ -71,5 +68,5 @@ export function StatusLine() {
       ]} />
     </div>
   );
-  return <>{thread.lock?.phase === 'history' ? <HandoffRecoveryLine job={thread.lock.id} fallback={status} /> : status}{serviceRecovery}</>;
+  return thread.lock?.phase === 'history' ? <HandoffRecoveryLine job={thread.lock.id} fallback={status} /> : status;
 }

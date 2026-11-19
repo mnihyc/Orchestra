@@ -28,31 +28,6 @@ fn lost() -> Event {
     })
 }
 
-/// How many commands the machines were asked whose body names `id`: the commands of one thread or
-/// session, whatever the engine's own sweeps ask of the machines beside them while the case lasts.
-fn naming(world: &World, id: Id) -> usize {
-    let id = id.to_string();
-    let mut kinds: Vec<String> = world
-        .commands
-        .kinds()
-        .into_iter()
-        .map(|(_, kind)| kind)
-        .collect();
-    kinds.sort();
-    kinds.dedup();
-    kinds
-        .iter()
-        .map(|kind| {
-            world
-                .commands
-                .issued_bodies(kind)
-                .into_iter()
-                .filter(|(_, body)| body.to_string().contains(&id))
-                .count()
-        })
-        .sum()
-}
-
 async fn wait_ack(world: &World, machine: Id, stream: &Stream, through: i64) {
     eventually("the link event to be taken in", || async {
         world.commands.acknowledged(machine, stream) >= through
@@ -201,7 +176,6 @@ fn usage(turn: Id) -> Event {
 
 fn tool(turn: Id, call_ref: &str) -> Event {
     Event::OrchToolCall(OrchToolCall {
-        deadline: None,
         turn_id: turn,
         call_ref: call_ref.to_owned(),
         attempt: None,
@@ -259,7 +233,7 @@ async fn a_foreign_session_cannot_write_items_usage_raw_or_call_an_orch_tool_and
             start.turn_id,
         )
         .await;
-    let before_commands = naming(&world, thread) + naming(&world, segment);
+    let before_commands = world.commands.kinds().len();
     // An internal caller must observe the same source boundary as the API's link.
     let delivered: Vec<DeliveredEvent> = events
         .iter()
@@ -308,11 +282,7 @@ async fn a_foreign_session_cannot_write_items_usage_raw_or_call_an_orch_tool_and
             .await,
         0
     );
-    assert_eq!(
-        naming(&world, thread) + naming(&world, segment),
-        before_commands,
-        "the machines were asked nothing of the session or its thread"
-    );
+    assert_eq!(world.commands.kinds().len(), before_commands);
     assert!(other.seen.of_kind(CommandKind::OrchToolResult).is_empty());
     assert_eq!(cursor(&world, other.id, &stream).await, None);
 
@@ -693,7 +663,6 @@ async fn a_former_harness_machine_cannot_receive_a_cached_answer_of_a_later_mach
 
     let attempt = new_id();
     let repeated = OrchToolCall {
-        deadline: None,
         turn_id: first.turn_id,
         call_ref: reference.clone(),
         attempt: Some(attempt),

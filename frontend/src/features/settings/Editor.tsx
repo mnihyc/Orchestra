@@ -52,7 +52,7 @@ export function SettingsEditor(props: SettingsEditorProps) {
   const location = useViewLocation();
   const wantedKey = new URLSearchParams(location.searchStr).get('setting');
   const opening = useDefaultsOpening(props.target.kind === 'node' ? props.target.id : null, undefined, props.only === undefined && props.compact !== true && props.secrets === true);
-  if (opening.waiting) return <SkeletonRows read={opening.opening} rows={6} />;
+  if (opening.waiting) return <SkeletonRows rows={6} />;
   // A newly selected URL key is a new editor session; ordinary query updates preserve its draft.
   return <EditorAtKey key={JSON.stringify([location.pathname,wantedKey])} {...props} wantedKey={wantedKey} />;
 }
@@ -102,9 +102,9 @@ function EditorAtKey({ target, scope, place, only, compact = false, secrets = fa
   });
   const groups = byGroup(shown);
 
-  if (registry.data === undefined) return registry.isError ? <ErrorState compact error={registry.error} retrying={registry.isRefetching} onRetry={() => void registry.refetch()} /> : <SkeletonRows read={registry} rows={6} />;
+  if (registry.data === undefined) return registry.isError ? <ErrorState compact error={registry.error} retrying={registry.isRefetching} onRetry={() => void registry.refetch()} /> : <SkeletonRows rows={6} />;
   const refused = list.error instanceof ApiError && [401, 403, 404].includes(list.error.status);
-  if (list.data === undefined || refused) return list.isError ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} /> : <SkeletonRows read={list} rows={6} />;
+  if (list.data === undefined || refused) return list.isError ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} /> : <SkeletonRows rows={6} />;
 
   const filtered = needle !== '' || onlyHere;
   const contents = !compact && only === undefined && groups.length > 1;

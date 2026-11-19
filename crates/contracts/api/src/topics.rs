@@ -242,7 +242,7 @@ pub struct AnnouncementCreateBody {
     /// What it does where it may not reach into a running turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<AnnouncementFallback>,
-    /// Explicitly wake idle threads where broadcast.wake_idle allows it; false when omitted.
+    /// Whether it wakes a thread that is idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_idle: Option<bool>,
 }

@@ -19,7 +19,6 @@ RUNNERS = {
     "x86_64-apple-darwin": "macos-15-intel",
     "aarch64-apple-darwin": "macos-15",
     "x86_64-pc-windows-msvc": "windows-2022",
-    "aarch64-pc-windows-msvc": "windows-11-arm",
 }
 SQL_NAME = re.compile(r"[0-9]+_[A-Za-z0-9_]+\.sql\Z")
 

@@ -23,8 +23,6 @@
 #   ORCH_SMOKE_KEEP=1  leave the stack up at the end, to look at it.
 #   ORCH_SMOKE_PROJECT_PREFIX  what the name of the Compose project begins with
 #       (default orchsmoke and the run's name); the scenario's name follows it.
-#   ORCH_SMOKE_MOCK_LLM  a built orch-mock-llm (the scripted model server of the two managed
-#       scenarios that use one), in place of building it from the tree with cargo.
 
 set -Eeuo pipefail
 
@@ -59,10 +57,8 @@ expect() {
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1: expected '$2', got '$3'"; fi
 }
 
-# says PATTERN COMMAND...: the command prints a line with PATTERN in it. (grep reads all of it:
-# with -q it would leave at the first match and, under pipefail, fail the pipe now and then
-# when the command was still writing.)
-says() { local pattern="$1"; shift; "$@" 2>&1 | grep -- "$pattern" > /dev/null; }
+# says PATTERN COMMAND...: the command prints a line with PATTERN in it.
+says() { local pattern="$1"; shift; "$@" 2>&1 | grep -q -- "$pattern"; }
 
 # refuses WHAT COMMAND...: the command fails.
 refuses() {
@@ -157,17 +153,17 @@ new_stack() {
     printf 'COMPOSE_PROJECT_NAME=%s\n' "$PROJECT"
   } >> "$STACK/.env"
   # The edge of this stack is its own web edge, without a front: the public
-  # address is its own, and the one endpoint the release advertises (a pinned one,
-  # at a placeholder name) is the gateway's service name inside the stack, which is
-  # where the checks run from and where the pinned listener answers.
+  # address is its own, and the advertised public endpoint is the web edge's
+  # service name inside the stack, which is where the checks run from.
   sed -i \
     -e "s|^public_url = .*|public_url = \"$EDGE\"|" \
-    -e 's|^url = "wss://gateway.example.com:9443"|url = "wss://gateway:9443"|' \
+    -e 's|^url = "wss://orch.example.com/link"|url = "ws://frontend/link"|' \
     "$STACK/config/orch.toml"
 }
 
 # update_sh ARGS...: update.sh of the stack.
-# The updater checks the actual published edge from the host.
+# Managed scenarios use the edge's Docker name for connector downloads. The
+# updater still checks the actual published edge from the host.
 update_sh() { (cd "$STACK" && COMPOSE_PROJECT_NAME="$PROJECT" COMPOSE_FILE="$STACK/compose.yml" ORCH_READY_URL="${ORCH_READY_URL:-$EDGE}" ./update.sh "$@"); }
 
 # compose ARGS...: docker compose in the stack.
@@ -178,13 +174,13 @@ doctor() { compose exec -T api /opt/orchctl/orchctl doctor "$@"; }
 
 # node_online: the bundled node has a session. It enrolls on its first start after the
 # administrator exists, which takes up to a minute or two; a system that is used has long had it.
-node_online() { doctor --only node | grep '^ok' > /dev/null; }
+node_online() { doctor --only node | grep -q '^ok'; }
 
 # doctor_fails_on ID...: orchctl doctor fails and names each of the checks.
 doctor_fails_on() {
   local output id
   output="$(doctor 2>&1 || true)"
-  for id in "$@"; do grep -q "^FAIL  $id " <<< "$output" || return 1; done
+  for id in "$@"; do printf '%s\n' "$output" | grep -q "^FAIL  $id " || return 1; done
 }
 
 # ready TAG: every service is up and reports the release.
@@ -238,30 +234,22 @@ json_field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1; }
 ADMIN_NAME=ada
 ADMIN_PASSWORD='correct horse battery'
 
-# admin_mode_on: the session of TOKEN acts as an administrator, as the browser's administrator switch
-# does. A session starts with the switch off, and what is the system's to administer (/admin/...)
-# answers 403 until it is on; a new sign-in is a new session.
-admin_mode_on() {
-  curl -fsS -X PUT -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{"as_admin":true}' \
-    "$EDGE/api/v1/me/admin-mode" > /dev/null
-}
-
-# setup_admin: makes the first administrator through the edge; sets TOKEN, with the administrator switch on.
+# setup_admin: makes the first administrator through the edge; sets TOKEN.
 setup_admin() {
   local reply
   reply="$(curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/setup" \
     -d "{\"username\":\"$ADMIN_NAME\",\"display_name\":\"Ada\",\"password\":\"$ADMIN_PASSWORD\"}")" || return 1
   TOKEN="$(printf '%s' "$reply" | json_field access_token)"
-  [ -n "$TOKEN" ] && admin_mode_on
+  [ -n "$TOKEN" ]
 }
 
-# sign_in: signs the administrator in through the edge; sets TOKEN, with the administrator switch on.
+# sign_in: signs the administrator in through the edge; sets TOKEN.
 sign_in() {
   local reply
   reply="$(curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/auth/login" \
     -d "{\"login\":\"$ADMIN_NAME\",\"password\":\"$ADMIN_PASSWORD\"}")" || return 1
   TOKEN="$(printf '%s' "$reply" | json_field access_token)"
-  [ -n "$TOKEN" ] && admin_mode_on
+  [ -n "$TOKEN" ]
 }
 
 # sql QUERY: one value from the stack's database.
@@ -289,8 +277,7 @@ has_security_headers() {
   local headers
   headers="$(curl -sS -D - -o /dev/null "$EDGE$1")"
   for name in content-security-policy x-content-type-options x-frame-options referrer-policy permissions-policy; do
-    # Not through a pipe: under pipefail, a printf that grep -q has left behind fails the pipe now and then.
-    grep -qi "^$name:" <<< "$headers" || return 1
+    printf '%s' "$headers" | grep -qi "^$name:" || return 1
   done
 }
 

@@ -232,24 +232,18 @@ pub enum Env {
 pub enum Mcp {
     /// List the servers the harnesses have configured.
     List,
-    /// Import one and switch it on in its environment.
+    /// Keep a copy of one of them for Orch.
     Import {
         /// The server's name.
         name: String,
         /// The harness whose configuration names it.
         #[arg(long, value_name = "HARNESS")]
         from: Option<String>,
-        /// Its name in Orch, when the native name is not a valid server name.
-        #[arg(long = "as", value_name = "NAME")]
-        as_name: Option<String>,
     },
-    /// Forget the imported resource and remove its copy.
+    /// Forget a copy.
     Forget {
-        /// The resource's name, original configured name, or exact identifier.
+        /// The server's name.
         name: String,
-        /// The harness whose imported definition is meant.
-        #[arg(long, value_name = "HARNESS")]
-        from: Option<String>,
     },
 }
 
@@ -512,9 +506,7 @@ mod tests {
             &["doctor"],
             &["update"],
             &["mcp", "list"],
-            &["mcp", "import", "native:name", "--as", "valid-name"],
             &["mcp", "forget", "files"],
-            &["mcp", "forget", "file-tools", "--from", "fake"],
             &["provider", "set-key", "--provider", "p"],
         ] {
             assert!(parse(words).command.is_some(), "{words:?}");

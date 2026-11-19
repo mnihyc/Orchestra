@@ -63,21 +63,23 @@ fn session_open_evidence(world: &World) -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_ready_key_fixture_defers_observation_without_disabling_its_normal_cadence() {
+    use orch_db::queries::provider_facts::{ReadSchedule, due_reads};
     let world = World::on_a_key(KEY).await;
+    let config = common::config().provider_facts;
+    let schedule = || ReadSchedule {
+        recent: config.recent,
+        active: config.active,
+        idle: config.idle,
+        refused: config.refused,
+    };
     let now = world.clock.now();
     let mut conn = world.pool.acquire().await.unwrap();
-    let current = world
-        .engine()
-        .due_provider_fact_reads(&mut conn, now, 1)
-        .await
-        .unwrap();
+    let current = due_reads(&mut conn, now, schedule(), 1).await.unwrap();
     assert!(
         !current.contains(&world.provider),
         "turn tests begin with no unrelated observation due"
     );
-    let later = world
-        .engine()
-        .due_provider_fact_reads(&mut conn, now + chrono::Duration::hours(1), 1)
+    let later = due_reads(&mut conn, now + config.idle, schedule(), 1)
         .await
         .unwrap();
     assert!(
@@ -257,40 +259,16 @@ async fn a_second_turn_opens_its_own_lease_and_does_not_start_the_provider_again
     assert_ne!(first.turn_id, second.turn_id);
     assert_eq!(world.ran(CommandKind::ProviderStart), 1);
     assert_eq!(world.ran(CommandKind::AgentStart), 1);
-    let opens: Vec<_> = world
-        .seen
-        .of_kind(CommandKind::SessionOpen)
-        .into_iter()
-        .map(|command| {
-            let Command::SessionOpen(open) = command else {
-                unreachable!()
-            };
-            open
-        })
-        .collect();
     assert_eq!(
-        opens.iter().filter(|open| !open.transport_only).count(),
+        world.ran(CommandKind::SessionOpen),
         1,
         "actual native opening comparison: {}",
         session_open_evidence(&world)
     );
-    let refreshed = only(opens.iter().filter(|open| open.transport_only).collect());
-    assert_eq!(
-        refreshed.mode,
-        orch_link_contract::commands::SessionMode::Resume
-    );
-    assert_eq!(refreshed.thread_id, thread);
-    assert_eq!(refreshed.segment_id, opens[0].segment_id);
-    assert!(refreshed.native_session_ref.is_some());
-    assert_eq!(refreshed.workspace_root, opens[0].workspace_root);
-    assert_eq!(refreshed.directory, opens[0].directory);
-    assert_eq!(refreshed.model, opens[0].model);
-    assert!(refreshed.archive.is_none() && refreshed.history.is_none());
     assert_eq!(
         world.ordered_kinds()[6..],
         [
             CommandKind::LeaseOpen,
-            CommandKind::SessionOpen,
             CommandKind::TurnStart,
             CommandKind::LeaseClose
         ]

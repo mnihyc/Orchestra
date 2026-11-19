@@ -27,12 +27,7 @@ async fn raising_live_limits_keeps_the_container_and_its_long_running_process() 
     });
     let unit = lab.run(&request).await;
     let pid = lab.inspect(&unit).await.state.unwrap().pid;
-    let process = lab
-        .wait_read(&unit, "/opt/process-kept", |text| {
-            text.trim().parse::<u32>().is_ok_and(|pid| pid > 0)
-        })
-        .await
-        .unwrap();
+    let process = lab.read(&unit, "/opt/process-kept").await.unwrap();
     lab.driver
         .apply_resources(
             &unit,
@@ -64,9 +59,7 @@ async fn raising_live_limits_keeps_the_container_and_its_long_running_process() 
     );
     assert_eq!(lab.read(&unit, "/opt/process-kept").await.unwrap(), process);
     assert_eq!(
-        lab.wait_read(&unit, "/opt/file-kept", |text| text == "installed\n")
-            .await
-            .as_deref(),
+        lab.read(&unit, "/opt/file-kept").await.as_deref(),
         Some("installed\n")
     );
     assert!(

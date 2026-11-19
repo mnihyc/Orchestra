@@ -135,50 +135,6 @@ pub const CREATE: Declaration<Source> = Declaration {
     ],
 };
 
-/// Global profiles keep the native system act and its own system-scoped Read.
-/// The same singleton source roles bound metadata for every profile creator.
-pub const SYSTEM_CREATE_FACETS: [FacetSpec; 8] = [
-    FacetSpec::required(
-        KeyAction::Manage,
-        &[KeyTargetKind::Object(ObjectKind::Agent)],
-        TargetResolver::System,
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(ObjectKind::Agent)],
-        TargetResolver::System,
-    ),
-    CREATE_FACETS[2],
-    CREATE_FACETS[3],
-    CREATE_FACETS[4],
-    CREATE_FACETS[5],
-    CREATE_FACETS[6],
-    CREATE_FACETS[7],
-];
-/// The native system governor and the real global singleton's optional metadata roles.
-pub const SYSTEM_CREATE: Declaration<Source> = Declaration {
-    operation: "AdminAgentCreate",
-    bindings: &[
-        Binding {
-            source: Source::Home,
-            target: TargetResolver::System,
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::One,
-        },
-        Binding {
-            source: Source::Created,
-            target: TargetResolver::System,
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::One,
-        },
-        CREATE.bindings[2],
-        CREATE.bindings[3],
-        CREATE.bindings[4],
-        CREATE.bindings[5],
-        CREATE.bindings[6],
-        CREATE.bindings[7],
-    ],
-};
-
 /// Stored-machine registration keeps its own Write and its actual Agent creation home.
 pub const MACHINE_CREATE_FACETS: [FacetSpec; 9] = [
     FacetSpec::required(

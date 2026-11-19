@@ -19,9 +19,6 @@ const SECOND_AGE_DAYS: i64 = 30;
 #[must_use]
 pub fn record(id: String, kind: StorageKind, name: String, observed_at: Time) -> KeptRecord {
     KeptRecord {
-        artifact: None,
-        physical_parts: Vec::new(),
-        upload: None,
         accounting_key: id.clone(),
         id,
         kind,
@@ -177,13 +174,16 @@ pub fn totals(records: &[KeptRecord]) -> StorageTotals {
             .as_deref()
             .is_none_or(|parent| !parents.contains(parent))
     }) {
-        if row.physical_parts.is_empty() {
-            count_part(&mut groups, &row.accounting_key, row.bytes);
-        } else {
-            for part in &row.physical_parts {
-                count_part(&mut groups, &part.key, part.bytes);
-            }
-        }
+        let bytes = row.bytes.filter(|bytes| *bytes >= 0);
+        groups
+            .entry(&row.accounting_key)
+            .and_modify(|held| {
+                *held = match (*held, bytes) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                }
+            })
+            .or_insert(bytes);
     }
     StorageTotals {
         items: i64::try_from(records.len()).unwrap_or(i64::MAX),
@@ -194,19 +194,6 @@ pub fn totals(records: &[KeptRecord]) -> StorageTotals {
         unknown: i64::try_from(groups.values().filter(|bytes| bytes.is_none()).count())
             .unwrap_or(i64::MAX),
     }
-}
-
-fn count_part<'a>(groups: &mut BTreeMap<&'a str, Option<i64>>, key: &'a str, bytes: Option<i64>) {
-    let bytes = bytes.filter(|bytes| *bytes >= 0);
-    groups
-        .entry(key)
-        .and_modify(|held| {
-            *held = match (*held, bytes) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            };
-        })
-        .or_insert(bytes);
 }
 
 /// Stable age filters use elapsed days, including their exact boundaries.
@@ -247,8 +234,6 @@ pub fn dimension_key(row: &KeptRecord, by: StorageDimension, at: Time) -> String
                         | StorageKind::Content
                         | StorageKind::Upload
                         | StorageKind::Export
-                        | StorageKind::Snapshot
-                        | StorageKind::Import
                         | StorageKind::SkillVersion
                         | StorageKind::Release
                         | StorageKind::Dump
@@ -388,63 +373,6 @@ pub fn breakdowns(records: &[KeptRecord], at: Time) -> Vec<StorageBreakdown> {
 mod tests {
     use super::*;
     use orch_types::Id;
-
-    #[test]
-    fn shared_artifact_parts_count_once_with_raw_blobs_and_in_filtered_subsets() {
-        use orch_api_contract::storage::StoragePart;
-        let at = Time::new("2026-10-01T12:00:00Z".parse().unwrap());
-        let mut first = record(
-            "snapshot:first".into(),
-            StorageKind::Snapshot,
-            String::new(),
-            at,
-        );
-        first.bytes = Some(17);
-        first.physical_parts = vec![
-            StoragePart {
-                key: "blob:shared".into(),
-                bytes: Some(10),
-            },
-            StoragePart {
-                key: "blob:first".into(),
-                bytes: Some(7),
-            },
-        ];
-        let mut second = record(
-            "import:second".into(),
-            StorageKind::Import,
-            String::new(),
-            at,
-        );
-        second.bytes = Some(15);
-        second.physical_parts = vec![
-            StoragePart {
-                key: "blob:shared".into(),
-                bytes: Some(10),
-            },
-            StoragePart {
-                key: "blob:second".into(),
-                bytes: Some(5),
-            },
-        ];
-        let mut raw = record(
-            "blob:shared".into(),
-            StorageKind::Content,
-            String::new(),
-            at,
-        );
-        raw.bytes = Some(10);
-        assert_eq!(totals(&[first.clone(), second.clone(), raw]).bytes, 22);
-        assert_eq!(totals(std::slice::from_ref(&first)).bytes, 17);
-        assert_eq!(totals(std::slice::from_ref(&second)).bytes, 15);
-        second.physical_parts.push(StoragePart {
-            key: "blob:unmeasured".into(),
-            bytes: None,
-        });
-        let combined = totals(&[first, second]);
-        assert_eq!(combined.bytes, 22);
-        assert_eq!(combined.unknown, 1);
-    }
 
     #[test]
     fn selected_records_keep_dependencies_of_unselected_native_units() {

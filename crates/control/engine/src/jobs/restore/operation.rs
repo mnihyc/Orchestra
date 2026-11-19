@@ -98,7 +98,6 @@ impl Anchor {
                 EngineError::unreadable("the recorded state has no keeping period")
             })?,
             command: FsRestorePlan {
-                touched: None,
                 environment_id: environment.id,
                 snapshot_id: snapshot.id,
                 directory: snapshot
@@ -108,69 +107,6 @@ impl Anchor {
                 turn_id: turn,
                 record_days: Some(record_days),
                 max_bytes: Some(max_bytes),
-            },
-        })
-    }
-    /// A file-tool target retains the real unavailable turn recording as its source association.
-    pub fn new_touched(
-        environment: &environments::EnvironmentRow,
-        snapshot: &storage::SnapshotRow,
-        machine: Id,
-        touched: orch_api_contract::source::TouchedRestore,
-        record_days: i64,
-        max_bytes: i64,
-        now: Time,
-    ) -> Result<Self, EngineError> {
-        if snapshot.environment_id != environment.id
-            || snapshot.env_generation != environment.generation
-            || snapshot.storage != "environment"
-            || snapshot.thread_id != Some(touched.thread_id)
-            || snapshot.kind != "turn"
-            || environment.machine_id != Some(machine)
-        {
-            return Err(EngineError::unreadable(
-                "the file-tool restore source changed",
-            ));
-        }
-        let days = if record_days > 0 {
-            record_days
-        } else {
-            orch_settings_contract::registry::get(
-                orch_settings_contract::registry::keys::WORKSPACE_RECORD_DAYS,
-            )
-            .and_then(|def| def.default_value())
-            .and_then(|value| value.as_i64())
-            .ok_or_else(|| {
-                EngineError::unreadable("the recorded-state keeping default is missing")
-            })?
-        };
-        let until = now
-            .get()
-            .checked_add_signed(
-                chrono::Duration::try_days(days).ok_or_else(|| {
-                    EngineError::unreadable("the restore keeping period is invalid")
-                })?,
-            )
-            .ok_or_else(|| EngineError::unreadable("the restore keeping deadline overflowed"))?;
-        Ok(Self {
-            environment: environment.id,
-            generation: environment.generation,
-            machine,
-            root: environment.workspace_root.clone(),
-            snapshot: snapshot.id,
-            witness: crate::archive::snapshot_authority::ReadWitness::from_snapshot(snapshot),
-            until: Time::new(until),
-            command: FsRestorePlan {
-                environment_id: environment.id,
-                snapshot_id: snapshot.id,
-                directory: snapshot
-                    .directory
-                    .clone()
-                    .ok_or_else(|| EngineError::unreadable("the recorded directory is unknown"))?,
-                turn_id: Some(touched.turn_id),
-                record_days: Some(record_days),
-                max_bytes: Some(max_bytes),
-                touched: Some(touched),
             },
         })
     }
@@ -226,28 +162,12 @@ impl Anchor {
     async fn current(&self, conn: &mut Conn, now: Time) -> Result<Native, Error> {
         let native = self.metadata(conn).await?.ok_or(Error::Refused)?;
         if self.until <= now
-            || !crate::commands::workspace_physical(conn, &native.environment, self.machine).await?
-        {
-            return Err(Error::Refused);
-        }
-        if let Some(touched) = &self.command.touched {
-            let current = super::touched::load(
-                conn,
-                self.environment,
-                touched.thread_id,
-                touched.turn_id,
-                &self.command.directory,
-                touched.whole_unavailable.clone(),
-            )
-            .await?;
-            if current.paths != touched.paths {
-                return Err(Error::Refused);
-            }
-        } else if native.snapshot.state != "complete"
+            || native.snapshot.state != "complete"
             || native
                 .snapshot
                 .expires_at
                 .is_none_or(|until| until <= now.get())
+            || !crate::commands::workspace_physical(conn, &native.environment, self.machine).await?
         {
             return Err(Error::Refused);
         }
@@ -608,13 +528,10 @@ impl ReviewParts {
 )]
 pub enum RestoreCommand {
     /// The once-only measured source and its exact original operation.
-    Review {
-        review: Box<Review>,
-        canonical: Json,
-    },
+    Review { review: Review, canonical: Json },
     /// One exact actual Job command, never source admission in its wire body.
     Job {
-        request: Box<Request>,
+        request: Request,
         canonical: Json,
         stage: CommandStage,
     },
@@ -637,7 +554,7 @@ impl RestoreCommand {
             ));
         }
         Ok(Self::Review {
-            review: Box::new(review),
+            review,
             canonical: crate::jobs::command_identity::canonical(
                 command.id,
                 command.machine,
@@ -775,35 +692,18 @@ impl std::fmt::Debug for Request {
         f.write_str("RecordedRestore([private])")
     }
 }
-/// The native confirmation facts retained with its newly inserted restore Job.
-pub struct Confirmation {
-    /// The actual session, absent for a scoped key.
-    pub session: Option<Id>,
-    /// The original review, when this confirmation has one.
-    pub review: Option<Review>,
-    /// The measured workspace and snapshot identity.
-    pub anchor: Anchor,
-    /// The admitted confirmation mode.
-    pub mode: Mode,
-    /// The original retention time.
-    pub now: Time,
-}
-
 impl Request {
     /// Retain only the actual newly inserted native Job and independently admitted confirmation.
     pub async fn retain(
         conn: &mut Conn,
         row: &jobs::JobRow,
         caller: &Caller,
-        confirmation: Confirmation,
+        session: Option<Id>,
+        review: Option<Review>,
+        anchor: Anchor,
+        mode: Mode,
+        now: Time,
     ) -> Result<Self, EngineError> {
-        let Confirmation {
-            session,
-            review,
-            anchor,
-            mode,
-            now,
-        } = confirmation;
         let plan: Plan = serde_json::from_value(row.plan.clone())?;
         let origin = CapturedOperation::capture(caller).map_err(EngineError::unreadable)?;
         let expected = crate::operation_scope::sources::bind_required(
@@ -1105,15 +1005,13 @@ impl NativeSource for RuntimeSource {
     }
 }
 
-type RestoreCallers = Vec<(Option<Caller>, Option<Time>)>;
-
 struct RuntimeFrame {
     confirmation: continuing::Frame<RuntimeSource>,
     review: Option<ReviewFrame>,
     until: Time,
 }
 impl RuntimeFrame {
-    fn check(self, clock: &dyn Clock) -> Result<RestoreCallers, Error> {
+    fn check(self, clock: &dyn Clock) -> Result<Vec<(Option<Caller>, Option<Time>)>, Error> {
         if self.until <= clock.time() {
             return Err(Error::Refused);
         }
@@ -1292,7 +1190,7 @@ impl RestoreCommand {
             return Err(refused());
         }
         Ok(Self::Job {
-            request: Box::new(request),
+            request,
             stage,
             canonical: crate::jobs::command_identity::canonical(
                 command.id,
@@ -1358,7 +1256,7 @@ async fn queued_original(
         else {
             continue;
         };
-        if original.as_ref() != request
+        if original != request
             || *admitted != canonical
             || !body_matches(request, &command.kind, &command.body, CommandStage::Forward)?
         {
@@ -1409,7 +1307,7 @@ pub(crate) async fn issued(job: &Job, id: Id) -> Result<(), Stop> {
     else {
         return Err(refused());
     };
-    if **accepted != request
+    if *accepted != request
         || *actual != canonical
         || !body_matches(&request, &command.kind, &command.body, *stage)?
     {

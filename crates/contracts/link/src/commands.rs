@@ -21,7 +21,6 @@
 //! reference ([`Secret::Ref`], [`TicketSlot::Asked`]), which is replaced
 //! at the moment the frame is written: by the value sealed to the machine
 //! it goes to, or by a freshly signed ticket.
-//! A transport-only session rebind is a live call: neither endpoint journals its body or result.
 
 pub use crate::browser::{
     BrowserAdopt, BrowserAdoptResult, BrowserClose, BrowserOpen, BrowserOpenResult,
@@ -361,18 +360,7 @@ pub struct Cmd {
     pub body: Json,
 }
 
-/// A live replacement of a retained session's forwarder ticket is never a durable command.
-#[must_use]
-pub fn is_transport_rebind(kind: &str, body: &Json) -> bool {
-    let flag = match kind {
-        "session.open" => body.get("transport_only"),
-        "session.open.fenced" => body.pointer("/session/transport_only"),
-        _ => None,
-    };
-    flag.and_then(Json::as_bool) == Some(true)
-}
-
-/// A machine's acceptance: durable for ordinary commands, in memory for a live transport rebind.
+/// A machine's word that it wrote a command down and will run it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CmdAck {
     /// The command.
@@ -1038,11 +1026,6 @@ commands! {
     ProviderStop = "provider.stop": PROVIDER, Provider, 30, None, ProviderStop => Empty;
     /// Makes one model request on the system's own behalf.
     ProviderComplete = "provider.complete": PROVIDER, None, 60, None, ProviderComplete => ProviderCompleteResult;
-    /// Generates one tool-capable dialogue step. Five minutes matches the stream idle
-    /// boundary; the host bounds the whole conversation independently.
-    ProviderGenerate = "provider.generate": PROVIDER, None, 300, Download, ProviderGenerate => ProviderGenerateResult;
-    /// One explicitly admitted extension-declared service request, with no model or credential in its body.
-    ProviderService = "provider.service": PROVIDER, Provider, 300, Upload, ProviderService => ProviderServiceResult;
     /// Turns texts into vectors on the system's own behalf, to search by meaning. A batch on a processor of a few
     /// cores takes tens of seconds; two minutes leave room for one that the indexer then halves.
     ProviderEmbed = "provider.embed": PROVIDER, None, 120, None, ProviderEmbed => ProviderEmbedResult;
@@ -1231,7 +1214,7 @@ commands! {
     /// Makes what a unit's file system comes from available on a host.
     NodeImageEnsure = "node.image.ensure": NODE, Image, 3600, Download, NodeImageEnsure => NodeImageEnsureResult;
     /// Proposes a template's spec from something a person already has.
-    NodeTemplateImport = "node.template.import": NODE, None, 60, Download, NodeTemplateImport => NodeTemplateImportResult;
+    NodeTemplateImport = "node.template.import": NODE, None, 60, None, NodeTemplateImport => NodeTemplateImportResult;
     /// Makes sure a tool is in a host's cache.
     NodeToolEnsure = "node.tool.ensure": NODE, Tool, 1800, None, NodeToolEnsure => NodeToolEnsureResult;
     /// Runs a build in a host's cache so that it prints its interface, and says which names it lacks.
@@ -1348,13 +1331,8 @@ pub struct MachinePolicySet {
     pub values: BTreeMap<String, Json>,
 }
 
-/// The validated role selection on the native boundary; API revision guards stay with the server row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MachineRolesSet {
-    /// Environment, agent and/or provider, without duplicates and with at least one role.
-    pub roles: Vec<String>,
-}
+/// The same role selection on the HTTP and native boundaries.
+pub type MachineRolesSet = orch_api_contract::resources::MachineRolesSetBody;
 
 /// The command answer is durable before the supervisor switches the active roles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1489,9 +1467,6 @@ pub struct AgentRuntime {
 pub struct AgentStart {
     /// The provider the harness process serves.
     pub provider_id: Id,
-    /// The actual account kind used to configure its program, never a key or sign-in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_kind: Option<orch_agent_contract::descriptor::ProviderKind>,
     /// The agent profile it runs.
     pub agent_id: Id,
     /// The harness kind, which names its adapter.
@@ -1628,16 +1603,6 @@ pub enum MemoryKeeper {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchTool {
-    /// Searches the bundled user help.
-    OrchDocs,
-    /// Opens a permitted reference as the sole viewer owner.
-    Open,
-    /// Searches readable material as the sole viewer owner.
-    Search,
-    /// Finds the catalogue's permitted read operations.
-    FindOperation,
-    /// Runs one permitted read operation as the sole viewer owner.
-    Read,
     /// Lists what the team shared with the agent.
     ListShared,
     /// Reads a part of it.
@@ -1676,14 +1641,6 @@ pub enum OrchTool {
     ListPortConnections,
     /// Reads the thread's goal, and reports where the agent stands on it.
     Goal,
-    /// Creates, lists or cancels managed future inputs on the calling thread.
-    Schedule,
-    /// Searches the public web through an explicitly selected paid service.
-    WebSearch,
-    /// Reads a public page through an explicitly selected paid service.
-    WebFetch,
-    /// Produces images through the selected service and delivers their files.
-    ImageGeneration,
 }
 
 /// A native history to import.
@@ -1811,9 +1768,6 @@ pub struct SessionOpenMcp {
 /// The body of `session.open`: everything a session is set up with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpen {
-    /// Current admitted model metadata and unchanged core capability resolutions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
     /// Refresh only the model transport while preserving the native session generation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transport_only: bool,
@@ -1861,15 +1815,9 @@ pub struct SessionOpen {
     /// Limits over the harness's own sub-agents, independent of its model parameters.
     #[serde(default)]
     pub subagent_limits: orch_agent_contract::session::SubagentLimits,
-    /// Explicit native prompt-cache lifetime; none preserves the program's own default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
-    /// A native image-generation override; absent keeps the selected program's default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_generation: Option<bool>,
     /// What the harness's own sandbox allows.
     pub sandbox_mode: SandboxMode,
     /// What the agent is told that is no person's message.
@@ -2133,17 +2081,11 @@ pub struct TurnImage {
     pub media_type: String,
     /// Its file name.
     pub name: String,
-    /// Actual environment path confirmed by this input's file materialization, when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_path: Option<String>,
 }
 
 /// The body of `turn.start`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnStart {
-    /// Current admitted model metadata and unchanged core capability resolutions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
     /// Adopt a native follow-up already waiting for this controller admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_wake: Option<String>,
@@ -2466,88 +2408,6 @@ pub struct ProviderCompleteResult {
     pub request_ref: Option<String>,
 }
 
-/// One owned dialogue step; no key or other model credential is carried here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderGenerate {
-    /// A trusted installed native capability, verified and rendered before the final model ceiling.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_capability: Option<NativeCapabilityInput>,
-    /// Explicit auxiliary-result capture; ordinary dialogue replies keep their existing payload size.
-    #[serde(default, skip_serializing_if = "no_capture")]
-    pub capture_native_result: bool,
-    /// The provider whose runtime presents its credential.
-    pub provider_id: Id,
-    /// The generation interface selected by the control plane.
-    pub protocol: String,
-    /// Enabled model routing name.
-    pub model_name: String,
-    /// Final effective options for this use.
-    pub params: Option<Json>,
-    /// Provider constraints frozen by the issuing control plane.
-    pub model_parameters: orch_provider_contract::models::ModelParameters,
-    /// Reauthorized conversation and tool definitions.
-    pub input: orch_model_contract::generation::GenerationInput,
-}
-
-/// Neutral capability intent; no caller-supplied wire body, endpoint, key or price.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct NativeCapabilityInput {
-    pub capability: String,
-    pub input: Json,
-    /// Fingerprint of the same installed endpoint/binding, never an authority token.
-    pub definition: Hash,
-}
-
-fn no_capture(value: &bool) -> bool {
-    !*value
-}
-
-/// Completed dialogue step, metered by the same reader as forwarded model calls.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ProviderGenerateResult {
-    /// Captured native JSON beyond the inline reply budget, uploaded for this exact command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_result_blob: Option<BlobRef>,
-    /// Text, finished tool calls and protocol continuation.
-    pub output: orch_model_contract::generation::GenerationOutput,
-    /// Actual reported token usage.
-    pub usage: foreign::TokenUsage,
-    /// Common factual performance and tier observations.
-    pub timing: orch_api_contract::usage::RequestTiming,
-    /// Upstream request identity, if given.
-    pub request_ref: Option<String>,
-}
-
-/// Whole JSON service replies use the same sixteen-megabyte budget as other bounded HTTP reads.
-pub const PROVIDER_SERVICE_RESULT_MAX_BYTES: usize = 16 * 1024 * 1024;
-
-/// One fixed extension-declared service request; endpoint and key remain with its keeping runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderService {
-    /// Source-bound input blobs; local paths and resolved bytes never enter neutral options.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub input_images: Vec<orch_model_contract::generation::GenerationPart>,
-    pub provider_id: Id,
-    pub offering: String,
-    pub capability: String,
-    pub input: Json,
-    /// Declaration fingerprint, not caller authority or provider Use.
-    pub definition: Hash,
-}
-
-/// Service data and actual native quantities; token measurements are not invented for a pure service.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ProviderServiceResult {
-    pub output: Json,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_blob: Option<BlobRef>,
-    pub timing: orch_api_contract::usage::RequestTiming,
-    pub counters: BTreeMap<String, Option<i64>>,
-}
-
 /// The body of `provider.embed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2656,14 +2516,6 @@ pub struct LeaseOpenAllowance {
     pub credits: Option<LeaseOpenAllowanceCredits>,
 }
 
-/// A managed access choice; a known null is ordinary, distinct from an unaware issuer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct LeaseAccessProgram {
-    /// The admitted program, or ordinary access when the turn chose none.
-    #[serde(default)]
-    pub program: Option<String>,
-}
-
 /// The body of `lease.open`, sent to where the credential is kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LeaseOpen {
@@ -2689,66 +2541,17 @@ pub struct LeaseOpen {
     /// Per-model provider ceilings frozen for this turn and retained in the local lease journal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_parameters: BTreeMap<String, orch_provider_contract::models::ModelParameters>,
-    /// Explicit thread choices by outgoing interface, frozen with this lease's model ceilings.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub request_options: BTreeMap<String, Json>,
-    /// The admitted managed access-program choice, frozen with this turn rather than inferred upstream.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_program: Option<LeaseAccessProgram>,
-    /// The same captured core resolution sent to the native session, frozen for request admission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
     /// What the turn may use before the forwarder refuses; absent when
     /// no cap covers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowance: Option<LeaseOpenAllowance>,
 }
 
-/// The renewable native sign-in moves only inside its owner's exact copy-and-delete job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderCredentialHandover {
-    /// The same current native profile at both ends of this owned transfer.
-    pub profile: Id,
-    /// A declared transferred form, never a shared access token.
-    pub form: String,
-    /// The exact original credential keeper and its native sealing key.
-    pub original: MachineKey,
-    /// Owned compensation returns this actual issued/accepted sign-in to its original provider.
-    pub returning: bool,
-}
-
-/// The static credential transfer belongs only to this actual owner duplicate job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderCredentialCopy {
-    /// The retained native duplicate job, not a lease or a Thread.
-    pub job_id: Id,
-    /// The current owner's real source provider.
-    pub source_provider_id: Id,
-    /// The distinct provider created by that job.
-    pub target_provider_id: Id,
-    /// Only the current declared source/target header names travel with the static key.
-    pub headers: Vec<String>,
-    /// Present only for a subscription Move, never an ordinary duplicate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handover: Option<ProviderCredentialHandover>,
-}
-/// Closed native form for an owner's static key and declared header values.
-pub const PROVIDER_COPY_FORM: &str = "orch-provider-copy-v1";
-
 /// The body of `provider.credential.issue`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderCredentialIssue {
-    /// Exact forward issue held by this recipient when compensation precedes installation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub return_credential: Option<SealedCredential>,
     /// The lease under which the credential is issued.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lease_id: Option<Id>,
-    /// An owner duplicate uses this purpose instead of a turn lease.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub copy: Option<ProviderCredentialCopy>,
+    pub lease_id: Id,
     /// The provider.
     pub provider_id: Id,
     /// The form to issue.
@@ -2774,9 +2577,6 @@ pub struct SealedCredential {
 pub struct ProviderCredentialAccept {
     /// The provider the credential comes home to.
     pub provider_id: Id,
-    /// The same actual owner duplicate whose sealed values are being installed once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub copy: Option<ProviderCredentialCopy>,
     /// The form it has.
     pub form: String,
     /// The credential, sealed to the provider's runtime.
@@ -2849,26 +2649,14 @@ pub struct LeaseCloseResult {
 /// Request identifiers, latency and performance state do not split an actual-tier group.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct LeaseUsageGroupKey {
-    /// The reported answering model, or the admitted routing name when not reported.
+    /// The admitted routing model.
     pub model: String,
-    /// Different actual native price selections must not share a close subtotal.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub native_prices: orch_api_contract::usage::NativePrices,
     /// The actual upstream wire protocol, not the caller-facing translated format.
     pub wire_protocol: Option<String>,
     /// The tier in the final actual upstream request, where present.
     pub requested_service_tier: Option<String>,
     /// The actual upstream report, including explicit absence or unavailable capability.
     pub reported_service_tier: orch_api_contract::usage::UsageMeasurement<String>,
-    /// Independent actual capacity request/report facts; old groups omit both.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_capacity_tier: Option<String>,
-    /// Capacity reports split groups independently of inference speed.
-    #[serde(
-        default,
-        skip_serializing_if = "orch_api_contract::usage::UsageMeasurement::is_unsupported"
-    )]
-    pub reported_capacity_tier: orch_api_contract::usage::UsageMeasurement<String>,
 }
 
 impl LeaseUsageGroupKey {
@@ -2877,12 +2665,9 @@ impl LeaseUsageGroupKey {
     pub fn of(model: &str, timing: &orch_api_contract::usage::RequestTiming) -> Self {
         Self {
             model: model.to_owned(),
-            native_prices: timing.native_prices.clone(),
             wire_protocol: timing.wire_protocol.clone(),
             requested_service_tier: timing.requested_service_tier.clone(),
             reported_service_tier: timing.reported_service_tier.clone(),
-            requested_capacity_tier: timing.requested_capacity_tier.clone(),
-            reported_capacity_tier: timing.reported_capacity_tier.clone(),
         }
     }
 }
@@ -2890,155 +2675,19 @@ impl LeaseUsageGroupKey {
 /// Cumulative native searches with an explicit completeness count.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LeaseSearchUsage {
-    /// Successful native page fetches, independent of searches.
-    #[serde(default)]
-    pub fetches: i64,
-    /// Requests which supplied a fetch count or could not fetch; zero for older peers.
-    #[serde(default)]
-    pub fetch_known_requests: i64,
     /// The searches actually reported by the known requests.
     pub searches: i64,
     /// Requests with a reported count or no hosted search tool selected.
     pub known_requests: i64,
 }
 
-/// A subtotal of vendor-reported costs with explicit request coverage; no missing request becomes free.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct LeaseReportedCost {
-    /// Exact original-unit subtotal of the requests covered by known_requests.
-    pub total: Option<orch_api_contract::usage::ReportedCost>,
-    /// How many requests supplied a usable original-unit total.
-    pub known_requests: i64,
-}
-impl LeaseReportedCost {
-    /// One request's actual report; no declared source means no claim of cost awareness.
-    #[must_use]
-    pub fn of(timing: &orch_api_contract::usage::RequestTiming) -> Option<Self> {
-        use orch_api_contract::usage::UsageMeasurement;
-        if matches!(timing.reported_cost, UsageMeasurement::Unsupported) {
-            return None;
-        }
-        let total = timing
-            .reported_cost
-            .value()
-            .filter(|cost| cost.unit.as_deref().is_some_and(|unit| !unit.is_empty()))
-            .and_then(|cost| {
-                orch_agent_contract::discovery::add_decimal_amounts("0", &cost.amount).map(
-                    |amount| orch_api_contract::usage::ReportedCost {
-                        amount,
-                        unit: cost.unit.clone(),
-                    },
-                )
-            });
-        Some(Self {
-            known_requests: i64::from(total.is_some()),
-            total,
-        })
-    }
-    /// Only a complete original-unit subtotal can replace a whole group's estimate.
-    #[must_use]
-    pub fn complete(&self, requests: i64) -> Option<orch_api_contract::usage::ReportedCost> {
-        (requests > 0 && self.known_requests == requests).then_some(())?;
-        let total = self
-            .total
-            .as_ref()
-            .filter(|cost| cost.unit.as_deref().is_some_and(|unit| !unit.is_empty()))?;
-        Some(orch_api_contract::usage::ReportedCost {
-            amount: orch_agent_contract::discovery::add_decimal_amounts("0", &total.amount)?,
-            unit: total.unit.clone(),
-        })
-    }
-    /// Combine factual subtotals, retaining incompleteness and refusing mixed original units.
-    pub fn merge(&mut self, other: &Self) {
-        if other.known_requests == 0 {
-            return;
-        }
-        if self.known_requests == 0 {
-            *self = other.clone();
-            return;
-        }
-        let total = self
-            .total
-            .as_ref()
-            .zip(other.total.as_ref())
-            .filter(|(a, b)| a.unit == b.unit && a.unit.is_some())
-            .and_then(|(a, b)| {
-                orch_agent_contract::discovery::add_decimal_amounts(&a.amount, &b.amount).map(
-                    |amount| orch_api_contract::usage::ReportedCost {
-                        amount,
-                        unit: a.unit.clone(),
-                    },
-                )
-            });
-        self.known_requests = if total.is_some() {
-            self.known_requests
-                .checked_add(other.known_requests)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        self.total = total;
-    }
-    /// Remove only this active request's previous contribution, without rounding or guessing a currency.
-    pub fn subtract(&mut self, other: &Self) {
-        if other.known_requests == 0 {
-            return;
-        }
-        let count = self
-            .known_requests
-            .checked_sub(other.known_requests)
-            .filter(|count| *count >= 0);
-        let total = count
-            .and_then(|_| self.total.as_ref().zip(other.total.as_ref()))
-            .filter(|(a, b)| a.unit == b.unit && a.unit.is_some())
-            .and_then(|(a, b)| {
-                orch_agent_contract::discovery::subtract_decimal_amounts(&a.amount, &b.amount).map(
-                    |amount| orch_api_contract::usage::ReportedCost {
-                        amount,
-                        unit: a.unit.clone(),
-                    },
-                )
-            });
-        self.known_requests = if total.is_some() {
-            count.unwrap_or(0)
-        } else {
-            0
-        };
-        self.total = total;
-    }
-}
-/// A measured subset of cache writes, with completeness retained across aggregate snapshots.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct LeaseCacheWriteUsage {
-    /// Tokens written with a one-hour lifetime, already included in cache_write_tokens.
-    pub one_hour_tokens: i64,
-    /// Requests with an actual subset count or with no one-hour cache directive selected.
-    pub known_requests: i64,
-    /// Twelve-hour writes, disjoint from one-hour writes and already inside cache_write_tokens.
-    #[serde(default, skip_serializing_if = "cache_count_is_zero")]
-    pub twelve_hour_tokens: i64,
-    /// Requests with an independently known twelve-hour subset, including an observed zero.
-    #[serde(default, skip_serializing_if = "cache_count_is_zero")]
-    pub twelve_hour_known_requests: i64,
-}
-
-fn cache_count_is_zero(value: &i64) -> bool {
-    *value == 0
-}
-
 /// Aggregate usage with one actual request/report state, never a requested-tier substitute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LeaseUsageGroup {
-    /// Original vendor totals and complete-request coverage; absent for an unaware sender.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reported_cost_usage: Option<LeaseReportedCost>,
-    /// Independent hourly subset and its completeness; absent from older snapshots.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_usage: Option<LeaseCacheWriteUsage>,
     /// Search counts and how many requests supplied complete search facts; absent for older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_usage: Option<LeaseSearchUsage>,
-    /// The answering model, or the admitted model when no answer named one.
+    /// The admitted routing model.
     pub model: String,
     /// Exact inclusive token totals for this group.
     pub usage: foreign::TokenUsage,
@@ -3227,9 +2876,6 @@ pub enum McpStart {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpStartGiven {
-    /// A registered preset selected by the controller; older bodies remain environment-owned additions.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preset: bool,
     /// Stable Orch membership, retained for call refusal and actual session dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<Id>,
@@ -3284,15 +2930,7 @@ pub struct McpImport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_fingerprint: Option<Hash>,
     /// The environment the server was found in.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment_id: Option<Id>,
-    /// Copy an already stored native definition, without reopening its former harness source.
-    /// This is mutually exclusive with an environment offering and needs its own native source proof.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stored: Option<McpStoredCopy>,
-    /// A stored snapshot crosses machines only as a recipient-sealed native transfer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<McpSnapshotTransfer>,
+    pub environment_id: Id,
     /// The identifier the copy is kept under.
     pub server_id: Id,
     /// The harness kind whose configuration names it.
@@ -3306,34 +2944,10 @@ pub struct McpImport {
     pub directory: Option<String>,
 }
 
-/// An exact native stored definition and the current owner's credential-copy choice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct McpStoredCopy {
-    /// The real existing native server copy.
-    pub server_id: Id,
-    /// The exact source snapshot, including its private values, without disclosing those values.
-    pub expected_digest: String,
-    /// Carry declared values only when the controller proved current source ownership.
-    pub include_secrets: bool,
-}
-
-/// Two closed phases of the same stored-snapshot copy, without any public definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum McpSnapshotTransfer {
-    /// Read the original saved snapshot and seal the chosen owner/redacted copy to this machine.
-    Issue { recipient: MachineKey },
-    /// Keep only that exact purpose-bound sealed definition on its actual destination.
-    Receive { recipient: Id, snapshot: Sealed },
-}
 /// The result of `mcp.import`. The definition itself stays on the
 /// machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpImportResult {
-    /// Internal recipient-sealed snapshot, only for the read phase; never resource metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<Sealed>,
     /// Structural identity of the copied definition, excluding credential and variable values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_fingerprint: Option<Hash>,
@@ -5364,30 +4978,6 @@ mod tests {
     }
 
     #[test]
-    fn older_given_tool_definitions_stay_environment_owned_and_omit_the_preset_marker() {
-        let mut given: McpStartGiven = serde_json::from_value(json!({
-            "environment_id": ENVIRONMENT_ID,"name":"files",
-            "spec":{"transport":"stdio","command":["tool-server"]},"secrets":{}
-        }))
-        .unwrap();
-        assert!(!given.preset);
-        assert!(
-            serde_json::to_value(&given)
-                .unwrap()
-                .get("preset")
-                .is_none()
-        );
-        given.preset = true;
-        given.server_id = Some(serde_json::from_value(json!(SECRET)).unwrap());
-        let wire = serde_json::to_value(&given).unwrap();
-        assert_eq!(wire["preset"], true);
-        assert_eq!(
-            serde_json::from_value::<McpStartGiven>(wire).unwrap(),
-            given
-        );
-    }
-
-    #[test]
     fn a_write_may_expect_a_version_or_expect_nothing_to_be_there() {
         let hash = Hash::of(b"before");
         let write: FsWrite = round_trip(json!({
@@ -5743,45 +5333,5 @@ mod tests {
             crate::content::listed_hashes(&body).contains(&import.archive.hash),
             "the archive is what the import may fetch"
         );
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
-mod reported_cost_tests {
-    use super::*;
-    use orch_api_contract::usage::{ReportedCost, RequestTiming, UsageMeasurement};
-    fn one(amount: &str, unit: &str) -> LeaseReportedCost {
-        LeaseReportedCost::of(&RequestTiming {
-            reported_cost: UsageMeasurement::Told {
-                value: ReportedCost {
-                    amount: amount.into(),
-                    unit: Some(unit.into()),
-                },
-            },
-            ..RequestTiming::default()
-        })
-        .unwrap()
-    }
-    #[test]
-    fn subtotal_coverage_currency_and_exact_removal_survive_a_wire_round_trip() {
-        let mut cost = one("0.0071", "USD");
-        cost.merge(&one("0.0123", "USD"));
-        assert_eq!(cost.complete(2).unwrap().amount, "0.0194");
-        assert!(
-            cost.complete(3).is_none(),
-            "an unreported request cannot become free"
-        );
-        let wire = serde_json::to_value(&cost).unwrap();
-        let mut decoded: LeaseReportedCost = serde_json::from_value(wire).unwrap();
-        decoded.subtract(&one("0.0071", "USD"));
-        assert_eq!(decoded.complete(1).unwrap().amount, "0.0123");
-        decoded.merge(&one("0.1", "EUR"));
-        assert!(
-            decoded.complete(2).is_none(),
-            "different original units have no invented sum"
-        );
-        assert!(LeaseReportedCost::of(&RequestTiming::default()).is_none());
-        assert_eq!(one("0", "USD").complete(1).unwrap().amount, "0");
     }
 }

@@ -55,7 +55,7 @@ it('uses one machine status identity for personal connectors and Host connector 
 it.each(['en', 'zh-CN'] as const)('links the tunnel report help to its existing article (%s)', async (locale) => {
   await look({ locale, theme: 'dark', width: 400 });
   show(<ThreadGatewayStatus threadId={tunnel.thread_id} />);
-  const help = await screen.findByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('regionalGateways.toolConnection') }) });
+  const help = await screen.findByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('regionalGateways.tunnel') }) });
   expect(help).toHaveAttribute('data-help-article', 'connect-a-machine');
   expect(help).toHaveAttribute('data-help-heading', 'tunnel-gateway');
 });
@@ -78,14 +78,14 @@ it('withdraws an old attachment when the current thread source revision changes'
   view.rerender(<ThreadGatewayStatus threadId={tunnel.thread_id} executionRevision={2} line />);
   expect(screen.queryByText('Asia tools', { exact: true })).not.toBeInTheDocument();
   await waitFor(() => expect(calls.thread).toHaveBeenCalledTimes(2));
-  act(() => { accept({ ...tunnel, state: 'unknown', attached_gateway_id: null }); });
+  await act(() => { accept({ ...tunnel, state: 'unknown', attached_gateway_id: null }); });
   await waitFor(() => expect(screen.queryByText('Asia tools', { exact: true })).not.toBeInTheDocument());
 });
 
 it('does not fan out from an environment thread list before gateway details are opened', async () => {
   show(<ThreadGatewayDetails threadId={tunnel.thread_id} />);
   expect(calls.thread).not.toHaveBeenCalled();
-  await userEvent.click(screen.getByText(i18n.t('regionalGateways.toolConnection'), { exact: true }));
+  await userEvent.click(screen.getByText(i18n.t('regionalGateways.tunnel'), { exact: true }));
   await screen.findByText('Asia tools', { exact: true });
   expect(calls.thread).toHaveBeenCalledExactlyOnceWith(tunnel.thread_id);
 });
@@ -93,7 +93,7 @@ it('does not fan out from an environment thread list before gateway details are 
 it('reads a fresh pair when an unreported thread gateway is inspected', async () => {
   calls.thread.mockResolvedValueOnce({ ...tunnel, state: 'unknown', attached_gateway_id: null });
   show(<ThreadGatewayStatus threadId={tunnel.thread_id} executionRevision={1} line />);
-  await userEvent.click(await screen.findByText(i18n.t('regionalGateways.toolConnection'), { exact: true }));
+  await userEvent.click(await screen.findByText(i18n.t('regionalGateways.tunnel'), { exact: true }));
   await screen.findByText('Asia tools', { exact: true });
   expect(calls.thread).toHaveBeenCalledTimes(2);
 });

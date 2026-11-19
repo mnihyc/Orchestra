@@ -242,19 +242,6 @@ pub async fn current_callers(
     if !associated {
         return Ok(None);
     }
-    if let Some(parent) = super::saved_authority(input.submission_authority.as_ref())?
-        .and_then(|authority| authority.capability_parent().cloned())
-        && !parent.current_use(conn, clock, access).await?
-    {
-        return Ok(None);
-    }
-    if input.id != turn.input_id
-        && let Some(original) = threads::input(conn, turn.input_id).await?
-        && super::saved_authority(original.submission_authority.as_ref())?
-            .is_some_and(|authority| authority.capability_parent().is_some())
-    {
-        return Ok(None);
-    }
     let mut unit = Unit::new(conn, clock.now());
     let mut callers = Vec::new();
     let author = if known_author {
@@ -314,14 +301,6 @@ pub async fn current_callers(
             Err(crate::native_actions::NativeError::Internal(error)) => return Err(error),
             Err(_) => return Ok(None),
         }
-    }
-    if let Some(parent) = super::saved_authority(input.submission_authority.as_ref())?
-        .and_then(|authority| authority.capability_parent().cloned())
-    {
-        let Some(parent_callers) = parent.current_callers(unit.conn, clock, access).await? else {
-            return Ok(None);
-        };
-        callers.extend(parent_callers);
     }
     if callers.iter().any(|(caller, _)| {
         caller

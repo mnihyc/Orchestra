@@ -23,10 +23,7 @@ impl Source for AdoptionSources {
         bindings: &[
             Binding {
                 source: Role::Topic,
-                target: TargetResolver::TypedPath {
-                    parameter: "id",
-                    kind: KeyTargetKind::Object(ObjectKind::Topic),
-                },
+                target: TargetResolver::Path("id"),
                 usage: FacetUsage::Required,
                 cardinality: Cardinality::One,
             },

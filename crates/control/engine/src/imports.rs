@@ -14,21 +14,19 @@ mod identity;
 pub mod make;
 mod model;
 mod open;
-pub mod operation;
 mod people;
 pub mod plain;
 mod plan;
 pub mod records;
 mod remap;
 mod report;
-pub mod scope;
 mod source;
 pub mod undo;
 
 pub use model::{Destination, Existing, Object, Opened, Plan, Wants};
 pub use open::{OpenError, open};
 pub use people::{Credit, Credits, IMPORTED_PERSON, Matched, match_people};
-pub use plan::{another_name, build, existing_readable, origin_kind};
+pub use plan::{another_name, build, origin_kind};
 pub use report::{
     Counts, ReportFile, chunk as report_chunk, csv_head, csv_of, csv_row, file as report_file,
     kind_word, outcome_word, row_of, stored as stored_row,
@@ -156,48 +154,12 @@ pub struct Made {
 }
 
 /// An inspected request, kept apart from the transaction that records it under current action authority.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PreparedImport {
     user: Id,
     node: Id,
     request: ImportRequest,
     package: Option<Json>,
-    restores_authority: bool,
-}
-impl PreparedImport {
-    /// The native plan actually restores sharing or attributes content to existing accounts.
-    /// This includes native administrator defaults and never guesses from submitted flags.
-    pub fn restores_authority(&self) -> bool {
-        self.restores_authority
-    }
-}
-
-fn validate_import_client(request: &ImportRequest) -> Result<(), ImportError> {
-    let client = request.client_id.trim();
-    if client.is_empty() || client.chars().count() > 200 {
-        return Err(ImportError::Invalid {
-            field: "client_id".to_owned(),
-            message: "is one to two hundred characters".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-/// Opaque native queue operands on the action owner's connection, including the actual replay.
-#[derive(Debug, Clone)]
-pub struct PreparedImportQueue {
-    prepared: PreparedImport,
-    replay: Option<Made>,
-}
-impl PreparedImportQueue {
-    /// The exact inspected source and server-resolved authority intent.
-    pub fn prepared(&self) -> &PreparedImport {
-        &self.prepared
-    }
-    /// A native replay never starts another job or overwrites its original credential.
-    pub fn replay(&self) -> Option<&Made> {
-        self.replay.as_ref()
-    }
 }
 
 fn time(at: DateTime<Utc>) -> Time {
@@ -473,9 +435,7 @@ impl Engine {
 fn credential_of(caller: &Caller) -> Json {
     match caller.grant() {
         None => Json::Null,
-        Some(grant) => {
-            json!({ "scopes": grant.scopes().to_strings(), "subtree": grant.subtree(),"operation_scoped":grant.operation_scope().is_some() })
-        }
+        Some(grant) => json!({ "scopes": grant.scopes().to_strings(), "subtree": grant.subtree() }),
     }
 }
 
@@ -497,7 +457,13 @@ impl Engine {
         node: Id,
         request: ImportRequest,
     ) -> Result<PreparedImport, ImportError> {
-        validate_import_client(&request)?;
+        let client = request.client_id.trim();
+        if client.is_empty() || client.chars().count() > 200 {
+            return Err(ImportError::Invalid {
+                field: "client_id".to_owned(),
+                message: "is one to two hundred characters".to_owned(),
+            });
+        }
         let now = self.inner.clock.now();
         let user = caller.user();
         // The plan is made outside the transaction that records it: opening an archive reads a good deal.
@@ -508,23 +474,7 @@ impl Engine {
             self.plan_of_import(&mut conn, &principal, node, &request)
                 .await?
         };
-        self.prepare_import_from_plan(user, node, request, &plan)
-    }
-
-    /// Finish the same native preparation from an archive already opened once by its owner.
-    /// No source IO, response rendering or queue mutation occurs here.
-    pub fn prepare_import_from_plan(
-        &self,
-        user: Id,
-        node: Id,
-        request: ImportRequest,
-        plan: &Plan,
-    ) -> Result<PreparedImport, ImportError> {
-        validate_import_client(&request)?;
-        if plan.destination.id != node || plan.credits.importer() != user {
-            return Err(ImportError::NotFound);
-        }
-        if let Some((code, limit, asked, message)) = Self::import_blockers(plan).into_iter().next()
+        if let Some((code, limit, asked, message)) = Self::import_blockers(&plan).into_iter().next()
         {
             return Err(ImportError::Blocked {
                 code,
@@ -545,101 +495,50 @@ impl Engine {
             node,
             request,
             package,
-            restores_authority: plan.access.restored
-                || plan.authors == orch_api_contract::imports::ImportAuthors::Accounts,
         })
     }
 
-    /// Lock native replay/running/custody operands before the action owner's source admission.
-    pub async fn prepare_import_queue(
+    /// Records an inspected import and its job in the caller's guarded action transaction. The caller commits and wakes jobs.
+    pub async fn make_import_in(
         &self,
-        conn: &mut Conn,
+        tx: &mut Tx,
         caller: &Caller,
         prepared: PreparedImport,
-    ) -> Result<PreparedImportQueue, ImportError> {
-        let user = prepared.user;
-        let request = &prepared.request;
+    ) -> Result<Made, ImportError> {
+        let PreparedImport {
+            user,
+            node,
+            request,
+            package: header,
+        } = prepared;
         if user != caller.user() {
             return Err(ImportError::NotFound);
         }
+        let now = self.inner.clock.now();
         let client = request.client_id.trim();
         let hashes: Vec<Hash> = request.source.files.iter().map(|file| file.blob).collect();
-        rows::lock_person(conn, user).await?;
-        if let Some(existing) = rows::by_client(conn, user, client).await? {
+        rows::lock_person(&mut *tx, user).await?;
+        if let Some(existing) = rows::by_client(&mut *tx, user, client).await? {
             let job = match existing.job_id {
-                Some(job) => job_rows::job(conn, job).await?,
+                Some(job) => job_rows::job(&mut *tx, job).await?,
                 None => None,
             };
             if let Some(job) = job {
-                return Ok(PreparedImportQueue {
-                    prepared,
-                    replay: Some(Made {
-                        import: existing,
-                        job,
-                    }),
+                return Ok(Made {
+                    import: existing,
+                    job,
                 });
             }
         }
-        let running = rows::running(conn, user).await?;
+        let running = rows::running(&mut *tx, user).await?;
         let most = i64::from(self.inner.config.imports_per_user);
         if running >= most {
             return Err(ImportError::TooManyAtOnce {
                 limit: self.inner.config.imports_per_user,
             });
         }
-        let distinct = hashes
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        if storage::prepare_pin_blobs(conn, &hashes).await? != distinct.len() {
-            return Err(ImportError::Invalid {
-                field: "source.files".to_owned(),
-                message: "name an upload that is not there any more".to_owned(),
-            });
-        }
-        Ok(PreparedImportQueue {
-            prepared,
-            replay: None,
-        })
-    }
-
-    /// The same native queue writer, with its check at the actual first pin mutation.
-    pub async fn apply_import_queue_before<E: Into<EngineError>>(
-        &self,
-        conn: &mut Conn,
-        caller: &Caller,
-        queue: PreparedImportQueue,
-        before: impl FnOnce() -> Result<(), E>,
-    ) -> Result<Made, ImportError> {
-        if !orch_db::queries::transaction_guard::in_transaction(conn) {
-            return Err(ImportError::Internal(EngineError::unreadable(
-                "the native import writer requires its transaction",
-            )));
-        }
-        if queue.prepared.user != caller.user() {
-            return Err(ImportError::NotFound);
-        }
-        if let Some(made) = queue.replay {
-            return Ok(made);
-        }
-        let PreparedImport {
-            user,
-            node,
-            request,
-            package: header,
-            restores_authority: _,
-        } = queue.prepared;
-        let now = self.inner.clock.now();
-        let client = request.client_id.trim();
-        let hashes = request
-            .source
-            .files
-            .iter()
-            .map(|file| file.blob)
-            .collect::<Vec<_>>();
-        before().map_err(|error| ImportError::Internal(error.into()))?;
         // The uploads stay until the import ends, whatever the sweep of unused uploads would have done.
-        let pinned = storage::pin_blobs(conn, &hashes).await?;
+        let pinned = storage::pin_blobs(&mut *tx, &hashes).await?;
         let distinct: std::collections::HashSet<Hash> = hashes.iter().copied().collect();
         if usize::try_from(pinned).unwrap_or(0) != distinct.len() {
             return Err(ImportError::Invalid {
@@ -652,7 +551,7 @@ impl Engine {
         let blobs: Vec<String> = distinct.iter().map(ToString::to_string).collect();
         let files = file_names(&request);
         let Some(import) = rows::insert(
-            conn,
+            &mut *tx,
             &rows::NewImport {
                 id,
                 user,
@@ -683,7 +582,7 @@ impl Engine {
             "undo": false,
         });
         let job = job_rows::insert(
-            conn,
+            &mut *tx,
             &NewJob {
                 id: new_id(),
                 kind: kind::IMPORT,
@@ -697,24 +596,12 @@ impl Engine {
             now,
         )
         .await?;
-        rows::attach_job(conn, id, job.id).await?;
+        rows::attach_job(&mut *tx, id, job.id).await?;
         let import = ImportRow {
             job_id: Some(job.id),
             ..import
         };
         Ok(Made { import, job })
-    }
-
-    /// Records an inspected import and its job in the caller's action transaction; the caller commits and wakes jobs.
-    pub async fn make_import_in(
-        &self,
-        tx: &mut Tx,
-        caller: &Caller,
-        prepared: PreparedImport,
-    ) -> Result<Made, ImportError> {
-        let queue = self.prepare_import_queue(tx, caller, prepared).await?;
-        self.apply_import_queue_before(tx, caller, queue, || Ok::<_, EngineError>(()))
-            .await
     }
 }
 
@@ -739,7 +626,6 @@ fn state_of(word: &str) -> ImportState {
 pub struct PreparedImportViews {
     rows: Vec<ImportRow>,
     refs: PlaceRefs,
-    inspections: HashMap<Id, orch_api_contract::access::AdminAccess>,
 }
 impl PreparedImportViews {
     /// Actual stored records, never identities inferred from the formatted response.
@@ -761,7 +647,6 @@ impl PreparedImportViews {
             let request: ImportRequest =
                 serde_json::from_value(row.request.clone()).map_err(EngineError::from)?;
             out.push(Import {
-                admin_access: self.inspections.get(&row.id).cloned(),
                 id: row.id,
                 node: row.node_id.map(|node| self.refs.of(node)),
                 request,
@@ -841,18 +726,7 @@ impl Engine {
             .filter_map(|row| row.node_id)
             .collect::<Vec<_>>();
         let refs = place_refs(conn, principal, &ids).await?;
-        let inspections = rows
-            .iter()
-            .filter_map(|row| {
-                crate::archive::custody_inspection(principal, row.user_id)
-                    .map(|reach| (row.id, reach))
-            })
-            .collect();
-        Ok(PreparedImportViews {
-            rows,
-            refs,
-            inspections,
-        })
+        Ok(PreparedImportViews { rows, refs })
     }
 
     /// The unchanged ordinary native import view.
@@ -878,47 +752,6 @@ impl Engine {
             .await?
             .filter(|row| row.user_id == Some(user))
             .ok_or(ImportError::NotFound)
-    }
-
-    /// Private retained metadata follows the actual reader's current custody, not a substituted owner.
-    pub async fn read_import(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        id: Id,
-    ) -> Result<ImportRow, ImportError> {
-        rows::get(conn, id)
-            .await?
-            .filter(|row| crate::archive::may_read_custody(principal, row.user_id))
-            .ok_or(ImportError::NotFound)
-    }
-
-    /// Names of the same admitted source, with the existing one-based cursor.
-    pub async fn import_file_names_for(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        id: Id,
-        after: Option<&str>,
-        limit: i64,
-    ) -> Result<(Vec<String>, Option<String>), ImportError> {
-        let row = self.read_import(conn, principal, id).await?;
-        let after = after
-            .map(str::parse::<usize>)
-            .transpose()
-            .map_err(|_| ImportError::Invalid {
-                field: "cursor".into(),
-                message: "is not one".into(),
-            })?
-            .unwrap_or(0);
-        let limit = usize::try_from(limit).map_err(|_| ImportError::Invalid {
-            field: "limit".into(),
-            message: "is not one".into(),
-        })?;
-        let more = row.files.len().saturating_sub(after) > limit;
-        let names: Vec<_> = row.files.into_iter().skip(after).take(limit).collect();
-        let next = more.then(|| after.saturating_add(names.len()).to_string());
-        Ok((names, next))
     }
 
     /// The imports of `user` as their list shows them, newest first: a page after the cursor of the last one shown.
@@ -1159,45 +992,26 @@ const RECORD_PREVIEW_LIMIT: u64 = 1024 * 1024;
 
 // ---------------------------------------------------------------- taking one back
 
-/// The locked ordinary input of an undo, including the native replay distinction.
-#[derive(Clone)]
-pub struct PreparedUndoJob {
-    import: ImportRow,
-    replay: Option<JobRow>,
-}
-impl PreparedUndoJob {
-    /// The actual creator-owned Import selected by the native factory.
-    pub fn import(&self) -> &ImportRow {
-        &self.import
-    }
-    /// The genuine already accepted job, when the import is already being taken back.
-    pub fn replay(&self) -> Option<&JobRow> {
-        self.replay.as_ref()
-    }
-}
-
 impl Engine {
-    /// Lock and resolve the native undo input before the queue writer's first effect.
-    pub async fn prepare_undo_job(
+    /// Records the Undo job in the caller's guarded transaction; the caller commits and wakes jobs.
+    pub async fn make_undo_in(
         &self,
-        conn: &mut Conn,
+        tx: &mut Tx,
         caller: &Caller,
         import: Id,
-    ) -> Result<PreparedUndoJob, ImportError> {
+    ) -> Result<Made, ImportError> {
         let user = caller.user();
-        rows::lock_person(conn, user).await?;
-        let row = rows::lock(conn, import)
+        let now = self.inner.clock.now();
+        rows::lock_person(&mut *tx, user).await?;
+        let row = rows::lock(&mut *tx, import)
             .await?
             .filter(|row| row.user_id == Some(user))
             .ok_or(ImportError::NotFound)?;
         if row.state == rows::state::UNDOING
             && let Some(job) = row.undo_job_id
-            && let Some(job) = job_rows::job(conn, job).await?
+            && let Some(job) = job_rows::job(&mut *tx, job).await?
         {
-            return Ok(PreparedUndoJob {
-                import: row,
-                replay: Some(job),
-            });
+            return Ok(Made { import: row, job });
         }
         if !matches!(
             row.state.as_str(),
@@ -1207,46 +1021,20 @@ impl Engine {
                 "the import was taken back already, or is not over".to_owned(),
             ));
         }
-        if row.node_id.is_none() {
-            return Err(ImportError::NotFound);
-        }
-        Ok(PreparedUndoJob {
-            import: row,
-            replay: None,
-        })
-    }
-
-    /// Consume the same locked native operands; replay performs no write or first-effect cut.
-    pub async fn apply_undo_job_before<E: Into<EngineError>>(
-        &self,
-        conn: &mut Conn,
-        caller: &Caller,
-        prepared: PreparedUndoJob,
-        before: impl FnOnce() -> Result<(), E>,
-    ) -> Result<Made, ImportError> {
-        if !orch_db::queries::transaction_guard::in_transaction(conn) {
-            return Err(ImportError::Internal(EngineError::unreadable(
-                "the native undo writer requires its transaction",
-            )));
-        }
-        let row = prepared.import;
-        if row.user_id != Some(caller.user()) {
-            return Err(ImportError::NotFound);
-        }
-        if let Some(job) = prepared.replay {
-            return Ok(Made { import: row, job });
-        }
-        let now = self.inner.clock.now();
         let node = row.node_id.ok_or(ImportError::NotFound)?;
         let progress = serde_json::to_value(crate::jobs::runner::initial_progress(
             &crate::jobs::import::UNDO_PHASES,
         ))
         .map_err(EngineError::from)?;
-        let plan = json!({ "import": row.id, "user": caller.user(), "node": node,
-            "credential": credential_of(caller), "undo": true });
-        before().map_err(|error| ImportError::Internal(error.into()))?;
+        let plan = json!({
+            "import": import,
+            "user": user,
+            "node": node,
+            "credential": credential_of(caller),
+            "undo": true,
+        });
         let job = job_rows::insert(
-            conn,
+            &mut *tx,
             &NewJob {
                 id: new_id(),
                 kind: kind::IMPORT,
@@ -1255,30 +1043,18 @@ impl Engine {
                 provider_id: None,
                 plan: &plan,
                 progress: &progress,
-                created_by: Some(caller.user()),
+                created_by: Some(user),
             },
             now,
         )
         .await?;
-        rows::begin_undo(conn, row.id, job.id).await?;
+        rows::begin_undo(&mut *tx, import, job.id).await?;
         let row = ImportRow {
             undo_job_id: Some(job.id),
             state: rows::state::UNDOING.to_owned(),
             ..row
         };
         Ok(Made { import: row, job })
-    }
-
-    /// Records the Undo job in the caller's guarded transaction; the caller commits and wakes jobs.
-    pub async fn make_undo_in(
-        &self,
-        tx: &mut Tx,
-        caller: &Caller,
-        import: Id,
-    ) -> Result<Made, ImportError> {
-        let prepared = self.prepare_undo_job(tx, caller, import).await?;
-        self.apply_undo_job_before(tx, caller, prepared, || Ok::<_, EngineError>(()))
-            .await
     }
 }
 
@@ -1475,26 +1251,6 @@ impl Engine {
         opened: &PreparedReportPage,
     ) -> Result<PreparedReportPage, ImportError> {
         let import = self.import_of(conn, user, opened.import.id).await?;
-        self.refresh_report_rows(conn, import, opened).await
-    }
-
-    /// The same fixed report window after a current administrative or creator read.
-    pub async fn refresh_report_for(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        opened: &PreparedReportPage,
-    ) -> Result<PreparedReportPage, ImportError> {
-        let import = self.read_import(conn, principal, opened.import.id).await?;
-        self.refresh_report_rows(conn, import, opened).await
-    }
-
-    async fn refresh_report_rows(
-        &self,
-        conn: &mut Conn,
-        import: ImportRow,
-        opened: &PreparedReportPage,
-    ) -> Result<PreparedReportPage, ImportError> {
         let positions = opened
             .entries
             .iter()
@@ -1517,30 +1273,9 @@ impl Engine {
         after: Option<i64>,
     ) -> Result<PreparedReportPage, ImportError> {
         let row = self.import_of(conn, user, import).await?;
-        self.report_chunk_rows(conn, row, after).await
-    }
-
-    /// The report remains bounded and current for a real browser administrator too.
-    pub async fn prepare_report_chunk_for(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        import: Id,
-        after: Option<i64>,
-    ) -> Result<PreparedReportPage, ImportError> {
-        let row = self.read_import(conn, principal, import).await?;
-        self.report_chunk_rows(conn, row, after).await
-    }
-
-    async fn report_chunk_rows(
-        &self,
-        conn: &mut Conn,
-        row: ImportRow,
-        after: Option<i64>,
-    ) -> Result<PreparedReportPage, ImportError> {
         let entries = rows::report_rows(
             conn,
-            row.id,
+            import,
             &rows::ReportFilter::default(),
             after,
             REPORT_PAGE,

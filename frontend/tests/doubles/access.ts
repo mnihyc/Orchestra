@@ -218,10 +218,10 @@ export class Access implements Part {
     this.requests.reset();
     this.clock = 0;
     this.groups = [
-      { group: { revision: 1, id: fixtureId(8, 1), name: 'Backend team', description: 'Who work on the services', member_count: 3, org_id: ACME.org }, members: ['grace', 'dora', 'linus'] },
-      { group: { revision: 1, id: fixtureId(8, 2), name: 'Design', description: '', member_count: 2, org_id: ACME.org }, members: ['margaret', 'vera'] },
-      { group: { revision: 1, id: fixtureId(0x30, 1), name: 'Operators', description: 'Who keeps the machines running', member_count: 2, org_id: ACME.org }, members: ['dora', 'grace'] },
-      { group: { revision: 1, id: fixtureId(0x30, 2), name: 'Interns', description: "This season's newcomers", member_count: 1, org_id: ACME.org }, members: ['linus'] },
+      { group: { id: fixtureId(8, 1), name: 'Backend team', description: 'Who work on the services', member_count: 3, org_id: ACME.org }, members: ['grace', 'dora', 'linus'] },
+      { group: { id: fixtureId(8, 2), name: 'Design', description: '', member_count: 2, org_id: ACME.org }, members: ['margaret', 'vera'] },
+      { group: { id: fixtureId(0x30, 1), name: 'Operators', description: 'Who keeps the machines running', member_count: 2, org_id: ACME.org }, members: ['dora', 'grace'] },
+      { group: { id: fixtureId(0x30, 2), name: 'Interns', description: "This season's newcomers", member_count: 1, org_id: ACME.org }, members: ['linus'] },
     ];
   }
 
@@ -1194,9 +1194,7 @@ export class Access implements Part {
       const page = this.pageOf('nodes', group.group.org_id, false);
       if (found[1] === 'GET') return { status: 200, body: this.groupInputs(id).map((input) => this.holderOf(input, page).holder) };
       if (!['user', 'group', 'role', 'members'].includes(String(body.kind))) throw new Refusal(400, 'request.invalid', 'a group contains people, groups, roles or org members');
-      const { expected_revision: expected, ...fields } = body;
-      if (found[1] === 'PUT' && expected !== undefined && expected !== group.group.revision) throw new Refusal(409, 'conflict.stale_revision', 'The group changed.', { current: { id, revision: group.group.revision } });
-      const input = fields as unknown as HolderInput;
+      const input = body as unknown as HolderInput;
       this.holderOf(input, page);
       if (input.kind === 'group' && found[1] === 'PUT' && !this.groupEdgeAllowed(id, input.id)) throw new Refusal(400, 'request.invalid', 'group nesting cannot contain a cycle or be deeper than five groups');
       if (input.kind === 'user') {
@@ -1209,7 +1207,6 @@ export class Access implements Part {
         group.holders = (group.holders ?? []).filter((holder) => JSON.stringify(holder) !== JSON.stringify(stored));
         if (found[1] === 'PUT') group.holders.push(stored);
       }
-      group.group.revision += 1;
       return { status: 204 };
     }
     if ((found = /^POST \/orgs\/([^/]+)\/groups$/.exec(route))) {
@@ -1217,7 +1214,7 @@ export class Access implements Part {
       this.world.places.need(person, orgId, 'members.manage');
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       if (name === '') throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'name', message: 'must not be empty' }] });
-      const made: Group = { revision: 1, id: randomUUID(), org_id: orgId, name, description: typeof body.description === 'string' ? body.description : '', member_count: 0 };
+      const made: Group = { id: randomUUID(), org_id: orgId, name, description: typeof body.description === 'string' ? body.description : '', member_count: 0 };
       this.groups.push({ group: made, members: [] });
       return { status: 200, body: made };
     }
@@ -1230,7 +1227,6 @@ export class Access implements Part {
       }
       if (typeof body.name === 'string' && body.name.trim() !== '') entry.group.name = body.name.trim();
       if (typeof body.description === 'string') entry.group.description = body.description;
-      entry.group.revision += 1;
       return { status: 200, body: this.groupLabel(entry.group.id) };
     }
     if ((found = /^GET \/groups\/([^/]+)\/members$/.exec(route))) {

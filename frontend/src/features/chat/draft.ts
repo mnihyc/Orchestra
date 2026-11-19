@@ -253,7 +253,5 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
   const replaceAttachment = useCallback((original: PastedTextPart, part: ChatPart) => change((before) => ({ ...before, attachments: before.attachments.map((held) => held.type === 'pasted_text' && pasteKey(held) === pasteKey(original) ? part : held) })), [change]);
   const restore = useCallback((parts: ChatPart[], replyTo: string | null, mentions: NamedMention[]) => change(() => contentOf({ parts, reply_to:replyTo, mention_names:mentions, updated_at:new Date().toISOString() })), [change]);
 
-  // A draft with nothing in it has no save to tell of: that line goes when the message is sent, not a second later,
-  // so the room of the list above does not change under a reader who is already acting on a row. A failure stays.
-  return { ...content, saving: saving !== 'failed' && isEmpty(content) ? 'idle' : saving, retry: () => { if (writable) void flush(latest.current); }, setText, setReplyTo, addQuotes, removeQuote, addAttachment, removeAttachment, replaceAttachment, addMention, restore, clear };
+  return { ...content, saving, retry: () => { if (writable) void flush(latest.current); }, setText, setReplyTo, addQuotes, removeQuote, addAttachment, removeAttachment, replaceAttachment, addMention, restore, clear };
 }

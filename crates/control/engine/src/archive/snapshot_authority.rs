@@ -1,6 +1,6 @@
 //! The existing Snapshot read door and its actual current credential targets.
 //! Stored copied bytes follow the Thread's current Environment; native recordings keep theirs;
-//! a threadless whole-workspace export retains its maker's custody after removal.
+//! a threadless whole-workspace export remains private to its maker even after removal.
 
 use crate::EngineError;
 use crate::commands::Outgoing;
@@ -102,7 +102,7 @@ impl Source {
         permission: Permission,
     ) -> Result<Access, orch_authz::Error> {
         if self.row.thread_id.is_none() {
-            return Ok(if super::may_read_custody(principal, self.row.created_by) {
+            return Ok(if self.row.created_by == Some(principal.user()) {
                 Access::Allowed
             } else {
                 Access::MakerOnly

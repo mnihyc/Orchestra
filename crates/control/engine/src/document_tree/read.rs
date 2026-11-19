@@ -1,7 +1,6 @@
 //! Batched typed document entries and redacted ancestry for person and agent navigation.
 
 use super::{Actor, Ancestor, Directory, Error, Item, Listed, TreeRead, access};
-use futures::future::BoxFuture;
 use orch_db::{Conn, queries::documents::containers};
 use orch_types::{Id, Time};
 
@@ -82,13 +81,13 @@ pub async fn select_entries_in(
     Ok(EntrySelection { entries, rows })
 }
 
-fn project_read<'a>(
-    conn: &'a mut Conn,
-    actor: Actor<'a>,
+fn project_read(
+    conn: &mut Conn,
+    actor: Actor<'_>,
     rows: Vec<containers::EntryRow>,
     now: Time,
     retained: bool,
-) -> BoxFuture<'a, Result<TreeRead, Error>> {
+) -> impl std::future::Future<Output = Result<TreeRead, Error>> {
     // All document-reader facades retain only a handle to this projection.
     Box::pin(prepare_projection(conn, actor, rows, now, retained))
 }

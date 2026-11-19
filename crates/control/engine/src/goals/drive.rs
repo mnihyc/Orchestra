@@ -308,7 +308,6 @@ impl Engine {
         let made = Made {
             source: "goal",
             goal: Some((goal.id, &stored)),
-            trigger: crate::inputs::InputTrigger::Automatic,
         };
         match self
             .submit_with_authority_in(unit, &callers, thread.node_id, &request, None, made)

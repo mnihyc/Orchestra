@@ -95,21 +95,6 @@ pub async fn copy_conversation(
             "The requested source segment is no longer selected.",
         ));
     }
-    // This legacy API means all finished selected turns when no range was supplied.
-    // The durable cut API requires an explicit bound; None there means no turns.
-    let range = match range {
-        Some(range) => Some(range),
-        None => Some((
-            1,
-            orch_db::queries::thread_history_cuts::last_finished(
-                unit.conn,
-                source,
-                source_row.active_continuation_id,
-            )
-            .await?
-            .unwrap_or(0),
-        )),
-    };
     let at = unit.now();
     let captured = orch_db::queries::thread_history_cuts::capture(
         unit.conn,
@@ -152,7 +137,7 @@ pub struct Counts {
 
 /// The default of the setting `thread.native_fork_check_bytes`: the most a history may take, as the database keeps its words, for
 /// a native fork point to be proved against it. It is the largest record of a session that an adapter writes, 32 MiB. The proof
-/// streams the record against compact identities of paged frozen items, and matches them one to one; a history that
+/// reads the whole record and, beside it, every item of the history it is made for, and matches them one to one; a history that
 /// takes more than a record can hold cannot be matched to a complete one, so no proof is begun for it, nothing of it is read, and
 /// it travels as the newest turns that fit.
 pub(crate) const NATIVE_PROOF_DEFAULT_BYTES: i64 =
@@ -466,7 +451,6 @@ pub(crate) async fn newest(
             let ordinal = bundle.turn.ordinal;
             let kept: Vec<ItemRow> = bundle
                 .items
-                .into_vec()?
                 .into_iter()
                 .filter(|item| (item.turn_id.is_some() || item.before_orch) && is_seen(item))
                 .collect();

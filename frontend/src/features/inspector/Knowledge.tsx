@@ -17,7 +17,6 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 import { ThreadPanel } from './ThreadPanel';
 import { ShareToAgent } from './ShareToAgent';
-import { PersonalSkillsPolicyLine } from './PersonalSkills';
 
 function Entry({ entry, threadId }: { entry: SharedEntry; threadId: string }) {
   const { t } = useTranslation();
@@ -38,7 +37,7 @@ function Entry({ entry, threadId }: { entry: SharedEntry; threadId: string }) {
 function Branch({ threadId, path = '/' }: { threadId: string; path?: string }) {
   const { t } = useTranslation();
   const query = useQuery(sharedTreeQuery(threadId, path));
-  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={3} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={3} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   return <><ul aria-label={t('threadViews.knowledge.tree')}>{query.data.entries.map((entry, index) => <Entry key={`${entry.id}:${index}`} entry={entry} threadId={threadId} />)}</ul>
     {query.data.entries.length === 0 && <EmptyState compact icon={<Folder aria-hidden />} title={t('threadViews.knowledge.empty')} />}
     {query.data.truncated && <p className="text-sm text-text-muted">{t('threadViews.knowledge.truncated')}</p>}</>;
@@ -50,7 +49,6 @@ function Knowledge({ thread }: { thread: Thread }) {
   const [sharing, setSharing] = useState(false);
   return <div className="h-full overflow-auto p-3" data-testid="thread-knowledge">
     <AgentKnowledgeNotice />
-    <PersonalSkillsPolicyLine read={shares} threadId={thread.id} />
     {thread.binding?.isolation.orch_tools.offered === false && <div className="pb-3"><IsolationBadge thread={thread} /></div>}
     <Button size="sm" onClick={() => setSharing(true)}>{t('threadViews.knowledge.share')}</Button>
     {shares.error !== null && <ErrorState compact error={shares.error} onRetry={() => void shares.refetch()} />}

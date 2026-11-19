@@ -6,9 +6,7 @@ import { ImportDialog } from '@/features/people/ImportDialog';
 import type { ImportReview as ImportReviewComponent } from '@/features/people/ImportReview';
 import type { ImportPlan, ImportRequest, ImportView, Job } from '@/generated/api-types';
 import { me, memberAccess, org, userRef } from '../doubles/fixtures';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 const calls = vi.hoisted(() => ({ plan: vi.fn(), start: vi.fn(), watch: vi.fn(), uploadFails: false }));
 vi.mock('@/api/imports', async (original) => ({ ...await original<object>(), planImport: calls.plan, startImport: calls.start }));

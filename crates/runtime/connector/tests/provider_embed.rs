@@ -234,7 +234,7 @@ async fn embedding_errors_keep_their_classified_cause_and_a_filter_does_not_refu
     for (status, kind, reason, error_type, message) in [
         (
             429,
-            "rate_limited",
+            "provider_busy",
             None,
             "rate_limit_error",
             "Capacity reached",
@@ -248,7 +248,7 @@ async fn embedding_errors_keep_their_classified_cause_and_a_filter_does_not_refu
         ),
         (
             200,
-            "overloaded",
+            "provider_busy",
             None,
             "overloaded_error",
             "The model is overloaded",

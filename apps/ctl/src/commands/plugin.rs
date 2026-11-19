@@ -220,7 +220,6 @@ fn registration_text(text: &str, entry: &PluginRegistration) -> Result<String, S
             .collect(),
         "provider" => orch_provider_contract::choice::builtin::ALL
             .into_iter()
-            .chain(orch_provider_builtins::names())
             .chain(["none"])
             .collect(),
         _ => Vec::new(),

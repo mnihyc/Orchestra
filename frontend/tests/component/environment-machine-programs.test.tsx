@@ -1,6 +1,3 @@
-import type * as ResourceToolsApi from '@/api/resource-tools';
-import { resourceRows, type ResourceRows } from '@/api/listed';
-import type * as RouterModule from '@tanstack/react-router';
 /** The real Environment Tools entrance shows and changes only current machine-program consent. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
@@ -11,23 +8,19 @@ import type * as EnvironmentApi from '@/api/environments';
 import { environmentKey } from '@/api/environments';
 import { ApiError } from '@/api/client';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
-import type { Environment, EnvironmentMachineProgram, EnvironmentMcp, EnvironmentUpdateBody, McpServer } from '@/generated/api-types';
+import type { Environment, EnvironmentMachineProgram, EnvironmentMcp, EnvironmentUpdateBody } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ADA, GRACE } from '../doubles/chat-rows';
 import { detailEnvironment } from './resource-detail-fixtures';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ available: vi.fn<() => Promise<ResourceRows<McpServer>>>(), read: vi.fn<() => Promise<Environment>>(), mcp: vi.fn<() => Promise<EnvironmentMcp>>(), write: vi.fn<(id: string, body: EnvironmentUpdateBody) => Promise<Environment>>() }));
+const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<Environment>>(), mcp: vi.fn<() => Promise<EnvironmentMcp>>(), write: vi.fn<(id: string, body: EnvironmentUpdateBody) => Promise<Environment>>() }));
 vi.mock('@/api/environments', async (load) => {
   const actual = await load<typeof EnvironmentApi>();
   return { ...actual, environmentQuery: (id: string) => ({ queryKey: actual.environmentKey(id), queryFn: calls.read, staleTime: Infinity }),
     environmentMcpQuery: (id: string) => ({ queryKey: actual.environmentMcpKey(id), queryFn: calls.mcp, staleTime: Infinity }), updateEnvironment: calls.write };
 });
-vi.mock('@/api/resource-tools', async (load) => {
-  const actual = await load<typeof ResourceToolsApi>();
-  return { ...actual, mcpServersQuery: { ...actual.mcpServersQuery, queryKey: ['consent-mcp-definitions'], staleTime: Infinity, queryFn: () => calls.available() } };
-});
-vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), useNavigate: () => vi.fn(), Link: ({ children, className }: { children: ReactNode; className?: string }) => <a href="#environment" className={className}>{children}</a> }));
+vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn(), Link: ({ children, className }: { children: ReactNode; className?: string }) => <a href="#environment" className={className}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), keepAwake: () => null, dialogs: null }) }));
 vi.mock('@/features/resources/environments/AgentReach', () => ({ AgentReach: () => null }));
@@ -50,7 +43,7 @@ function draw(initial: EnvironmentTab = 'tools') {
   function Scene() { const [tab, setTab] = useState<EnvironmentTab>(initial); return <EnvironmentScreen environmentId={detailEnvironment.id} tab={tab} onTab={setTab} />; }
   return { cache, ...show(<QueryClientProvider client={cache}><Scene /></QueryClientProvider>) };
 }
-beforeEach(() => { vi.clearAllMocks(); calls.available.mockResolvedValue(resourceRows<McpServer>([])); calls.read.mockResolvedValue(row()); calls.mcp.mockResolvedValue({ applies: 'next_turn', found: [], import: { allowed: false, reason: 'policy' }, servers: [] }); });
+beforeEach(() => { vi.clearAllMocks(); calls.read.mockResolvedValue(row()); calls.mcp.mockResolvedValue({ applies: 'next_turn', found: [], import: { allowed: false, reason: 'policy' }, servers: [] }); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
@@ -118,7 +111,7 @@ it('shows the server refusal and keeps the unapproved state when Manage is denie
   await user.click(await screen.findByRole('switch', { name: 'Any agent version' }));
   expect(await screen.findByRole('alert')).toBeVisible();
   expect(screen.getByRole('switch', { name: 'Any agent version' })).not.toBeChecked();
-  expect(calls.write).toHaveBeenCalledTimes(1); expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.mcp).toHaveBeenCalledTimes(1); expect(calls.available).toHaveBeenCalledOnce();
+  expect(calls.write).toHaveBeenCalledTimes(1); expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.mcp).toHaveBeenCalledTimes(1);
 });
 
 it('keeps keyboard focus and one write while the server records consent', async () => {

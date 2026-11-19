@@ -42,9 +42,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 
 pub mod download;
-pub mod operation;
-mod scope;
-pub use scope::ScopedExportPlan;
 
 /// The most places and threads one archive looks through. A place with more says so, and is exported as far as
 /// this reaches: past it the walk would be longer than a request may wait for.
@@ -107,57 +104,11 @@ pub struct DocumentForm {
     pub losses: String,
 }
 
-/// The native form whose existing live references are selected before formatting.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Form {
-    /// The native thread record header.
-    Thread { id: Id },
-    /// A document's actual requested form; JSON includes its full metadata.
-    Document { id: Id, json: bool, comments: bool },
-}
-/// A native protected reference, not an identifier discovered in a returned DTO.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FormReference {
-    /// A node name, document title, folder name or other current protected reference.
-    Object {
-        object: orch_access_contract::permissions::ObjectKind,
-        id: Id,
-    },
-    /// A chat name or one of its carried file names.
-    Chat { id: Id },
-    /// A binding/environment reference the native readable Thread publishes.
-    Published {
-        object: orch_access_contract::permissions::ObjectKind,
-        id: Id,
-    },
-}
-/// Genuine form inputs before serialization; absence of this handoff is never an empty proof.
-pub struct FormSources {
-    /// Only the actual existing references this native form materializes.
-    pub references: Vec<FormReference>,
-}
-
 /// What writes the forms of a single export that need the views of the API: a document with the names a reader
 /// is given, and a thread as the API shows it. The program the engine lives in attaches it; a single export and
 /// an archive both ask it, so that a thing in an archive is the very bytes of its single export.
 #[async_trait]
 pub trait Forms: Send + Sync {
-    /// Existing native factual selectors, before the Thread/Document DTO or bytes are built.
-    /// An unreported source remains unsupported for scoped forms; old in-process forms stay ordinary.
-    async fn sources(
-        &self,
-        _conn: &mut Conn,
-        _asker: &Principal,
-        _form: Form,
-    ) -> Result<Option<FormSources>, FormsFault> {
-        Ok(None)
-    }
     /// The thread as `asker` sees it, which is the `thread` of its records.
     async fn thread(
         &self,
@@ -528,108 +479,6 @@ impl Access {
     }
 }
 
-/// Native database candidates and ordinary access, before aggregate construction or API rendering.
-#[derive(Debug, Clone)]
-pub struct ExportSelection {
-    /// Actual requested place.
-    pub place: PlaceRow,
-    /// Native bounded traversal, including routing ancestors.
-    pub scope: Vec<PlaceRow>,
-    /// Native request-selected node ids.
-    pub included: Vec<Id>,
-    /// Actual requested conversation candidates.
-    pub threads: Vec<Id>,
-    /// Actual nonempty native node chats.
-    pub chats: Vec<rows::ChatFacts>,
-    /// Existing document candidates, including native size facts.
-    pub documents: Vec<rows::DocumentFacts>,
-    /// The original per-item ordinary reading/export questions.
-    pub access: Access,
-    /// Native conversation measurements, not public aggregates.
-    pub conversation_facts: HashMap<Id, rows::ConversationFacts>,
-    /// Names admitted by the native node reader.
-    pub viewable: HashMap<Id, String>,
-    /// The existing traversal bound was reached.
-    pub cut_short: bool,
-}
-
-/// Trusted additional selection bounds; these add no native visibility or Export authority.
-#[derive(Debug, Clone, Default)]
-pub struct ExportBounds {
-    /// Conversations admitted by the consuming operation.
-    pub threads: HashSet<Id>,
-    /// Native chats admitted by the consuming operation.
-    pub chats: HashSet<Id>,
-    /// Native documents admitted by the consuming operation.
-    pub documents: HashSet<Id>,
-    /// Native node records/labels admitted by the consuming operation.
-    pub nodes: HashSet<Id>,
-}
-impl ExportSelection {
-    /// Restrict raw candidates before counts, file accounting, blockers, layout or DTOs.
-    pub fn restrict(&mut self, bounds: &ExportBounds, package: bool) {
-        self.threads.retain(|id| bounds.threads.contains(id));
-        self.chats.retain(|row| bounds.chats.contains(&row.chat_id));
-        self.documents
-            .retain(|row| bounds.documents.contains(&row.id));
-        self.access
-            .reads_conversations
-            .retain(|id| bounds.threads.contains(id));
-        self.access
-            .exports_conversations
-            .retain(|id| bounds.threads.contains(id));
-        let chat_nodes = self
-            .chats
-            .iter()
-            .map(|chat| chat.node_id)
-            .collect::<HashSet<_>>();
-        self.access.reads_chats.retain(|id| chat_nodes.contains(id));
-        self.access
-            .exports_chats
-            .retain(|id| chat_nodes.contains(id));
-        self.access
-            .reads_documents
-            .retain(|id| bounds.documents.contains(id));
-        self.access
-            .exports_documents
-            .retain(|id| bounds.documents.contains(id));
-        let mut needed = HashSet::from([self.place.id]);
-        needed.extend(self.threads.iter().copied());
-        needed.extend(self.chats.iter().map(|row| row.node_id));
-        needed.extend(self.documents.iter().map(|row| row.node_id));
-        if package {
-            needed.extend(
-                self.included
-                    .iter()
-                    .copied()
-                    .filter(|id| bounds.nodes.contains(id)),
-            );
-        }
-        let anchors = self
-            .scope
-            .iter()
-            .filter(|node| needed.contains(&node.id))
-            .flat_map(|node| node.path.iter().copied())
-            .collect::<Vec<_>>();
-        needed.extend(anchors);
-        self.scope.retain(|node| needed.contains(&node.id));
-        self.included.retain(|id| needed.contains(id));
-        self.viewable
-            .retain(|id, _| needed.contains(id) && bounds.nodes.contains(id));
-    }
-}
-
-/// Prepared native plan operands, reused by ordinary requests and scoped source factories.
-#[derive(Debug, Clone)]
-pub struct PreparedExportPlan {
-    /// Raw native selection; any extra bounds are applied here before aggregation.
-    pub selection: ExportSelection,
-    /// The native resolved request, never an operation label supplied by a client.
-    pub wanted: Wanted,
-    /// Current native place limits.
-    pub limits: ExportLimits,
-}
-
 /// What was found for an archive: the things the caller may take away, and what they may not.
 #[derive(Debug, Clone)]
 pub struct Selected {
@@ -649,8 +498,6 @@ pub struct Selected {
     pub documents: Vec<Thing>,
     /// What the caller may read and not take away, and the files past a size, by the place they lie in.
     pub left_out: BTreeMap<(u8, Id), i64>,
-    /// Exact native readable contributors to the not-exportable counts, selected before aggregation.
-    pub count_sources: Vec<operation::Subject>,
     /// An estimate of the size of the archive.
     pub bytes: i64,
     /// The files, counted.
@@ -771,6 +618,10 @@ pub fn node_kind(word: &str) -> NodeKind {
 
 impl Engine {
     /// Finds what `principal` may take away of what lies in the place `place`, as `wanted` says, at this moment.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one reading in the order it is made: the places, what lies in them, what the caller holds, then the sizes"
+    )]
     pub async fn select_export(
         &self,
         conn: &mut Conn,
@@ -778,20 +629,6 @@ impl Engine {
         place: Id,
         wanted: &Wanted,
     ) -> Result<Selected, ExportError> {
-        let selection = self
-            .prepare_export_selection(conn, principal, place, wanted)
-            .await?;
-        self.finish_export_selection(conn, &selection, wanted).await
-    }
-
-    /// Select actual native rows and ordinary authority, without computing the plan's aggregates.
-    pub async fn prepare_export_selection(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        place: Id,
-        wanted: &Wanted,
-    ) -> Result<ExportSelection, ExportError> {
         let root = places::places(conn, &[place])
             .await?
             .into_iter()
@@ -816,6 +653,11 @@ impl Engine {
             })
             .collect();
         let included_ids: Vec<Id> = included.iter().map(|node| node.id).collect();
+        let name_of_node: HashMap<Id, &str> = scope
+            .iter()
+            .map(|node| (node.id, node.name.as_str()))
+            .collect();
+
         // What exists: the threads, the chats that say something, the documents.
         let thread_ids: Vec<Id> = if wanted.conversations_on {
             included
@@ -869,62 +711,7 @@ impl Engine {
         let access = Access::of(conn, principal, &thread_ids, &chat_nodes, &document_ids).await?;
         let conversation_facts = rows::conversation_facts(conn, &thread_ids, wanted.span).await?;
 
-        // The places the caller may name.
-        let scope_ids: Vec<Id> = scope.iter().map(|node| node.id).collect();
-        let viewable: HashMap<Id, String> = nodes::holding(
-            conn,
-            principal,
-            &scope_ids,
-            PermissionName::OfNode(NodePermission::View),
-            Act::Use,
-            Policy::default(),
-        )
-        .await?
-        .into_iter()
-        .map(|listed| (listed.id, listed.name))
-        .collect();
-        Ok(ExportSelection {
-            place: root,
-            scope,
-            included: included_ids,
-            threads: thread_ids,
-            chats: chat_facts,
-            documents: document_facts,
-            access,
-            conversation_facts,
-            viewable,
-            cut_short,
-        })
-    }
-
-    /// Aggregate and lay out the same native operands, after any trusted source restriction.
-    pub async fn finish_export_selection(
-        &self,
-        conn: &mut Conn,
-        selection: &ExportSelection,
-        wanted: &Wanted,
-    ) -> Result<Selected, ExportError> {
-        let root = selection.place.clone();
-        let place = root.id;
-        let scope = selection.scope.clone();
-        let included_ids = selection.included.clone();
-        let included: Vec<&PlaceRow> = scope
-            .iter()
-            .filter(|node| included_ids.contains(&node.id))
-            .collect();
-        let name_of_node: HashMap<Id, &str> = scope
-            .iter()
-            .map(|node| (node.id, node.name.as_str()))
-            .collect();
-        let thread_ids = &selection.threads;
-        let chat_facts = &selection.chats;
-        let document_facts = &selection.documents;
-        let access = &selection.access;
-        let conversation_facts = &selection.conversation_facts;
-        let viewable = selection.viewable.clone();
-        let cut_short = selection.cut_short;
         let mut left_out: BTreeMap<(u8, Id), i64> = BTreeMap::new();
-        let mut count_sources = Vec::new();
         let mut conversations: Vec<Thing> = Vec::new();
         for node in included.iter().filter(|node| node.kind == "thread") {
             if !thread_ids.contains(&node.id) || !access.reads_conversations.contains(&node.id) {
@@ -936,7 +723,6 @@ impl Engine {
                 .unwrap_or(node.id);
             if !access.exports_conversations.contains(&node.id) {
                 *left_out.entry((NOT_EXPORTABLE, home)).or_default() += 1;
-                count_sources.push(operation::Subject::ThreadCount(node.id));
                 continue;
             }
             conversations.push(Thing {
@@ -954,13 +740,12 @@ impl Engine {
             });
         }
         let mut chats: Vec<Thing> = Vec::new();
-        for facts in chat_facts {
+        for facts in &chat_facts {
             if !access.reads_chats.contains(&facts.node_id) {
                 continue;
             }
             if !access.exports_chats.contains(&facts.node_id) {
                 *left_out.entry((NOT_EXPORTABLE, facts.node_id)).or_default() += 1;
-                count_sources.push(operation::Subject::ChatCount(facts.chat_id));
                 continue;
             }
             chats.push(Thing {
@@ -976,13 +761,12 @@ impl Engine {
             });
         }
         let mut documents: Vec<Thing> = Vec::new();
-        for facts in document_facts {
+        for facts in &document_facts {
             if !access.reads_documents.contains(&facts.id) {
                 continue;
             }
             if !access.exports_documents.contains(&facts.id) {
                 *left_out.entry((NOT_EXPORTABLE, facts.node_id)).or_default() += 1;
-                count_sources.push(operation::Subject::DocumentCount(facts.id));
                 continue;
             }
             let mut bytes = facts.bytes + HEAD_BYTES + ENTRY_OVERHEAD_BYTES;
@@ -1064,6 +848,20 @@ impl Engine {
             bytes += text + html + objects * PACKAGE_OBJECT_BYTES;
         }
 
+        // The places the caller may name.
+        let scope_ids: Vec<Id> = scope.iter().map(|node| node.id).collect();
+        let viewable: HashMap<Id, String> = nodes::holding(
+            conn,
+            principal,
+            &scope_ids,
+            PermissionName::OfNode(NodePermission::View),
+            Act::Use,
+            Policy::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|listed| (listed.id, listed.name))
+        .collect();
         let included: HashSet<Id> = included_ids.iter().copied().collect();
         Ok(Selected {
             place: root,
@@ -1074,7 +872,6 @@ impl Engine {
             chats,
             documents,
             left_out,
-            count_sources,
             bytes,
             files,
             cut_short,
@@ -1158,7 +955,7 @@ fn node_ref(selected: &Selected) -> NodeRef {
 
 impl Engine {
     /// Whether the caller may view the place an archive is asked of; it is not there for them otherwise.
-    pub async fn export_place_seen(
+    async fn export_place_seen(
         &self,
         conn: &mut Conn,
         principal: &Principal,
@@ -1189,46 +986,16 @@ impl Engine {
         place: Id,
         request: &ExportRequest,
     ) -> Result<ExportPlan, ExportError> {
+        let wanted = Wanted::read(request)?;
         let now = self.inner.clock.now();
         let mut conn = self.inner.db.acquire().await?;
         let principal = Principal::load(&mut conn, caller.clone(), Time::new(now)).await?;
-        let prepared = self
-            .prepare_export_plan(&mut conn, &principal, place, request)
-            .await?;
-        self.render_export_plan(&mut conn, &prepared).await
-    }
-
-    /// Prepare on the caller's guarded connection using the same native source and ordinary gate.
-    pub async fn prepare_export_plan(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        place: Id,
-        request: &ExportRequest,
-    ) -> Result<PreparedExportPlan, ExportError> {
-        let wanted = Wanted::read(request)?;
-        self.export_place_seen(conn, principal, place).await?;
-        let selection = self
-            .prepare_export_selection(conn, principal, place, &wanted)
-            .await?;
-        let limits = self.export_limits(conn, place).await?;
-        Ok(PreparedExportPlan {
-            selection,
-            wanted,
-            limits,
-        })
-    }
-
-    /// The existing plan formatter; no source selection or external IO is repeated here.
-    pub async fn render_export_plan(
-        &self,
-        conn: &mut Conn,
-        prepared: &PreparedExportPlan,
-    ) -> Result<ExportPlan, ExportError> {
+        self.export_place_seen(&mut conn, &principal, place).await?;
         let selected = self
-            .finish_export_selection(conn, &prepared.selection, &prepared.wanted)
+            .select_export(&mut conn, &principal, place, &wanted)
             .await?;
-        Ok(plan_of(&selected, &prepared.wanted, prepared.limits))
+        let limits = self.export_limits(&mut conn, place).await?;
+        Ok(plan_of(&selected, &wanted, limits))
     }
 }
 
@@ -1263,22 +1030,12 @@ pub struct Made {
     pub job: JobRow,
 }
 
-/// Immutable native creation operands selected on the writer's actual guarded connection.
-#[derive(Debug, Clone)]
-pub struct PreparedExportCreation {
-    selected: Selected,
-    request: ExportRequest,
-    user: Id,
-}
-
 /// What a caller was reading with, kept with the job so that it reads the same way when it writes: a browser
 /// session reads as its person; a token reads within its scopes and the subtree it is kept to.
 fn credential_of(caller: &Caller) -> Json {
     match caller.grant() {
         None => Json::Null,
-        Some(grant) => {
-            json!({ "scopes": grant.scopes().to_strings(), "subtree": grant.subtree(), "operation_scoped":grant.operation_scope().is_some() })
-        }
+        Some(grant) => json!({ "scopes": grant.scopes().to_strings(), "subtree": grant.subtree() }),
     }
 }
 
@@ -1293,56 +1050,17 @@ impl Engine {
         place: Id,
         request: &ExportRequest,
     ) -> Result<Made, ExportError> {
+        let wanted = Wanted::read(request)?;
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
         let principal = Principal::load(&mut tx, caller.clone(), Time::new(now)).await?;
-        rows::lock_person(&mut tx, principal.user()).await?;
-        let plan = self
-            .prepare_export_plan(&mut tx, &principal, place, request)
-            .await?;
-        let prepared = self
-            .prepare_export_creation(&mut tx, &principal, &plan, request)
-            .await?;
-        let made = self
-            .apply_export_creation(&mut tx, &principal, caller, origin, &prepared, || {
-                Ok::<(), EngineError>(())
-            })
-            .await?;
-        if caller
-            .grant()
-            .is_some_and(|grant| grant.operation_scope().is_some())
-        {
-            operation::Request::retain(
-                &mut tx,
-                &made,
-                caller,
-                crate::operation_scope::request_origin::Credential::Native,
-                caller.grant().and_then(orch_authz::TokenGrant::expires_at),
-                Time::new(now),
-            )
-            .await?;
-        }
-        tx.commit().await.map_err(DbError::from)?;
-        self.kick();
-        Ok(made)
-    }
-
-    /// Validate the native request's source-bounded selection and the existing per-person queue limit.
-    /// The caller holds lock_person on this same transaction before selecting these operands.
-    pub async fn prepare_export_creation(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        plan: &PreparedExportPlan,
-        request: &ExportRequest,
-    ) -> Result<PreparedExportCreation, ExportError> {
-        self.export_place_seen(conn, principal, plan.selection.place.id)
-            .await?;
+        self.export_place_seen(&mut tx, &principal, place).await?;
         let selected = self
-            .finish_export_selection(conn, &plan.selection, &plan.wanted)
+            .select_export(&mut tx, &principal, place, &wanted)
             .await?;
+        let limits = self.export_limits(&mut tx, place).await?;
         if let Some((by, limit, asked, message)) =
-            blockers_of(&selected, &plan.limits).into_iter().next()
+            blockers_of(&selected, &limits).into_iter().next()
         {
             return Err(ExportError::Blocked {
                 by,
@@ -1351,41 +1069,18 @@ impl Engine {
                 message,
             });
         }
-        let writing = rows::writing(conn, principal.user()).await?;
-        if writing >= i64::from(self.inner.config.exports_per_user) {
+        let user = principal.user();
+        rows::lock_person(&mut tx, user).await?;
+        let writing = rows::writing(&mut tx, user).await?;
+        let most = i64::from(self.inner.config.exports_per_user);
+        if writing >= most {
             return Err(ExportError::TooManyAtOnce {
                 limit: self.inner.config.exports_per_user,
             });
         }
-        Ok(PreparedExportCreation {
-            selected,
-            request: request.clone(),
-            user: principal.user(),
-        })
-    }
-
-    /// The original native archive/job writer, with an opaque check at its actual first insert.
-    pub async fn apply_export_creation<E: Into<EngineError>>(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        caller: &Caller,
-        origin: &Origin,
-        prepared: &PreparedExportCreation,
-        before: impl FnOnce() -> Result<(), E>,
-    ) -> Result<Made, ExportError> {
-        if principal.user() != prepared.user || caller.user() != prepared.user {
-            return Err(ExportError::NotFound);
-        }
-        let user = prepared.user;
-        let selected = &prepared.selected;
-        let place = selected.place.id;
-        let request = &prepared.request;
-        let now = self.inner.clock.now();
         let id = new_id();
         let stored = serde_json::to_value(request).map_err(EngineError::from)?;
-        before().map_err(|error| ExportError::Internal(error.into()))?;
-        let export = rows::insert(conn, id, user, place, &stored, now).await?;
+        let export = rows::insert(&mut tx, id, user, place, &stored, now).await?;
         let progress =
             serde_json::to_value(initial_progress(&the_job::PHASES)).map_err(EngineError::from)?;
         let plan = json!({
@@ -1398,7 +1093,7 @@ impl Engine {
             "emails": principal.is_system_admin(),
         });
         let job = job_rows::insert(
-            &mut *conn,
+            &mut tx,
             &NewJob {
                 id: new_id(),
                 kind: kind::EXPORT,
@@ -1412,7 +1107,7 @@ impl Engine {
             now,
         )
         .await?;
-        rows::attach_job(&mut *conn, id, job.id).await?;
+        rows::attach_job(&mut tx, id, job.id).await?;
         let export = ExportRow {
             job_id: Some(job.id),
             ..export
@@ -1432,7 +1127,9 @@ impl Engine {
             "options": stored,
             "job_id": job.id,
         });
-        append(&mut *conn, &audit, origin, now).await?;
+        append(&mut tx, &audit, origin, now).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        self.kick();
         Ok(Made { export, job })
     }
 }
@@ -1463,8 +1160,6 @@ pub struct PreparedExportViews {
     rows: Vec<ExportRow>,
     kinds: HashMap<Id, String>,
     viewable: HashMap<Id, String>,
-    inspections: HashMap<Id, orch_api_contract::access::AdminAccess>,
-    manifests: HashMap<Id, Json>,
 }
 impl PreparedExportViews {
     /// Actual stored archives selected by this producer.
@@ -1487,8 +1182,6 @@ impl PreparedExportViews {
                 serde_json::from_value(row.request.clone()).map_err(EngineError::from)?;
             let ready = row.state == rows_state::READY;
             out.push(Export {
-                admin_access: self.inspections.get(&row.id).cloned(),
-                manifest: self.manifests.get(&row.id).cloned(),
                 id: row.id,
                 node: row.node_id.map(|node| NodeRef {
                     thread_display: None,
@@ -1546,17 +1239,6 @@ impl Engine {
         let kinds: HashMap<Id, String> =
             found.into_iter().map(|node| (node.id, node.kind)).collect();
         Ok(PreparedExportViews {
-            manifests: rows::manifests(conn, &list.iter().map(|row| row.id).collect::<Vec<_>>())
-                .await?
-                .into_iter()
-                .collect(),
-            inspections: list
-                .iter()
-                .filter_map(|row| {
-                    crate::archive::custody_inspection(principal, row.user_id)
-                        .map(|reach| (row.id, reach))
-                })
-                .collect(),
             rows: list,
             kinds,
             viewable,
@@ -1585,19 +1267,6 @@ impl Engine {
         rows::get(conn, id)
             .await?
             .filter(|row| row.user_id == Some(user))
-            .ok_or(ExportError::NotFound)
-    }
-
-    /// The actual creator's custody, or a current administrative browser inspection.
-    pub async fn read_export(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        id: Id,
-    ) -> Result<ExportRow, ExportError> {
-        rows::get(conn, id)
-            .await?
-            .filter(|row| crate::archive::may_read_custody(principal, row.user_id))
             .ok_or(ExportError::NotFound)
     }
 
@@ -1705,21 +1374,6 @@ pub fn prepare_export_open_row(
     let row = row
         .filter(|row| row.user_id == Some(user))
         .ok_or(ExportError::NotFound)?;
-    ready_export(row)
-}
-
-/// The same ready artifact, checked against the actual reader without impersonating its maker.
-pub fn prepare_export_open_for_row(
-    row: Option<ExportRow>,
-    principal: &Principal,
-) -> Result<PreparedExportOpen, ExportError> {
-    let row = row
-        .filter(|row| crate::archive::may_read_custody(principal, row.user_id))
-        .ok_or(ExportError::NotFound)?;
-    ready_export(row)
-}
-
-fn ready_export(row: ExportRow) -> Result<PreparedExportOpen, ExportError> {
     match row.state.as_str() {
         rows_state::READY => {}
         rows_state::PENDING => return Err(ExportError::NotFound),
@@ -1844,16 +1498,6 @@ impl Engine {
         prepare_export_open_row(rows::lock(conn, id).await?, user)
     }
 
-    /// Retain the actual administrative reader and the same locked native archive.
-    pub async fn prepare_export_open_for(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        id: Id,
-    ) -> Result<PreparedExportOpen, ExportError> {
-        prepare_export_open_for_row(rows::lock(conn, id).await?, principal)
-    }
-
     /// Open exactly the selected native blob once, outside any retryable source preparation.
     pub async fn read_prepared_export(
         &self,
@@ -1883,36 +1527,8 @@ impl Engine {
         origin: &Origin,
         now: DateTime<Utc>,
     ) -> Result<bool, ExportError> {
-        let user = prepared.row.user_id.ok_or(ExportError::NotFound)?;
-        self.record_export_open_by(conn, prepared, origin, now, user)
-            .await
-    }
-
-    /// Download bookkeeping names the actual admitted reader, including an administrative opening.
-    pub async fn record_export_open_for(
-        &self,
-        conn: &mut Conn,
-        prepared: &PreparedExportOpen,
-        principal: &Principal,
-        origin: &Origin,
-        now: DateTime<Utc>,
-    ) -> Result<bool, ExportError> {
-        if !crate::archive::may_read_custody(principal, prepared.row.user_id) {
-            return Err(ExportError::NotFound);
-        }
-        self.record_export_open_by(conn, prepared, origin, now, principal.user())
-            .await
-    }
-
-    async fn record_export_open_by(
-        &self,
-        conn: &mut Conn,
-        prepared: &PreparedExportOpen,
-        origin: &Origin,
-        now: DateTime<Utc>,
-        user: Id,
-    ) -> Result<bool, ExportError> {
         let row = &prepared.row;
+        let user = row.user_id.ok_or(ExportError::NotFound)?;
         let changed = rows::first_download(conn, row.id, now).await?;
         if changed {
             let mut audit = AuditEntry::new(

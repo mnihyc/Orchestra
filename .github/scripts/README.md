@@ -10,14 +10,6 @@ input, installs the locked npm packages for their notices, and puts all verified
 connectors into each server's downloads; `release_assemble.py` verifies each downloaded
 package against its original manifest, requires one server of each Linux architecture,
 and rejects mixed commits and differing common files.
-The deployment scenarios are not compiled for: the `scenarios` job of the release workflow
-(`scenarios.yml`, one definition) downloads the x86-64 package that `package` made and runs the scenarios of
-a fresh installation (`scripts/smoke/run-all.sh fresh`) against it, and `assemble` needs it. Only the scripted model
-server of two scenarios is built there. The scenarios that prove an update, a rollback or a recovery need an
-earlier real release, which this first release does not have: they are a reported step that never fails the job,
-and run only when an earlier run's package is named (`earlier_run_id`). Dispatch the release workflow with
-`scenarios_run_id` to try the scenarios alone against the package of an earlier run, with the scripts of the dispatched
-branch and none of the other jobs: `gh workflow run release.yml --ref BRANCH -f scenarios_run_id=RUN_ID`.
 `release_contract.py` records every sealed SQL source, the browser/key roots and
 the native target catalogue, and supplies the workflow matrices.
 Release package checks add `--check-source`: the manifest commit must be the clean
@@ -42,36 +34,11 @@ Unit, example and documentation tests run as well. Shards keep going after a
 test program fails, use a separate PostgreSQL service, and report their results
 independently.
 
-Each shard builds its selected test executables once from Cargo's JSON artifact
-messages, then runs each binary separately with a 45-minute default deadline.
-Set `ORCH_CI_TEST_BINARY_TIMEOUT_SECONDS` or pass `--binary-timeout-seconds` to
-`ci_test_shard.py` to choose another positive limit. The default leaves headroom
-over scale binaries that take about 30 minutes, within the 180-minute shard job.
-A timeout stops only that binary's own process group, reports the cases the
-harness still names as running and separately lists unfinished cases, then
-continues with the rest of the shard. Output remains streamed under Cargo's
-usual `Running` and `test result:` lines; the shard fails if any binary fails.
-Package working directories, build-script environment, binary fixtures and
-library search paths follow the Cargo artifacts; database and stack settings
-remain inherited. Doc tests still run through Cargo, and the engine unit run
-keeps its `--test-threads=3` command.
-
-The Linux Rust gate and both static musl compilation jobs use `ci_memory.sh` to
-add 8 GiB of swap beside any swap the hosted runner already has. The helper
-prints memory and disk capacity, refuses an existing swap path, and leaves the
-file to the ephemeral runner's teardown. The Linux Rust gate also uses one
-Cargo job. Every Rust platform gate disables development debug information and
-incremental compilation and has a 210-minute job limit, leaving 45 minutes
-above the slowest completed platform leg. macOS and Windows retain their
-CPU-default Cargo concurrency and do not use the Linux swap helper.
-The static jobs keep their optimized release compilation and one Cargo job;
-release packaging and its compiler settings are unchanged.
-
 For a complete snapshot dry run, seal the schema before committing the snapshot,
 commit the intended version's release notes, then manually dispatch CI and Release
 on that branch with `rehearsal` enabled. Release pins the dispatched SHA, requires
-that branch's newest matching CI to be green, builds all five native targets and both
-server architectures, runs the deployment scenarios against the x86-64 package, and uploads the
+that branch's newest matching CI to be a green manual run (including deployment),
+builds all five native targets and both server architectures, and uploads the
 assembled `verified-release` artifact. It creates no tag, GitHub Release or GHCR
 image. A version tag already naming another SHA is refused. The
 [operator release guide](../../docs/operator/releases.md) has the command sequence.
@@ -81,7 +48,7 @@ default branch with `warm_caches` enabled and the intended future tag. It builds
 the same native, frontend and package jobs from that branch commit but never
 publishes a release or images; it skips final assembly and can use an unsealed
 schema. A normal release requires an existing tag, matching commit, sealed schema,
-release notes, green exact-tag CI and the deployment scenarios of the release's own package. Rehearsal and warm-up
+release notes and green exact-tag CI, including deployment. Rehearsal and warm-up
 cannot be combined or used to enable image publication.
 
 To repackage, dispatch the release workflow with the same tag and the numeric

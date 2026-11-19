@@ -451,8 +451,7 @@ async fn a_harness_that_is_gone_ends_the_turn_it_ran_and_the_thread_goes_on() {
         kept["message"].as_str().unwrap().contains("signal 9"),
         "what the harness said of its end is in the sentence: {kept}"
     );
-    let next = world.turn_start(thread, 1).await;
-    assert_eq!(next.text, "Continue");
+    world.wait_state(thread, "idle").await;
     assert_eq!(
         provider_status(&world).await.0,
         "ready",

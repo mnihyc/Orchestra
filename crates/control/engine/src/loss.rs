@@ -17,9 +17,7 @@ use orch_db::{
 use orch_types::{Hash, Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashSet, sync::Arc};
-
-mod preview_origin;
+use std::collections::HashSet;
 
 /// An additional projection bound over native names; it supplies no ordinary permission.
 pub struct NameBounds {
@@ -107,15 +105,10 @@ pub enum LossError {
 struct Stored {
     plan: LossPlan,
     fingerprint: Hash,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    preview_origin: Option<crate::operation_scope::http_origin::HttpOrigin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    named: Option<HashSet<ObjectRef>>,
 }
 
 /// The actual native review record and audience before its once-only persistence.
 pub struct PreparedLossPreview {
-    target: LossTarget,
     plan: LossPlan,
     inventory: rows::Inventory,
     fingerprint: Hash,
@@ -125,10 +118,6 @@ pub struct PreparedLossPreview {
     named: HashSet<ObjectRef>,
 }
 impl PreparedLossPreview {
-    /// The actual native input subject, independent of the rendered plan.
-    pub fn target(&self) -> LossTarget {
-        self.target
-    }
     /// Native response operands, not a source of inferred scope targets.
     pub fn plan(&self) -> &LossPlan {
         &self.plan
@@ -147,198 +136,6 @@ impl PreparedLossPreview {
     }
 }
 
-/// The exact reviewed native cascade, after its complete preparation and before mutation.
-pub struct PreparedLossDeclaration {
-    preview: Arc<PreparedLossPreview>,
-    affected: Vec<ObjectRef>,
-    operation: crate::notifications::NotificationOperation,
-    now: chrono::DateTime<chrono::Utc>,
-    preview_frame: Option<crate::operation_scope::continuing::Frame<preview_origin::Preview>>,
-}
-impl PreparedLossDeclaration {
-    /// The original native content and source cut, independent of the response shape.
-    pub fn preview(&self) -> Arc<PreparedLossPreview> {
-        Arc::clone(&self.preview)
-    }
-    /// Every actual resource changed by this native cascade.
-    pub fn affected(&self) -> &[ObjectRef] {
-        &self.affected
-    }
-    /// The real physical connections closed only after the declaration commits.
-    pub fn machines(&self) -> &[Id] {
-        &self.preview.inventory.machines
-    }
-    fn check_deadline(&self, clock: &dyn orch_types::Clock) -> Result<(), LossError> {
-        if self.preview.plan.expires_at.get() <= clock.now() {
-            return Err(LossError::Stale);
-        }
-        if let Some(frame) = &self.preview_frame {
-            frame
-                .check_deadline(clock)
-                .map_err(preview_origin::refused)?;
-        }
-        Ok(())
-    }
-    /// Confirm this accepted effect's immutable journal and exact changed rows, without replay.
-    pub async fn current(&self, conn: &mut Conn) -> Result<bool, LossError> {
-        if orch_db::queries::notifications::operations::get(conn, self.operation.id).await?
-            != Some(serde_json::to_value(&self.operation).map_err(EngineError::from)?)
-        {
-            return Ok(false);
-        }
-        for environment in &self.preview.inventory.environments {
-            let at: Option<chrono::DateTime<chrono::Utc>> =
-                sqlx::query_scalar("SELECT lost_at FROM environments WHERE id=$1")
-                    .bind(environment.id)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(DbError::from)?
-                    .flatten();
-            if at != Some(self.now) {
-                return Ok(false);
-            }
-        }
-        for machine in &self.preview.inventory.machines {
-            let at: Option<chrono::DateTime<chrono::Utc>> =
-                sqlx::query_scalar("SELECT lost_at FROM machines WHERE id=$1")
-                    .bind(machine)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(DbError::from)?
-                    .flatten();
-            if at != Some(self.now) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
-/// Select the cascade's actual native resources, before scope admission or response formatting.
-async fn declaration_objects(
-    conn: &mut Conn,
-    target: LossTarget,
-    inventory: &rows::Inventory,
-) -> Result<Vec<ObjectRef>, LossError> {
-    let mut objects = HashSet::new();
-    for (kind, ids) in [
-        (
-            ObjectKind::Environment,
-            inventory.environments.iter().map(|row| row.id).collect(),
-        ),
-        (ObjectKind::Machine, inventory.machines.clone()),
-        (ObjectKind::Provider, inventory.providers.clone()),
-        (ObjectKind::Mount, inventory.mounts.clone()),
-        (
-            ObjectKind::Thread,
-            inventory
-                .threads
-                .iter()
-                .chain(&inventory.provider_threads)
-                .copied()
-                .collect(),
-        ),
-    ] {
-        objects.extend(ids.into_iter().map(|id| ObjectRef { kind, id }));
-    }
-    if !matches!(target, LossTarget::Environment { .. })
-        && let Some(id) = inventory.host
-    {
-        objects.insert(ObjectRef {
-            kind: ObjectKind::Host,
-            id,
-        });
-    }
-    let servers: Vec<Id> = sqlx::query_scalar("SELECT DISTINCT server_id FROM mcp_server_offerings WHERE machine_id=ANY($1) AND state<>'lost' ORDER BY server_id")
-        .bind(&inventory.machines).fetch_all(conn).await.map_err(DbError::from)?;
-    objects.extend(servers.into_iter().map(|id| ObjectRef {
-        kind: ObjectKind::McpServer,
-        id,
-    }));
-    objects.remove(&target.object());
-    let mut objects = objects.into_iter().collect::<Vec<_>>();
-    objects.sort_by_key(|object| (object.kind, object.id));
-    Ok(objects)
-}
-
-/// Read the actual private review subject without using the submitted nonce as scope authority.
-pub fn declaration_target(row: &jobs::forks::PreflightRow) -> Result<LossTarget, LossError> {
-    let stored: Stored = serde_json::from_value(row.plan.clone()).map_err(EngineError::from)?;
-    Ok(stored.plan.target)
-}
-
-/// The original native preview with only currently readable recorded names retained.
-pub struct ProjectedLossPreview {
-    plan: LossPlan,
-    named: HashSet<ObjectRef>,
-}
-impl ProjectedLossPreview {
-    /// The same frozen result, ready for its one transport formatter.
-    pub fn plan(&self) -> &LossPlan {
-        &self.plan
-    }
-    /// Actual recorded name sources still emitted by this native projection.
-    pub fn named_sources(&self) -> &HashSet<ObjectRef> {
-        &self.named
-    }
-}
-
-/// Narrow recorded names without reopening inventory, audience, a selector window or planning.
-pub async fn project_loss_preview(
-    conn: &mut Conn,
-    principal: &Principal,
-    prepared: &PreparedLossPreview,
-    bounds: Option<&NameBounds>,
-) -> Result<ProjectedLossPreview, LossError> {
-    let mut named = HashSet::new();
-    for object in &prepared.named {
-        if name_allowed(bounds, object.kind, object.id)
-            && name_visible(conn, principal, *object).await?
-        {
-            named.insert(*object);
-        }
-    }
-    let mut plan = prepared.plan.clone();
-    for environment in &mut plan.environments {
-        if !named.contains(&ObjectRef {
-            kind: ObjectKind::Environment,
-            id: environment.environment.id,
-        }) {
-            environment.environment.name = None;
-        }
-        let before = environment.threads.len();
-        environment.threads.retain(|thread| {
-            named.contains(&ObjectRef {
-                kind: ObjectKind::Thread,
-                id: thread.id,
-            })
-        });
-        environment.threads_hidden += before.saturating_sub(environment.threads.len()) as i64;
-    }
-    for (kind, resources) in [
-        (ObjectKind::Provider, &mut plan.providers),
-        (ObjectKind::Mount, &mut plan.mounts),
-    ] {
-        for resource in resources {
-            if !named.contains(&ObjectRef {
-                kind,
-                id: resource.id,
-            }) {
-                resource.name = None;
-            }
-        }
-    }
-    let before = plan.provider_threads.len();
-    plan.provider_threads.retain(|thread| {
-        named.contains(&ObjectRef {
-            kind: ObjectKind::Thread,
-            id: thread.id,
-        })
-    });
-    plan.provider_threads_hidden += before.saturating_sub(plan.provider_threads.len()) as i64;
-    Ok(ProjectedLossPreview { plan, named })
-}
-
 /// The actual loss subject of the privately kept native preview, before audience formatting.
 pub fn recipient_subject(plan: &orch_types::Json) -> Result<ObjectRef, EngineError> {
     let stored: Stored = serde_json::from_value(plan.clone())?;
@@ -352,21 +149,6 @@ pub async fn allowed(
     target: LossTarget,
 ) -> Result<bool, LossError> {
     if let LossTarget::Machine { id } = target {
-        if orch_db::queries::resources::hosting::host_of_machine(conn, id)
-            .await?
-            .is_some()
-        {
-            return Ok(orch_authz::resources::check_machine(
-                conn,
-                principal,
-                id,
-                Permission::MachineManage,
-                Policy::default(),
-            )
-            .await
-            .map_err(EngineError::from)?
-            .is_allowed());
-        }
         let owns = orch_db::queries::resources::machine(conn, id)
             .await?
             .is_some_and(|row| row.owner_id == Some(principal.user()));
@@ -433,33 +215,6 @@ async fn visible(
     .is_allowed())
 }
 
-async fn name_visible(
-    conn: &mut Conn,
-    principal: &Principal,
-    object: ObjectRef,
-) -> Result<bool, LossError> {
-    let permission = match object.kind {
-        ObjectKind::Environment => Permission::EnvironmentView,
-        ObjectKind::Provider => Permission::ProviderView,
-        ObjectKind::Mount => Permission::MountView,
-        ObjectKind::Thread => {
-            return Ok(orch_authz::nodes::check(
-                conn,
-                principal,
-                object.id,
-                Permission::ThreadView,
-                Act::Use,
-                Policy::default(),
-            )
-            .await
-            .map_err(EngineError::from)?
-            .is_allowed());
-        }
-        _ => return Ok(false),
-    };
-    visible(conn, principal, object.kind, object.id, permission).await
-}
-
 async fn shown(
     conn: &mut Conn,
     principal: &Principal,
@@ -476,15 +231,17 @@ async fn shown(
         let mut hidden = 0;
         for thread in orch_db::queries::environments::threads_in(conn, &[environment.id]).await? {
             if name_allowed(bounds, ObjectKind::Thread, thread.thread_id)
-                && name_visible(
+                && orch_authz::nodes::check(
                     conn,
                     principal,
-                    ObjectRef {
-                        kind: ObjectKind::Thread,
-                        id: thread.thread_id,
-                    },
+                    thread.thread_id,
+                    Permission::ThreadView,
+                    Act::Use,
+                    Policy::default(),
                 )
-                .await?
+                .await
+                .map_err(EngineError::from)?
+                .is_allowed()
             {
                 named.insert(ObjectRef {
                     kind: ObjectKind::Thread,
@@ -502,13 +259,12 @@ async fn shown(
             }
         }
         let name = (name_allowed(bounds, ObjectKind::Environment, environment.id)
-            && name_visible(
+            && visible(
                 conn,
                 principal,
-                ObjectRef {
-                    kind: ObjectKind::Environment,
-                    id: environment.id,
-                },
+                ObjectKind::Environment,
+                environment.id,
+                Permission::EnvironmentView,
             )
             .await?)
             .then(|| environment.name.clone());
@@ -536,13 +292,12 @@ async fn shown(
     let mut providers = Vec::new();
     for id in &inventory.providers {
         let name = if name_allowed(bounds, ObjectKind::Provider, *id)
-            && name_visible(
+            && visible(
                 conn,
                 principal,
-                ObjectRef {
-                    kind: ObjectKind::Provider,
-                    id: *id,
-                },
+                ObjectKind::Provider,
+                *id,
+                Permission::ProviderView,
             )
             .await?
         {
@@ -565,13 +320,12 @@ async fn shown(
         orch_db::queries::resources::hosting::mount_names(conn, &inventory.mounts).await?
     {
         let name = (name_allowed(bounds, ObjectKind::Mount, id)
-            && name_visible(
+            && visible(
                 conn,
                 principal,
-                ObjectRef {
-                    kind: ObjectKind::Mount,
-                    id,
-                },
+                ObjectKind::Mount,
+                id,
+                Permission::MountView,
             )
             .await?)
             .then_some(name);
@@ -587,15 +341,17 @@ async fn shown(
     let mut provider_threads_hidden = 0;
     for thread in &inventory.provider_threads {
         if name_allowed(bounds, ObjectKind::Thread, *thread)
-            && name_visible(
+            && orch_authz::nodes::check(
                 conn,
                 principal,
-                ObjectRef {
-                    kind: ObjectKind::Thread,
-                    id: *thread,
-                },
+                *thread,
+                Permission::ThreadView,
+                Act::Use,
+                Policy::default(),
             )
-            .await?
+            .await
+            .map_err(EngineError::from)?
+            .is_allowed()
         {
             if let Some(row) = orch_db::queries::threads::thread(conn, *thread).await? {
                 named.insert(ObjectRef {
@@ -641,11 +397,6 @@ pub(crate) async fn managers(
     object: ObjectRef,
     wanted: Permission,
 ) -> Result<Vec<Id>, EngineError> {
-    let (object, wanted) = if object.kind == ObjectKind::Machine {
-        orch_authz::resources::machine_permission(conn, object.id, wanted).await?
-    } else {
-        (object, wanted)
-    };
     let (graph, _, site) = orch_authz::resources::site(conn, object).await?;
     let mut asked = vec![wanted];
     asked.extend(wanted.held_through());
@@ -799,7 +550,6 @@ impl Engine {
         };
         let fingerprint = inventory.fingerprint()?;
         Ok(PreparedLossPreview {
-            target,
             plan,
             inventory,
             fingerprint,
@@ -817,38 +567,9 @@ impl Engine {
         conn: &mut Conn,
         prepared: &PreparedLossPreview,
     ) -> Result<(), LossError> {
-        self.save_loss_preview_origin(conn, prepared, None).await
-    }
-
-    /// Retain the actual accepted preview operation beside its frozen native review.
-    pub async fn save_loss_preview_with_origin(
-        &self,
-        conn: &mut Conn,
-        prepared: &PreparedLossPreview,
-        origin: &crate::operation_scope::http_origin::HttpOrigin,
-    ) -> Result<(), LossError> {
-        if origin.origin().operation() != orch_api_contract::loss_sources::PREFLIGHT.operation
-            || origin.origin().user() != prepared.creator
-        {
-            return Err(
-                EngineError::unreadable("the loss preview changed its native origin").into(),
-            );
-        }
-        self.save_loss_preview_origin(conn, prepared, Some(origin.clone()))
-            .await
-    }
-
-    async fn save_loss_preview_origin(
-        &self,
-        conn: &mut Conn,
-        prepared: &PreparedLossPreview,
-        preview_origin: Option<crate::operation_scope::http_origin::HttpOrigin>,
-    ) -> Result<(), LossError> {
         let stored = Stored {
             plan: prepared.plan.clone(),
             fingerprint: prepared.fingerprint,
-            preview_origin,
-            named: Some(prepared.named.clone()),
         };
         let body = serde_json::to_value(stored).map_err(EngineError::from)?;
         jobs::forks::save_preflight(
@@ -888,19 +609,6 @@ impl Engine {
         principal: &Principal,
         body: &LossDeclareBody,
     ) -> Result<LossPlan, LossError> {
-        let prepared = self.prepare_loss_declaration(conn, principal, body).await?;
-        self.apply_loss_declaration(conn, principal, &prepared)
-            .await?;
-        Ok(prepared.preview.plan.clone())
-    }
-
-    /// Check the native reviewed inventory, confirmation and full lock footprint without writing.
-    pub async fn prepare_loss_declaration(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        body: &LossDeclareBody,
-    ) -> Result<PreparedLossDeclaration, LossError> {
         if !orch_db::queries::transaction_guard::in_transaction(conn) {
             return Err(EngineError::unreadable("loss declaration requires a transaction").into());
         }
@@ -909,7 +617,7 @@ impl Engine {
             .await?
             .filter(|row| row.kind == "loss" && row.created_by == principal.user())
             .ok_or(LossError::NotFound)?;
-        let stored: Stored = serde_json::from_value(row.plan.clone()).map_err(EngineError::from)?;
+        let stored: Stored = serde_json::from_value(row.plan).map_err(EngineError::from)?;
         let target = stored.plan.target;
         if !allowed(conn, principal, target).await? {
             return Err(LossError::Denied);
@@ -973,61 +681,10 @@ impl Engine {
             subject: Some((target.kind().into(), target.id())),
             recipients: audience,
         };
-        let preview_frame = match &stored.preview_origin {
-            Some(origin) => Some(
-                preview_origin::prepare(conn, self.inner.clock.as_ref(), origin, &row, target)
-                    .await?,
-            ),
-            None => None,
-        };
-        let named = match &stored.named {
-            Some(named) => named.clone(),
-            None => {
-                shown(conn, principal, target, &inventory, now, None)
-                    .await?
-                    .1
-            }
-        };
-        let affected = declaration_objects(conn, target, &inventory).await?;
-        let preview = Arc::new(PreparedLossPreview {
-            target,
-            plan: stored.plan,
-            fingerprint: stored.fingerprint,
-            inventory,
-            audience: Vec::new(),
-            creator: row.created_by,
-            created_at: row.created_at,
-            named,
-        });
-        Ok(PreparedLossDeclaration {
-            preview,
-            affected,
-            operation,
-            now,
-            preview_frame,
-        })
-    }
-
-    /// Apply only the prepared native loss cascade, starting with its existing operation insert.
-    pub async fn apply_loss_declaration(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        prepared: &PreparedLossDeclaration,
-    ) -> Result<(), LossError> {
-        if principal.user() != prepared.preview.creator {
-            return Err(LossError::NotFound);
-        }
-        prepared.check_deadline(self.inner.clock.as_ref())?;
-        let inventory = &prepared.preview.inventory;
-        let target = prepared.preview.target;
-        let now = prepared.now;
-        let operation = &prepared.operation;
-        let stored = &prepared.preview;
         orch_db::queries::notifications::operations::save(
             conn,
             operation.id,
-            &serde_json::to_value(operation).map_err(EngineError::from)?,
+            &serde_json::to_value(&operation).map_err(EngineError::from)?,
             now,
         )
         .await?;
@@ -1042,7 +699,7 @@ impl Engine {
             crate::updates::UpdateError::Denied => LossError::Denied,
             other => LossError::Internal(EngineError::unreadable(other)),
         })?;
-        rows::close(conn, inventory, principal.user(), now).await?;
+        rows::close(conn, &inventory, principal.user(), now).await?;
         for job in &inventory.jobs {
             crate::recovery::release_history_pins(conn, *job, now).await?;
         }
@@ -1087,7 +744,7 @@ impl Engine {
             unit.wake(*id);
         }
         unit.finish().await?;
-        crate::notifications::notify_operation(conn, operation, "done", now).await?;
+        crate::notifications::notify_operation(conn, &operation, "done", now).await?;
         let mut entry = orch_db::audit::Entry::new(
             orch_db::audit::Actor::User(principal.user()),
             match target {
@@ -1106,9 +763,8 @@ impl Engine {
         orch_authz::epoch::bump(conn)
             .await
             .map_err(EngineError::from)?;
-        jobs::forks::forget_preflight(conn, prepared.preview.plan.preflight_id).await?;
-        prepared.check_deadline(self.inner.clock.as_ref())?;
-        Ok(())
+        jobs::forks::forget_preflight(conn, body.preflight_id).await?;
+        Ok(stored.plan)
     }
 }
 

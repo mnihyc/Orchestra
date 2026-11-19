@@ -46,10 +46,6 @@ pub struct Parts<F: Source> {
 }
 
 impl<F: Source> Frame<F> {
-    /// The actual raw credential and observed minima of this preparation, without complete admission.
-    pub fn http_origin(&self) -> Option<&crate::operation_scope::http_origin::HttpOrigin> {
-        self.0.http_origin()
-    }
     /// The native actor for this phase, carrying no complete required-role proof.
     pub fn principal(&self) -> &Principal {
         self.0.principal()
@@ -115,7 +111,6 @@ pub async fn prepare<F: Source>(
         Arc::new(input),
         None,
         super::Phase::Preparation,
-        super::Transport::Current(None),
     )
     .await
     .map(Frame)
@@ -136,7 +131,6 @@ pub async fn prepare_with_caller<F: Source>(
         Arc::new(input),
         Some(caller.clone()),
         super::Phase::Preparation,
-        super::Transport::Current(None),
     )
     .await
     .map(Frame)

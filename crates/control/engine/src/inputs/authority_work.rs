@@ -119,35 +119,20 @@ fn ordinary_input_origin(plan: &Prepared) -> bool {
     .any(|route| plan.matches_route(route))
 }
 
-struct MaterializedContext<'a> {
-    thread: &'a ThreadRow,
-    input: &'a Materialized,
-    selection: &'a str,
-    target: &'a KeyResolvedTarget,
-    scheduled: Option<super::ScheduledInputOrigin>,
-    chat: Option<super::ChatInputOrigin>,
-    forward: Option<&'a super::ForwardInputOrigin>,
-    snapshot_comment: Option<super::SnapshotCommentOrigin>,
-    complete: bool,
-}
-
 async fn materialized_origin(
     unit: &mut Unit<'_>,
+    thread: &ThreadRow,
+    input: &Materialized,
+    selection: &str,
     caller: &Caller,
-    context: MaterializedContext<'_>,
+    target: &KeyResolvedTarget,
+    scheduled: Option<super::ScheduledInputOrigin>,
+    chat: Option<super::ChatInputOrigin>,
+    forward: Option<&super::ForwardInputOrigin>,
+    snapshot_comment: Option<super::SnapshotCommentOrigin>,
+    complete: bool,
     clock: &dyn Clock,
 ) -> Result<Option<Caller>, EngineError> {
-    let MaterializedContext {
-        thread,
-        input,
-        selection,
-        target,
-        scheduled,
-        chat,
-        forward,
-        snapshot_comment,
-        complete,
-    } = context;
     // A restored browser has no additional credential policy to admit. Keep its existing
     // ordinary input/native checks in their original order; do not turn stale native state
     // into a new browser authorization refusal merely to compute a restriction it lacks.
@@ -200,12 +185,13 @@ async fn materialized_origin(
         {
             return Ok(None);
         }
-        if let Some(copy) = orch_db::queries::shares::copy(unit.conn, reference.copy_id).await?
-            && (copy.thread_id != reference.thread_id
+        if let Some(copy) = orch_db::queries::shares::copy(unit.conn, reference.copy_id).await? {
+            if copy.thread_id != reference.thread_id
                 || copy.created_by != caller.user()
-                || super::SnapshotCommentOrigin::source_of(&copy)? != reference.source)
-        {
-            return Ok(None);
+                || super::SnapshotCommentOrigin::source_of(&copy)? != reference.source
+            {
+                return Ok(None);
+            }
         }
         // The normal copy producer completed source reads and parcel capture before accepting
         // the comment. Neither source deletion nor copy withdrawal reinterprets that past read;
@@ -614,15 +600,6 @@ async fn materialized_origin(
             }
         }
     }
-    if creator_origin || schedule_origin {
-        // The human audience gift belongs to birth, never to later input delivery.
-        if let Some(index) = plan.variant().facets.iter().position(|facet| {
-            facet.target == TargetResolver::ResolvedCollection("creator_reader_environments")
-        }) && bound(plan.bind_empty(index))?.is_none()
-        {
-            return Ok(None);
-        }
-    }
     if !complete {
         return bound(plan.preparation_caller(caller));
     }
@@ -685,16 +662,17 @@ async fn materialized_origin(
     {
         return Ok(None);
     }
-    if native_role
-        && bound(operation::bind_native_collection(
+    if native_role {
+        if bound(operation::bind_native_collection(
             &mut plan,
             native_name,
             scheduled_destination.as_ref().unwrap_or(target),
             permission,
         ))?
         .is_none()
-    {
-        return Ok(None);
+        {
+            return Ok(None);
+        }
     }
 
     let bypass_role =
@@ -802,18 +780,16 @@ async fn restore_for_input(
         let caller = if let (Some(selection), Some(target)) = (&origin.operation, &target) {
             let Some(caller) = materialized_origin(
                 unit,
+                thread,
+                input,
+                selection,
                 &origin.caller,
-                MaterializedContext {
-                    thread,
-                    input,
-                    selection,
-                    target,
-                    scheduled: restored.captured.scheduled(),
-                    chat: restored.captured.chat(),
-                    forward: restored.captured.forward(),
-                    snapshot_comment: restored.captured.snapshot_comment(),
-                    complete,
-                },
+                target,
+                restored.captured.scheduled(),
+                restored.captured.chat(),
+                restored.captured.forward(),
+                restored.captured.snapshot_comment(),
+                complete,
                 clock,
             )
             .await?
@@ -846,13 +822,6 @@ pub(super) async fn for_input(
     if input.thread_id != thread.node_id {
         return Ok(None);
     }
-    if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(unit.conn, thread, &input.content, actor, clock)
-            .await?
-    {
-        return Ok(None);
-    }
     let materialized = Materialized::stored(input);
     let Some((restored, callers)) =
         restore_for_input(unit, thread, &materialized, actor, authority, true, clock).await?
@@ -875,13 +844,6 @@ pub(super) async fn for_preflight(
     if input.thread_id != thread.node_id {
         return Ok(None);
     }
-    if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(unit.conn, thread, &input.content, actor, clock)
-            .await?
-    {
-        return Ok(None);
-    }
     let materialized = Materialized::stored(input);
     Ok(
         restore_for_input(unit, thread, &materialized, actor, authority, false, clock)
@@ -900,19 +862,6 @@ pub(super) async fn for_request(
     authority: &InputAuthority,
     clock: &dyn Clock,
 ) -> Result<Option<InputCallers>, EngineError> {
-    if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(
-                unit.conn,
-                thread,
-                &serde_json::to_value(&request.content)?,
-                actor,
-                clock,
-            )
-            .await?
-    {
-        return Ok(None);
-    }
     let materialized = Materialized::requested(request, selection, actor)?;
     let Some((restored, callers)) =
         restore_for_input(unit, thread, &materialized, actor, authority, true, clock).await?

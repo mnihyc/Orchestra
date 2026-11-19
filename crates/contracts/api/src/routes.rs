@@ -87,20 +87,6 @@ pub enum Shape {
     Raw,
 }
 
-/// Explicit creation-key decisions that do not install the shared header binding.
-/// Unspecified remains undecided for a creating route until its server binding is inspected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Idempotency {
-    /// No native/protocol exemption has been declared; inspect the actual server binding.
-    Unspecified,
-    /// The native stored body client_id is the creation fence.
-    ClientId,
-    /// An existing native header fence owns a one-time-secret creation exception.
-    NativeHeader(&'static str),
-    /// This operation intentionally creates no keyed object or has no account namespace.
-    NotKeyed(&'static str),
-}
-
 /// One request of the API.
 #[derive(Debug, Clone, Copy)]
 pub struct Route {
@@ -117,8 +103,6 @@ pub struct Route {
     /// Business action and target metadata. A fixed permission can supply its ordinary
     /// facet; compound rules and exceptions declare their metadata on the endpoint.
     pub operation: Option<crate::operations::OperationSpec>,
-    /// A native body key or an explicit reason no account-owned header key applies.
-    pub idempotency: Idempotency,
     /// Its query parameters.
     pub query: Shape,
     /// Its body.
@@ -206,8 +190,6 @@ pub const fn writable<T: Serialize + JsonSchema>() {}
 /// An optional `operation expression` declares business facets and target resolution.
 /// It follows `responses` when both are present. Missing metadata on a non-permission
 /// endpoint fails catalogue generation rather than guessing from its HTTP method.
-/// Optional `idempotency expression` follows operation metadata and records a native
-/// body client ID or an explicit account-namespace exemption beside that request.
 #[macro_export]
 macro_rules! endpoints {
     ($(
@@ -216,7 +198,6 @@ macro_rules! endpoints {
         $qk:ident $($qt:ty)?, $bk:ident $($bt:ty)?, $rk:ident $($rt:ty)?, $status:literal
         $(, responses [$($response_status:literal => $response_type:ty),+ $(,)?])?
         $(, operation $operation:expr)?
-        $(, idempotency $idempotency:expr)?
     );* $(;)?) => {
         $(
             $(#[doc = $doc])*
@@ -234,7 +215,6 @@ macro_rules! endpoints {
                     path: $path,
                     access: $access,
                     operation: $crate::__endpoint_operation!($($operation)?),
-                    idempotency: $crate::__endpoint_idempotency!($($idempotency)?),
                     query: $crate::__endpoint_part!(shape in $qk $($qt)?),
                     body: $crate::__endpoint_part!(shape in $bk $($bt)?),
                     reply: $crate::__endpoint_part!(shape out $rk $($rt)?),
@@ -248,17 +228,6 @@ macro_rules! endpoints {
         pub const ROUTES: &[$crate::routes::Route] = &[
             $( <$name as $crate::routes::Endpoint>::ROUTE, )*
         ];
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __endpoint_idempotency {
-    () => {
-        $crate::routes::Idempotency::Unspecified
-    };
-    ($value:expr) => {
-        $value
     };
 }
 
@@ -319,16 +288,13 @@ macro_rules! __endpoint_part {
 pub fn all() -> Vec<Route> {
     let modules: &[&[Route]] = &[
         crate::auth::ROUTES,
-        crate::ask::ROUTES,
         crate::operations::ROUTES,
         crate::users::ROUTES,
         crate::nodes::ROUTES,
         crate::everything::ROUTES,
         crate::settings::ROUTES,
-        crate::summaries::ROUTES,
         crate::access::ROUTES,
         crate::ownership::ROUTES,
-        crate::duplicates::ROUTES,
         crate::threads::ROUTES,
         crate::calls::ROUTES,
         crate::goals::ROUTES,
@@ -351,7 +317,6 @@ pub fn all() -> Vec<Route> {
         crate::ports::ROUTES,
         crate::approvals::ROUTES,
         crate::resources::ROUTES,
-        crate::resource_groups::ROUTES,
         crate::storage::ROUTES,
         crate::resource_facts::ROUTES,
         crate::library::ROUTES,
@@ -363,7 +328,6 @@ pub fn all() -> Vec<Route> {
         crate::skills::ROUTES,
         crate::notifications::ROUTES,
         crate::admin::ROUTES,
-        crate::admin_messages::ROUTES,
         crate::program_admin::ROUTES,
         crate::downloads::ROUTES,
         crate::search::ROUTES,

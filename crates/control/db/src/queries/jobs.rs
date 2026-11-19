@@ -299,27 +299,12 @@ pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<JobRow>, DbError> {
 
 /// Locks jobs retaining this creator-provision command, including an older queued frame
 /// whose active pointer has moved. The caller must still validate its exact active fence.
-pub async fn creator_provision_command_owners(
-    conn: &mut Conn,
-    command: Id,
-) -> Result<Vec<Id>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM jobs WHERE (plan ? 'creator_provision' OR plan ? 'creator_provision_version' OR plan ? 'creator_provision_commands') AND
-        (plan->'active_command'->>'id'=$1::text OR plan->'creator_provision_commands' ? $1::text)
-        ORDER BY id",
-    )
-    .bind(command)
-    .fetch_all(conn)
-    .await?)
-}
-
-/// The source owner must be pinned before this child row is locked.
 pub async fn lock_creator_provision_command_owners(
     conn: &mut Conn,
     command: Id,
 ) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT id FROM jobs WHERE (plan ? 'creator_provision' OR plan ? 'creator_provision_version' OR plan ? 'creator_provision_commands') AND
+        "SELECT id FROM jobs WHERE plan ? 'creator_provision' AND
         (plan->'active_command'->>'id'=$1::text OR plan->'creator_provision_commands' ? $1::text)
         ORDER BY id FOR UPDATE",
     )
@@ -397,15 +382,10 @@ pub async fn lock_provider_update_command_owners(
     Ok(sqlx::query_scalar("SELECT id FROM jobs WHERE
         ((plan ? 'provider_update_origins' OR plan ? 'provider_update_binding'
             OR plan ? 'provider_update_commands' OR plan ? 'provider_update_notice_commands'
-            OR plan ? 'environment_update' OR plan ? 'environment_update_binding' OR plan ? 'environment_update_batch_commands' OR plan ? 'environment_update_batch_notice_commands' OR plan ? 'environment_update_commands'
-            OR plan ? 'environment_update_notice_commands' OR plan ? 'environment_update_composed_commands'
             OR kind='provider_recreate')
             AND plan->'active_command'->>'id'=$1::text)
         OR plan->'provider_update_commands' ? $1::text OR plan->'provider_update_notice_commands' ? $1::text
         OR plan->'provider_recreate_commands' ? $1::text OR plan->'provider_recreate_notice_commands' ? $1::text
-        OR plan->'environment_update_commands' ? $1::text OR plan->'environment_update_notice_commands' ? $1::text
-        OR plan->'environment_update_composed_commands' ? $1::text
-        OR plan->'environment_update_batch_commands' ? $1::text OR plan->'environment_update_batch_notice_commands' ? $1::text
         ORDER BY id FOR UPDATE").bind(command).fetch_all(conn).await?)
 }
 
@@ -861,7 +841,7 @@ pub mod forks {
             Some(environment) => super::stamp_environment(conn, environment, at).await?,
             None => None,
         };
-        let created = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "INSERT INTO jobs (id, kind, node_id, environment_id, batch_id, state, plan, progress, created_by,
                                topic_seq, env_seq, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11, $11)
@@ -878,21 +858,8 @@ pub mod forks {
         .bind(topic_seq)
         .bind(env_seq)
         .bind(at)
-        .fetch_one(&mut *conn)
-        .await?;
-        crate::idempotency::creation::observe_with(
-            conn,
-            Some(job.created_by),
-            "thread_fork",
-            job.id,
-            serde_json::json!({"reserved_thread":job.plan.get("new_thread")}),
-        )
-        .await?;
-        if let Some(batch) = job.batch {
-            crate::idempotency::creation::observe(conn, Some(job.created_by), "fork_batch", batch)
-                .await?;
-        }
-        Ok(created)
+        .fetch_one(conn)
+        .await?)
     }
 
     /// The open job holding a thread while its binding or runtime changes, or while it is made.
@@ -1087,12 +1054,6 @@ pub mod forks {
         .bind(id)
         .fetch_optional(conn)
         .await?)
-    }
-
-    /// Serializes a confirmation with consumption of this same private kept plan.
-    pub async fn lock_preflight(conn: &mut Conn, id: Id) -> Result<Option<PreflightRow>, DbError> {
-        Ok(sqlx::query_as("SELECT id,kind,node_id,environment_id,created_by,plan,expires_at,created_at FROM preflights WHERE id=$1 FOR UPDATE")
-            .bind(id).fetch_optional(conn).await?)
     }
 
     /// Forgets a plan that was carried out: it is good for one confirmation.

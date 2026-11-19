@@ -158,7 +158,7 @@ pub async fn bind_bypass(
             .variant()
             .facets
             .iter()
-            .position(|facet| facet.target == TargetResolver::ResolvedCollection(role))
+            .position(|facet| facet.target == TargetResolver::ResolvedCollection(*role))
             .ok_or_else(|| invalid(plan, "the input bypass collection is not declared"))?;
         let found: Vec<_> = actual
             .iter()

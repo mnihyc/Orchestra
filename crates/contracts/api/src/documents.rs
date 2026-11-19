@@ -751,6 +751,8 @@ pub struct DocumentRef {
     /// Its description, whose first line is shown where documents are listed; at most
     /// [`DOCUMENT_DESCRIPTION_MAX_CHARS`] characters, empty when nobody wrote one.
     pub description: String,
+    /// Who maintains the description: whoever wrote it, a person or an agent, or automation.
+    pub description_source: crate::nodes::FieldSource,
     /// What a list shows beside its title: the first line of its description, or while it has none the first
     /// line of its first paragraph; at most [`DOCUMENT_LINE_MAX_CHARS`] characters, empty when it has neither.
     pub description_line: String,
@@ -912,9 +914,6 @@ pub struct DocumentSync {
     /// False when more than [`DOCUMENT_SYNC_MAX_CHANGES`] blocks changed, or the position is below
     /// what was purged; the client loads again without a position.
     pub complete: bool,
-    /// The optional full summary requested with the live opening.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<crate::summaries::SummarySnapshot>,
 }
 
 /// Why a version was cut.
@@ -1205,9 +1204,6 @@ pub struct DocumentSyncGetQuery {
     /// Only what changed after this document sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Seq>,
-    /// Carry the independently readable summary on a full live sync.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<bool>,
 }
 
 /// Renames a document, changes its description, or both; at least one of the two is given. A description that
@@ -1535,17 +1531,6 @@ crate::common::full_or_receipt! {
     }
 }
 
-crate::common::full_or_receipt! {
-    /// A created discussion or its factual accepted identity.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum DocumentDiscussionCreateResponse {Full(DocumentDiscussion),Receipt(DocumentDiscussionReceipt),}
-}
-crate::common::full_or_receipt! {
-    /// A created comment or its factual accepted identity.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum DocumentCommentCreateResponse {Full(DocumentComment),Receipt(DocumentCommentReceipt),}
-}
-
 /// Puts the caller's reaction to a comment on, or takes it off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1733,9 +1718,9 @@ pub struct DocumentImportResultError {
 /// One truthful made/refused outcome and every conversion loss.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentImportResultEntry {
-    /// The source entry's name; a completed header replay uses the accepted document's current title.
+    /// The source entry's name.
     pub name: String,
-    /// The accepted native document, rendered with current authority; null when refused.
+    /// The created document, unchanged on a retry; null when refused.
     pub document: Option<DocumentRef>,
     /// Conversion losses, once each.
     pub warnings: Vec<String>,
@@ -1748,39 +1733,6 @@ pub struct DocumentImportResultEntry {
 pub struct DocumentImportResult {
     /// Successful and refused entries alike.
     pub entries: Vec<DocumentImportResultEntry>,
-}
-
-/// One actual partial import outcome without a stored document projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DocumentImportReceiptEntry {
-    /// The supplied source name, preserving source order.
-    pub name: String,
-    /// Its actual accepted native document id, including durable replay.
-    pub document_id: Option<Id>,
-    /// The ordinary refusal code, without protected diagnostic content.
-    pub error: Option<String>,
-}
-/// A truthful acknowledgement of every accepted or refused entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DocumentImportReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// Named outcomes of this attempt; a header replay may acknowledge identities without source paths below.
-    pub entries: Vec<DocumentImportReceiptEntry>,
-    /// Accepted native identities on a header replay, without retained source paths or document metadata.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accepted_document_ids: Vec<Id>,
-    /// Whether every entry was accepted, when this acknowledges recorded header progress.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub complete: Option<bool>,
-}
-crate::common::full_or_receipt! {
-    /// The native import report or its accepted per-entry identities.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum DocumentImportResponse {
-        Full(DocumentImportResult),
-        Receipt(DocumentImportReceipt),
-    }
 }
 
 /// What a text that is converted into blocks is written in.
@@ -1831,25 +1783,6 @@ pub struct DocumentConvertReply {
     pub warnings: Vec<ReaderWarning>,
     /// The files of the document that the conversion stored, which the blocks name.
     pub files: Vec<DocumentFile>,
-}
-
-/// Contextual conversion completed, without exposing its existing directory-derived result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DocumentConvertReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual document used as conversion context.
-    pub document_id: Id,
-    /// Actual embedded files retained by this conversion; blocks themselves were not stored.
-    pub file_ids: Vec<Id>,
-}
-crate::common::full_or_receipt! {
-    /// Generated conversion content or the actual completed contextual acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum DocumentConvertResponse {
-        Full(DocumentConvertReply),
-        Receipt(DocumentConvertReceipt),
-    }
 }
 
 /// The most characters of a part's text that a reference's card shows.
@@ -2067,39 +2000,6 @@ const fn document_sync_facets(action: orch_access_contract::key_scope::KeyAction
     ]
 }
 
-const fn document_sync_read_facets() -> [Facet; 10] {
-    let [
-        root,
-        org,
-        project,
-        topic,
-        thread,
-        container,
-        documents,
-        chats,
-    ] = document_sync_facets(Read);
-    [
-        root,
-        org,
-        project,
-        topic,
-        thread,
-        container,
-        documents,
-        chats,
-        Facet::required(
-            Read,
-            crate::summaries::SUMMARY_FAMILIES,
-            Target::ResolvedCollection("document_summary_inputs"),
-        ),
-        Facet::required(
-            Read,
-            &[Object(K::Provider)],
-            Target::ResolvedCollection("document_summary_providers"),
-        ),
-    ]
-}
-
 /// Content windows publish stored document content and only their actual live reference labels.
 /// Full document placement/container metadata is not part of these projections.
 const fn document_content_facets(action: orch_access_contract::key_scope::KeyAction) -> [Facet; 7] {
@@ -2146,27 +2046,6 @@ const fn document_comment_write_facets() -> [Facet; 8] {
     ]
 }
 
-/// Input labels and independently selected live response labels use the same native families.
-const fn document_comment_create_facets() -> [Facet; 14] {
-    let written = document_comment_write_facets();
-    [
-        written[0],
-        written[1],
-        written[2],
-        written[3],
-        written[4],
-        written[5],
-        written[6],
-        written[7],
-        Facet::response_content(written[2].resources, written[2].target),
-        Facet::response_content(written[3].resources, written[3].target),
-        Facet::response_content(written[4].resources, written[4].target),
-        Facet::response_content(written[5].resources, written[5].target),
-        Facet::response_content(written[6].resources, written[6].target),
-        Facet::response_content(written[7].resources, written[7].target),
-    ]
-}
-
 crate::endpoints! {
     /// Reads the first document page of each expanded place under its own current authority.
     NodeDocumentPagesGet: GET "/nodes/{id}/document-pages", User, query NodeDocumentPagesGetQuery, none, json Vec<NodeDocumentPage>, 200,
@@ -2177,22 +2056,41 @@ crate::endpoints! {
     NodeDocumentCopy: POST "/nodes/{id}/documents/copy", Rule("destination doc.create with docs.enabled and source doc.view"), none, json NodeDocumentCopyBody, json DocumentCreationResponse, 201,
         operation Op::receipt(&Op::facets(&crate::document_sources::text_copy_facets()));
     /// Turns Markdown, HTML or plain text into blocks, without storing any: what a paste is read by.
-    DocumentConvert: POST "/documents/convert", Rule("any signed-in caller; with document_id, Edit on that document"), none, json DocumentConvertBody, json DocumentConvertResponse, 200,
-        operation Op::receipt(&Op::variants(&[
+    DocumentConvert: POST "/documents/convert", Rule("any signed-in caller; with document_id, Edit on that document"), none, json DocumentConvertBody, json DocumentConvertReply, 200,
+        operation Op::variants(&[
             Variant {
                 name: "supplied",
                 selector: "document_id is absent; convert supplied content",
-                facets: &crate::document_sources::CONVERSION_SUPPLIED_FACETS,
+                facets: &[Facet::required(
+                    Write,
+                    &[Identity(I::Account)],
+                    Target::CurrentAccount,
+                )],
             },
             Variant {
                 name: "document",
                 selector: "document_id is present; attachment references resolve there",
-                facets: &crate::document_sources::CONVERSION_DOCUMENT_FACETS,
+                facets: &[Facet::required(
+                    Write,
+                    &[Object(K::Document)],
+                    Target::Resolved("document"),
+                )],
             },
-        ]));
+        ]);
     /// Imports several text files or one bounded archive and reports every entry.
-    NodeDocumentImport: POST "/nodes/{id}/documents/import", Permission("doc.create"), none, json DocumentImportRequest, json DocumentImportResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::document_sources::text_import_facets()));
+    NodeDocumentImport: POST "/nodes/{id}/documents/import", Permission("doc.create"), none, json DocumentImportRequest, json DocumentImportResult, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Identity(I::Upload)],
+                Target::Resolved("import_sources"),
+            ),
+            Facet::required(Write, &[Object(K::Document)], Target::PermissionObject),
+            Facet::response_content(
+                &[Object(K::Document)],
+                Target::Resolved("created_resources"),
+            ),
+        ]);
     /// Changes the caller's discussion bell on this document.
     DocumentSubscriptionSet: PUT "/documents/{id}/subscription", Permission("doc.view"), none, json DocumentSubscriptionSetBody, none, 204,
         operation Op::single(Write, &[Object(K::Document)], Target::PermissionObject);
@@ -2233,7 +2131,7 @@ crate::endpoints! {
             Variant {
                 name: "read",
                 selector: "inspect_deleted is not true",
-                facets: &document_sync_read_facets(),
+                facets: &document_sync_facets(Read),
             },
             Variant {
                 name: "inspect_deleted",
@@ -2243,7 +2141,16 @@ crate::endpoints! {
         ]);
     /// What a reference's card shows: the thing it names and the part, as the caller may read them; anything the caller may not read is not found.
     ReferencePreviewGet: GET "/references/preview", Rule("reading the reference's target or attachment owner, or files.view on its environment"), query ReferencePreviewQuery, none, json ReferencePreview, 200,
-        operation Op::facets(&crate::reference_sources::FACETS);
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Document),
+                Object(K::Thread),
+                Identity(I::Chat),
+                Object(K::Environment),
+            ],
+            Target::Resolved("reference_target"),
+        );
     /// Renames a document, or changes its description.
     DocumentUpdate: PATCH "/documents/{id}", Permission("doc.edit"), none, json DocumentUpdateBody, json Document, 200,
         operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
@@ -2406,8 +2313,8 @@ crate::endpoints! {
             },
         ]);
     /// Opens a discussion on a block of a document, with its first comment.
-    DocumentDiscussionCreate: POST "/documents/{id}/discussions", Permission("doc.comment"), none, json DocumentDiscussionCreateBody, json DocumentDiscussionCreateResponse, 201,
-        operation Op::receipt(&Op::facets(&document_comment_create_facets()));
+    DocumentDiscussionCreate: POST "/documents/{id}/discussions", Permission("doc.comment"), none, json DocumentDiscussionCreateBody, json DocumentDiscussion, 201,
+        operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Lists a discussion's comments in the order they were written, a window at a time from the newest.
     DocumentCommentList: GET "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.view"), query DocumentCommentListQuery, none, json DocumentCommentPage, 200,
         operation Op::variants(&[
@@ -2423,8 +2330,8 @@ crate::endpoints! {
             },
         ]);
     /// Answers in a discussion.
-    DocumentCommentCreate: POST "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.comment"), none, json DocumentCommentCreateBody, json DocumentCommentCreateResponse, 201,
-        operation Op::receipt(&Op::facets(&document_comment_create_facets()));
+    DocumentCommentCreate: POST "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.comment"), none, json DocumentCommentCreateBody, json DocumentComment, 201,
+        operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Resolves a discussion, or opens it again.
     DocumentDiscussionResolve: POST "/documents/{id}/discussions/{discussion_id}/resolve", Rule("doc.edit, or having written in that discussion"), none, json DocumentDiscussionResolveBody, json DocumentDiscussionResolveResponse, 200,
         operation Op::receipt(&Op::facets(&document_comment_write_facets()));

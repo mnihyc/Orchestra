@@ -111,8 +111,7 @@ pub enum GoalCheckedBy {
     Agent,
 }
 
-/// A goal's saved limits. Omitted values follow the place; zero adds no own cap.
-/// Effective budgets still retain the place's policy bounds.
+/// A goal's own limits. A limit left out follows the setting of the place; zero is no limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GoalLimits {

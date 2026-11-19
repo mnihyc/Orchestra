@@ -130,9 +130,6 @@ pub struct MountKeptData {
 /// Data that environments attach beside their workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Mount {
-    /// Protected origin and native contextual availability, beside home and owner.
-    #[serde(default, flatten)]
-    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Former volume locations on machines declared lost or deleted, never attempted again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost_locations: Vec<MountLostLocation>,
@@ -241,9 +238,6 @@ pub struct MachineMountChoice {
 /// The host side of mounts, read without a probe or a separate query for each mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineMounts {
-    /// Protected grouping of the actual readable Mount references below.
-    #[serde(default)]
-    pub grouping: Vec<crate::resource_groups::ResourceChoiceGrouping>,
     /// Located mounts the caller may read, with only readable attached environments.
     pub locations: Vec<MachineMount>,
     /// Mounts the caller manages and may locate here; excludes existing locations.
@@ -533,18 +527,6 @@ pub struct MountUsesGetReply {
     pub hidden: i64,
 }
 
-/// The accepted location identity, without the mount's existing inventory.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct MountLocationSetReceipt {
-    pub projection: crate::common::ReceiptProjection,
-    pub mount_id: Id,
-    pub machine_id: Id,
-}
-crate::common::full_or_receipt! {
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum MountLocationSetResponse { Full(Mount), Receipt(MountLocationSetReceipt), }
-}
-
 crate::endpoints! {
     /// Mounts located on a readable host or the caller's own machine, and manageable add choices.
     MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), none, none, json MachineMounts, 200,
@@ -567,8 +549,12 @@ crate::endpoints! {
     /// Deletes a mount that no scope enables.
     MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, none, none, 204;
     /// Sets where a mount is on a machine: a path, or a volume on a host's storage.
-    MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json MountLocationSetResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::mount_location_sources::SET_FACETS));
+    MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json Mount, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Mount)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Machine)], Target::Path("machine_id")),
+            Facet::response_content(&[Object(K::Mount)], Target::Path("id")),
+        ]);
     /// Says what the data of a mount's location on a machine is: a hint shown beside it, which decides nothing.
     MountLocationUpdate: PATCH "/mounts/{id}/locations/{machine_id}", Permission("mount.manage"), none, json MountLocationUpdateBody, json Mount, 200,
         operation Op::returning(Manage, &[Object(K::Mount)], Target::PermissionObject);
@@ -605,7 +591,6 @@ mod tests {
     #[test]
     fn a_mount_shows_its_locations_and_hides_a_source_the_caller_may_not_change() {
         let written = json!({
-            "origin_machine": null, "availability": [],
             "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b", "name": "datasets", "address": "acme.research.datasets",
             "description": "Training data", "org_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6c",
             "home": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6c", "kind": "org", "name": "Research", "redacted": false },

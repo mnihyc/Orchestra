@@ -11,7 +11,7 @@
  */
 import { queryOptions } from '@tanstack/react-query';
 
-import { accepted, api, ApiError, ok, repeatable } from '@/api/client';
+import { api, ApiError, ok, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
 import type {
   AgentAccessChoice,
@@ -19,8 +19,7 @@ import type {
   ForkBatchPlan,
   ForkBatchPreflightBody,
   ForkCreateBody,
-  ForkCreateResponse,
-  ForkNowResponse,
+  ForkNowReply,
   ForkPlan,
   ForkRequest,
   Job,
@@ -47,50 +46,36 @@ export function isOver(state: Job['state']): boolean {
 // ---------------------------------------------------------------- the plan
 
 /** What a fork or a switch of one thread would do, before anything does. */
-export async function planFork(
-  threadId: string,
-  request: ForkRequest,
-  signal?: AbortSignal,
-): Promise<ForkPlan> {
-  const result = await ok(
+export function planFork(threadId: string, request: ForkRequest, signal?: AbortSignal): Promise<ForkPlan> {
+  return ok(
     api.POST('/threads/{id}/forks/preflight', {
       params: { path: { id: threadId } },
       body: request,
       ...(signal === undefined ? {} : { signal }),
     }),
   );
-  if ('projection' in result) {
-    throw new Error('The plan was prepared, but its details are no longer available.');
-  }
-  return result;
 }
 
 /** Forks a thread at once with nothing to choose: the same topic, environment, provider, profile and model, with all of the history. */
-export async function forkNow(threadId: string, key: string, toTurn?: number, agentAccess?: AgentAccessChoice): Promise<ForkNowResponse> {
-  return accepted(
+export function forkNow(threadId: string, key: string, toTurn?: number, agentAccess?: AgentAccessChoice): Promise<ForkNowReply> {
+  return ok(
     api.POST('/threads/{id}/forks/now', { params: { path: { id: threadId } }, body: { ...(toTurn === undefined ? {} : { to_turn: toTurn }), ...(agentAccess === undefined ? {} : { agent_access: agentAccess }) }, ...repeatable(key) }),
   );
 }
 
 /** Carries a plan out: the job it makes, with the thread locked from this moment where it is a switch. */
-export function startFork(threadId: string, body: ForkCreateBody, key: string): Promise<ForkCreateResponse> {
-  return accepted(api.POST('/threads/{id}/forks', { params: { path: { id: threadId } }, body, ...repeatable(key) }));
+export function startFork(threadId: string, body: ForkCreateBody, key: string): Promise<Job> {
+  return ok(api.POST('/threads/{id}/forks', { params: { path: { id: threadId } }, body, ...repeatable(key) }));
 }
 
 /** What switching several threads at once would do: one plan for each, each with its own blockers. */
-export async function planBatch(body: ForkBatchPreflightBody, signal?: AbortSignal): Promise<ForkBatchPlan> {
-  const result = await ok(api.POST('/forks/preflight', { body, ...(signal === undefined ? {} : { signal }) }));
-  if ('projection' in result) {
-    throw new Error('The batch was prepared, but its details are no longer available.');
-  }
-  return result;
+export function planBatch(body: ForkBatchPreflightBody, signal?: AbortSignal): Promise<ForkBatchPlan> {
+  return ok(api.POST('/forks/preflight', { body, ...(signal === undefined ? {} : { signal }) }));
 }
 
 /** Carries a batch plan out: one job for each plan without blockers, all their threads locked at once. */
-export async function startBatch(body: ForkCreateBody, key: string): Promise<ForkBatch> {
-  const result = await ok(api.POST('/forks', { body, ...repeatable(key) }));
-  if ('projection' in result) throw new Error('The batch was accepted, but its details are no longer available.');
-  return result;
+export function startBatch(body: ForkCreateBody, key: string): Promise<ForkBatch> {
+  return ok(api.POST('/forks', { body, ...repeatable(key) }));
 }
 
 // ---------------------------------------------------------------- jobs and batches

@@ -75,7 +75,7 @@ function LibraryUse({facts,threads,version}:{facts:ResourceFacts;threads?:number
   const n=(value:number|null)=>value===null?'–':formatNumber(value,locale);
   if(uses===null)return null;
   return <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-text-muted">
-    <span>{t('library.allTime',{number:n(uses.all_time),unit:t(`library.units.${unit(uses.kind)}`,{count:uses.all_time??0})})}</span><span>{t('library.recent',{number:n(uses.last_30_days),unit:t(`library.units.${unit(uses.kind)}`,{count:uses.last_30_days??0})})}</span>
+    <span>{t('library.allTime',{number:n(uses.all_time)})}</span><span>{t('library.recent',{number:n(uses.last_30_days)})}</span>
     {facts.subject.kind==='resource' && facts.subject.object.kind==='provider'&&<span>{t('library.threadCount',{number:n(threads??null),count:threads??0})}</span>}
     <UsePeople facts={facts} count={uses.people} version={version} label={t('library.people',{number:n(uses.people),count:uses.people??0})}/>
     <UsePeople facts={facts} count={uses.people_30_days} version={version} recent label={t('library.recentPeople',{number:n(uses.people_30_days),count:uses.people_30_days??0})}/>
@@ -95,7 +95,7 @@ function UsePeopleList({object,recent,version}:{object:LibraryObject;recent:bool
   const query=useQuery({queryKey:['resource-library-people',object,recent,version,cursor],
     // Hover-to-pin shares the same admitted read; a cursor replaces its page rather than appending history.
     queryFn:()=>ok(api.POST('/resources/library/people',{body:{target:{object,version_id:version},cursor,recent}}))});
-  if(query.isPending)return <div className="w-72 p-3"><SkeletonRows read={query} rows={3}/></div>;
+  if(query.isPending)return <div className="w-72 p-3"><SkeletonRows rows={3}/></div>;
   if(query.isError)return <ErrorState compact error={query.error} onRetry={()=>void query.refetch()}/>;
   if(query.data.items.length===0&&query.data.hidden===0)return <EmptyState compact title={t('library.noPeople')}/>;
   return <div className="p-3"><PeopleList users={query.data.items} hidden={query.data.hidden}>
@@ -105,7 +105,7 @@ function UsePeopleList({object,recent,version}:{object:LibraryObject;recent:bool
 
 export function ResourceLibrary({object,version=null}:{object:LibraryObject;version?:string|null}) {
   const query=useQuery({...libraryQuery([{object,version_id:version}]),retry:false});
-  if(query.isPending)return <SkeletonRows read={query} rows={1}/>;
+  if(query.isPending)return <SkeletonRows rows={1}/>;
   if(query.isError)return <ErrorState compact error={query.error} onRetry={()=>void query.refetch()}/>;
   const entry=query.data[0];
   return entry===undefined?null:<LibraryCounts facts={entry.facts} threads={entry.threads} version={version} given={version===null} full hint={<Hint id="resource-library" popover/>}/>;

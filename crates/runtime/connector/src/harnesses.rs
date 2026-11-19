@@ -26,8 +26,6 @@
 //! the thread's directory are the adapter's: it is given the profile's `config` and `env` to merge over
 //! its own base configuration, the session's `mcp` and `memory`, and starts its harness accordingly.
 
-pub(crate) mod output_blobs;
-
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -409,7 +407,6 @@ pub struct Process {
     ctx: Arc<Context>,
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
-    output_directory: Mutex<Option<PathBuf>>,
     adapter_start: AdapterStart,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
     owned_home: bool,
@@ -825,48 +822,6 @@ impl Process {
         }
     }
 
-    async fn keep_output_blobs(&self, event: &Event, generation: u64) -> bool {
-        // The producer may be awaiting a bounded sink while holding the adapter call mutex.
-        // This immutable process-generation snapshot keeps the consumer independent of that mutex.
-        let directory = lock(&self.output_directory).clone();
-        let mut warned = false;
-        loop {
-            if self.stopping.load(Ordering::SeqCst)
-                || self.generation.load(Ordering::SeqCst) != generation
-            {
-                return false;
-            }
-            let upload =
-                output_blobs::keep(&self.ctx.services.content, directory.as_deref(), event);
-            tokio::pin!(upload);
-            let result = loop {
-                tokio::select! {
-                    result = &mut upload => break result,
-                    () = tokio::time::sleep(RESTART_FIRST_PAUSE) => {
-                        if self.stopping.load(Ordering::SeqCst)
-                            || self.generation.load(Ordering::SeqCst) != generation
-                        {
-                            return false;
-                        }
-                    }
-                }
-            };
-            match result {
-                Ok(()) => {
-                    return self.generation.load(Ordering::SeqCst) == generation
-                        && !self.stopping.load(Ordering::SeqCst);
-                }
-                Err(error) => {
-                    if !warned {
-                        tracing::warn!(%error, "retained outputs wait for the content store before publication");
-                        warned = true;
-                    }
-                    tokio::time::sleep(RESTART_FIRST_PAUSE).await;
-                }
-            }
-        }
-    }
-
     /// Puts the events of the adapter that waited together on their streams, in their order, and takes note
     /// of what they say of the sessions. All are handed to the link before any answer is waited for
     /// (C-turns: one event to a turn of the link, each turn forcing the spool to disk, a harness of ten
@@ -896,13 +851,7 @@ impl Process {
             };
             self.observe(&event);
             match convert(self.provider_id, self.agent_id, &event) {
-                Ok(converted) => {
-                    if !self.keep_output_blobs(&converted.1, generation).await {
-                        current = false;
-                        break;
-                    }
-                    kept.push(converted);
-                }
+                Ok(converted) => kept.push(converted),
                 Err(error) => {
                     tracing::warn!(%error, "an event of the adapter was not given to the link")
                 }
@@ -1094,10 +1043,8 @@ impl Process {
             )
             .await
             .map_err(|error| command_error(&error))?;
-        let output_directory = adapter.output_directory();
         drop(adapter);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *lock(&self.output_directory) = output_directory;
         {
             let mut state = self.state();
             state.status = HarnessState::Online;
@@ -1534,7 +1481,6 @@ impl Hosting {
             services,
             AdapterStart {
                 provider_id: request.provider_id,
-                provider_kind: request.provider_kind,
                 agent_id: request.agent_id,
                 harness_kind: request.harness_kind.clone(),
                 profile,
@@ -1560,7 +1506,6 @@ impl Hosting {
                 return Err(command_error(&error));
             }
         };
-        let output_directory = adapter.output_directory();
         let process = Arc::new(Process {
             provider_id: request.provider_id,
             agent_id: request.agent_id,
@@ -1568,7 +1513,6 @@ impl Hosting {
             ctx: Arc::clone(&self.ctx),
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
-            output_directory: Mutex::new(output_directory),
             adapter_start,
             resource_group,
             owned_home,

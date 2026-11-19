@@ -12,12 +12,6 @@ import { useShape } from '@/features/workbench/Narrow';
 import { useWorkbench } from '@/features/workbench/store';
 import { currentPrompt } from '@/ui/PromptScope';
 
-/** A modeless work window can use the same temporary reading view as a form. */
-export function openHelpReading(article?: string, heading?: string): void {
-  showArticle(article ?? null, heading ?? null);
-  useHelpState.setState((state) => ({ overlay: true, readingRequest: state.readingRequest + 1 }));
-}
-
 /** Opens the help, at an article and a heading in it, or at its first page. */
 export function useHelpOpener(): (article?: string, heading?: string) => void {
   const router = useRouter();
@@ -30,8 +24,9 @@ export function useHelpOpener(): (article?: string, heading?: string) => void {
     if (!location.pathname.startsWith('/help')) useHelpState.setState({ origin: location.pathname });
     const dialog = currentPrompt();
     if (dialog !== null && document.querySelector('[data-help-work]') !== null) {
+      showArticle(article ?? null, heading ?? null);
       // The Shell pauses its work subtree, preserving drafts and releasing every focus trap.
-      openHelpReading(article, heading);
+      useHelpState.setState((state) => ({ overlay: true, readingRequest: state.readingRequest + 1 }));
       return;
     }
     if (location.pathname.startsWith('/help')) {

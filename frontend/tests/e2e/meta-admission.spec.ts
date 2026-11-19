@@ -3,7 +3,7 @@ import { expect, test, type Request, type Route } from '@playwright/test';
 import { ACME, scenario, signIn } from './support.ts';
 
 const META = '/api/v1/meta';
-const RESTORE = '/api/v1/auth/session';
+const REFRESH = '/api/v1/auth/refresh';
 const BOOTSTRAP = '/api/v1/me/bootstrap';
 const THREAD = `/thread/${ACME.mainThread}`;
 const DRAFT = `/api/v1/threads/${ACME.mainThread}/draft`;
@@ -14,17 +14,15 @@ function holdFirstResponse() {
   const held = new Promise<void>((resolve) => { release = resolve; });
   let requested = false;
   let status: number | null = null;
-  let bytes: number | null = null;
   const handle = async (route: Route) => {
     if (requested) { await route.continue(); return; }
     requested = true;
     const response = await route.fetch();
-    bytes = (await response.body()).byteLength;
     status = response.status();
     await held;
     await route.fulfill({ response });
   };
-  return { handle, release, status: () => status, bytes: () => bytes };
+  return { handle, release, status: () => status };
 }
 
 for (const theme of ['light', 'dark'] as const) test(`cold thread admission holds its shared bootstrap through the frame handoff in ${theme}`, async ({ page }, info) => {
@@ -45,13 +43,13 @@ for (const theme of ['light', 'dark'] as const) test(`cold thread admission hold
   // End setup's readers before collecting the cold document's traffic; the browser keeps its cookie.
   await page.goto('about:blank');
 
-  const boot = holdFirstResponse(), restore = holdFirstResponse();
-  const metaRequests: Request[] = [], bootstrapRequests: Request[] = [], restoreRequests: Request[] = [];
-  const bootstrapStatuses: number[] = [], restoreStatuses: number[] = [];
-  const failedBootstrap: Request[] = [];
+  const boot = holdFirstResponse(), refresh = holdFirstResponse();
+  const metaRequests: Request[] = [], bootstrapRequests: Request[] = [], refreshRequests: Request[] = [];
+  const bootstrapStatuses: number[] = [], refreshStatuses: number[] = [];
+  const completedBootstrap: Request[] = [], failedBootstrap: Request[] = [];
   const paths: { event: string; method: string; path: string; query: string; status?: number }[] = [];
   const checkpoints: string[] = [];
-  const observed = new Set([META, RESTORE, '/api/v1/me/bootstrap', `/api/v1/threads/${ACME.mainThread}/opening`, DRAFT]);
+  const observed = new Set([META, REFRESH, '/api/v1/me/bootstrap', `/api/v1/threads/${ACME.mainThread}/opening`, DRAFT]);
   let documents = 0, pageErrors = 0;
   const entry = (request: Request) => {
     const url = new URL(request.url());
@@ -63,29 +61,24 @@ for (const theme of ['light', 'dark'] as const) test(`cold thread admission hold
     if (observed.has(value.path)) paths.push({ event: 'request', ...value });
     if (value.path === META) metaRequests.push(request);
     if (value.path === BOOTSTRAP) bootstrapRequests.push(request);
-    if (value.path === RESTORE) restoreRequests.push(request);
+    if (value.path === REFRESH) refreshRequests.push(request);
   });
   page.on('response', (response) => {
     const value = entry(response.request());
     if (observed.has(value.path)) paths.push({ event: 'response', ...value, status: response.status() });
     if (value.path === BOOTSTRAP) bootstrapStatuses.push(response.status());
-    if (value.path === RESTORE) restoreStatuses.push(response.status());
+    if (value.path === REFRESH) refreshStatuses.push(response.status());
   });
+  page.on('requestfinished', (request) => { if (entry(request).path === BOOTSTRAP) completedBootstrap.push(request); });
   page.on('requestfailed', (request) => { if (entry(request).path === BOOTSTRAP) failedBootstrap.push(request); });
   page.on('pageerror', () => { pageErrors += 1; });
   await page.route((url) => url.pathname === BOOTSTRAP, boot.handle);
-  await page.route((url) => url.pathname === RESTORE, restore.handle);
-
-  // The browser's resource timing records full delivery of the intercepted native body.
-  const completedBootstrap = () => page.evaluate(({ url, bytes }) =>
-    performance.getEntriesByName(url, 'resource').filter((entry) =>
-      entry instanceof PerformanceResourceTiming && entry.responseEnd > 0 && entry.decodedBodySize === bytes).length,
-  { url: new URL(BOOTSTRAP, address).href, bytes: boot.bytes() });
+  await page.route((url) => url.pathname === REFRESH, refresh.handle);
 
   try {
     // A new document restores the real sign-in cookie; no cached JS client or injected auth state.
     await page.goto(address, { waitUntil: 'domcontentloaded' });
-    await expect.poll(() => restore.status()).toBe(200);
+    await expect.poll(() => refresh.status()).toBe(200);
     expect(boot.status()).toBeNull();
     expect(bootstrapRequests).toEqual([]); expect(metaRequests).toEqual([]);
     const language = page.getByRole('radiogroup', { name: 'Language', exact: true });
@@ -94,11 +87,11 @@ for (const theme of ['light', 'dark'] as const) test(`cold thread admission hold
     await expect(appearance).toBeVisible();
     await expect(main).toHaveCount(0);
     expect(bootstrapStatuses).toEqual([]);
-    expect(restoreStatuses).toEqual([]);
+    expect(refreshStatuses).toEqual([]);
     checkpoints.push('AuthFrame visible; real cookie restoration held; no independent Meta or premature bootstrap');
 
-    restore.release();
-    await expect.poll(() => restoreStatuses).toEqual([200]);
+    refresh.release();
+    await expect.poll(() => refreshStatuses).toEqual([200]);
     await expect.poll(() => boot.status()).toBe(200);
     // Restoration establishes the reader. Its admitted aggregate still owns all
     // metadata/authority; protected content cannot paint while that reply is held.
@@ -114,13 +107,13 @@ for (const theme of ['light', 'dark'] as const) test(`cold thread admission hold
     await expect(composer).toBeVisible();
     await expect(composer).toHaveValue(draft);
     await expect(page).toHaveURL(address);
-    await expect.poll(completedBootstrap).toBe(1);
+    await expect.poll(() => completedBootstrap.length).toBe(1);
     expect(bootstrapStatuses).toEqual([200]);
     expect(metaRequests).toEqual([]);
     expect(bootstrapRequests.map((request) => entry(request))).toEqual([{ method: 'GET', path: BOOTSTRAP, query: '' }]);
     // Only booleans reach this assertion; the credential and body are never logged.
     expect(await Promise.all(bootstrapRequests.map(async (request) => Boolean(await request.headerValue('authorization'))))).toEqual([true]);
-    expect(restoreRequests.map((request) => entry(request))).toEqual([{ method: 'POST', path: RESTORE, query: '' }]);
+    expect(refreshRequests.map((request) => entry(request))).toEqual([{ method: 'POST', path: REFRESH, query: '' }]);
     checkpoints.push('Addressed thread and saved draft ready; one authenticated bootstrap supplied current Meta and authority');
 
     const active = page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { selected: true });
@@ -148,16 +141,16 @@ for (const theme of ['light', 'dark'] as const) test(`cold thread admission hold
     await info.attach(`meta-admission-settled-${theme}`, { path: screenshot, contentType: 'image/png' });
     expect(metaRequests.length).toBe(0);
     expect(bootstrapRequests.length).toBe(1);
-    expect(await completedBootstrap()).toBe(1);
+    expect(completedBootstrap.length).toBe(1);
     expect(failedBootstrap.length).toBe(0);
-    expect(restoreRequests.length).toBe(1);
+    expect(refreshRequests.length).toBe(1);
     expect(documents).toBe(1);
     expect(pageErrors).toBe(0);
     await expect(page).toHaveURL(address);
     await expect(composer).toHaveValue(draft);
     checkpoints.push('Help navigation, retained-tab return and browser focus stayed quiet; URL and draft retained');
   } finally {
-    boot.release(); restore.release();
+    boot.release(); refresh.release();
     await page.unrouteAll({ behavior: 'wait' });
     await info.attach('meta-admission-paths.json', { contentType: 'application/json', body: JSON.stringify({ checkpoints, paths }, null, 2) });
   }

@@ -1,7 +1,7 @@
 /** The real Share form acknowledges a committed receipt through the ordinary API helper, without resend. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router';
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -10,7 +10,6 @@ import type * as Client from '@/api/client';
 import { client } from '@/api/client';
 import { ShareWithAgentsDialog } from '@/features/access/ShareWithAgents';
 import type { ShareAgentCreateReply, ShareAgentCreateReceipt, SharePreview } from '@/generated/api-types';
-import { choiceOption } from '@/i18n/choices';
 import { i18n, setLocale } from '@/i18n';
 import { snapshot } from '../unit/continuation-fixtures';
 import { ADA, CATALOGUE, pageFor } from '../unit/general-access-fixtures';
@@ -91,17 +90,6 @@ it.each([
   const shown = show(<RouterProvider router={router} />);
   try {
     const user = userEvent.setup();
-    // EN: Share with agents → focus/hover Live → guidance opens without an inline paragraph.
-    // 中文：与智能体共享 → 聚焦或悬停实时共享 → 在提示中查看说明，不在页面旁堆叠段落。
-    const mode = await screen.findByRole('radiogroup', { name: i18n.t('access.agents.dialog.kind') });
-    const live = choiceOption(i18n.t, 'agentShareMode.live');
-    expect(within(mode).getByText(live.description)).not.toBeVisible();
-    const liveControl = within(mode).getByRole('radio', { name: live.name });
-    expect(liveControl).toHaveAccessibleDescription(live.description);
-    await user.hover(liveControl);
-    const explanation = await screen.findByRole('tooltip');
-    expect(explanation).toBeVisible();
-    expect(explanation).toHaveTextContent(live.description);
     const submitName = i18n.t('access.agents.dialog.button.read', {
       who: i18n.t('access.agents.dialog.button.ofAgents', { name: recipient.name }),
       what: i18n.t('access.agents.dialog.button.this', { name: target.name }),
@@ -123,7 +111,7 @@ it.each([
     expect(closed).toHaveBeenCalledOnce();
     expect(shareCalls()).toHaveLength(1);
     const anyClientId: unknown = expect.any(String);
-    expect(shareCalls()[0]).toEqual(['/share/agents', { headers: { 'Idempotency-Key': anyClientId }, body: {
+    expect(shareCalls()[0]).toEqual(['/share/agents', { body: {
       what: { node_id: target.id }, mode: 'live', to: [{ thread_id: recipient.id }],
       parts: { timeline: 'read', chat: 'read', documents: 'read' }, inside: true,
       read_first: false, client_id: anyClientId,

@@ -50,7 +50,7 @@ pub(super) fn validate(request: &Request) -> Result<(), Error> {
             }
             create::validate_name(request.name.as_deref().unwrap_or_default(), true)?;
         }
-        Command::Copy | Command::Move | Command::MoveOut => {
+        Command::Copy | Command::Move => {
             if request.items.is_empty()
                 || request.to.is_none()
                 || (request.name.is_some() && request.items.len() != 1)
@@ -255,117 +255,11 @@ pub(super) async fn require(
         now,
         matches!(
             request.command,
-            Command::Delete | Command::Move | Command::MoveOut | Command::Restore
+            Command::Delete | Command::Move | Command::Restore
         ),
         act,
     )
     .await?;
-    if request.command == Command::MoveOut {
-        let Actor::Person(principal) = actor else {
-            return Err(Error::Denied);
-        };
-        let (_, destination_root, _) = destination.ok_or(Error::NotFound)?;
-        for row in &prepared.roots {
-            if row.org_id == destination_root {
-                return Err(Error::Invalid(
-                    "Use the existing Move within this organization.",
-                ));
-            }
-            if !orch_authz::documents::effective(
-                conn,
-                principal,
-                row.id,
-                orch_authz::Policy::default(),
-            )
-            .await?
-            .owner
-            {
-                return Err(Error::Denied);
-            }
-        }
-        // Copy reads only the live material. The complete original closure, including retained
-        // descendants, remains admitted and checked under the same native Delete authority above.
-        access::require_entries(
-            conn,
-            actor,
-            &live_entries(&prepared.entries),
-            Permission::DocView,
-            now,
-            false,
-            orch_authz::Act::Use,
-        )
-        .await?;
-    }
-    if matches!(request.command, Command::Copy | Command::MoveOut)
-        && let Some((node, root, _)) = destination
-    {
-        let outgoing = prepared
-            .entries
-            .iter()
-            .filter(|row| row.deleted_at.is_none() && row.org_id != root)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut knowledge = HashSet::new();
-        for row in prepared
-            .entries
-            .iter()
-            .filter(|row| row.deleted_at.is_none())
-        {
-            let kind = if row.kind == "container" {
-                orch_access_contract::permissions::ObjectKind::DocumentContainer
-            } else {
-                orch_access_contract::permissions::ObjectKind::Document
-            };
-            let boundary = crate::copy_out::inspect(
-                conn,
-                crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
-                    kind,
-                    id: row.id,
-                }),
-                Some(node),
-            )
-            .await
-            .map_err(|error| match error {
-                crate::copy_out::Error::Native(error) => Error::Engine(error),
-                _ => Error::Denied,
-            })?;
-            if let Some(boundary) = boundary {
-                match actor {
-                    Actor::Person(principal) => {
-                        crate::copy_out::require_knowledge_exports(conn, principal, &boundary)
-                            .await
-                            .map_err(|error| match error {
-                                crate::copy_out::Error::Native(error) => Error::Engine(error),
-                                _ => Error::Denied,
-                            })?
-                    }
-                    Actor::Agent { .. } => knowledge.extend(boundary.knowledge_roots()),
-                }
-            }
-        }
-        access::require_exports(conn, actor, &outgoing, now).await?;
-        if !knowledge.is_empty()
-            && let Actor::Agent { thread } = actor
-        {
-            let reach = access::agent_reach(
-                conn,
-                thread,
-                Vec::new(),
-                knowledge.iter().copied().collect(),
-                now,
-            )
-            .await?;
-            if knowledge.into_iter().any(|root| {
-                !reach.governing_export_allowed(
-                    root,
-                    Permission::DocExport,
-                    orch_access_contract::permissions::Profile::Any,
-                )
-            }) {
-                return Err(Error::Denied);
-            }
-        }
-    }
     if let Some(parent) = request.to {
         access::require_create(conn, actor, parent, now).await?;
         if let Directory::Container(id) = parent
@@ -392,7 +286,7 @@ pub(super) async fn require(
         && prepared.entries.iter().any(|row| row.org_id != root)
     {
         return Err(Error::Invalid(
-            "Use Move to another org to copy there and delete here.",
+            "a moved document tree stays in its original root organization",
         ));
     }
     Ok(())

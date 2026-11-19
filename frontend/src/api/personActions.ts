@@ -4,7 +4,6 @@ import { api, done, ok, repeatable } from '@/api/client';
 import { changePage, pathOf } from '@/api/access';
 import type { AccessChoice } from '@/generated/api-types';
 import type { PersonAnchor, PersonThing } from '@/features/people/personContext';
-import type { LinkOrigin } from './linkOrigin';
 
 export interface PersonActions {
   can_view: boolean | null;
@@ -24,21 +23,17 @@ type NoticeWrite = (path: '/{object}/{id}/notify', options: {
 }) => Promise<Answer<never>>;
 type ChatGrantWrite = (path: '/chats/{id}/permissions/people/{user_id}', options: {
   params: { path: { id: string; user_id: string } };
-  body: { choice: AccessChoice; notify: boolean; anchor?: PersonAnchor; link_origin?: LinkOrigin };
+  body: { choice: AccessChoice; notify: boolean; anchor?: PersonAnchor };
   headers: Record<string, string>;
 }) => Promise<Answer<never>>;
-
-export function readPersonActions(thing: PersonThing, userId: string, signal?: AbortSignal): Promise<PersonActions> {
-  return ok((api.GET as unknown as ContextRead)('/{object}/{id}/notify/people/{user_id}', {
-    params: { path: { object: pathOf(thing.kind), id: thing.id, user_id: userId } }, ...(signal === undefined ? {} : { signal }),
-  }));
-}
 
 export const personActionsQuery = (thing: PersonThing, userId: string) => queryOptions({
   queryKey: ['person-actions', pathOf(thing.kind), thing.id, userId],
   // One bounded context read belongs to the query cache, including a StrictMode remount.
   // The session's cache fence and every mutation's current authority checks still apply.
-  queryFn: () => readPersonActions(thing, userId),
+  queryFn: (): Promise<PersonActions> => ok((api.GET as unknown as ContextRead)('/{object}/{id}/notify/people/{user_id}', {
+    params: { path: { object: pathOf(thing.kind), id: thing.id, user_id: userId } },
+  })),
   staleTime: 0,
 });
 
@@ -50,19 +45,17 @@ export function notifyPerson(thing: PersonThing, userId: string, note: string, k
   }));
 }
 
-export async function grantPerson(thing: PersonThing, userId: string, choice: AccessChoice, notify: boolean, key: string, origin?: LinkOrigin): Promise<void> {
+export async function grantPerson(thing: PersonThing, userId: string, choice: AccessChoice, notify: boolean, key: string): Promise<void> {
   if (thing.kind === 'chat') {
     await done((api.POST as unknown as ChatGrantWrite)('/chats/{id}/permissions/people/{user_id}', {
       params: { path: { id: thing.id, user_id: userId } },
-      body: { choice, notify, ...(thing.anchor === undefined ? {} : { anchor: thing.anchor }), ...(origin === undefined ? {} : { link_origin: origin }) },
+      body: { choice, notify, ...(thing.anchor === undefined ? {} : { anchor: thing.anchor }) },
       ...repeatable(key),
     }));
     return;
   }
-  const change = {
-    name: [{ holders: [{ kind: 'user' as const, id: userId }], choice, export: false }],
+  await changePage(thing, {
+    name: [{ holders: [{ kind: 'user', id: userId }], choice, export: false }],
     ...(notify ? { notify: true, ...(thing.anchor === undefined ? {} : { notify_anchor: thing.anchor }) } : {}),
-    ...(origin === undefined ? {} : { link_origin: origin }),
-  };
-  await changePage(thing, change, key);
+  }, key);
 }

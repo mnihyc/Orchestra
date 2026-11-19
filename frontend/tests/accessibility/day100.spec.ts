@@ -11,7 +11,7 @@ for (const language of ['en', 'zh-CN'] as const) {
     const appearance = await fetch(`${DOUBLE}/__double/day100/appearance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locale: language }) });
     expect(appearance.ok).toBe(true);
     await signIn(page, PEOPLE.ada);
-    await page.goto(`/project/${ACME.web}/settings?section=defaults`);
+    await page.goto(`/project/${ACME.web}/settings?section=policies`);
     const row = page.locator('[data-setting="agent.instructions"]');
     await expect(row).toBeVisible();
     await row.locator('[data-setting-editor-trigger]').click();

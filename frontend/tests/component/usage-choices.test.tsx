@@ -18,8 +18,6 @@ function Choices({kind='usage',initial={}}:{kind?:'usage' | 'providerUsage';init
   const change=(patch:SearchPatch)=>{keep(patch);setAddress((before)=>patchSearch(before,patch));};
   return <><output aria-label="Visible choices">{JSON.stringify(visible)}</output><output aria-label="Address">{JSON.stringify(address)}</output>
     <button onClick={()=>change({view:'usage'})}>Usage</button><button onClick={()=>change({view:'performance'})}>Performance</button><button onClick={()=>change({view:'requests'})}>Requests</button>
-    <button onClick={()=>change({series:'offering',by:'purpose'})}>Service chart</button>
-    <button onClick={()=>change({series:'purpose',by:'offering'})}>Purpose chart</button>
     <button onClick={()=>change({show:'tokens',series:'token_kind',bucket:'day'})}>Token chart</button>
     <button onClick={()=>change({show:'first_token',series:'provider',bucket:'hour'})}>Performance chart</button>
     <button onClick={()=>change({plan:'history',plan_metric:'credits',plan_bucket:'hour'})}>Plan history</button>
@@ -62,21 +60,4 @@ it('honours explicit default choices in an address and never restores filters or
   expect(visible().from).toBeUndefined();expect(visible().person).toBeUndefined();
   rendered.unmount();show(<Choices kind="providerUsage" initial={readSearch({view:'usage',show:'credits',series:'model',bucket:'auto',range:'30d'})} />);
   expect(visible()).toMatchObject({view:'usage',show:'credits',series:'model',bucket:'auto',range:'30d'});
-});
-
-
-it('retains the declared offering and purpose dimensions through address, refresh and device choices',async()=>{
-  const user=userEvent.setup();
-  let rendered=show(<Choices kind="providerUsage" initial={readSearch({view:'usage',series:'offering',by:'purpose'})}/>);
-  expect(visible()).toMatchObject({view:'usage',series:'offering',by:'purpose'});
-  await user.click(screen.getByRole('button',{name:'Service chart'}));
-  await user.click(screen.getByRole('button',{name:'Purpose chart'}));
-  expect(visible()).toMatchObject({series:'purpose',by:'offering'});
-  const address=readSearch(JSON.parse(screen.getByLabelText('Address').textContent) as Record<string,unknown>);
-  rendered.unmount();rendered=show(<Choices kind="providerUsage" initial={address}/>);
-  expect(visible()).toMatchObject({series:'purpose',by:'offering'});
-  rendered.unmount();rendered=show(<Choices kind="providerUsage"/>);
-  expect(visible()).toMatchObject({series:'purpose',by:'offering'});
-  rendered.unmount();show(<Choices kind="providerUsage" initial={readSearch({view:'usage',series:'model',by:'project'})}/>);
-  expect(visible()).toMatchObject({series:'model',by:'project'});
 });

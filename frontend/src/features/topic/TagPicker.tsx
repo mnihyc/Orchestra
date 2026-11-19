@@ -69,7 +69,7 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
       {busy && <LoaderCircle className="animate-spin text-text-subtle" role="img" aria-label={t('places.menu.working')} />}
       {allowed && <Popover open={open} onOpenChange={setOpen} label={t('placeTags.title')} trigger={<Button size="sm" variant="ghost" icon={<Tags aria-hidden />}>{place.tags.length === 0 ? t('placeTags.add') : t('placeTags.edit')}</Button>} className="flex w-[min(22rem,calc(100vw-2rem))] max-w-full flex-col gap-3">
         <Input label={t('day100.tags.name')} value={name} disabled={busy || created !== null} onChange={(event) => setName(event.target.value)} autoComplete="off" />
-        {available.isPending ? <SkeletonRows read={available} rows={2} /> : available.isError ? <ErrorState compact error={available.error} onRetry={() => void available.refetch()} /> : <>
+        {available.isPending ? <SkeletonRows rows={2} /> : available.isError ? <ErrorState compact error={available.error} onRetry={() => void available.refetch()} /> : <>
           {available.data.filter((tag) => tag.id !== created?.id && (typed === '' || tag.name.toLocaleLowerCase().includes(typed.toLocaleLowerCase()))).map((tag) => <Checkbox key={tag.id} presentation="picker"
             label={<TagChip name={t('inventoryChoices.tags.tag.name', { name: tag.name })} color={tag.color} />}
             description={t('inventoryChoices.tags.tag.description', { place: placeName(tag.node) })}

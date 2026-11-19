@@ -11,7 +11,7 @@ mod common;
 #[cfg(not(feature = "test-observers"))]
 #[test]
 fn the_dedicated_observer_is_absent_from_default_builds() {
-    const { assert!(!cfg!(feature = "test-observers")) };
+    assert!(!cfg!(feature = "test-observers"));
 }
 
 #[cfg(feature = "test-observers")]

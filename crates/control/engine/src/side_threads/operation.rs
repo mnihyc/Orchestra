@@ -183,26 +183,16 @@ pub(crate) async fn checkpoint(engine: &Engine, cut: &cuts::Cut) -> Result<(), E
         .owner_thread_id
         .filter(|side| *side == cut.id)
         .ok_or_else(|| EngineError::unreadable("The side history owner changed."))?;
-    let mut conn = engine.db().begin().await?;
-    let principal = principal(&mut conn, engine.inner.clock.as_ref(), side).await?;
-    if principal.as_ref().is_some_and(|principal| {
-        !principal
+    let mut conn = engine.db().acquire().await?;
+    if let Some(principal) = principal(&mut conn, engine.inner.clock.as_ref(), side).await? {
+        if !principal
             .caller()
             .key_deadline_allows(engine.inner.clock.as_ref())
-    }) {
-        return Err(EngineError::unreadable(
-            "The original side credential ended.",
-        ));
-    }
-    conn.commit().await.map_err(orch_db::DbError::from)?;
-    if principal.as_ref().is_some_and(|principal| {
-        !principal
-            .caller()
-            .key_deadline_allows(engine.inner.clock.as_ref())
-    }) {
-        return Err(EngineError::unreadable(
-            "The original side credential ended.",
-        ));
+        {
+            return Err(EngineError::unreadable(
+                "The original side credential ended.",
+            ));
+        }
     }
     Ok(())
 }

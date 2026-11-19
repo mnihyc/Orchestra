@@ -1,5 +1,6 @@
 //! Making an image available through the real Docker driver on a real daemon: a build tells the job how far it is with the lines the daemon prints, answers what it was built from, and when it fails keeps the end of its log on the job.
 // The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -19,7 +20,7 @@ async fn a_dockerfile_is_built_by_the_daemon_with_its_steps_told_to_the_job_and_
     let Some(lab) = Lab::start().await else {
         return;
     };
-    let mut world = World::start(&lab).await;
+    let mut world = World::start(&lab.bridge).await;
     let mut node = NodeUnderTest::start(&world, &lab).await;
     let fleet = Fleet::new(&world, &lab, &node);
 

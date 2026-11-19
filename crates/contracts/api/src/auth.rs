@@ -167,12 +167,6 @@ pub struct Meta {
     pub version: String,
     /// The build it came from.
     pub build: String,
-    /// The installation's preferred browser origin, used by copied links.
-    #[serde(default)]
-    pub public_url: String,
-    /// Other browser origins that name this same installation.
-    #[serde(default)]
-    pub alternate_urls: Vec<String>,
     /// Whether the first administrator is still to be made.
     pub needs_setup: bool,
     /// Who may register.
@@ -520,9 +514,6 @@ pub struct SetupCreateBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthRegisterBody {
-    /// Current invitation terms acknowledged when registration also accepts its target.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_terms_hash: Option<String>,
     /// The username to sign in with.
     pub username: String,
     /// The name to show.
@@ -543,39 +534,6 @@ pub struct AuthRegisterBody {
     /// UTC until a browser reports one where none is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-}
-
-/// An account already made by this creation key. Sign in to open a session;
-/// a completed replay never creates or returns another credential.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AccountCreatedReceipt {
-    /// No current account or session content is included.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual account made by the original request.
-    pub user_id: Id,
-    /// Continue at sign-in instead of creating another session here.
-    #[serde(deserialize_with = "sign_in_is_required")]
-    #[schemars(extend("const" = true))]
-    pub sign_in_required: bool,
-}
-fn sign_in_is_required<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<bool, D::Error> {
-    if bool::deserialize(deserializer)? {
-        Ok(true)
-    } else {
-        Err(serde::de::Error::custom("sign_in_required must be true"))
-    }
-}
-crate::common::full_or_receipt! {
-    /// First setup's session, or its completed account's sign-in receipt.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum SetupCreateReply {
-        /// The first successful setup's unchanged session result.
-        Full(AuthResult),
-        /// No session or secret is minted again.
-        Receipt(AccountCreatedReceipt),
-    }
 }
 
 /// The answer of a registration that has to be confirmed first.
@@ -637,30 +595,6 @@ pub enum AuthRegisterReply {
     Registered(AuthRegisterResult),
     /// `202`: continue through the mailbox before signing in; no session is created here.
     Pending(VerificationRequired),
-    /// A matching creation retry: the account exists; continue at sign-in.
-    AlreadyCreated(AccountCreatedReceipt),
-}
-
-crate::common::full_or_receipt! {
-    /// Registration's `201` body, including a completed creation's session-free replay.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum AuthRegisterCreatedReply {
-        /// A newly created account's session and optional accepted invitation.
-        Full(AuthRegisterResult),
-        /// The same creation's receipt; signing in is a separate request.
-        Receipt(AccountCreatedReceipt),
-    }
-}
-
-crate::common::full_or_receipt! {
-    /// Registration's `202` body; neither alternative creates or includes a session.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum AuthRegisterPendingReply {
-        /// The account must confirm its address before signing in.
-        Full(VerificationRequired),
-        /// The same creation's receipt, retaining its original `202` status.
-        Receipt(AccountCreatedReceipt),
-    }
 }
 
 /// Signs a person in with one proof, or with two for somebody who has a second step.
@@ -783,9 +717,6 @@ pub struct MeUpdateBody {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthOidcStartQuery {
-    /// Current invitation terms acknowledged when this sign-in also accepts its target.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_terms_hash: Option<String>,
     /// An in-app path to return to afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<String>,
@@ -1031,11 +962,11 @@ crate::endpoints! {
     MetaGet: GET "/meta", Public, none, none, json Meta, 200,
         operation Op::public();
     /// Makes the first system administrator, while the system still needs one.
-    SetupCreate: POST "/setup", Public, none, json SetupCreateBody, json SetupCreateReply, 200,
+    SetupCreate: POST "/setup", Public, none, json SetupCreateBody, json AuthResult, 200,
         operation Op::protocol();
     /// Registers a user: answers `201` with a session, or `202` when the address is to be confirmed first.
     AuthRegister: POST "/auth/register", Public, none, json AuthRegisterBody, json AuthRegisterReply, 201,
-        responses [201 => AuthRegisterCreatedReply, 202 => AuthRegisterPendingReply],
+        responses [201 => AuthRegisterResult, 202 => VerificationRequired],
         operation Op::protocol();
     /// Checks whether a public username or root-org slug is free, without accepting an email address.
     AuthNameAvailabilityGet: GET "/auth/name-availability", Public, query AuthNameAvailabilityGetQuery, none, json AuthNameAvailabilityGetReply, 200,
@@ -1048,9 +979,6 @@ crate::endpoints! {
         operation Op::protocol();
     /// Gives a new access token to the browser that holds the session cookie.
     AuthRefresh: POST "/auth/refresh", Cookie, none, none, json AuthResult, 200,
-        operation Op::protocol();
-    /// Restores this browser's cookie session, or answers null when no cookie is present.
-    AuthSessionRestore: POST "/auth/session", Cookie, none, none, json Option<AuthResult>, 200,
         operation Op::protocol();
     /// Ends the session of the browser and revokes it.
     AuthLogout: POST "/auth/logout", Cookie, none, none, none, 204,
@@ -1210,8 +1138,7 @@ crate::endpoints! {
         operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("activity_org"));
     /// Makes a key through the shared authorized account operation; its secret is shown once.
     MeTokenCreate: POST "/me/tokens", Session, none, json ApiTokenCreateBody, json TokenCreateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Key)], Target::CurrentAccount)),
-        idempotency crate::routes::Idempotency::NativeHeader("The native header fence records the created token and never retains or returns its one-time secret again.");
+        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Key)], Target::CurrentAccount));
     /// Revokes an API token.
     MeTokenDelete: DELETE "/me/tokens/{id}", User, none, none, none, 204,
         operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("owned_key"));
