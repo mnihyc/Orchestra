@@ -143,6 +143,8 @@ impl Fixture {
                 token: Some(token),
                 creator_origin: Some(origin),
                 scheduled_input: None,
+                workspace_edits: Vec::new(),
+                prepared_source: None,
                 action: Action::Prepare {
                     directory: row.workspace_dir.clone(),
                     source: RepositorySource {
@@ -162,6 +164,7 @@ impl Fixture {
         let plan: Plan = serde_json::from_value(job.plan.clone()).unwrap();
         let command = new_id();
         let body = json!(FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: world.environment,
             mount: None,
             path: row.workspace_dir

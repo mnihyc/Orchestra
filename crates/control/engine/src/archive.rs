@@ -38,6 +38,7 @@ use crate::preflight::Blocked;
 use crate::turns::{InputAfter, TurnEnd};
 use crate::unit::Unit;
 use chrono::{DateTime, Utc};
+use orch_api_contract::threads::{InputCancellation, InputCancellationCause};
 use orch_db::Conn;
 use orch_db::queries::{approvals, hierarchy, lifecycle, link, threads};
 use orch_link_contract::commands::{LeaseClose, SerialKey, TurnInterrupt};
@@ -459,7 +460,14 @@ impl Engine {
         let ids = lifecycle::threads_under(conn, node).await?;
         let mut unit = Unit::new(conn, now.get());
         let mut result = self
-            .settle_in(&mut unit, &ids, by, "archived", false)
+            .settle_in(
+                &mut unit,
+                &ids,
+                by,
+                "archived",
+                InputCancellationCause::ThreadEnded,
+                false,
+            )
             .await?;
         let rows = hierarchy::with_ancestors(&mut *unit.conn, &[node]).await?;
         let root = rows
@@ -535,7 +543,14 @@ impl Engine {
         let ids = lifecycle::bindings(conn, environment).await?;
         let mut unit = Unit::new(conn, now.get());
         let result = self
-            .settle_in(&mut unit, &ids, by, "environment_removed", true)
+            .settle_in(
+                &mut unit,
+                &ids,
+                by,
+                "environment_removed",
+                InputCancellationCause::SourceUnavailable,
+                true,
+            )
             .await?;
         for id in ids {
             let thread = threads::thread(&mut *unit.conn, id)
@@ -582,8 +597,15 @@ impl Engine {
             return Ok(());
         };
         let mut unit = Unit::with_first_effect(conn, now.get(), before);
-        self.settle_in(&mut unit, &[side], by, "closed", false)
-            .await?;
+        self.settle_in(
+            &mut unit,
+            &[side],
+            by,
+            "closed",
+            InputCancellationCause::ThreadEnded,
+            false,
+        )
+        .await?;
         if let Some(segment) = thread.current_segment_id {
             let seq = unit.stamp(side).await?;
             threads::end_segment(&mut *unit.conn, segment, "archived", now.get(), seq).await?;
@@ -598,6 +620,7 @@ impl Engine {
         ids: &[Id],
         by: Option<Id>,
         reason: &str,
+        cancellation_cause: InputCancellationCause,
         removing: bool,
     ) -> Result<Settled, EngineError> {
         threads::tools::lock_threads(&mut *unit.conn, ids).await?;
@@ -664,7 +687,7 @@ impl Engine {
                         Outgoing::new(
                             ids::turn_interrupt(turn.id),
                             machine,
-                            SerialKey::Thread(*id),
+                            SerialKey::None,
                             &TurnInterrupt {
                                 thread_id: *id,
                                 turn_id: turn.id,
@@ -721,6 +744,13 @@ impl Engine {
                     )
                     .await?
                     {
+                        let cancellation = serde_json::to_value(InputCancellation {
+                            cause: cancellation_cause,
+                            at: Time::new(now),
+                            by: None,
+                        })?;
+                        threads::record_input_cancellation(unit.conn, input.id, &cancellation)
+                            .await?;
                         counts.inputs += 1;
                     }
                 }
@@ -864,6 +894,8 @@ impl Engine {
                 .commands
                 .issue(Outgoing {
                     authority: None,
+                    input_facts: None,
+                    session_offer: None,
                     id: row.id,
                     machine: row.machine_id,
                     key,

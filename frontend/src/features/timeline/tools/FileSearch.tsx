@@ -8,6 +8,7 @@ import { EmptyState } from '@/ui/EmptyState';
 
 import { FileLink } from '@/features/files/FileLink';
 import type { Item } from '@/generated/api-types';
+import { nativeFieldMasked } from '../masking';
 
 type SearchItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -29,7 +30,7 @@ export function FileSearchDisplay({ item }: { item: SearchItem }) {
           {tool.matches.map((match, index) => (
             <li key={`${match.path}.${match.line ?? 0}.${index}`} className="flex gap-2 px-3 py-1">
               <span className="shrink-0 text-text">
-                <FileLink path={match.path} line={match.line} />
+                {nativeFieldMasked(item.payload, `/tool/matches/${index}/path`) ? <span title={t('timeline.masking.path')}>{match.path}</span> : <FileLink path={match.path} line={match.line} />}
                 {match.line !== null && <span className="text-text-subtle">:{match.line}</span>}
               </span>
               {match.text !== null && <span className="min-w-0 truncate text-text-muted">{match.text.trim()}</span>}
