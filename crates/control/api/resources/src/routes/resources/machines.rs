@@ -169,6 +169,7 @@ const LINK_MEMBER: &str = rows::LINK_MEMBER;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    gateway::register(registry);
     reenrollment::mount(registry);
     enrollment::mount(registry);
     registry
@@ -203,6 +204,11 @@ pub fn mount(registry: &mut Registry) {
             api::MachineProbe,
             crate::key_operations::native::stored_deferred::<probes::Probes, _, _>,
             probes::probe,
+        )
+        .on_with_optional_operation(
+            api::MachineDirectoryList,
+            crate::key_operations::native::stored::<directories::Directories, _, _>,
+            directories::list,
         )
         .on_with_operation(api::MachinePolicyGet, read_operation::prepare, policy_get)
         .on_with_optional_operation(
@@ -322,12 +328,20 @@ fn installation_info(config: &ServerConfig) -> api::MachineEnrollmentInfo {
 }
 
 async fn enrollment_info(ctx: Ctx, (): (), (): ()) -> ApiResult<api::MachineEnrollmentInfo> {
-    Ok(installation_info(&installation_config(&ctx)))
+    let mut conn = ctx.app.db.acquire().await?;
+    Ok(installation_info(
+        &installation_config(&ctx, &mut conn).await?,
+    ))
 }
 
 /// Commands and readiness use the same effective catalogue as enrollment, including an admin override.
-pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
+pub(crate) async fn installation_config(ctx: &Ctx, conn: &mut Conn) -> ApiResult<ServerConfig> {
     let mut config = (*ctx.app.config).clone();
+    let addresses = crate::public_addresses::read(&ctx.app, conn)
+        .await?
+        .addresses;
+    config.system.public_url = addresses.public_url;
+    config.system.alternate_urls = addresses.alternate_urls;
     config.gateway.instances.clear();
     config.gateway.endpoints = ctx
         .app
@@ -344,7 +358,7 @@ pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
             .into(),
         })
         .collect();
-    config
+    Ok(config)
 }
 
 /// Never mint a secret for a command the shipped installer will refuse.
@@ -433,6 +447,10 @@ fn shown_facts(facts: &Json) -> Json {
         members.remove("installation");
         // Directory observations have their own management projection, never the generic facts blob.
         members.remove("data_directory");
+        if let Some(programs) = members.get_mut("programs").and_then(Json::as_object_mut) {
+            programs.insert("approvals".into(), json!([]));
+            programs.remove("machine_view");
+        }
         // Policy acknowledgements update the canonical policy before a later native facts event.
         // Capability support is a fact; its delegated/enabled state always comes from that policy.
         if let Some(capability) = members
@@ -539,7 +557,7 @@ async fn prepare_inventory_for(
     readable_only: bool,
 ) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::hosts_naming(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
     let mut effective =
@@ -629,6 +647,8 @@ pub(crate) async fn show_inventory_prepared(
     let hosts = &prepared.hosts;
     let ids: Vec<_> = found.iter().map(|row| row.id).collect();
     let software_updates = crate::component_updates::views(&ctx.app.link, conn, &ids).await?;
+    let sources: Vec<_> = found.iter().map(|row| (row.id, &row.facts)).collect();
+    let mut execution_approvals = programs::confirmations::among(conn, &sources).await?;
     let holdings: Vec<_> = prepared
         .effective
         .iter()
@@ -688,6 +708,12 @@ pub(crate) async fn show_inventory_prepared(
                 })
                 .flatten();
             Ok(Machine {
+                execution_approvals: execution_approvals.remove(&row.id).unwrap_or_default(),
+                spool: row
+                    .facts
+                    .get("spool")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
                 data_directory,
                 grouping: grouping
                     .get(&("machine".to_owned(), row.id))
@@ -724,6 +750,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),
@@ -941,8 +968,6 @@ async fn token_create(
     (): (),
     body: api::MachineEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    let installation = installation_config(&ctx);
-    require_installable(&installation)?;
     let authed = ctx.user()?;
     if !authorization::caller_of(authed)?.reaches(None) {
         return Err(ApiError::not_found());
@@ -974,6 +999,8 @@ async fn token_create(
         Ok(Making::Refused(why)) => return Err(refused_making(&mut conn, home, why).await),
         Err(error) => return Err(refusals::problem(&mut conn, error).await),
     }
+    let installation = installation_config(&ctx, &mut conn).await?;
+    require_installable(&installation)?;
     drop(conn);
     let name_hint = body
         .name_hint
@@ -1040,11 +1067,10 @@ pub(crate) async fn machine_with_readiness(
 }
 orch_api_base::__api_bind_d2ace19f11!();
 
-/// The original native update observations and local-policy gate, before its first write.
+/// The original explicit update target and version observations, before its first write.
 pub(crate) struct PreparedUpdate {
     row: MachineRow,
     view: api::ComponentUpdate,
-    enabled: bool,
 }
 
 impl PreparedUpdate {
@@ -1066,7 +1092,7 @@ pub(crate) async fn prepare_update_on(
 ) -> ApiResult<PreparedUpdate> {
     if orch_db::queries::transaction_guard::in_transaction(conn) {
         orch_db::queries::component_updates::lock(conn, machine).await?;
-        let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(machine)
             .fetch_optional(&mut *conn)
             .await
@@ -1083,7 +1109,6 @@ pub(crate) async fn prepare_update_on(
         .filter(|row| row.is_active())
         .ok_or_else(ApiError::not_found)?;
     require_machine(conn, principal, row.id, Permission::MachineManage).await?;
-    require_online(ctx, &row)?;
     if row.runtime_id.is_some() {
         return Err(ApiError::new(
             ErrorCode::RequestInvalid,
@@ -1094,9 +1119,7 @@ pub(crate) async fn prepare_update_on(
         .await?
         .remove(&machine)
         .ok_or_else(ApiError::not_found)?;
-    let enabled = reported_policy(conn,&row).await?.ok_or_else(||ApiError::new(ErrorCode::SourceOffline,
-        "This machine has not reported update.auto yet; wait for its policy report, then retry Update now."))?.update_auto;
-    Ok(PreparedUpdate { row, view, enabled })
+    Ok(PreparedUpdate { row, view })
 }
 
 pub(crate) async fn apply_update_on(
@@ -1120,7 +1143,6 @@ pub(crate) async fn apply_update_with_origin(
 ) -> ApiResult<RequestedUpdate> {
     let row = &value.row;
     let machine = row.id;
-    let enabled = value.enabled;
     let mut view = value.view.clone();
     let mut fresh = false;
     // Native drain/state/physical preparation has completed on this same connection.
@@ -1135,24 +1157,10 @@ pub(crate) async fn apply_update_with_origin(
             ctx.now,
         )
         .await?;
-        if !enabled && fresh {
-            let detail = format!(
-                "update.auto is off on this machine. Its local policy refuses Update now. Run `{}` on the machine to update it locally.",
-                view.command
-            );
-            orch_db::queries::component_updates::finish(
-                conn,
-                machine,
-                "refused",
-                Some(&detail),
-                ctx.now,
-            )
-            .await?;
-            view.status = "refused".into();
-            view.detail = Some(detail);
-        } else if fresh {
+        if fresh {
             view.status = "queued".into();
             view.detail = None;
+            view.automatic = false;
         } else {
             view = crate::component_updates::views(&ctx.app.link, conn, &[machine])
                 .await?
@@ -1355,6 +1363,8 @@ async fn policy_of(
     let machine = refs.get(&row.id).cloned().ok_or_else(ApiError::not_found)?;
     let Some(policy) = reported_policy(conn, row).await? else {
         return Ok(MachinePolicy {
+            platform_review: None,
+            limits: None,
             machine_view: None,
             command: Some(policy_command(conn, row).await?),
             machine,
@@ -1365,6 +1375,7 @@ async fn policy_of(
     // What a caller may change is asked once for each thing a key can limit.
     let mut changeable: BTreeMap<&'static str, bool> = BTreeMap::new();
     let mut keys = Vec::new();
+    let mut applicable_keys = Vec::new();
     let roles = row
         .roles
         .iter()
@@ -1379,6 +1390,11 @@ async fn policy_of(
             .sections()
             .iter()
             .any(|section| readable.contains(section))
+        {
+            continue;
+        }
+        if *key == PolicyKey::ExecPlatform
+            && row.facts.get("runtime_platform").is_none_or(Json::is_null)
         {
             continue;
         }
@@ -1429,6 +1445,15 @@ async fn policy_of(
         } else {
             false
         };
+        applicable_keys.push(api::MachinePolicyApplicability {
+            key: key.as_str().to_owned(),
+            governing_resource: bounds_of(*key),
+            authority_source: if delegated {
+                api::MachinePolicyAuthority::Delegated
+            } else {
+                api::MachinePolicyAuthority::PhysicalOperator
+            },
+        });
         keys.push(MachinePolicyKey {
             definition: key.definition(),
             key: key.as_str().to_owned(),
@@ -1438,7 +1463,39 @@ async fn policy_of(
             writable,
         });
     }
+    let platform_review = if keys
+        .iter()
+        .any(|key| key.key == PolicyKey::ExecPlatform.as_str())
+    {
+        if let Some(build) = row
+            .facts
+            .get("runtime_platform")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            let approved = policy.exec_platform.accepts(&build);
+            let approval = if approved {
+                programs::confirmations::among(conn, &[(row.id, &row.facts)]).await?.remove(&row.id)
+                    .unwrap_or_default().into_iter().find_map(|decision| matches!(decision.subject, orch_api_contract::machine_programs::MachineExecutionSubject::System{ .. }).then_some(decision.approval))
+            } else {
+                None
+            };
+            Some(orch_api_contract::resources::MachinePlatformReview {
+                build,
+                approved,
+                approval,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(MachinePolicy {
+        platform_review,
+        limits: Some(api::MachineLimits {
+            unit_context: row.runtime_id.is_some(),
+            applicable_keys,
+        }),
         machine_view: None,
         command: Some(policy_command(conn, row).await?),
         machine,
@@ -1501,8 +1558,13 @@ pub mod individual;
 #[path = "machines/mutations.rs"]
 pub mod mutations;
 
+#[path = "machines/gateway.rs"]
+mod gateway;
 #[path = "machines/policies.rs"]
 pub mod policies;
+
+#[path = "machines/directories.rs"]
+pub mod directories;
 
 #[path = "machines/probes.rs"]
 pub mod probes;

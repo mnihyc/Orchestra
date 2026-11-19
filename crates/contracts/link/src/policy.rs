@@ -21,6 +21,7 @@ pub use drivers::{ImageRules, MachineDrivers, ProcessRules};
 pub use orch_api_contract::resources::{
     MachinePolicyDefinition as PolicyDefinition, MachinePolicySection as PolicySection,
 };
+pub use orch_api_contract::workspace::FileReach;
 
 /// The entry of [`PolicyKey::PolicyDelegated`] that hands every key over.
 pub const ALL_KEYS: &str = "*";
@@ -144,6 +145,8 @@ policy_keys! {
     /// The directories inside which an environment of the machine may
     /// have its root, and a mount its location.
     EnvironmentRoots = "environment.roots", Machine;
+    /// The widest human file reach this machine accepts; entries still default to roots.
+    EnvironmentFilesReach = "environment.files_reach", Environments;
     /// Whether files written through the system are accepted.
     EnvironmentRemoteWrite = "environment.remote_write", Environments;
     /// Whether shells may be opened on the machine through the system.
@@ -165,6 +168,8 @@ policy_keys! {
     /// What the machine's exec node may offer a harness that runs
     /// elsewhere.
     ExecOffers = "exec.offers", Environments;
+    /// The native system and connector build whose supported directory operations the machine owner accepts.
+    ExecPlatform = "exec.platform", Machine;
     /// Whether files that arrive with a message to an agent are written
     /// into the workspace.
     EnvironmentDeliverFiles = "environment.deliver_files", Environments;
@@ -250,6 +255,9 @@ pub struct PolicyHarness {
     pub kind: String,
     /// Where its program is on the machine, or the daemon to attach to.
     pub path: String,
+    /// The server-recorded manager decision; absent for a local operator's selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<orch_agent_programs::confirmation::Confirmation>,
 }
 
 impl PolicyKey {
@@ -271,6 +279,7 @@ impl PolicyKey {
         match self {
             Self::EnvironmentRoots => &[S::Environment, S::Node],
             Self::EnvironmentRemoteWrite
+            | Self::EnvironmentFilesReach
             | Self::EnvironmentTerminal
             | Self::EnvironmentAfterUp
             | Self::EnvironmentBrowser
@@ -287,7 +296,9 @@ impl PolicyKey {
             | Self::ProviderPrograms
             | Self::ProviderUpstreams
             | Self::ProviderArrangements => &[S::Provider],
-            Self::MachineRoles | Self::UpdateAuto | Self::PolicyDelegated => &[S::Machine],
+            Self::ExecPlatform | Self::MachineRoles | Self::UpdateAuto | Self::PolicyDelegated => {
+                &[S::Machine]
+            }
         }
     }
 
@@ -346,6 +357,7 @@ impl PolicyKey {
             Self::Storages => "Storage",
             Self::ResourceMax => "Resource limits",
             Self::EnvironmentRoots => "Directories Orch may expose",
+            Self::EnvironmentFilesReach => "File reach",
             Self::EnvironmentRemoteWrite => "File writes",
             Self::EnvironmentTerminal => "Shells",
             Self::EnvironmentAfterUp => "Commands after start",
@@ -355,6 +367,7 @@ impl PolicyKey {
             Self::McpImport => "Import tool servers",
             Self::McpAdd => "Add tool servers",
             Self::ExecOffers => "Tools offered to agents",
+            Self::ExecPlatform => "Directory runtime on this system",
             Self::AgentMaxSandbox => "Widest sandbox",
             Self::Ports => "Port audiences and listeners",
             Self::LifecycleHooks => "Lifecycle programs",
@@ -551,6 +564,9 @@ pub struct LocalPolicy {
     /// See [`PolicyKey::EnvironmentRoots`].
     #[serde(rename = "environment.roots")]
     pub environment_roots: Vec<String>,
+    /// See [`PolicyKey::EnvironmentFilesReach`].
+    #[serde(rename = "environment.files_reach")]
+    pub environment_files_reach: orch_api_contract::workspace::FileReach,
     /// See [`PolicyKey::EnvironmentRemoteWrite`].
     #[serde(rename = "environment.remote_write")]
     pub environment_remote_write: bool,
@@ -575,6 +591,9 @@ pub struct LocalPolicy {
     /// See [`PolicyKey::McpAdd`].
     #[serde(rename = "mcp.add")]
     pub mcp_add: bool,
+    /// See [`PolicyKey::ExecPlatform`].
+    #[serde(rename = "exec.platform", default)]
+    pub exec_platform: orch_agent_programs::confirmation::PlatformConsent,
     /// See [`PolicyKey::ExecOffers`].
     #[serde(rename = "exec.offers")]
     pub exec_offers: Vec<String>,
@@ -629,6 +648,7 @@ impl Default for LocalPolicy {
             local_values: PolicyValues::new(),
             hooks: MachineHooks::default(),
             environment_roots: Vec::new(),
+            environment_files_reach: orch_api_contract::workspace::FileReach::Machine,
             environment_remote_write: false,
             environment_terminal: false,
             environment_after_up: false,
@@ -637,6 +657,7 @@ impl Default for LocalPolicy {
             ports: MachinePorts::default(),
             mcp_import: true,
             mcp_add: false,
+            exec_platform: Default::default(),
             exec_offers: orch_agent_programs::Programs::builtin().every_offer(),
             environment_deliver_files: true,
             agent_max_sandbox: SandboxMode::Workspace,
@@ -709,7 +730,9 @@ impl LocalPolicy {
     ) -> EnvironmentSwitches {
         EnvironmentSwitches {
             remote_write: self.environment_remote_write && remote_write.unwrap_or(true),
-            terminal: self.environment_terminal && terminal.unwrap_or(true),
+            terminal: self.environment_terminal
+                && self.environment_files_reach == FileReach::Machine
+                && terminal.unwrap_or(true),
             browser: self.environment_browser && browser.unwrap_or(true),
             vnc: self.environment_vnc && vnc.unwrap_or(true),
         }
@@ -868,6 +891,7 @@ impl LocalPolicy {
             PolicyKey::ResourceMax => serde_json::json!(self.resource_max),
             PolicyKey::LifecycleHooks => serde_json::json!(self.hooks),
             PolicyKey::EnvironmentRoots => texts(&self.environment_roots),
+            PolicyKey::EnvironmentFilesReach => serde_json::json!(self.environment_files_reach),
             PolicyKey::EnvironmentRemoteWrite => Json::Bool(self.environment_remote_write),
             PolicyKey::EnvironmentTerminal => Json::Bool(self.environment_terminal),
             PolicyKey::EnvironmentAfterUp => Json::Bool(self.environment_after_up),
@@ -876,6 +900,7 @@ impl LocalPolicy {
             PolicyKey::Ports => serde_json::json!(self.ports),
             PolicyKey::McpImport => Json::Bool(self.mcp_import),
             PolicyKey::McpAdd => Json::Bool(self.mcp_add),
+            PolicyKey::ExecPlatform => serde_json::json!(self.exec_platform),
             PolicyKey::ExecOffers => texts(&self.exec_offers),
             PolicyKey::EnvironmentDeliverFiles => Json::Bool(self.environment_deliver_files),
             PolicyKey::AgentMaxSandbox => Json::from(self.agent_max_sandbox.as_str()),
@@ -887,14 +912,7 @@ impl LocalPolicy {
                     .map(|kind| kind.as_str())
                     .collect::<Vec<_>>(),
             ),
-            PolicyKey::AgentHarnesses => Json::from(
-                self.agent_harnesses
-                    .iter()
-                    .map(
-                        |harness| serde_json::json!({ "kind": harness.kind, "path": harness.path }),
-                    )
-                    .collect::<Vec<_>>(),
-            ),
+            PolicyKey::AgentHarnesses => serde_json::json!(self.agent_harnesses),
             PolicyKey::ToolsFetch => Json::Bool(self.tools_fetch),
             PolicyKey::AgentPrograms => Json::Bool(self.agent_programs),
             PolicyKey::ProviderPrograms => Json::Bool(self.provider_programs),
@@ -968,6 +986,10 @@ impl LocalPolicy {
                     .ok_or_else(|| wrong("absolute hook programs and a nonzero timeout_secs"))?;
             }
             PolicyKey::EnvironmentRoots => self.environment_roots = texts("a list of directories")?,
+            PolicyKey::EnvironmentFilesReach => {
+                self.environment_files_reach =
+                    serde_json::from_value(value.clone()).map_err(|_| wrong("roots or machine"))?;
+            }
             PolicyKey::EnvironmentRemoteWrite => self.environment_remote_write = flag()?,
             PolicyKey::EnvironmentTerminal => self.environment_terminal = flag()?,
             PolicyKey::EnvironmentAfterUp => self.environment_after_up = flag()?,
@@ -979,6 +1001,10 @@ impl LocalPolicy {
             }
             PolicyKey::McpImport => self.mcp_import = flag()?,
             PolicyKey::McpAdd => self.mcp_add = flag()?,
+            PolicyKey::ExecPlatform => {
+                self.exec_platform = serde_json::from_value(value.clone())
+                    .map_err(|_| wrong("off or an approved native system and build"))?;
+            }
             PolicyKey::ExecOffers => {
                 self.exec_offers = texts("a list of executor kinds and tool sets")?
             }
@@ -1175,7 +1201,7 @@ impl LocalPolicy {
     }
 }
 
-/// The scoped policy in a machine report; older unscoped policies retain their wire shape.
+/// The policy for the roles this machine actually offers.
 pub(crate) fn serialize_reported<S: serde::Serializer>(
     policy: &Option<LocalPolicy>,
     serializer: S,
@@ -1190,6 +1216,97 @@ pub(crate) fn serialize_reported<S: serde::Serializer>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_system_confirmation_applies_only_to_the_connector_build_and_platform_the_manager_reviewed()
+    {
+        use orch_agent_programs::confirmation::{Confirmation, PlatformBuild, PlatformConsent};
+        let reviewed = PlatformBuild {
+            os: "windows".into(),
+            arch: "x86_64".into(),
+            executable: orch_types::Hash::of(b"original"),
+        };
+        let stamped = Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00Z".parse().unwrap(),
+        };
+        let mut policy = LocalPolicy::default();
+        assert!(!policy.exec_platform.accepts(&reviewed));
+        let consent = PlatformConsent::Approved {
+            build: reviewed.clone(),
+            confirmation: Some(stamped),
+        };
+        policy
+            .set(PolicyKey::ExecPlatform, &json!(consent))
+            .unwrap();
+        let reported: LocalPolicy = serde_json::from_value(policy.reported()).unwrap();
+        assert!(reported.exec_platform.accepts(&reviewed));
+        for other in [
+            PlatformBuild {
+                executable: orch_types::Hash::of(b"replacement"),
+                ..reviewed.clone()
+            },
+            PlatformBuild {
+                os: "macos".into(),
+                ..reviewed.clone()
+            },
+            PlatformBuild {
+                arch: "aarch64".into(),
+                ..reviewed.clone()
+            },
+        ] {
+            assert!(!reported.exec_platform.accepts(&other));
+        }
+        policy
+            .set(PolicyKey::ExecPlatform, &json!(PlatformConsent::Off))
+            .unwrap();
+        assert!(!policy.exec_platform.accepts(&reviewed));
+    }
+
+    #[test]
+    fn saved_and_reported_program_choices_keep_the_actual_manager_without_attributing_local_choices()
+     {
+        let manager = orch_types::new_id();
+        let at = "2026-10-31T00:00:00.000Z".parse().unwrap();
+        let confirmation = orch_agent_programs::confirmation::Confirmation { by: manager, at };
+        let policy = LocalPolicy {
+            roles: Some(vec![crate::session::Role::Environment]),
+            agent_harnesses: vec![
+                PolicyHarness {
+                    kind: "codex".into(),
+                    path: "/confirmed/codex".into(),
+                    confirmation: Some(confirmation),
+                },
+                PolicyHarness {
+                    kind: "claude-code".into(),
+                    path: "/operator/claude".into(),
+                    confirmation: None,
+                },
+            ],
+            ..LocalPolicy::default()
+        };
+        let expected = json!([
+            {"kind":"codex","path":"/confirmed/codex","confirmation":{"by":manager,"at":at}},
+            {"kind":"claude-code","path":"/operator/claude"}
+        ]);
+        assert_eq!(
+            policy.get(PolicyKey::AgentHarnesses),
+            expected,
+            "the saved delegated value keeps the actual decision"
+        );
+        assert_eq!(
+            policy.reported()["agent.harnesses"],
+            expected,
+            "role-filtered machine facts keep the same decision"
+        );
+        let again: LocalPolicy =
+            serde_json::from_value(serde_json::to_value(&policy).unwrap()).unwrap();
+        assert_eq!(
+            again.harness("codex").unwrap().confirmation,
+            Some(confirmation)
+        );
+        assert!(again.harness("claude-code").unwrap().confirmation.is_none());
+    }
 
     #[test]
     fn environment_switches_follow_the_same_machine_ceiling_and_an_explicit_narrowing_stays_off() {
@@ -1499,6 +1616,25 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<LocalPolicy>(written).unwrap(),
             LocalPolicy::default()
+        );
+    }
+
+    #[test]
+    fn a_machine_can_bound_human_file_reach_without_changing_the_agent_sandbox() {
+        use orch_api_contract::workspace::FileReach;
+        let mut policy = LocalPolicy::default();
+        let sandbox = policy.agent_max_sandbox;
+        assert_eq!(policy.environment_files_reach, FileReach::Machine);
+        policy
+            .set(PolicyKey::EnvironmentFilesReach, &json!("roots"))
+            .unwrap();
+        assert_eq!(policy.environment_files_reach, FileReach::Roots);
+        assert_eq!(policy.get(PolicyKey::EnvironmentFilesReach), json!("roots"));
+        assert_eq!(policy.agent_max_sandbox, sandbox);
+        assert!(
+            policy
+                .set(PolicyKey::EnvironmentFilesReach, &json!("anywhere"))
+                .is_err()
         );
     }
 

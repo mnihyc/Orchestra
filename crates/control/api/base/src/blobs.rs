@@ -52,8 +52,6 @@ use orch_db::Conn;
 
 use orch_db::DbError;
 
-use orch_link_contract::content::MAX_TRANSFERS_PER_MACHINE;
-
 use orch_types::Hash;
 
 use orch_types::Id;
@@ -293,15 +291,35 @@ impl Blobs {
 
     /// Makes the directory of the uploads if it is not there.
     pub async fn make_uploads_dir(&self) -> Result<(), BlobsError> {
+        let mut missing = Vec::new();
+        let mut directory = self.inner.uploads.as_path();
+        loop {
+            match tokio::fs::metadata(directory).await {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(directory.to_path_buf());
+                    let Some(parent) = directory.parent() else {
+                        break;
+                    };
+                    directory = parent;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         tokio::fs::create_dir_all(&self.inner.uploads).await?;
+        for directory in missing.iter().rev() {
+            if let Some(parent) = directory.parent() {
+                sync_directory(parent).await?;
+            }
+        }
         Ok(())
     }
 
     /// Counts a transfer for `machine`, unless it runs as many as it may.
-    pub fn begin_transfer(&self, machine: Id) -> Result<Transfer, TooManyTransfers> {
+    pub fn begin_transfer(&self, machine: Id, maximum: u32) -> Result<Transfer, TooManyTransfers> {
         let mut transfers = lock(&self.inner.transfers);
         let count = transfers.entry(machine).or_insert(0);
-        if *count >= MAX_TRANSFERS_PER_MACHINE {
+        if *count >= maximum {
             return Err(TooManyTransfers);
         }
         *count += 1;
@@ -540,38 +558,86 @@ impl Blobs {
 pub struct PieceFile {
     file: tokio::fs::File,
     offset: u64,
+    directory: Option<PathBuf>,
 }
 
 /// Open the native file once, outside any retryable metadata resolver.
-/// Callers may refresh authority after this filesystem wait before truncating or writing bytes.
+/// Callers may refresh authority after this filesystem wait before writing bytes.
 pub async fn prepare_piece(path: &Path, offset: i64) -> std::io::Result<PieceFile> {
     let file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .read(true)
         .truncate(false)
         .open(path)
         .await?;
     Ok(PieceFile {
         file,
         offset: u64::try_from(offset).unwrap_or(0),
+        directory: path.parent().map(Path::to_path_buf),
     })
 }
 
 impl PieceFile {
-    /// Preserve the native truncate/seek/write/flush/sync sequence after the caller's first-effect cut.
-    pub async fn write(mut self, piece: &[u8]) -> std::io::Result<()> {
-        use tokio::io::AsyncSeekExt;
-        self.file.set_len(self.offset).await?;
+    /// Compare every acknowledged overlap before changing any byte, then preserve the suffix.
+    pub async fn write_unreceived(
+        mut self,
+        piece: &[u8],
+        ranges: &[orch_api_contract::threads::UploadRange],
+    ) -> std::io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let start = i64::try_from(self.offset).map_err(std::io::Error::other)?;
+        let end = start + i64::try_from(piece.len()).map_err(std::io::Error::other)?;
+        for range in ranges {
+            let from = start.max(range.start);
+            let to = end.min(range.start + range.len);
+            if from >= to {
+                continue;
+            }
+            let a = usize::try_from(from - start).map_err(std::io::Error::other)?;
+            let b = usize::try_from(to - start).map_err(std::io::Error::other)?;
+            let mut held = vec![0; b - a];
+            self.file
+                .seek(std::io::SeekFrom::Start(
+                    u64::try_from(from).map_err(std::io::Error::other)?,
+                ))
+                .await?;
+            self.file.read_exact(&mut held).await?;
+            if held != piece[a..b] {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "the retry changes acknowledged content",
+                ));
+            }
+        }
         self.file
             .seek(std::io::SeekFrom::Start(self.offset))
             .await?;
         self.file.write_all(piece).await?;
         self.file.flush().await?;
-        self.file.sync_data().await
+        self.file.sync_data().await?;
+        if let Some(directory) = self.directory {
+            sync_directory(&directory).await?;
+        }
+        Ok(())
+    }
+
+    /// A caller without a coverage ledger still preserves existing suffixes.
+    pub async fn write(self, piece: &[u8]) -> std::io::Result<()> {
+        self.write_unreceived(piece, &[]).await
     }
 }
 
-/// Writes a piece at its native offset, cutting off only unrecorded trailing bytes first.
+// POSIX persists a new directory entry separately from the file's data acknowledgement.
+async fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    tokio::fs::File::open(path).await?.sync_all().await?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Writes at its announced offset, preserving any previously acknowledged suffix.
 pub async fn write_piece(path: &Path, offset: i64, piece: &[u8]) -> std::io::Result<()> {
     prepare_piece(path, offset).await?.write(piece).await
 }
@@ -654,6 +720,7 @@ impl BlobStore for MemoryBlobs {
 pub mod tests {
 
     use super::*;
+    use orch_link_contract::content::MAX_TRANSFERS_PER_MACHINE;
 
     use futures::stream;
     #[cfg(any(test, feature = "test-support"))]
@@ -722,9 +789,15 @@ pub mod tests {
             .write(b" next")
             .await
             .unwrap();
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"known next");
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"known nextcorded-tail"
+        );
         write_piece(&path, 10, b" piece").await.unwrap();
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"known next piece");
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"known next piece-tail"
+        );
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -740,15 +813,29 @@ pub mod tests {
         let blobs = Blobs::in_memory();
         let machine = new_id();
         let held: Vec<Transfer> = (0..MAX_TRANSFERS_PER_MACHINE)
-            .map(|_| blobs.begin_transfer(machine).unwrap())
+            .map(|_| {
+                blobs
+                    .begin_transfer(machine, MAX_TRANSFERS_PER_MACHINE)
+                    .unwrap()
+            })
             .collect();
-        assert!(blobs.begin_transfer(machine).is_err());
         assert!(
-            blobs.begin_transfer(new_id()).is_ok(),
+            blobs
+                .begin_transfer(machine, MAX_TRANSFERS_PER_MACHINE)
+                .is_err()
+        );
+        assert!(
+            blobs
+                .begin_transfer(new_id(), MAX_TRANSFERS_PER_MACHINE)
+                .is_ok(),
             "another machine has transfers of its own"
         );
         drop(held);
-        assert!(blobs.begin_transfer(machine).is_ok());
+        assert!(
+            blobs
+                .begin_transfer(machine, MAX_TRANSFERS_PER_MACHINE)
+                .is_ok()
+        );
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

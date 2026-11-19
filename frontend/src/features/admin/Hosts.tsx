@@ -8,12 +8,13 @@
  * nothing of its own, each changed where it is shown. A host's own page, where it is managed, is one
  * click from its name.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { hostsQuery } from '@/api/admin';
+import { bundledNodeQuery, hostsQuery, retryBundledNode } from '@/api/admin';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { fullEffect, FULL_PERCENT_SHIPPED, declaredShare, megabytes } from '@/features/admin/hosts';
 import { ChoiceSetting, NumberSetting, useSystemSettings } from '@/features/admin/SettingRows';
@@ -22,10 +23,11 @@ import { useAppearance } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { boxClasses, Section } from '@/shell/Page';
 import { StatusTag } from '@/features/admin/StatusTag';
-import { buttonClasses } from '@/ui/Button';
+import { Button, buttonClasses } from '@/ui/Button';
 import { cx } from '@/ui/cx';
 import { EmptyState } from '@/ui/EmptyState';
-import { ErrorState } from '@/ui/ErrorState';
+import { StateLine } from '@/ui/StateLine';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Meter } from '@/ui/Meter';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
@@ -63,6 +65,17 @@ export function Hosts() {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const hosts = useQuery(hostsQuery);
+  const hasBundled = hosts.data?.some((host) => host.bundled_with_server) === true;
+  const enrollment = useQuery({...bundledNodeQuery, enabled: !hasBundled});
+  const status = hasBundled ? null : enrollment.data;
+  const wasPending = useRef(false);
+  const {refetch: refreshHosts} = hosts;
+  useEffect(() => {
+    if (status === null && wasPending.current) void refreshHosts();
+    wasPending.current = Boolean(status);
+  }, [status, refreshHosts]);
+  const retry = useMutation({mutationFn: retryBundledNode, onSuccess: () => { void enrollment.refetch(); }});
+  const waiting = status === 'waiting_for_administrator' || status === 'waiting_for_node';
   const { find } = useSystemSettings();
   const percentSetting = find('hosts.full_percent')?.value;
   const percent = typeof percentSetting === 'number' ? percentSetting : FULL_PERCENT_SHIPPED;
@@ -135,12 +148,17 @@ export function Hosts() {
           </Link>
         }
       >
+        {status && <StateLine compact role="status" tone={waiting ? 'neutral' : 'warning'}
+          message={t(`admin.hosts.enrollment.${status}`)}
+          action={waiting ? undefined : <Button size="sm" pending={retry.isPending} onClick={() => retry.mutate()}>{t('admin.hosts.retryRegistration')}</Button>} />}
+        {retry.isError && <ErrorAlert error={retry.error} />}
+        {enrollment.isError && !hasBundled && <ErrorState compact error={enrollment.error} onRetry={() => void enrollment.refetch()} />}
         {hosts.isPending ? (
           <SkeletonRows read={hosts} rows={3} />
         ) : hosts.isError ? (
           <ErrorState error={hosts.error} retrying={hosts.isRefetching} onRetry={() => void hosts.refetch()} />
         ) : hosts.data.length === 0 ? (
-          <EmptyState compact icon={<Server aria-hidden />} title={t('admin.hosts.none')} description={t('admin.hosts.noneHint')} />
+          status || enrollment.isPending || enrollment.isError ? null : <EmptyState compact icon={<Server aria-hidden />} title={t('admin.hosts.none')} description={t('admin.hosts.noneHint')} />
         ) : (
           <>
             <Table label={t('admin.sections.hosts.title')} columns={columns} rows={hosts.data} rowKey={(host) => host.id} />

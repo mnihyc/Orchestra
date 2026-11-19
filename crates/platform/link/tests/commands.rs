@@ -11,8 +11,8 @@ use orch_link::commands::{CommandIssuer, Progress};
 use orch_link::machine::{MachineConfig, MachineLink};
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
-    Cmd, CommandError, CommandKind, ErrorCode, Reference, SerialKey, SessionClose,
-    resolve_references,
+    Cmd, Command, CommandError, CommandKind, CommandResult, ErrorCode, ProviderDiscoverModels,
+    ProviderDiscoverModelsResult, Reference, SerialKey, SessionClose, resolve_references,
 };
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_link_contract::version::Limits;
@@ -92,6 +92,58 @@ async fn a_command_that_is_sent_again_after_a_reconnect_runs_once_and_gets_one_r
     rig.machine.handler.release();
     let ended = within(30, rig.controller.wait_command(id)).await;
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
+    assert_eq!(rig.machine.handler.runs_of(id), 1);
+}
+
+#[tokio::test]
+async fn a_large_model_catalogue_and_its_request_cross_the_default_link_without_configuration() {
+    let rig = rig();
+    rig.machine.link.connected().await;
+    let text = "Model details 模型资料 ".repeat(40_000);
+    let mut request = ProviderDiscoverModels {
+        provider_id: new_id(),
+        models: Some(Default::default()),
+    };
+    request
+        .models
+        .as_mut()
+        .unwrap()
+        .config
+        .insert("description".into(), json!(text));
+    let expected = ProviderDiscoverModelsResult {
+        source: None,
+        suggestions: (0..96)
+            .map(|index| {
+                orch_link_contract::foreign::ModelSuggestion::named(
+                    &format!("model-{index}"),
+                    Some(&format!("Model {index} {}", "details 资料 ".repeat(700))),
+                )
+            })
+            .collect(),
+    };
+    let sent_request = request.clone();
+    let sent_result = expected.clone();
+    rig.machine
+        .handler
+        .on(CommandKind::ProviderDiscoverModels, move |command| {
+            let Command::ProviderDiscoverModels(received) = command else {
+                panic!("the native model request arrives");
+            };
+            assert_eq!(
+                received, &sent_request,
+                "the whole request arrives unchanged"
+            );
+            Ok(CommandResult::ProviderDiscoverModels(sent_result.clone()))
+        });
+    let id = rig
+        .controller
+        .issue(&SerialKey::None, deadline(&rig.clock, 300), &request);
+    let ended = within(15, rig.controller.wait_command(id)).await;
+    let Progress::Succeeded(result) = ended else {
+        panic!("the model catalogue should arrive: {ended:?}");
+    };
+    let received: ProviderDiscoverModelsResult = serde_json::from_value(result).unwrap();
+    assert_eq!(received, expected);
     assert_eq!(rig.machine.handler.runs_of(id), 1);
 }
 
@@ -222,7 +274,7 @@ async fn commands_with_one_key_run_one_at_a_time_in_the_order_they_came_and_othe
 }
 
 #[tokio::test]
-async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
+async fn a_short_command_that_waited_in_line_behind_a_long_one_still_runs_when_its_turn_comes() {
     let rig = rig();
     rig.machine.link.connected().await;
     rig.machine.handler.hold(CommandKind::SessionClose);
@@ -232,21 +284,75 @@ async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
         deadline(&rig.clock, 600),
         &SessionClose { thread_id: thread },
     );
-    let late = rig.controller.issue(
+    // Thirty seconds of work, asked while the line is held by a long one.
+    let short = rig.controller.issue(
         &SerialKey::Thread(thread),
         deadline(&rig.clock, 30),
         &SessionClose { thread_id: thread },
     );
     within(10, rig.machine.handler.started(blocker)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The line stays held for far longer than the short command's thirty seconds.
     rig.clock.advance(chrono::Duration::seconds(60));
     rig.machine.handler.release();
-    let ended = within(10, rig.controller.wait_command(late)).await;
-    let Progress::Failed(error) = ended else {
-        panic!("{ended:?}")
-    };
-    assert_eq!(error.code, ErrorCode::Timeout.as_str());
-    assert_eq!(rig.machine.handler.runs_of(late), 0);
+    let ended = within(10, rig.controller.wait_command(short)).await;
+    assert!(
+        matches!(ended, Progress::Succeeded(_)),
+        "the time spent waiting is not the command's own: {ended:?}"
+    );
+    assert_eq!(rig.machine.handler.runs_of(short), 1);
+}
+
+#[tokio::test]
+async fn original_authority_expiring_in_the_native_serial_queue_never_becomes_a_fresh_work_budget()
+{
+    let rig = rig();
+    rig.machine.link.connected().await;
+    rig.machine.handler.hold(CommandKind::SessionClose);
+    let thread = new_id();
+    let blocker = rig.controller.issue(
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 600),
+        &SessionClose { thread_id: thread },
+    );
+    within(10, rig.machine.handler.started(blocker)).await;
+    let id = new_id();
+    let mut command = Cmd::new(
+        id,
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 300),
+        &SessionClose { thread_id: thread },
+    )
+    .unwrap();
+    command.authority_until = Some(deadline(&rig.clock, 10));
+    let mut queued = rig.controller.link().commands().issue(command);
+    within(10, async {
+        let mut observation = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            let progress = queued.progress();
+            if matches!(progress, Progress::Accepted) {
+                break;
+            }
+            assert!(
+                !progress.is_final(),
+                "the original authority is still valid at durable native acceptance: {progress:?}"
+            );
+            observation.tick().await;
+        }
+    })
+    .await;
+    rig.clock.advance(chrono::Duration::seconds(60));
+    rig.machine.handler.release();
+    let ended = within(10, queued.wait()).await;
+    assert!(
+        matches!(ended, Progress::Failed(ref error) if error.known() == Some(ErrorCode::Timeout)),
+        "{ended:?}"
+    );
+    assert_eq!(
+        rig.machine.handler.runs_of(id),
+        0,
+        "queue time can extend work, never original authority"
+    );
 }
 
 #[tokio::test]
@@ -307,15 +413,19 @@ async fn a_command_that_reaches_a_machine_before_it_has_said_what_carries_comman
     );
     // The machine has written it down and said so; the next moments are its chance to fail it.
     within(10, async {
-        while !matches!(controller.progress(command), Some(Progress::Accepted)) {
+        while !controller
+            .progress(command)
+            .is_some_and(|progress| progress.key_phase().is_some())
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        controller.progress(command),
-        Some(Progress::Accepted),
+    assert!(
+        controller
+            .progress(command)
+            .is_some_and(|progress| progress.key_phase().is_some()),
         "it is in hand and waits"
     );
     let handler = Arc::new(ScriptedHandler::default());
@@ -424,12 +534,14 @@ async fn a_machine_that_does_not_acknowledge_a_command_is_asked_once_more_and_th
     let handle = issuer.issue(command(&clock, 3_600));
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
     assert_eq!(handle.progress(), Progress::Sent);
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     assert!(
         matches!(frames.recv().await, Some(DownFrame::Cmd(_))),
         "sent once more"
     );
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     let Progress::Failed(error) = handle.progress() else {
@@ -453,7 +565,10 @@ async fn a_command_no_machine_took_expires_at_its_deadline_and_one_a_machine_too
         "the one that waited is sent first"
     );
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
-    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck { id: taken.id() });
+    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck {
+        id: taken.id(),
+        key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+    });
     issuer.session_down();
     clock.advance(chrono::Duration::seconds(90));
     issuer.tick(tokio::time::Instant::now());
@@ -525,6 +640,11 @@ async fn cancellation_received_before_command_admission_prevents_any_handler_wor
     server.serve(handler.clone());
     let id = new_id();
     let command = Cmd {
+        authority_until: None,
+        native_members: None,
+        native_revision: None,
+
+        native_target: None,
         id,
         kind: CommandKind::SessionClose.as_str().into(),
         key: None,
@@ -583,6 +703,11 @@ async fn a_stop_after_restart_waits_for_interrupted_external_work_to_be_cleaned_
     let directory = tempfile::tempdir().unwrap();
     let id = new_id();
     let command = Cmd {
+        authority_until: None,
+        native_members: None,
+        native_revision: None,
+
+        native_target: None,
         id,
         kind: CommandKind::SessionClose.as_str().into(),
         key: None,
@@ -685,7 +810,10 @@ async fn a_native_ack_before_local_refusal_wins_but_unacknowledged_first_send_st
         let (issuer, _frames, clock) = issuer();
         let original = command(&clock, 60);
         let handle = issuer.issue(original.clone());
-        let ack = orch_link_contract::commands::CmdAck { id: original.id };
+        let ack = orch_link_contract::commands::CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        };
         let error = CommandError::new(ErrorCode::Conflict, "current authority was revoked");
         if ack_first {
             issuer.on_cmd_ack(&ack);
@@ -716,7 +844,10 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         let handle = issuer.issue(original.clone());
         issuer.session_ready();
         assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
-        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        });
         assert_eq!(handle.progress(), Progress::Accepted);
         // Normal reconnection retries the acknowledged identity to recover its result.
         issuer.session_ready();
@@ -739,7 +870,10 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         // can deliver its actual result. Retiring one local timer is not cancellation.
         issuer.session_ready();
         assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
-        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        });
         let result = json!({"native":"completed after suppression"});
         issuer.on_cmd_res(&CmdRes {
             id: original.id,
@@ -748,4 +882,784 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         assert_eq!(handle.progress(), Progress::Succeeded(result));
         assert!(issuer.answered(original.id));
     }
+}
+
+#[tokio::test]
+async fn a_deferred_native_act_recovers_only_its_own_successful_journal_answer_after_restart() {
+    let mut rig = rig();
+    rig.machine.link.connected().await;
+    let thread = new_id();
+    let id = rig.controller.issue(
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 300),
+        &SessionClose { thread_id: thread },
+    );
+    assert!(
+        !rig.machine
+            .link
+            .command_succeeded(new_id(), CommandKind::SessionClose)
+    );
+    assert!(matches!(
+        within(10, rig.controller.wait_command(id)).await,
+        Progress::Succeeded(_)
+    ));
+    assert!(
+        rig.machine
+            .link
+            .command_succeeded(id, CommandKind::SessionClose)
+    );
+    assert!(
+        !rig.machine
+            .link
+            .command_succeeded(id, CommandKind::SessionOpen)
+    );
+    let _kept = rig.machine.keep_dir();
+    let directory = rig.machine.data_dir().to_owned();
+    rig.machine.link.shutdown().await;
+    let identity = rig.pki.machine(rig.machine.machine_id);
+    let returned = ScriptedMachine::start_in(
+        &rig.hub,
+        &rig.shared,
+        &identity,
+        &MachineSpec::default(),
+        &directory,
+    );
+    assert!(
+        returned
+            .link
+            .command_succeeded(id, CommandKind::SessionClose)
+    );
+    assert!(
+        !returned
+            .link
+            .command_succeeded(new_id(), CommandKind::SessionClose)
+    );
+    returned.link.shutdown().await;
+}
+
+#[test]
+fn a_closed_native_opening_cannot_reappear_after_restart_or_retire_its_successor() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{SessionAction, SessionTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let first = SessionTarget {
+        thread_id: orch_types::new_id(),
+        segment_id: Some(orch_types::new_id()),
+        opening_id: Some(orch_types::new_id()),
+        opening_epoch: Some(1),
+    };
+    let fences = NativeFences::new(directory.path().to_owned());
+    assert!(fences.observe_session(&first, SessionAction::Open).unwrap());
+    assert!(
+        fences
+            .observe_session(&first, SessionAction::Close)
+            .unwrap()
+    );
+    drop(fences);
+    let restarted = NativeFences::new(directory.path().to_owned());
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Open)
+            .unwrap(),
+        "an empty native slot does not forget its retirement"
+    );
+    let successor = SessionTarget {
+        opening_id: Some(orch_types::new_id()),
+        opening_epoch: Some(2),
+        ..first.clone()
+    };
+    assert!(
+        restarted
+            .observe_session(&successor, SessionAction::Open)
+            .unwrap()
+    );
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Close)
+            .unwrap()
+    );
+    assert!(
+        restarted
+            .observe_session(&successor, SessionAction::Use)
+            .unwrap()
+    );
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Use)
+            .unwrap()
+    );
+}
+
+#[test]
+fn old_runtime_and_harness_controls_stay_stale_after_an_empty_slot_and_native_restart() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    let directory = tempfile::tempdir().unwrap();
+    for subject in [
+        LifecycleSubject::Runtime {
+            runtime_id: new_id(),
+        },
+        LifecycleSubject::Harness {
+            provider_id: new_id(),
+            agent_id: new_id(),
+        },
+    ] {
+        let first = LifecycleTarget {
+            pending: Vec::new(),
+            subject: subject.clone(),
+            observed: None,
+            opening: Some(new_id()),
+            revision: 1,
+        };
+        let fences = NativeFences::new(directory.path().to_owned());
+        assert!(
+            fences
+                .observe_lifecycle(&first, LifecycleAction::Start)
+                .unwrap()
+        );
+        let stopped = LifecycleTarget {
+            observed: first.opening,
+            opening: None,
+            revision: 2,
+            ..first.clone()
+        };
+        assert!(
+            fences
+                .observe_lifecycle(&stopped, LifecycleAction::Stop)
+                .unwrap()
+        );
+        drop(fences);
+        let restarted = NativeFences::new(directory.path().to_owned());
+        assert!(
+            !restarted
+                .observe_lifecycle(&first, LifecycleAction::Start)
+                .unwrap()
+        );
+        let next = LifecycleTarget {
+            opening: Some(new_id()),
+            revision: 3,
+            ..first.clone()
+        };
+        assert!(
+            restarted
+                .observe_lifecycle(&next, LifecycleAction::Start)
+                .unwrap()
+        );
+        assert!(
+            !restarted
+                .observe_lifecycle(&stopped, LifecycleAction::Stop)
+                .unwrap()
+        );
+        let absent = LifecycleTarget {
+            observed: None,
+            opening: None,
+            revision: 4,
+            ..first.clone()
+        };
+        assert!(
+            restarted
+                .observe_lifecycle(&absent, LifecycleAction::Remove)
+                .unwrap()
+        );
+        drop(restarted);
+        let reopened = NativeFences::new(directory.path().to_owned());
+        assert_eq!(reopened.lifecycle_target(&subject).unwrap(), Some(absent));
+        assert!(
+            !reopened
+                .observe_lifecycle(&next, LifecycleAction::Start)
+                .unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_newer_native_control_is_durable_before_older_work_leaves_its_serial_queue() {
+    use orch_link::commands::{CommandServer, ServerOptions};
+    use orch_link::journal::{Journal, Step};
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::commands::{CommandResult, NodeRuntimeStart, NodeRuntimeStop};
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget, NativeTarget};
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(orch_testkit::clock::start()));
+    let directory = tempfile::tempdir().unwrap();
+    let journal = Journal::open(directory.path(), Duration::from_secs(3600), clock.time()).unwrap();
+    let server = CommandServer::new(
+        journal,
+        clock.clone(),
+        ServerOptions {
+            roles: vec![Role::Agent, Role::Node],
+            connected: true,
+        },
+    );
+    let handler = Arc::new(ScriptedHandler::default());
+    handler.hold(CommandKind::SessionClose);
+    handler.on(CommandKind::NodeRuntimeStart, |_| {
+        Ok(CommandResult::NodeRuntimeStart(
+            orch_link_contract::commands::NodeRuntimeStartResult {
+                source: orch_link_contract::native_target::RuntimeSource::untracked(),
+                reused: false,
+            },
+        ))
+    });
+    handler.on(CommandKind::NodeRuntimeStop, |_| {
+        Err(CommandError::new(
+            ErrorCode::Unsupported,
+            "the transport fixture owns no physical runtime",
+        ))
+    });
+    server.serve(handler.clone());
+    let runtime = new_id();
+    let key = SerialKey::Runtime(runtime);
+    let deadline = Time::new(clock.now() + chrono::Duration::minutes(1));
+    let hold = Cmd::new(
+        new_id(),
+        &key,
+        deadline,
+        &SessionClose {
+            thread_id: new_id(),
+        },
+    )
+    .unwrap();
+    server.on_cmd(hold.clone()).await;
+    within(10, handler.started(hold.id)).await;
+    let original = new_id();
+    let mut start = Cmd::new(
+        new_id(),
+        &key,
+        deadline,
+        &NodeRuntimeStart {
+            runtime_id: runtime,
+        },
+    )
+    .unwrap();
+    let first = LifecycleTarget {
+        pending: Vec::new(),
+        subject: LifecycleSubject::Runtime {
+            runtime_id: runtime,
+        },
+        observed: Some(original),
+        opening: Some(new_id()),
+        revision: 1,
+    };
+    start.native_target = Some(NativeTarget::Lifecycle(first.clone()));
+    server.on_cmd(start.clone()).await;
+    let mut stop = Cmd::new(
+        new_id(),
+        &key,
+        deadline,
+        &NodeRuntimeStop {
+            runtime_id: runtime,
+            reason: None,
+        },
+    )
+    .unwrap();
+    let latest = LifecycleTarget {
+        opening: None,
+        revision: 2,
+        ..first
+    };
+    stop.native_target = Some(NativeTarget::Lifecycle(latest.clone()));
+    server.on_cmd(stop.clone()).await;
+    let fences = NativeFences::new(directory.path().join("native-fences"));
+    within(10, async {
+        while fences.lifecycle_target(&latest.subject).unwrap() != Some(latest.clone()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert_eq!(handler.runs_of(start.id), 0);
+    assert_eq!(handler.runs_of(stop.id), 0);
+    handler.release();
+    within(10, async {
+        while !server
+            .entry(stop.id)
+            .is_some_and(|entry| matches!(entry.step, Step::Done { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let old = server.entry(start.id).unwrap();
+    assert!(matches!(old.step, Step::Done { result } if
+        matches!(&result.outcome, Err(error) if error.known() == Some(ErrorCode::Conflict))));
+    assert_eq!(
+        handler.runs_of(start.id),
+        0,
+        "old queued work must never reach a handler"
+    );
+    assert_eq!(handler.runs_of(stop.id), 1);
+}
+
+#[tokio::test]
+async fn a_retried_native_control_uses_its_journaled_target_before_updating_any_marker() {
+    use orch_link::commands::{CommandServer, ServerOptions};
+    use orch_link::journal::{Journal, Step};
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::commands::NodeRuntimeStop;
+    use orch_link_contract::native_target::{LifecycleSubject, LifecycleTarget, NativeTarget};
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(orch_testkit::clock::start()));
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = new_id();
+    let mut original = Cmd::new(
+        new_id(),
+        &SerialKey::Runtime(runtime),
+        Time::new(clock.now() + chrono::Duration::minutes(1)),
+        &NodeRuntimeStop {
+            runtime_id: runtime,
+            reason: None,
+        },
+    )
+    .unwrap();
+    let target = LifecycleTarget {
+        pending: Vec::new(),
+        subject: LifecycleSubject::Runtime {
+            runtime_id: runtime,
+        },
+        observed: Some(new_id()),
+        opening: None,
+        revision: 2,
+    };
+    original.native_target = Some(NativeTarget::Lifecycle(target.clone()));
+    let mut journal =
+        Journal::open(directory.path(), Duration::from_secs(3600), clock.time()).unwrap();
+    journal.accept(&original, clock.time()).unwrap();
+    let server = CommandServer::new(
+        journal,
+        clock,
+        ServerOptions {
+            roles: vec![Role::Node],
+            connected: true,
+        },
+    );
+    let handler = Arc::new(ScriptedHandler::default());
+    let expected = target.clone();
+    handler.on_with_context(CommandKind::NodeRuntimeStop, move |context, _| {
+        assert_eq!(
+            context.native_target,
+            Some(NativeTarget::Lifecycle(expected.clone()))
+        );
+        Err(CommandError::new(
+            ErrorCode::Unsupported,
+            "the transport fixture owns no physical runtime",
+        ))
+    });
+    server.serve(handler.clone());
+    let other = LifecycleSubject::Runtime {
+        runtime_id: new_id(),
+    };
+    let mut retry = original.clone();
+    retry.native_target = Some(NativeTarget::Lifecycle(LifecycleTarget {
+        subject: other.clone(),
+        revision: 999,
+        ..target.clone()
+    }));
+    server.on_cmd(retry).await;
+    within(10, async {
+        while !server
+            .entry(original.id)
+            .is_some_and(|entry| matches!(entry.step, Step::Done { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let fences = NativeFences::new(directory.path().join("native-fences"));
+    assert_eq!(
+        fences.lifecycle_target(&target.subject).unwrap(),
+        Some(target)
+    );
+    assert_eq!(fences.lifecycle_target(&other).unwrap(), None);
+    assert_eq!(handler.runs_of(original.id), 1);
+}
+
+#[test]
+fn native_control_order_never_merges_another_subject_or_different_original_physical_operands() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let fences = NativeFences::new(directory.path().to_owned());
+    let first = LifecycleTarget {
+        pending: Vec::new(),
+        subject: LifecycleSubject::Runtime {
+            runtime_id: new_id(),
+        },
+        observed: None,
+        opening: Some(new_id()),
+        revision: 8,
+    };
+    assert!(
+        fences
+            .observe_lifecycle(&first, LifecycleAction::Start)
+            .unwrap()
+    );
+    let mut substituted = first.clone();
+    substituted.opening = Some(new_id());
+    assert!(
+        fences
+            .observe_lifecycle(&substituted, LifecycleAction::Start)
+            .is_err()
+    );
+    substituted = first.clone();
+    substituted.observed = Some(new_id());
+    assert!(
+        fences
+            .observe_lifecycle(&substituted, LifecycleAction::Start)
+            .is_err()
+    );
+    assert_eq!(
+        fences.lifecycle_target(&first.subject).unwrap(),
+        Some(first.clone())
+    );
+    let independent = LifecycleTarget {
+        subject: LifecycleSubject::Runtime {
+            runtime_id: new_id(),
+        },
+        revision: 1,
+        ..first.clone()
+    };
+    assert!(
+        fences
+            .observe_lifecycle(&independent, LifecycleAction::Start)
+            .unwrap()
+    );
+    let harness = LifecycleTarget {
+        subject: LifecycleSubject::Harness {
+            provider_id: new_id(),
+            agent_id: new_id(),
+        },
+        revision: 1,
+        ..first.clone()
+    };
+    assert!(
+        fences
+            .observe_lifecycle(&harness, LifecycleAction::Start)
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_committed_tool_withdrawal_before_native_delivery_survives_restart_and_cannot_retire_a_successor()
+ {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{SessionAction, SessionTarget};
+    use orch_link_contract::tool_sessions::ToolSessionUpdate;
+    let directory = tempfile::tempdir().unwrap();
+    let first = SessionTarget {
+        thread_id: new_id(),
+        segment_id: Some(new_id()),
+        opening_id: Some(new_id()),
+        opening_epoch: Some(1),
+    };
+    let withdrawal = ToolSessionUpdate {
+        machine_id: new_id(),
+        thread_id: first.thread_id,
+        segment_id: first.segment_id.unwrap(),
+        opening_id: first.opening_id,
+        opening_epoch: 1,
+        revision: 3,
+        live: false,
+        members: vec![],
+    };
+    NativeFences::new(directory.path().into())
+        .observe_tools(&withdrawal)
+        .unwrap();
+    let restarted = NativeFences::new(directory.path().into());
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Open)
+            .unwrap()
+    );
+    let next = SessionTarget {
+        opening_id: Some(new_id()),
+        opening_epoch: Some(2),
+        ..first.clone()
+    };
+    assert!(
+        restarted
+            .observe_session(&next, SessionAction::Open)
+            .unwrap()
+    );
+    restarted.observe_tools(&withdrawal).unwrap();
+    assert!(
+        restarted
+            .observe_session(&next, SessionAction::Use)
+            .unwrap()
+    );
+    assert!(
+        restarted.tools(first.thread_id).unwrap().is_none(),
+        "the old snapshot cannot be stamped onto the successor"
+    );
+}
+
+#[test]
+fn a_saved_positive_scope_cannot_revalidate_a_new_control_connection_without_a_fresh_notice() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::tool_sessions::ToolSessionUpdate;
+    let directory = tempfile::tempdir().unwrap();
+    let fences = NativeFences::new(directory.path().into());
+    let update = ToolSessionUpdate {
+        machine_id: new_id(),
+        thread_id: new_id(),
+        segment_id: new_id(),
+        opening_id: Some(new_id()),
+        opening_epoch: 1,
+        revision: 1,
+        live: true,
+        members: vec![],
+    };
+    assert!(fences.observe_tools(&update).unwrap());
+    assert!(fences.current_tools(update.thread_id).unwrap().is_some());
+    fences.set_tool_control(false);
+    fences.set_tool_control(true);
+    assert!(fences.current_tools(update.thread_id).unwrap().is_none());
+    assert!(
+        fences.tools(update.thread_id).unwrap().is_some(),
+        "old facts still restrict queued commands"
+    );
+    assert!(
+        fences.observe_tools(&update).unwrap(),
+        "the current API may confirm an unchanged revision after restart"
+    );
+    assert!(fences.current_tools(update.thread_id).unwrap().is_some());
+}
+
+#[test]
+fn an_unsettled_native_opening_survives_restart_and_a_newer_stop_until_its_own_outcome_is_known() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let original = LifecycleTarget {
+        subject: LifecycleSubject::Runtime {
+            runtime_id: new_id(),
+        },
+        observed: None,
+        opening: Some(new_id()),
+        pending: Vec::new(),
+        revision: 1,
+    };
+    let fences = NativeFences::new(directory.path().into());
+    assert!(
+        fences
+            .observe_lifecycle(&original, LifecycleAction::Create)
+            .unwrap()
+    );
+    assert!(
+        fences
+            .begin_opening(&original, LifecycleAction::Create)
+            .unwrap()
+    );
+    let stop = LifecycleTarget {
+        opening: None,
+        pending: vec![original.opening.unwrap()],
+        revision: 2,
+        ..original.clone()
+    };
+    let reopened = NativeFences::new(directory.path().into());
+    assert!(
+        reopened
+            .observe_lifecycle(&stop, LifecycleAction::Stop)
+            .unwrap()
+    );
+    assert!(
+        reopened.unsettled_opening(&stop).unwrap(),
+        "new control order is no proof that an older native effect never happened"
+    );
+    let changed = LifecycleTarget {
+        subject: LifecycleSubject::Runtime {
+            runtime_id: new_id(),
+        },
+        ..stop.clone()
+    };
+    assert!(
+        !reopened.unsettled_opening(&changed).unwrap(),
+        "another native subject is independent"
+    );
+    let newer = LifecycleTarget {
+        opening: Some(new_id()),
+        pending: Vec::new(),
+        revision: 3,
+        ..original.clone()
+    };
+    assert!(
+        reopened
+            .observe_lifecycle(&newer, LifecycleAction::Create)
+            .unwrap()
+    );
+    assert!(
+        !reopened
+            .begin_opening(&newer, LifecycleAction::Create)
+            .unwrap(),
+        "an ambiguous earlier effect cannot become a replacement's allocation"
+    );
+    assert!(
+        reopened
+            .settle_opening(&original, LifecycleAction::Create)
+            .unwrap(),
+        "an original factual receipt remains recordable after supersession"
+    );
+    let settled = NativeFences::new(directory.path().into());
+    assert!(!settled.unsettled_opening(&stop).unwrap());
+    assert!(
+        settled
+            .begin_opening(&newer, LifecycleAction::Create)
+            .unwrap()
+    );
+    assert!(
+        !settled
+            .settle_opening(&original, LifecycleAction::Create)
+            .unwrap(),
+        "a late old receipt cannot settle another opening"
+    );
+    let current = LifecycleTarget {
+        observed: newer.opening,
+        opening: None,
+        pending: Vec::new(),
+        revision: 4,
+        ..stop
+    };
+    assert!(settled.unsettled_opening(&current).unwrap());
+}
+
+#[test]
+fn an_actual_native_receipt_is_immutable_and_stops_being_recovery_input_after_its_ledger_commit() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{LifecycleAction, LifecycleSubject, LifecycleTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let fences = NativeFences::new(directory.path().into());
+    let target = LifecycleTarget {
+        subject: LifecycleSubject::Runtime {
+            runtime_id: new_id(),
+        },
+        observed: None,
+        opening: Some(new_id()),
+        pending: Vec::new(),
+        revision: 1,
+    };
+    assert!(
+        fences
+            .observe_lifecycle(&target, LifecycleAction::Create)
+            .unwrap()
+    );
+    assert!(
+        fences
+            .begin_opening(&target, LifecycleAction::Create)
+            .unwrap()
+    );
+    let receipt = json!({"actual_driver_reference":"created-object","metadata":"original"});
+    assert!(
+        fences
+            .record_opening(&target, LifecycleAction::Create, &receipt)
+            .unwrap()
+    );
+    let reopened = NativeFences::new(directory.path().into());
+    let saved = reopened
+        .uninstalled_receipt(&target.subject)
+        .unwrap()
+        .expect("the actual receipt survives before ledger commit");
+    assert_eq!(saved.target, target);
+    assert_eq!(saved.value, receipt);
+    assert!(
+        reopened
+            .record_opening(&target, LifecycleAction::Create, &receipt)
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .record_opening(
+                &target,
+                LifecycleAction::Create,
+                &json!({"actual_driver_reference":"replacement"})
+            )
+            .is_err(),
+        "a receipt never changes its observed object"
+    );
+    let newer = LifecycleTarget {
+        revision: 2,
+        opening: Some(new_id()),
+        ..target.clone()
+    };
+    assert!(
+        !reopened
+            .acknowledge_opening(&newer, LifecycleAction::Create)
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .acknowledge_opening(&target, LifecycleAction::Create)
+            .unwrap()
+    );
+    let committed = NativeFences::new(directory.path().into());
+    assert!(
+        committed
+            .uninstalled_receipt(&target.subject)
+            .unwrap()
+            .is_none(),
+        "a completed old creation cannot roll back later generations"
+    );
+}
+
+#[tokio::test]
+async fn a_replayed_acknowledgement_cannot_reacquire_a_released_key() {
+    use orch_link_contract::commands::{CmdAck, CommandKeyPhase};
+    let (issuer, _frames, clock) = issuer();
+    let original = command(&clock, 60);
+    let handle = issuer.issue(original.clone());
+    for key_phase in [
+        CommandKeyPhase::Queued,
+        CommandKeyPhase::Running,
+        CommandKeyPhase::Released,
+    ] {
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase,
+        });
+        assert_eq!(handle.progress().key_phase(), Some(key_phase));
+    }
+    issuer.on_cmd_ack(&CmdAck {
+        id: original.id,
+        key_phase: CommandKeyPhase::Queued,
+    });
+    assert_eq!(handle.progress(), Progress::Released);
+    assert!(
+        !handle.progress().is_final(),
+        "the upload still owns its result"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_reaches_the_machine_while_the_threads_ordinary_command_is_still_running() {
+    use orch_link_contract::commands::{KeyKind, TurnInterrupt};
+    let rig = rig();
+    rig.machine.link.connected().await;
+    rig.machine.handler.hold(CommandKind::SessionClose);
+    let thread = new_id();
+    let slow = rig.controller.issue(
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 600),
+        &SessionClose { thread_id: thread },
+    );
+    within(10, rig.machine.handler.started(slow)).await;
+    assert_eq!(
+        CommandKind::TurnInterrupt.key(),
+        KeyKind::None,
+        "Stop has no ordinary command queue"
+    );
+    let stop = rig.controller.issue(
+        &SerialKey::None,
+        deadline(&rig.clock, 30),
+        &TurnInterrupt {
+            thread_id: thread,
+            turn_id: new_id(),
+        },
+    );
+    within(10, rig.machine.handler.started(stop)).await;
+    assert!(matches!(
+        within(10, rig.controller.wait_command(stop)).await,
+        Progress::Succeeded(_)
+    ));
+    assert!(!matches!(
+        rig.controller.progress(slow),
+        Some(Progress::Succeeded(_))
+    ));
+    rig.machine.handler.release();
+    within(10, rig.controller.wait_command(slow)).await;
 }

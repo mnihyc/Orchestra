@@ -22,17 +22,41 @@ use orch_types::{Id, Json};
 /// the link allows, so that one run of text never fills a frame.
 pub const MAX_MERGED_DELTA_BYTES: usize = 16 * 1024;
 
+/// An observation and the original physical producer carried beside its unchanged stream.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Publication {
+    pub stream: Stream,
+    pub event: Event,
+    pub native_opening_id: Option<Id>,
+}
+
 /// Somewhere events are put. The link's spool is one; a test can be another.
 #[async_trait]
 pub trait Publisher: Send + Sync {
     /// Puts a durable event on a stream and returns once it is kept.
-    async fn publish(&self, stream: Stream, event: Event) -> Result<(), PublishError>;
+    async fn publish(&self, stream: Stream, event: Event) -> Result<(), PublishError> {
+        self.publish_from(None, stream, event).await
+    }
+    /// Puts the source captured by the producer in the same durable record as its observation.
+    async fn publish_from(
+        &self,
+        native_opening_id: Option<Id>,
+        stream: Stream,
+        event: Event,
+    ) -> Result<(), PublishError>;
     /// Puts events on their streams in their order and returns once all are kept, each one's answer in
     /// its place. As given here one after the other; the link hands all over before it waits (C-turns).
-    async fn publish_all(&self, events: Vec<(Stream, Event)>) -> Vec<Result<(), PublishError>> {
+    async fn publish_all(&self, events: Vec<Publication>) -> Vec<Result<(), PublishError>> {
         let mut answers = Vec::with_capacity(events.len());
-        for (stream, event) in events {
-            answers.push(self.publish(stream, event).await);
+        for publication in events {
+            answers.push(
+                self.publish_from(
+                    publication.native_opening_id,
+                    publication.stream,
+                    publication.event,
+                )
+                .await,
+            );
         }
         answers
     }
@@ -47,14 +71,26 @@ impl Publisher for MachineLink {
     async fn raw_after(&self, stream: Stream, after: i64) -> Result<(), PublishError> {
         MachineLink::raw_after(self, &stream, after).await
     }
-    async fn publish(&self, stream: Stream, event: Event) -> Result<(), PublishError> {
-        MachineLink::publish(self, &stream, &event).await
+    async fn publish_from(
+        &self,
+        native_opening_id: Option<Id>,
+        stream: Stream,
+        event: Event,
+    ) -> Result<(), PublishError> {
+        MachineLink::publish_from_now(self, native_opening_id, &stream, &event).await
     }
-    async fn publish_all(&self, events: Vec<(Stream, Event)>) -> Vec<Result<(), PublishError>> {
+    async fn publish_all(&self, events: Vec<Publication>) -> Vec<Result<(), PublishError>> {
         // All handed to the link first, in their order; then each answer (C-turns).
         let handed: Vec<_> = events
             .iter()
-            .map(|(stream, event)| MachineLink::publish_now(self, stream, event))
+            .map(|publication| {
+                MachineLink::publish_from_now(
+                    self,
+                    publication.native_opening_id,
+                    &publication.stream,
+                    &publication.event,
+                )
+            })
             .collect();
         let mut answers = Vec::with_capacity(handed.len());
         for answer in handed {
@@ -81,8 +117,8 @@ pub fn convert(
     provider_id: Id,
     agent_id: Id,
     event: &AdapterEvent,
-) -> Result<(Stream, Event), ConvertError> {
-    Ok(match event {
+) -> Result<Publication, ConvertError> {
+    let (stream, linked) = match event {
         AdapterEvent::ModelRequest(report) => (
             Stream::Session {
                 thread_id: report.thread_id,
@@ -97,6 +133,7 @@ pub fn convert(
             thread_id,
             segment_id,
             event,
+            ..
         } => {
             let written = serde_json::to_value(event)?;
             let kind = event.kind();
@@ -131,6 +168,11 @@ pub fn convert(
             },
             Event::HarnessStatus(harness_status(status)),
         ),
+    };
+    Ok(Publication {
+        stream,
+        event: linked,
+        native_opening_id: event.native_opening_id(),
     })
 }
 
@@ -148,13 +190,15 @@ pub fn harness_status(status: &HarnessStatus) -> link::HarnessStatus {
     }
 }
 
-fn delta_of(event: &AdapterEvent) -> Option<(Id, Id, &ItemDelta)> {
+fn delta_of(event: &AdapterEvent) -> Option<(Id, Id, Option<Id>, &ItemDelta)> {
     match event {
         AdapterEvent::Session {
+            native_opening_id,
             thread_id,
             segment_id,
             event: SessionEvent::ItemDelta(delta),
-        } => Some((*thread_id, *segment_id, delta)),
+            ..
+        } => Some((*thread_id, *segment_id, *native_opening_id, delta)),
         _ => None,
     }
 }
@@ -169,13 +213,16 @@ pub fn coalesce(batch: Vec<AdapterEvent>) -> Vec<AdapterEvent> {
         let joined = match (merged.last_mut(), delta_of(&event)) {
             (
                 Some(AdapterEvent::Session {
+                    native_opening_id,
                     thread_id,
                     segment_id,
                     event: SessionEvent::ItemDelta(before),
+                    ..
                 }),
-                Some((thread, segment, delta)),
+                Some((thread, segment, opening, delta)),
             ) if *thread_id == thread
                 && *segment_id == segment
+                && *native_opening_id == opening
                 && before.native_ref == delta.native_ref
                 && before.field == delta.field
                 && before.offset + before.len == delta.offset
@@ -202,6 +249,7 @@ mod tests {
 
     fn delta(thread: Id, segment: Id, item: &str, offset: i64, data: &str) -> AdapterEvent {
         AdapterEvent::Session {
+            native_opening_id: None,
             thread_id: thread,
             segment_id: segment,
             event: SessionEvent::ItemDelta(ItemDelta::text(item, DeltaField::Text, offset, data)),
@@ -209,8 +257,26 @@ mod tests {
     }
 
     fn data_of(event: &AdapterEvent) -> (&str, i64, i64) {
-        let (_, _, delta) = delta_of(event).unwrap();
+        let (_, _, _, delta) = delta_of(event).unwrap();
         (delta.data.as_str(), delta.offset, delta.len)
+    }
+
+    #[test]
+    fn text_from_different_physical_openings_keeps_its_own_events_on_one_stream() {
+        let (thread, segment) = (new_id(), new_id());
+        let event = |opening, offset, data| {
+            AdapterEvent::from_wire("item.delta",
+            serde_json::json!({"thread_id":thread,"segment_id":segment,"native_opening_id":opening,
+                "native_ref":"reused-item","field":"text","offset":offset,"len":1,"data":data})).unwrap()
+        };
+        let batch = coalesce(vec![event(new_id(), 0, "A"), event(new_id(), 1, "B")]);
+        assert_eq!(
+            batch.len(),
+            2,
+            "a replacement's text cannot join its predecessor's retained delta"
+        );
+        assert_eq!(data_of(&batch[0]), ("A", 0, 1));
+        assert_eq!(data_of(&batch[1]), ("B", 1, 1));
     }
 
     #[test]
@@ -229,6 +295,7 @@ mod tests {
     fn a_delta_is_not_merged_across_another_event_another_item_or_a_gap() {
         let (thread, segment) = (new_id(), new_id());
         let completed = AdapterEvent::Session {
+            native_opening_id: None,
             thread_id: thread,
             segment_id: segment,
             event: SessionEvent::TurnCompleted(TurnCompleted {
@@ -248,7 +315,7 @@ mod tests {
         ]);
         let shapes: Vec<_> = merged
             .iter()
-            .map(|event| delta_of(event).map(|(_, _, d)| d.data.clone()))
+            .map(|event| delta_of(event).map(|(_, _, _, d)| d.data.clone()))
             .collect();
         assert_eq!(
             shapes,
@@ -288,7 +355,11 @@ mod tests {
     fn a_session_event_goes_on_the_stream_of_its_session_in_the_form_the_link_carries() {
         let (provider, agent, thread, segment) = (new_id(), new_id(), new_id(), new_id());
         let event = delta(thread, segment, "item_1", 0, "Hi");
-        let (stream, converted) = convert(provider, agent, &event).unwrap();
+        let Publication {
+            stream,
+            event: converted,
+            ..
+        } = convert(provider, agent, &event).unwrap();
         assert_eq!(
             stream,
             Stream::Session {
@@ -310,7 +381,7 @@ mod tests {
         let (provider, agent) = (new_id(), new_id());
         let login = AdapterEvent::Login(orch_agent_contract::login::LoginState::idle());
         assert_eq!(
-            convert(provider, agent, &login).unwrap().0,
+            convert(provider, agent, &login).unwrap().stream,
             Stream::Provider {
                 provider_id: provider
             }
@@ -321,7 +392,7 @@ mod tests {
             harness_version: None,
             sessions_open: 2,
         });
-        let (stream, event) = convert(provider, agent, &status).unwrap();
+        let Publication { stream, event, .. } = convert(provider, agent, &status).unwrap();
         assert_eq!(
             stream,
             Stream::Harness {

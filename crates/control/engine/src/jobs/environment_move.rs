@@ -499,6 +499,7 @@ impl Engine {
                 machine,
                 SerialKey::Environment(environment),
                 &FsManifest {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: environment,
                     selection: Selection {
                         include: selection.include.clone(),
@@ -680,6 +681,14 @@ impl Engine {
             }
         }
         let files = FilesPlan {
+            source_policy: live.then(crate::fork_source::workspace_copy_policy),
+            home_policy: home
+                .as_ref()
+                .filter(|home| home.measured)
+                .map(|_| crate::fork_source::owned_copy_policy()),
+            file_states_policy: file_states
+                .complete
+                .then(crate::fork_source::owned_copy_policy),
             file_states: Some(file_states),
             kept_image_bytes: kept_image.as_ref().map(|image| image.bytes),
             source: if live {
@@ -1001,6 +1010,7 @@ impl Moving {
                         machine,
                         SerialKey::Environment(self.environment()),
                         &FsSnapshot {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             work: None,
                             environment_id: self.environment(),
                             job_id: job.id(),
@@ -1086,6 +1096,7 @@ impl Moving {
                     machine,
                     SerialKey::Environment(self.environment()),
                     &FsMaterialize {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: self.environment(),
                         job_id: Some(job.id()),
@@ -1160,6 +1171,7 @@ impl Moving {
                         machine,
                         SerialKey::Environment(self.environment()),
                         &orch_link_contract::source::FsRecordVerify {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             environment_id: self.environment(),
                         },
                     )
@@ -1576,13 +1588,25 @@ impl Moving {
                 hosts::delete_runtime_secret(&mut conn, next, "enroll_token").await?;
                 drop(conn);
                 // With the candidate gone nothing uses the copies' volumes; a replaced location gets its data back.
-                let left = crate::mount_copies::undo(job).await;
+                let left = match crate::mount_copies::undo(job).await {
+                    Ok(left) => left,
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            "copy cleanup must retain its original data before the move can finish"
+                        );
+                        return Err(Stop::Lost);
+                    }
+                };
                 if !left.is_empty() {
                     return Err(fail("mount_copy_failed", left.join("; ")));
                 }
                 Ok(())
             }
             .await;
+            if matches!(cleanup, Err(Stop::Lost)) {
+                return Err(Stop::Lost);
+            }
             if let Err(error) = cleanup {
                 // Source processes must be resumed even when the destination will only answer
                 // a later cleanup attempt. Keep the candidate for the reaper, never publish it.
@@ -1700,6 +1724,7 @@ impl Phased for Moving {
         match self.rollback(job).await {
             Ok(None) => Undone::Everything,
             Ok(Some(detail)) => Undone::Partly(detail),
+            Err(Stop::Lost) => Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into()),
             Err(e) => Undone::Partly(format!("the move could not be fully undone: {e:?}")),
         }
     }

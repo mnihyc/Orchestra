@@ -14,14 +14,14 @@ pub struct RecordedUses;
 
 /// Freezes the acknowledged session membership before a turn can outlive a reload or reconnect.
 pub async fn capture_turn(conn: &mut Conn, turn: Id) -> Result<(), EngineError> {
-    sqlx::query("UPDATE turns t SET resource_delivery=(SELECT jsonb_agg(jsonb_build_object('name',m->'name','server_id',m->'server_id')) FROM commands c CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.body->'session',c.body)->'mcp') m WHERE c.id=(s.delivered_resources->>'command')::uuid) FROM segments s WHERE t.id=$1 AND s.id=t.segment_id AND t.resource_delivery IS NULL")
+    sqlx::query("UPDATE turns t SET resource_delivery=NULLIF(s.delivered_resources->'mcp_names','null'::jsonb),resource_opening_id=(s.delivered_resources->>'mcp_command')::uuid FROM segments s WHERE t.id=$1 AND s.id=t.segment_id AND t.resource_delivery IS NULL AND t.resource_opening_id IS NULL")
         .bind(turn).execute(conn).await.map_err(DbError::from)?;
     Ok(())
 }
 
 /// A closed turn cannot accept another use, so its replay fence is no longer needed.
 pub async fn close_turn(conn: &mut Conn, turn: Id) -> Result<(), EngineError> {
-    sqlx::query("UPDATE turns SET resource_delivery=NULL WHERE id=$1")
+    sqlx::query("UPDATE turns SET resource_delivery=NULL,resource_opening_id=NULL WHERE id=$1")
         .bind(turn)
         .execute(&mut *conn)
         .await
@@ -211,7 +211,7 @@ pub async fn tool_item(
     }
     // Refused local approvals never reach the target, even when the native tool prints an error.
     let denied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM approvals a LEFT JOIN items i ON i.id=a.tool_item_id WHERE a.turn_id=$1 AND a.state='denied' AND (a.native_ref=$2 OR i.native_ref=$2))")
-        .bind(turn).bind(native).fetch_one(&mut *conn).await.map_err(DbError::from)?;
+        .bind(turn).bind(orch_types::storable::encode_key(native)).fetch_one(&mut *conn).await.map_err(DbError::from)?;
     if denied {
         return Ok(());
     }

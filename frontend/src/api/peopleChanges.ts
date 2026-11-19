@@ -20,6 +20,7 @@ const PEOPLE_PROJECTIONS = new Set([
   'node-chat-opening', 'org-overview', 'children', 'names', 'activity', 'outside-port-openings',
   // A private reference is an independent authorized projection; a reconnect can change its reach.
   'reference-preview',
+  'start-options', 'thread-binding-options',
 ]);
 
 // These admin projections contain people, membership counts or member choices.
@@ -34,23 +35,23 @@ export function isPeopleProjection(key: QueryKey): boolean {
   return typeof key[0] === 'string' && PEOPLE_PROJECTIONS.has(key[0]);
 }
 
-const generations = new WeakMap<QueryClient, number>();
-const hintCuts = new WeakMap<QueryClient, number>();
+const generations = new WeakMap<ReturnType<QueryClient['getQueryCache']>, number>();
+const hintCuts = new WeakMap<ReturnType<QueryClient['getQueryCache']>, number>();
 interface NativePeopleRead { cut: number; reader: number | undefined; accepted: boolean }
 const nativeReads = new WeakMap<Query, NativePeopleRead>();
 
 /** A native hint follows its committed change; later native reads already check that change. */
 export function capturePeopleHint(cache: QueryClient): number {
   scheduledReads.advance();
-  const next = (hintCuts.get(cache) ?? 0) + 1;
-  hintCuts.set(cache, next);
+  const next = (hintCuts.get(cache.getQueryCache()) ?? 0) + 1;
+  hintCuts.set(cache.getQueryCache(), next);
   return next;
 }
 
 /** Bind one supplier to the latest received hint, without using a clock or inferring permission. */
 export function beginPeopleRead(cache: QueryClient, queryKey: QueryKey): { accept: () => void; cancel: () => void } {
   const query = cache.getQueryCache().find({ queryKey, exact: true });
-  const read: NativePeopleRead = { cut: hintCuts.get(cache) ?? 0, reader: client.session.getState().readerVersion, accepted: false };
+  const read: NativePeopleRead = { cut: hintCuts.get(cache.getQueryCache()) ?? 0, reader: client.session.getState().readerVersion, accepted: false };
   if (query !== undefined) nativeReads.set(query, read);
   return {
     accept: () => { if (query !== undefined && nativeReads.get(query) === read) read.accepted = true; },
@@ -59,7 +60,7 @@ export function beginPeopleRead(cache: QueryClient, queryKey: QueryKey): { accep
 }
 
 /** Current native membership generation; attempt history remains with its own Query. */
-export function peopleHintCut(cache: QueryClient): number { return hintCuts.get(cache) ?? 0; }
+export function peopleHintCut(cache: QueryClient): number { return hintCuts.get(cache.getQueryCache()) ?? 0; }
 
 function checkedAfter(query: Query, cut: number | undefined): boolean {
   const read = nativeReads.get(query);
@@ -105,9 +106,9 @@ const REVEALING = new Set(['org']);
  */
 export async function repairPeople(cache: QueryClient, supplied: readonly QueryKey[] = [], cut?: number, reachChanged = false): Promise<void> {
   const version = client.session.getState().readerVersion;
-  const generation = (generations.get(cache) ?? 0) + 1;
-  generations.set(cache, generation);
-  const current = () => client.session.getState().readerVersion === version && generations.get(cache) === generation;
+  const generation = (generations.get(cache.getQueryCache()) ?? 0) + 1;
+  generations.set(cache.getQueryCache(), generation);
+  const current = () => client.session.getState().readerVersion === version && generations.get(cache.getQueryCache()) === generation;
   // A mode mutation owns its complete authority reset. If it succeeds that
   // newer reader supersedes this work; a refusal still needs the native hint.
   await modeSettled(cache);
@@ -175,7 +176,7 @@ export async function repairPeople(cache: QueryClient, supplied: readonly QueryK
 
 interface AuthorityBaseline { person: Me; mode: AdminMode; changed: boolean; supplied: readonly QueryKey[] }
 interface AuthorityFlight { version: number | undefined; done: Promise<AuthorityBaseline | null>; invalidate: () => void }
-const authorityFlights = new WeakMap<QueryClient, AuthorityFlight>();
+const authorityFlights = new WeakMap<ReturnType<QueryClient['getQueryCache']>, AuthorityFlight>();
 
 /** One current person/mode baseline precedes dependent reads after an authority hint.
  * The existing session-reset owner handles changed authority; a pending mode act
@@ -183,7 +184,7 @@ const authorityFlights = new WeakMap<QueryClient, AuthorityFlight>();
  */
 export function readAuthority(cache: QueryClient): Promise<AuthorityBaseline | null> {
   const version = client.session.getState().readerVersion;
-  const previous = authorityFlights.get(cache);
+  const previous = authorityFlights.get(cache.getQueryCache());
   if (previous !== undefined && previous.version === version) {
     previous.invalidate();
     return previous.done;
@@ -240,8 +241,8 @@ export function readAuthority(cache: QueryClient): Promise<AuthorityBaseline | n
     }
   };
   const flight: AuthorityFlight = { version, done: work(), invalidate: () => invalidate?.() };
-  authorityFlights.set(cache, flight);
-  const clear = () => { if (authorityFlights.get(cache) === flight) authorityFlights.delete(cache); };
+  authorityFlights.set(cache.getQueryCache(), flight);
+  const clear = () => { if (authorityFlights.get(cache.getQueryCache()) === flight) authorityFlights.delete(cache.getQueryCache()); };
   void flight.done.then(clear, clear);
   return flight.done;
 }

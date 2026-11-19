@@ -86,6 +86,21 @@ fn exec_spec(
 }
 
 #[cfg(target_os = "linux")]
+fn member_id(ticket: &str) -> Id {
+    orch_link_contract::tunnels::Ticket::parse(ticket)
+        .unwrap()
+        .claims()
+        .tool_session
+        .as_ref()
+        .unwrap()
+        .member
+        .strip_prefix("mcp:")
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_harness_reaches_the_executor_of_another_machine_through_its_listener_and_a_tunnel() {
     let mut rig = EnvRig::new();
@@ -253,6 +268,77 @@ async fn a_harness_opens_a_websocket_to_its_executor_and_its_messages_go_both_wa
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+async fn closing_a_local_native_session_ends_its_existing_executor_socket_and_keeps_another_session()
+ {
+    let mut rig = EnvRig::with_roles(vec![Role::Agent, Role::Environment]);
+    rig.with_the_scripted_harness();
+    rig.parts.executors = vec![stand_in_executors::echo_socket()];
+    rig.config.exec.offers.push("echo-exec".into());
+    let workspace = rig.directory("work");
+    rig.start().await;
+    let facts: EnvironmentFacts = serde_json::from_value(rig.attach(&workspace).await).unwrap();
+    start_executor(&rig, "echo-exec").await;
+    let start: orch_link_contract::commands::AgentStart = serde_json::from_value(json!({
+        "provider_id":rig.provider,"agent_id":rig.agent,"harness_kind":"fake",
+        "profile":{"harness_version":null,"config":{},"env":{}},"home":null,
+    }))
+    .unwrap();
+    rig.succeed(&start).await;
+    let mut sockets = Vec::new();
+    for _ in 0..2 {
+        let thread = new_id();
+        let directory = workspace.join(thread.to_string()).display().to_string();
+        let open: SessionOpen = serde_json::from_value(json!({
+            "agent_id":rig.agent,"thread_id":thread,"segment_id":new_id(),"mode":"new",
+            "workspace_root":workspace,"instruction_root_marker":false,"directory":directory,"cwd":directory,"mounts":[],
+            "model":"fake-large","effort":"medium","params":{},"approval_mode":"on_request",
+            "sandbox_mode":"workspace","instructions":"x","memory":null,"arrangement":"separated",
+            "provider":{"path":"native","provider_id":rig.provider},
+            "exec":{"executor":"echo-exec","environment_id":rig.environment,"generation":facts.generation},
+            "mcp":[],"orch_tools":[],"raw_events":false,
+        })).unwrap();
+        rig.succeed(&open).await;
+        let connector = rig.connector.as_ref().unwrap();
+        let process = connector
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap();
+        let harness = Harness {
+            port: connector.loopback().port(),
+            token: process.grant().token.expose().to_owned(),
+            key: process.session_key(thread).unwrap(),
+        };
+        let mut socket = harness.websocket().await.unwrap();
+        tool_message(socket.send(Message::text("before")))
+            .await
+            .unwrap();
+        assert_eq!(
+            tool_message(socket.next()).await.unwrap().unwrap(),
+            Message::text("echo before")
+        );
+        sockets.push((thread, socket));
+    }
+    let (first, mut socket) = sockets.remove(0);
+    rig.succeed(&orch_link_contract::commands::SessionClose { thread_id: first })
+        .await;
+    assert!(matches!(
+        tool_message(socket.next()).await,
+        None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+    ));
+    let (_, mut independent) = sockets.remove(0);
+    tool_message(independent.send(Message::text("after")))
+        .await
+        .unwrap();
+    assert_eq!(
+        tool_message(independent.next()).await.unwrap().unwrap(),
+        Message::text("echo after")
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
     let mut rig = EnvRig::new();
     rig.config.mcp.add = true;
@@ -278,7 +364,7 @@ async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
     .await;
     let agent = rig.agent_side().await;
     let thread = new_id();
-    let mcp = json!([{
+    let mut mcp = json!([{
         "name": "files",
         "ticket": rig.ticket(
             TicketSource::Machine(agent.machine_id),
@@ -287,6 +373,7 @@ async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
             None
         )
     }]);
+    mcp[0]["server_id"] = json!(member_id(mcp[0]["ticket"].as_str().unwrap()));
     let harness = agent
         .open_session(
             thread,
@@ -346,12 +433,12 @@ async fn a_harness_whose_environment_is_on_its_own_machine_reaches_its_tools_wit
             "native_session_ref": null, "archive": null, "history": null, "upto_turn_ordinal": null,
             "workspace_root": workspace, "instruction_root_marker": false,
             "directory": directory, "cwd": directory, "mounts": [],
-            "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request",
+            "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
             "sandbox_mode": "workspace", "instructions": "x", "memory": null,
             "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
             "exec": { "executor": executor, "tool_set": (executor == "orch-exec").then_some("plain"),
                       "environment_id": rig.environment, "generation": facts.generation },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         }))
         .unwrap();
         rig.succeed(&open).await;
@@ -457,11 +544,11 @@ async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
         "native_session_ref": null, "archive": null, "history": null, "upto_turn_ordinal": null,
         "workspace_root": workspace, "instruction_root_marker": false,
         "directory": directory, "cwd": directory, "mounts": [],
-        "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request",
+        "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
         "sandbox_mode": "workspace", "instructions": "x", "memory": null,
         "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
         "exec": { "executor": null, "environment_id": rig.environment, "generation": facts.generation },
-        "mcp": [{ "name": "allowed", "ticket": ticket }], "orch_tools": [], "raw_events": false
+        "mcp": [{ "server_id":member_id(&ticket), "name": "allowed", "ticket": ticket }], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
     }))
     .unwrap();
     rig.succeed(&open).await;
