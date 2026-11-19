@@ -438,7 +438,10 @@ impl Context {
                 "the vendor client is unavailable",
             )
         })?;
-        let source = (entry.make)(Arc::new(client), Arc::clone(&self.services.clock));
+        let source = (entry.make)(
+            Arc::new(crate::key_facts::Client(client)),
+            Arc::clone(&self.services.clock),
+        );
         Ok(Some(Facts {
             source,
             native: false,
@@ -782,7 +785,11 @@ impl Context {
     }
 
     /// Lists offered models, keeping unsupported, empty and a failed read distinct from one another.
-    pub async fn discover(&self, spec: Option<&SourceSpec>) -> ProviderDiscoverModelsResult {
+    pub async fn discover(
+        &self,
+        spec: Option<&SourceSpec>,
+        max_report_bytes: u64,
+    ) -> ProviderDiscoverModelsResult {
         let default = SourceSpec::default();
         let spec = spec.unwrap_or(&default);
         let mut described = None;
@@ -825,8 +832,8 @@ impl Context {
             described = Some(self.descriptor(source.describe(), &opened)?);
             let raw = serde_json::to_value(&report.models)
                 .map_err(|_| SourceError::new(SourceErrorCode::Malformed, "models"))?;
-            let clean = reports::models(&raw, &opened.protected).map_err(|code| {
-                SourceError::new(code.parse().unwrap_or(SourceErrorCode::Malformed), "models")
+            let clean = reports::models_with_limit(&raw, &opened.protected, usize::try_from(max_report_bytes).unwrap_or(usize::MAX)).map_err(|code| {
+                SourceError::new(code.parse().unwrap_or(SourceErrorCode::Malformed), format!("The normalized model listing exceeds its allowance or is malformed; providers.upstream_whole_bytes allows {max_report_bytes} bytes."))
             })?;
             let supported = clean.models.is_some();
             let note = (!clean.notes.is_empty()).then(|| {

@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/component/human-resource-facts.test.tsx tests/unit/acts.test.ts
+web test

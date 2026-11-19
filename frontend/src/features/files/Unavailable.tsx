@@ -20,7 +20,7 @@ export function Unavailable({ reason }: { reason: FetchUnavailable }) {
       className="h-full"
       icon={<FileX aria-hidden />}
       title={t(unavailableKey(reason))}
-      description={reason === 'offline_not_cached' ? t('files.unavailable.offlineHint') : undefined}
+      description={reason === 'offline_not_cached' ? t('files.unavailable.offlineHint') : reason === 'offline' ? t('files.unavailable.offlineRelayedHint') : undefined}
     />
   );
 }

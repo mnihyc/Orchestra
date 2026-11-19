@@ -12,10 +12,7 @@ use desk::Desk;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::{document_tree::*, documents::VersionCause};
-use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
-    testing::RawReply,
-};
+use orch_api_core::{middleware::authentication::token_hash, testing::RawReply};
 use orch_db::queries::{
     documents,
     identity::{self, NewApiToken},
@@ -47,9 +44,10 @@ fn scope(rules: Vec<Json>) -> Json {
     json!(scope)
 }
 async fn key(desk: &Desk, user: Id, rules: Vec<Json>) -> Key {
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,

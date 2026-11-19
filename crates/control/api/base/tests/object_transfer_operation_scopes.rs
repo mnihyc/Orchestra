@@ -16,7 +16,7 @@ use orch_api_contract::document_tree::{
     DocumentContainerCreate, DocumentContainerCreateBody, DocumentTreeItem,
 };
 use orch_api_contract::ownership::{ObjectTransfer, TransferBody};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::{identity, resources::access_fixtures};
@@ -122,11 +122,12 @@ impl Scene {
         let scope: orch_access_contract::key_scope::KeyScope =
             serde_json::from_value(json!({"rules":rules})).unwrap();
         assert!(scope.validate().is_empty());
-        let secret = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let secret = new_api_token(issued_key_id);
         identity::create_api_token_scoped(
             &mut *self.desk.world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: issued_key_id,
                 user_id: self.desk.ada.id(),
                 name: "Native transfer scope",
                 token_hash: &token_hash(&secret),
@@ -346,11 +347,12 @@ async fn manage_only_transfer_returns_actual_ownership_without_native_content() 
 async fn object_transfer_target_wait_checks_the_original_deadline_before_ownership_changes() {
     let s = Scene::new().await;
     let id = s.target("document").await;
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *s.desk.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.desk.ada.id(),
             name: "Expiring native ownership control",
             token_hash: &token_hash(&token),

@@ -38,7 +38,7 @@ Two parts of search depend on what the database offers, and are decided when the
 
 ## Changing the schema
 
-At each release tag, the release integrator records `<SHA-384 hex>  <filename.sql>` for every released file in
+At each release tag, the release process records `<SHA-384 hex>  <filename.sql>` for every released file in
 `RELEASED`, and the `orch-db` regression checks those files' exact bytes. A released file is never edited: a later
 change to the schema goes into a new numbered file. New migrations must keep data, survive concurrent writers and
 recover from an interrupted upgrade, and their tests must prove it on a database with rows.
