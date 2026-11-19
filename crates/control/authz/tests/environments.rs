@@ -127,6 +127,37 @@ async fn grouped_reach_counts_keep_nested_members_owners_and_each_objects_suspen
 }
 
 #[tokio::test]
+async fn a_machine_file_view_never_widens_a_roots_only_write_entry() {
+    use orch_access_contract::permissions::FileReach;
+    let s = setting().await;
+    let reader = s.w.member("file-reader").await;
+    s.w.put(
+        "environment",
+        s.env,
+        P::FilesView,
+        Holder::User { id: reader },
+        json!({"reach":"machine"}),
+    )
+    .await;
+    s.w.put(
+        "environment",
+        s.env,
+        P::FilesManage,
+        Holder::User { id: reader },
+        json!({}),
+    )
+    .await;
+    let principal = s.w.principal(Caller::session(reader)).await;
+    let reach =
+        orch_authz::file_reach::held(&mut *s.w.conn().await, &principal, s.env, Policy::default())
+            .await
+            .unwrap();
+    assert_eq!(reach.view, Some(FileReach::Machine));
+    assert_eq!(reach.manage, Some(FileReach::Roots));
+    assert!(!reach.terminal);
+}
+
+#[tokio::test]
 async fn whoever_manages_an_environment_decides_where_threads_run_in_it_and_nobody_else_does() {
     let s = setting().await;
     let into = |thread: Option<Id>, from: Option<Id>, to: Option<Id>| Moving {
@@ -1007,4 +1038,48 @@ async fn a_registered_environments_creator_can_transfer_ownership_without_transf
     );
     let machine_page = m.w.read_thing(m.hal, "machine", machine).await;
     assert_eq!(machine_page.first_owner, Some(m.hal));
+}
+
+#[test]
+fn usable_terminal_reach_widens_existing_file_doors_without_inventing_a_missing_act() {
+    use orch_access_contract::permissions::FileReach;
+    use orch_authz::file_reach::Held;
+    let held = Held {
+        view: Some(FileReach::Roots),
+        manage: None,
+        terminal: true,
+    };
+    let usable = held.resolved(true, FileReach::Machine);
+    assert_eq!(usable.view, Some(FileReach::Machine));
+    assert_eq!(usable.manage, None);
+    assert!(usable.view_from_terminal);
+    let unavailable = held.resolved(false, FileReach::Machine);
+    assert_eq!(unavailable.view, Some(FileReach::Roots));
+    assert!(!unavailable.view_from_terminal);
+    let bounded = held.resolved(true, FileReach::Roots);
+    assert_eq!(bounded.view, Some(FileReach::Roots));
+    assert!(!bounded.view_from_terminal);
+}
+
+#[tokio::test]
+async fn full_environment_control_keeps_its_native_file_authority_when_the_shell_is_off() {
+    use orch_access_contract::permissions::FileReach;
+    let w = World::new().await;
+    let owner = w.member("file-owner").await;
+    let manager = w.member("file-manager").await;
+    let environment = w.thing("environment", owner, w.topic, "Files").await;
+    w.grant(
+        "environment",
+        environment,
+        P::EnvironmentManage,
+        Holder::User { id: manager },
+    )
+    .await;
+    let principal = w.principal(Caller::session(manager)).await;
+    let mut conn = w.conn().await;
+    let held = orch_authz::file_reach::held(&mut conn, &principal, environment, Policy::default())
+        .await
+        .unwrap();
+    assert_eq!(held.view, Some(FileReach::Machine));
+    assert_eq!(held.manage, Some(FileReach::Machine));
 }

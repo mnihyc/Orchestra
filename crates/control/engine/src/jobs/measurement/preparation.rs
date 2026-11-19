@@ -721,6 +721,13 @@ pub(crate) fn build_command(
     let source_machine: Id = serde_json::from_value(row.plan["machine"].clone())?;
     let timeout = row.plan["timeout_secs"].as_u64().ok_or_else(closed)?;
     let work = WorkReport {
+        timeout_policy: row
+            .plan
+            .get("timeout_policy")
+            .cloned()
+            .filter(|value| !value.is_null())
+            .map(serde_json::from_value)
+            .transpose()?,
         files_total: None,
         bytes_total: None,
         job_id: row.id,
@@ -759,6 +766,8 @@ pub(crate) fn build_command(
     };
     Ok(Outgoing {
         authority: None,
+        input_facts: None,
+        session_offer: None,
         id,
         machine,
         kind,
@@ -915,6 +924,8 @@ impl CommandEvidence {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if command.serial_key.is_some() {
             return Ok(None);
@@ -949,6 +960,8 @@ impl CommandEvidence {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if command.serial_key().is_some() {
             return Ok(None);

@@ -1,7 +1,8 @@
 /** Import requests keep source paths and use the same act identity on a retry. */
 import { afterEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
-import { downloadImportReport, importForJob, importKeys, planImport, startImport, startImportUndo } from '@/api/imports';
+import { QueryClient } from '@tanstack/react-query';
+import { downloadImportReport, importForJob, importKeys, importFileNamesQuery, myImportsQuery, planImport, startImport, startImportUndo } from '@/api/imports';
 import type { ImportRequest } from '@/generated/api-types';
 
 const calls = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
@@ -61,4 +62,15 @@ it('does not reuse import cache entries for a different reader', () => {
     client.session.setState({ userId: 'second', readerVersion: 2, status: 'signed_in' });
     keys().forEach((key, index) => expect(key).not.toEqual(first[index]));
   } finally { client.session.setState(before); }
+});
+
+it('searches the whole native import history and source names before their pages', async () => {
+  calls.get.mockResolvedValue({ data: { items: [], next_cursor: null }, response: new Response(null, { status: 200 }) });
+  const cache = new QueryClient();
+  try {
+    await cache.infiniteQuery(myImportsQuery('older source'));
+    expect(calls.get).toHaveBeenLastCalledWith('/me/imports', expect.objectContaining({ params: { query: { q: 'older source', limit: 50 } } }));
+    await cache.infiniteQuery(importFileNamesQuery('import', 40, 'last file'));
+    expect(calls.get).toHaveBeenLastCalledWith('/imports/{id}/files', expect.objectContaining({ params: { path: { id: 'import' }, query: { q: 'last file', limit: 40 } } }));
+  } finally { cache.clear(); }
 });

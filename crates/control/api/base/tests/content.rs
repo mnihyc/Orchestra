@@ -119,14 +119,14 @@ async fn an_upload_that_was_cut_goes_on_where_it_stopped_and_what_arrives_is_who
         .content
         .put(depot.machine, command, &hash, 0, size, &bytes[..5_000])
         .await;
-    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.received(), Some(5_000));
     let ahead = depot
         .content
         .put(depot.machine, command, &hash, 9_000, size, &bytes[9_000..])
         .await;
-    assert_eq!(ahead.status, StatusCode::CONFLICT);
-    assert_eq!(ahead.received(), Some(5_000));
+    assert_eq!(ahead.status, StatusCode::OK);
+    assert_eq!(ahead.received(), Some(8_000));
 
     let rest = depot
         .content
@@ -143,7 +143,7 @@ async fn an_upload_that_was_cut_goes_on_where_it_stopped_and_what_arrives_is_who
 }
 
 #[tokio::test]
-async fn an_upload_may_only_begin_with_its_first_piece() {
+async fn an_upload_can_begin_with_a_later_piece_without_claiming_its_hole() {
     let depot = Depot::new().await;
     let command = depot.uploading().await;
     let bytes = bytes_of(3_000);
@@ -152,14 +152,12 @@ async fn an_upload_may_only_begin_with_its_first_piece() {
         .content
         .put(depot.machine, command, &hash, 1_000, 3_000, &bytes[1_000..])
         .await;
-    assert_eq!(answer.status, StatusCode::CONFLICT);
-    assert_eq!(
-        answer.received(),
-        Some(0),
-        "it is told to begin at the start"
-    );
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.received(), Some(2_000));
+    assert_eq!(answer.complete(), Some(false));
     let probe = depot.content.head(depot.machine, command, &hash).await;
-    assert_eq!(probe.status, StatusCode::NOT_FOUND, "nothing was begun");
+    assert_eq!(probe.received(), Some(2_000));
+    assert_eq!(probe.complete(), Some(false));
 }
 
 #[tokio::test]
@@ -550,12 +548,10 @@ async fn content_that_is_not_in_the_store_is_not_found() {
     assert_eq!(answer.status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
+/// Puts in the store the list of a tree whose one file is `file`, as an export or a snapshot made it,
+/// and says its hash.
+async fn store_a_list_naming(depot: &Depot, path: &str, file: Hash, size: i64) -> Hash {
     use orch_engine::manifest::{Entry, EntryKind, Header, build};
-    let depot = Depot::new().await;
-    let inside = depot.store(b"a file the list names").await;
-    let outside = depot.store(b"a file that no list names").await;
     let written = build(
         &Header {
             v: 1,
@@ -565,12 +561,12 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
             case_sensitive: true,
         },
         vec![Entry {
-            path: "src/a.txt".to_owned(),
+            path: path.to_owned(),
             kind: EntryKind::File,
-            size: 21,
+            size,
             mtime_ns: 1,
             mode: 0o644,
-            hash: Some(inside),
+            hash: Some(file),
             link: None,
         }],
     )
@@ -582,12 +578,21 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
         .await
         .unwrap();
     assert_eq!(list.hash, written.hash);
+    list.hash
+}
+
+#[tokio::test]
+async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
+    let depot = Depot::new().await;
+    let inside = depot.store(b"a file the list names").await;
+    let outside = depot.store(b"a file that no list names").await;
+    let list = store_a_list_naming(&depot, "src/a.txt", inside, 21).await;
     let materializing = depot
         .command(
             depot.machine,
             CommandKind::FsMaterialize,
             &json!({
-                "environment_id": new_id(), "job_id": null, "manifest_blob": list.hash,
+                "environment_id": new_id(), "job_id": null, "manifest_blob": list,
                 "target_root": "/workspace/web", "purpose": "delivery"
             }),
         )
@@ -601,7 +606,7 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
     assert_eq!(file.body.as_ref(), b"a file the list names");
     let list_itself = depot
         .content
-        .get(depot.machine, materializing, &list.hash, None)
+        .get(depot.machine, materializing, &list, None)
         .await;
     assert_eq!(
         list_itself.status,
@@ -611,6 +616,48 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
     let other = depot
         .content
         .get(depot.machine, materializing, &outside, None)
+        .await;
+    assert_eq!(other.status, StatusCode::FORBIDDEN);
+}
+
+/// A machine move carries the home and the recorded file states of an environment in two commands of
+/// this kind, each naming only the list of the exported tree: the machine that imports it fetches
+/// every file of the list by its hash, as `fs.materialize` does.
+#[tokio::test]
+async fn a_command_that_imports_a_data_part_is_given_the_files_its_list_names() {
+    let depot = Depot::new().await;
+    let inside = depot.store(b"a file of the exported data part").await;
+    let outside = depot.store(b"a file that no list names").await;
+    let list = store_a_list_naming(&depot, ".orch/file-states/state", inside, 32).await;
+    let importing = depot
+        .command(
+            depot.machine,
+            CommandKind::FsDataImport,
+            &json!({
+                "environment_id": new_id(), "job_id": new_id(), "part": "file_states",
+                "manifest_blob": list
+            }),
+        )
+        .await;
+
+    let list_itself = depot
+        .content
+        .get(depot.machine, importing, &list, None)
+        .await;
+    assert_eq!(
+        list_itself.status,
+        StatusCode::OK,
+        "the list is in the command's body"
+    );
+    let file = depot
+        .content
+        .get(depot.machine, importing, &inside, None)
+        .await;
+    assert_eq!(file.status, StatusCode::OK, "{file:?}");
+    assert_eq!(file.body.as_ref(), b"a file of the exported data part");
+    let other = depot
+        .content
+        .get(depot.machine, importing, &outside, None)
         .await;
     assert_eq!(other.status, StatusCode::FORBIDDEN);
 }
@@ -627,8 +674,17 @@ async fn no_more_than_four_transfers_run_for_a_machine_at_once() {
             &json!({ "environment_id": new_id(), "path": "a.bin", "blob": named }),
         )
         .await;
-    let held: Vec<_> = (0..4)
-        .map(|_| depot.app().blobs.begin_transfer(depot.machine).unwrap())
+    let held: Vec<_> = (0..orch_link_contract::content::MAX_TRANSFERS_PER_MACHINE)
+        .map(|_| {
+            depot
+                .app()
+                .blobs
+                .begin_transfer(
+                    depot.machine,
+                    orch_link_contract::content::MAX_TRANSFERS_PER_MACHINE,
+                )
+                .unwrap()
+        })
         .collect();
     let refused = depot
         .content
@@ -743,4 +799,99 @@ async fn a_blob_that_arrived_is_a_blob_of_the_size_it_was_announced_with() {
     let mut conn = depot.world.conn().await;
     let row = storage::blob(&mut conn, &meta.hash).await.unwrap().unwrap();
     assert_eq!(row.size, meta.size);
+}
+
+#[tokio::test]
+async fn a_machine_can_deliver_its_last_piece_first_and_retry_only_the_missing_middle() {
+    let depot = Depot::new().await;
+    let command = depot.uploading().await;
+    let bytes = bytes_of(12_000);
+    let hash = Hash::of(&bytes);
+    for (offset, end, received, complete) in [
+        (8_000, 12_000, 4_000, false),
+        (0, 4_000, 8_000, false),
+        (8_000, 12_000, 8_000, false),
+        (4_000, 8_000, 12_000, true),
+    ] {
+        let reply = depot
+            .content
+            .put(
+                depot.machine,
+                command,
+                &hash,
+                offset,
+                12_000,
+                &bytes[usize::try_from(offset).unwrap()..end],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            (reply.received(), reply.complete()),
+            (Some(received), Some(complete))
+        );
+    }
+    assert_eq!(
+        depot
+            .app()
+            .blobs
+            .read_whole(&hash, 12_000)
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn machine_progress_reports_durable_intervals_and_the_accepted_policy_without_starting_a_transfer()
+ {
+    let depot = Depot::new().await;
+    let command = depot.uploading().await;
+    let bytes = bytes_of(12_000);
+    let hash = Hash::of(&bytes);
+    let path = format!("/internal/link/blobs/{hash}/progress");
+    let ask = || {
+        depot.content.request(
+            http::Method::GET,
+            &path,
+            Some(depot.machine),
+            Some(command),
+            &[],
+            bytes::Bytes::new(),
+        )
+    };
+    let before = depot.content.send(ask()).await;
+    assert_eq!(before.status, StatusCode::OK);
+    assert_eq!(before.json()["ranges"], json!([]));
+    let mut conn = depot.world.conn().await;
+    assert!(storage::upload(&mut conn, &hash).await.unwrap().is_none());
+    drop(conn);
+    depot
+        .content
+        .put(
+            depot.machine,
+            command,
+            &hash,
+            8_000,
+            12_000,
+            &bytes[8_000..],
+        )
+        .await;
+    depot
+        .world
+        .set("storage.transfer_max_piece_bytes", json!(8_388_608))
+        .await;
+    let status = depot.content.send(ask()).await;
+    assert_eq!(
+        status.json()["progress"],
+        json!({"received":4_000,"complete":false})
+    );
+    assert_eq!(
+        status.json()["ranges"],
+        json!([{"start":8_000,"len":4_000}])
+    );
+    assert_eq!(
+        status.json()["policy"]["max_piece_bytes"],
+        json!(16_777_216)
+    );
 }

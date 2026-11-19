@@ -34,8 +34,8 @@ pub const SEARCH_INDEXED_MIN_CHARS: u32 = 3;
 pub const SEARCH_SNIPPET_MAX_CHARS: u32 = 240;
 /// How many names a search for names returns when it is not told.
 pub const NAME_SEARCH_LIMIT_DEFAULT: u32 = 20;
-/// The most names a search for names returns.
-pub const NAME_SEARCH_LIMIT_MAX: u32 = 50;
+/// A larger default batch for overview shortcuts.
+pub const NAME_SEARCH_OVERVIEW_COUNT: u32 = 50;
 
 /// What a search found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -265,13 +265,16 @@ pub struct NameHit {
     pub recent: bool,
 }
 
-/// A bounded name lookup; a partial answer asks the reader to narrow the words rather than claiming completeness.
+/// One currently authorized name page, with continuation through the same native selector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NameSearchPage {
     /// Currently readable names, in rank order.
     pub items: Vec<NameHit>,
     /// More candidates may match beyond the answer or its bounded access-check budget.
     pub partial: bool,
+    /// Continue the same actor, kinds, scope and search; absent at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 impl std::ops::Deref for NameSearchPage {
@@ -356,6 +359,9 @@ pub struct SearchListQuery {
     /// A node: only what lies in it and below it. Everything the caller can read when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Id>,
+    /// Only items of this conversation stream, applied before matching and paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
     /// A comma list of item kinds, `chat_message` and `document`; empty selects none, absence all.
     #[serde(
         default,
@@ -408,6 +414,15 @@ pub struct SearchListQuery {
     /// On a stream, milliseconds already elapsed since the last keystroke.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typing_age_ms: Option<u32>,
+    /// Stream-only read of already captured serving sources; requires this search's own cursor and starts no retrieval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_details: Option<bool>,
+    /// Offset within that captured source list, never within corpus results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<u32>,
+    /// Finds current safe place labels or captured serving-model labels inside that source list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_filter: Option<String>,
 }
 
 /// Which names to find, among whatever the caller may see: nodes they may view, documents they may
@@ -417,6 +432,9 @@ pub struct SearchListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NameSearchListQuery {
+    /// One exact identity, independent of recent visits; the same current visibility checks still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Id>,
     /// Only this caller's starred kind/id identities; empty words list them in saved order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starred: Option<bool>,
@@ -433,7 +451,13 @@ pub struct NameSearchListQuery {
     /// Keeps to one tree of orgs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
-    /// How many names, at most [`NAME_SEARCH_LIMIT_MAX`]; [`NAME_SEARCH_LIMIT_DEFAULT`] when left out.
+    /// Picker mode offers all available names when empty, with this person's recent selections first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<bool>,
+    /// Continue the same selection with the previous next_cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// How many names; any positive u32, [`NAME_SEARCH_LIMIT_DEFAULT`] when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -467,10 +491,71 @@ pub struct SearchOrderEntry {
     pub match_field: Option<SearchMatchField>,
 }
 
+/// A model admitted by the actual query, without requiring access to its provider configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchMeaningModel {
+    /// Opaque model reference component, never an identifier to display as a name.
+    pub provider_id: Id,
+    /// Actual routing name used for the vector space.
+    pub model_name: String,
+    /// Captured display name, with the routing name only when no distinct label was supplied.
+    pub display_name: String,
+}
+
+/// Safe current names around one actual serving receipt; a generation's raw identifier is not exposed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchMeaningSource {
+    /// Root whose index answered, named only under this reader's current authority.
+    pub root: NodeRef,
+    /// Model actually used, not a subsequently configured replacement.
+    pub model: SearchMeaningModel,
+    /// Actual embedding-request usage owner, absent when a cached vector issued no new request.
+    pub usage_owner: Option<UserRef>,
+    /// A recorded owner exists but its name is not shared with this reader.
+    pub usage_owner_withheld: bool,
+    /// No new query embedding was requested.
+    pub cached: bool,
+    /// When the serving lookup completed.
+    pub observed_at: Time,
+}
+
+/// A bounded page of this query's captured sources, not another search or model request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchMeaningSourcePage {
+    /// Currently authorized, safely named sources on this page.
+    pub sources: Vec<SearchMeaningSource>,
+    /// Explicit continuation within the same receipt.
+    pub next_offset: Option<u32>,
+    /// Sources matching the current safe-label filter.
+    pub total: u32,
+    /// Older source positions had no captured provenance; zero is not substituted for them.
+    pub unreported: bool,
+}
+
 /// A newline-delimited event of one search; each payload appears once in that search segment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchStreamEvent {
+    /// Actual serving provenance; the independent receipt cursor remains available when corpus results are exhausted.
+    MeaningSources {
+        /// Reader-bound receipt, with the same lifetime and allowance as ordinary search cursors.
+        cursor: Option<String>,
+        /// Actual serving indexes, not merely configured roots.
+        total: u32,
+        /// Some earlier serving positions have no receipt.
+        unreported: bool,
+        /// A model caption is valid only for exactly one proven serving source.
+        single: Option<SearchMeaningModel>,
+        /// Present only for an explicit read of the already captured source list.
+        page: Option<Box<SearchMeaningSourcePage>>,
+    },
+    /// The indexed field scope, including the current allowance for newly projected conversation text.
+    /// Word matches never imply full transcript coverage: raw calls, output, hidden reasoning,
+    /// side threads and text whose masking inputs cannot be opened are excluded.
+    Coverage {
+        /// Characters retained per masked conversation item. Existing projections change on rebuild.
+        conversation_chars: u64,
+    },
     /// The settings that govern this opening, resolved at the selected scope.
     Options {
         /// The initial number of visible rows.
@@ -616,6 +701,21 @@ pub struct RelatedItem {
     pub references: Option<RelatedReference>,
 }
 
+/// Native name search within the source document's ranked readable suggestions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentRelatedListQuery {
+    /// Literal current readable item-name words; the native score and reasons are retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries per page; any positive u32, the place's related count by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Continue the same actor, source, words and ranked visible observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// A bounded related list for the source document's current revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RelatedItems {
@@ -634,7 +734,7 @@ pub struct RelatedItems {
 
 crate::endpoints! {
     /// Finds related readable documents, chats and threads using the document's resolved settings.
-    DocumentRelatedList: GET "/documents/{id}/related", User, query crate::common::PageQuery, none, json RelatedItems, 200,
+    DocumentRelatedList: GET "/documents/{id}/related", User, query DocumentRelatedListQuery, none, json RelatedItems, 200,
         operation Op::facets(&[
             crate::operations::FacetSpec::required(Read,&[Object(K::Document)],Target::Resolved("document")),
             crate::operations::FacetSpec::required(Read,&[Object(K::Document),Object(K::Thread),Identity(I::Chat)],Target::ResolvedCollection("results")),

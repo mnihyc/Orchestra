@@ -451,6 +451,7 @@ fn archive_gate(room: &mut Room, hash: Hash) -> Arc<OpenGate> {
         build: old.build,
         blobs: old.blobs.clone(),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
