@@ -638,6 +638,60 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "AdminBundledNodeEnrollmentGet",
+    "method": "GET",
+    "path": "/admin/bundled-node/enrollment",
+    "title": "Shows bundled host enrollment to a system administrator.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": false,
+        "operation": "AdminBundledNodeEnrollmentGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "AdminBundledNodeEnrollmentRetry",
+    "method": "POST",
+    "path": "/admin/bundled-node/enrollment/retry",
+    "title": "Wakes the automatic registration task after the administrator corrects a failure.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": false,
+        "operation": "AdminBundledNodeEnrollmentRetry",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "AdminCapabilityDelete",
     "method": "DELETE",
     "path": "/admin/capabilities/{key}",
@@ -2018,6 +2072,70 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "AdminServerUpdateGet",
+    "method": "GET",
+    "path": "/admin/server-update",
+    "title": "Reads the current server release, native update condition and retained job.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": false,
+        "operation": "AdminServerUpdateGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "AdminServerUpdateStart",
+    "method": "POST",
+    "path": "/admin/server-update",
+    "title": "Runs the selected release through the bundled node's existing host updater, or joins its open job.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": false,
+        "operation": "AdminServerUpdateStart",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
             },
             "usage": "response_content"
           }
@@ -6094,6 +6212,156 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "ask_model_providers"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "AskMoveOut",
+    "method": "POST",
+    "path": "/ask/conversations/{id}/move-out",
+    "title": "Copies the complete program conversation to destination defaults and deletes its original atomically.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "AskMoveOut",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "thread"
+              }
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "thread"
+              }
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "ask_move_destination"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "provider",
+              "agent",
+              "environment",
+              "host",
+              "machine",
+              "template",
+              "mcp_server",
+              "mount",
+              "skill"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "ask_move_deleted_resources"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "AskMoveOutPreview",
+    "method": "POST",
+    "path": "/ask/conversations/{id}/move-out/preview",
+    "title": "Reviews a permanent built-in conversation's native copy and owner-only original Delete.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "AskMoveOutPreview",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "thread"
+              }
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "thread"
+              }
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "ask_move_destination"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "provider",
+              "agent",
+              "environment",
+              "host",
+              "machine",
+              "template",
+              "mcp_server",
+              "mount",
+              "skill"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "ask_move_deleted_resources"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -16695,6 +16963,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "EnvironmentFileTransferGet",
+    "method": "GET",
+    "path": "/environments/{id}/files/transfer",
+    "title": "Reads the exact current manifest transfer under the existing Files authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "EnvironmentFileTransferGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "EnvironmentFilesExport",
     "method": "POST",
     "path": "/environments/{id}/files/export",
@@ -17425,7 +17720,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "EnvironmentMcpGet",
     "method": "GET",
     "path": "/environments/{id}/mcp",
-    "title": "Lists the MCP servers of an environment and those found in the harness configuration there that nobody imported.",
+    "title": "Lists managed servers and native configuration, optionally with a readable thread's connection state.",
     "delegation": "business",
     "variants": [
       {
@@ -17434,6 +17729,28 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "name": "",
         "selector": "",
         "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "agent"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "environment_mcp_profiles"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "environment_mcp_native_thread"
+            },
+            "usage": "required"
+          },
           {
             "action": "read",
             "resources": [
@@ -19475,6 +19792,45 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "EnvironmentSourceEditsGet",
+    "method": "GET",
+    "path": "/environments/{id}/source/edits",
+    "title": "Reads the saved file edits without exposing them through conversation metadata.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "EnvironmentSourceEditsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "bound_thread"
             },
             "usage": "required"
           }
@@ -24450,6 +24806,34 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "MachineDirectoryList",
+    "method": "GET",
+    "path": "/machines/{id}/directories",
+    "title": "Browses directories before registration through the same current machine Use authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MachineDirectoryList",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "machine_subject"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MachineEnrollmentAgainTokenCreate",
     "method": "POST",
     "path": "/machines/{id}/enrollment-tokens",
@@ -24861,6 +25245,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "facets": [
           {
             "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "machine_id",
+                "kind": "machine"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MachineGatewaySet",
+    "method": "PUT",
+    "path": "/machines/{machine_id}/gateway",
+    "title": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MachineGatewaySet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
             "resources": [
               "machine"
             ],
@@ -26112,7 +26527,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MachineUpdateNow",
     "method": "POST",
     "path": "/machines/{id}/update",
-    "title": "Requests a verified physical connector update, drained under its local update.auto policy.",
+    "title": "Requests an explicit verified physical connector update after its active work drains.",
     "delegation": "business",
     "variants": [
       {
@@ -28081,6 +28496,60 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "MeModelRecentCreate",
+    "method": "POST",
+    "path": "/me/model-recents",
+    "title": "Records one deliberate choice without replacing another device's history.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MeModelRecentCreate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "account"
+            ],
+            "target": {
+              "kind": "current_account"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MeModelRecentList",
+    "method": "GET",
+    "path": "/me/model-recents",
+    "title": "Reads only this person's selected models, shared across their devices.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MeModelRecentList",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "account"
+            ],
+            "target": {
+              "kind": "current_account"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MeNotificationChannelCreate",
     "method": "POST",
     "path": "/me/notification-channels",
@@ -29524,6 +29993,222 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "variants": []
   },
   {
+    "operation_id": "MountCopyCreate",
+    "method": "POST",
+    "path": "/mounts/{id}/copy",
+    "title": "Accepts the reviewed standalone copy, keeping displaced data and joining a repeated acceptance.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MountCopyCreate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "mount"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_reader"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_writer"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "mount"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_reader"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_writer"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MountCopyLatest",
+    "method": "GET",
+    "path": "/mounts/{id}/copy",
+    "title": "Reads this person's latest durable copy job without exposing its native recipe.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MountCopyLatest",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "mount"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "job"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "mount_copy_jobs"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "mount_copy_machine_names"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MountCopyPreflight",
+    "method": "POST",
+    "path": "/mounts/{id}/copy-plan",
+    "title": "Reviews a standalone copy of one location's data to another allowed machine.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MountCopyPreflight",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "write",
+            "resources": [
+              "mount"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_reader"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_writer"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "mount"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_reader"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "mount_copy_writer"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MountCreate",
     "method": "POST",
     "path": "/mounts",
@@ -29632,7 +30317,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MountDelete",
     "method": "DELETE",
     "path": "/mounts/{id}",
-    "title": "Deletes a mount that no scope enables.",
+    "title": "Deletes the definition through the common cleanup job, keeping data unless its displayed fate is confirmed.",
     "delegation": "business",
     "variants": [
       {
@@ -29644,12 +30329,319 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "mount"
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
             ],
             "target": {
-              "kind": "permission_object"
+              "kind": "resolved",
+              "value": "storage_namespace"
             },
             "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_records"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_destinations"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_content"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_names"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MountDeletePreflight",
+    "method": "POST",
+    "path": "/mounts/{id}/delete-plan",
+    "title": "Previews removal of the definition, its next-start consequences and the fates of owned data.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MountDeletePreflight",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "storage_namespace"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_records"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_destinations"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_content"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_names"
+            },
+            "usage": "response_content"
           }
         ]
       }
@@ -36217,6 +37209,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "action": "read",
             "resources": [
               "host",
+              "mcp_server",
+              "mount",
               "environment",
               "provider",
               "machine",
@@ -38348,6 +39342,17 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "tree_settings"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "chat"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "tree_groups"
             },
             "usage": "response_content"
           }
@@ -40623,6 +41628,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderFactsModelsGet",
+    "method": "GET",
+    "path": "/providers/{id}/facts/models",
+    "title": "Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderFactsModelsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderFactsOverridesSet",
     "method": "PUT",
     "path": "/providers/{id}/facts-overrides",
@@ -41342,6 +42378,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderModelDefaultsGet",
+    "method": "GET",
+    "path": "/providers/{id}/models/defaults",
+    "title": "The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderModelDefaultsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
           }
         ]
       }
@@ -42475,6 +43542,81 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderTrialGet",
+    "method": "GET",
+    "path": "/providers/{id}/credential-trial",
+    "title": "Reads the single credential-trial observation without refreshing or starting native work.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderTrialGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "provider_trial_names_orgs"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "project"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "provider_trial_names_projects"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "topic"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "provider_trial_names_topics"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "provider_trial_names_threads"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderUpdate",
     "method": "PATCH",
     "path": "/providers/{id}",
@@ -42561,6 +43703,68 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "provider_names_threads"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PublicAddressGet",
+    "method": "GET",
+    "path": "/admin/public-address",
+    "title": "Reads the revision and effective addresses in Management.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PublicAddressGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PublicAddressProofGet",
+    "method": "GET",
+    "path": "/public-address/proof",
+    "title": "Proves that this browser origin reaches the same installation without signing anyone in.",
+    "delegation": "public",
+    "variants": []
+  },
+  {
+    "operation_id": "PublicAddressUpdate",
+    "method": "PUT",
+    "path": "/admin/public-address",
+    "title": "Prepares the edge and publishes one current-revision address draft.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PublicAddressUpdate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -42662,11 +43866,26 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server",
+              "mount",
+              "skill",
+              "template"
             ],
             "target": {
               "kind": "resolved",
               "value": "requested_resources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "library_owned_environments"
             },
             "usage": "required"
           },
@@ -43315,6 +44534,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "key_scope_threads"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "SettingParameterFormResolve",
+    "method": "POST",
+    "path": "/settings/parameters/form",
+    "title": "Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "SettingParameterFormResolve",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -50984,7 +52230,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "ThreadInterrupt",
     "method": "POST",
     "path": "/threads/{id}/interrupt",
-    "title": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+    "title": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
     "delegation": "business",
     "variants": [
       {
@@ -51184,6 +52430,51 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadItemRawGet",
+    "method": "GET",
+    "path": "/threads/{id}/items/{item_id}/raw",
+    "title": "Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.read",
+        "name": "read",
+        "selector": "inspect_deleted is not true",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.inspect_deleted",
+        "name": "inspect_deleted",
+        "selector": "inspect_deleted is true; apply the stored thread restoration rule",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -51776,6 +53067,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ThreadOrchToolsGet",
+    "method": "GET",
+    "path": "/threads/{id}/orch-tools",
+    "title": "Reads one page of the catalogue actually accepted by the thread's current native session.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadOrchToolsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ThreadOutlineGet",
     "method": "GET",
     "path": "/threads/{id}/outline",
@@ -52242,6 +53560,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadScreenFactsGet",
+    "method": "GET",
+    "path": "/threads/{id}/screen-facts",
+    "title": "Reads current silence and plan-answer facts under this actual thread's View authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadScreenFactsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -54297,10 +55642,38 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "UploadSessionGet",
+    "method": "GET",
+    "path": "/uploads/sessions/{upload_id}",
+    "title": "Reads durable intervals, accepted policy and a retained completion receipt of an owned upload.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "UploadSessionGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "upload"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "upload_id"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "UploadSessionPut",
     "method": "PUT",
     "path": "/uploads/sessions/{upload_id}",
-    "title": "Sends one piece of an upload, at the offset where the last one ended.",
+    "title": "Sends one piece at any offset; identical overlapping bytes are safe to repeat.",
     "delegation": "business",
     "variants": [
       {

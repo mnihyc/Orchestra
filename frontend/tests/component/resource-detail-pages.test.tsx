@@ -14,6 +14,7 @@ import { mcpKey } from '@/api/resource-tools';
 import { AgentScreen, type AgentTab } from '@/features/resources/agents/Profile';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { HostScreen, type HostTab } from '@/features/resources/hosts/Host';
+import { HostLink } from '@/features/resources/hosts/HostList';
 import { Machine, type MachineTab } from '@/features/resources/machines/Machine';
 import { TemplateScreen, type TemplateTab } from '@/features/resources/templates/Template';
 import { McpScreen } from '@/features/resources/mcp/Preset';
@@ -58,7 +59,7 @@ vi.mock('@/api/resource-tools', async (load) => {
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, to, params, className }: { children: ReactNode; to: string; params?: Record<string, string>; className?: string }) => <a className={className} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
@@ -102,6 +103,31 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.agent = detailAgent;
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
+
+for (const locale of ['en','zh-CN'] as const) it(`marks the protected server host on its page and list name without guessing from its name (${locale})`,async()=>{
+  await setLocale(locale);
+  const bundled={...detailHost,bundled_with_server:true,name:'Renamed host'};
+  const view=draw(<HostScreen hostId={bundled.id} tab="overview" onTab={vi.fn()}/>,bundled);
+  expect(await screen.findByText(i18n.t('hosts.serverHost.label'))).toBeVisible();
+  view.unmount();
+  const listed=show(<HostLink host={bundled}/>);
+  expect(screen.getByText(i18n.t('hosts.serverHost.label'))).toBeVisible();
+  listed.unmount();
+  show(<HostLink host={{...detailHost,name:'Bundled node',bundled_with_server:false}}/>);
+  expect(screen.queryByText(i18n.t('hosts.serverHost.label'))).not.toBeInTheDocument();
+});
+
+for(const locale of ['en','zh-CN'] as const) it(`names the idle reconnect beside automatic certificate renewal only for a valid identity (${locale})`,async()=>{
+  await setLocale(locale);
+  const renewal=locale==='en'?'Automatic · reconnects when idle':'自动续期 · 空闲时重新连接';
+  const view=draw(<Machine machineId={detailMachine.id} tab="certificate" onTab={vi.fn()} />);
+  expect(await screen.findByText(renewal)).toBeVisible();
+  expect(screen.getByText(i18n.t('machines.certificate.ends'))).toBeVisible();
+  act(()=>{view.client.setQueryData(machineKey(detailMachine.id),{...detailMachine,status:'revoked'});});
+  await waitFor(()=>expect(screen.queryByText(renewal)).not.toBeInTheDocument());
+  const certificate=screen.getByLabelText(i18n.t('machines.certificate.title'),{selector:'dl'});
+  expect(within(certificate).getByText(i18n.t('machines.certificate.revoked'))).toBeVisible();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {

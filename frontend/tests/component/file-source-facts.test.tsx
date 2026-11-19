@@ -1,0 +1,158 @@
+/** Captured source facts share the existing disclosure and retire with their reader. */
+import { cleanup, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, expect, it, vi } from 'vitest';
+import { FileFactBody, FileSourceDisclosure, imageDeliveryFragment } from '@/features/files/FileFacts';
+import type { FileSourceFacts, NativeImageReceipt, PreviewAllowance, FilesPlan } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+import { PlanLists } from '@/features/change/Lists';
+import { filesLines } from '@/features/change/plan';
+import { show } from './support';
+import { PathBar } from '@/features/files/PathBar';
+import { detailEnvironment, detailMount } from './resource-detail-fixtures';
+import { client } from '@/api/client';
+import type * as WorkspaceApi from '@/api/workspace';
+import { page, entry, pending } from '../unit/directory-window-fixtures';
+const pathReads = vi.hoisted(() => ({ list: vi.fn(), stat: vi.fn() }));
+vi.mock('@/api/workspace', async (original) => ({ ...await original<typeof WorkspaceApi>(), listDirectory: pathReads.list, statFile: pathReads.stat }));
+
+const at = '2026-11-15T05:00:00Z';
+const facts: FileSourceFacts = { policy: { kind: 'workspace', writable: true, workspace_exclusions: true }, observed_at: at,
+  inclusion: { governing_rule_sources: [{ kind: 'configured', path: null }, { kind: 'local', path: 'sub/.orch_ignore' }, { kind: 'local', path: null }], deeper_rules_override: true, parent_excluded: false, internal_rules_applied: true },
+  watch: { native: true, recursive: false, fallback_interval_secs: 97, observation_id: 'one', source: 'machine_configuration' } };
+afterEach(async () => { cleanup(); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps native source facts on intent and uses its captured interval after a new observation (${locale})`, async () => {
+    await setLocale(locale);
+    const read = vi.fn().mockResolvedValue({ transfer: null });
+    const view = show(<FileSourceDisclosure facts={facts} asOf={at} readTransfer={read} />);
+    expect(screen.queryByText('sub/.orch_ignore')).not.toBeInTheDocument();
+    expect(read).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+    const body = await screen.findByRole('dialog');
+    expect(body).toHaveTextContent('sub/.orch_ignore');
+    expect(body).toHaveTextContent(i18n.t('fileFacts.notShared'));
+    expect(body).toHaveTextContent('37');
+    expect(read).toHaveBeenCalledTimes(1);
+    view.rerender(<FileSourceDisclosure facts={{ ...facts, watch: null }} asOf={at} readTransfer={read} />);
+    expect(body).not.toHaveTextContent('37');
+    expect(body).toHaveTextContent(i18n.t('factDisclosure.notReported'));
+  });
+
+  it(`keeps missing old policy distinct from read-only mounts and whole owned roots (${locale})`, async () => {
+    await setLocale(locale);
+    const view = show(<FileFactBody showSource />);
+    expect(screen.getAllByText(i18n.t('factDisclosure.notReported')).length).toBeGreaterThan(0);
+    view.rerender(<FileFactBody showSource facts={{ ...facts, policy: { kind: 'mount', writable: false, workspace_exclusions: false }, inclusion: null, watch: null }} />);
+    expect(screen.getByText(i18n.t('fileFacts.readOnlyMount'))).toBeVisible();
+    expect(screen.queryByText('sub/.orch_ignore')).not.toBeInTheDocument();
+    view.rerender(<FileFactBody showSource facts={{ ...facts, policy: { kind: 'owned_data', writable: true, workspace_exclusions: false }, inclusion: null, watch: null }} />);
+    expect(screen.getByText(i18n.t('fileFacts.ownedWhole'))).toBeVisible();
+  });
+
+  it(`names the refused preview accounting and the actual native image route independently (${locale})`, async () => {
+    await setLocale(locale);
+    const allowance: PreviewAllowance = { kind: 'pixels', limit: 99, actual_if_known: 100, source: { scope: 'system', node: null } };
+    const receipt: NativeImageReceipt = { part: 0, forwarded_image: null, applied_delivery: 'path', allowance_exceeded: true, native_image_bytes: 14, source: null, resolved_at: at };
+    const view = show(<FileFactBody allowance={allowance} imageDelivery={receipt} />);
+    expect(screen.getByText(i18n.t('fileFacts.allowanceKind.pixels'))).toBeVisible();
+    expect(screen.queryByText(i18n.t('fileFacts.allowanceKind.viewer_bytes'))).not.toBeInTheDocument();
+    expect(imageDeliveryFragment(receipt, i18n.t)).toBe(i18n.t('fileFacts.imageByPath'));
+    expect(screen.getByText(i18n.t('fileFacts.notShared'))).toBeVisible();
+    view.rerender(<FileFactBody imageDelivery={{ ...receipt, native_image_bytes: 0, allowance_exceeded: false }} />);
+    expect(screen.getByText(i18n.t('fileFacts.imagesUsePaths'))).toBeVisible();
+    expect(screen.queryByText(i18n.t('fileFacts.imageByPath'))).not.toBeInTheDocument();
+  });
+}
+
+it('keeps only the exact machine transfer receipt and does not derive its expiry from current settings', async () => {
+  const read = vi.fn().mockResolvedValue({ transfer: { transfer_id: 'a'.repeat(64), state: 'interrupted', last_piece_at: at, expires_at: '2026-11-15T05:02:00Z', idle_retention_secs: 120, retention_source: { scope: 'default', node: null } } });
+  const view = show(<FileSourceDisclosure facts={facts} readTransfer={read} />);
+  await userEvent.click(screen.getByRole('button', { name: 'Details' }));
+  await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('2 min'));
+  expect(screen.getByRole('dialog')).toHaveTextContent(i18n.t('fileFacts.lastPiece'));
+  view.rerender(<FileSourceDisclosure key="another-source" facts={null} />);
+  expect(screen.queryByText(i18n.t('fileFacts.lastPiece'))).not.toBeInTheDocument();
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
+it('withdraws previously visible source names when the ordinary source read loses authority', async () => {
+  const { ApiError } = await import('@/api/client');
+  const read = vi.fn().mockResolvedValueOnce({ transfer: null }).mockRejectedValueOnce(new ApiError({ status: 403, code: 'authz.denied', title: '', detail: '', type: '', request_id: '' }, null));
+  show(<FileSourceDisclosure facts={facts} readTransfer={read} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'Details' }));
+  expect(await screen.findByText('sub/.orch_ignore')).toBeVisible();
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  await user.keyboard('{Escape}');
+  await user.click(screen.getByRole('button', { name: 'Details' }));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.queryByText('sub/.orch_ignore')).not.toBeInTheDocument());
+  expect(screen.getByRole('dialog')).toHaveTextContent(i18n.t('fileFacts.notShared'));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps an old copy policy unknown while a measured owned root keeps its captured policy (${locale})`, async () => {
+    await setLocale(locale);
+    const plan: FilesPlan = { source: 'cached', source_as_of: at, file_count: 1, total_bytes: 100, bytes_to_upload: 0, bytes_to_download: 100,
+      missing: { count: 0, bytes: null, sample: [] }, path_map: { from: 'before', to: 'after' },
+      home: { measured: true, file_count: 1, total_bytes: 50 }, file_states: null, private_views: [],
+      source_policy: null, home_policy: { kind: 'owned_data', workspace_exclusions: false, writable: true } };
+    const view = show(<PlanLists changes={filesLines(plan, locale, i18n.t)} stays={[]} ends={[]} />);
+    expect(screen.getByText(i18n.t('fileFacts.ownedWhole'))).toBeVisible();
+    await userEvent.click(screen.getAllByRole('button', { name: i18n.t('common.details') })[0]!);
+    expect(screen.getByRole('dialog')).toHaveTextContent(i18n.t('factDisclosure.notReported'));
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(i18n.t('fileFacts.applied'));
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getAllByRole('button', { name: i18n.t('common.details') })[1]!);
+    expect(screen.getByRole('dialog')).toHaveTextContent(i18n.t('fileFacts.wholeRoot'));
+    expect(screen.getByRole('dialog')).toHaveTextContent(i18n.t('fileFacts.requiresPermission'));
+    await userEvent.keyboard('{Escape}');
+    view.rerender(<PlanLists changes={filesLines({ ...plan, home_policy: null }, locale, i18n.t)} stays={[]} ends={[]} />);
+    expect(screen.queryByText(i18n.t('fileFacts.ownedWhole'))).not.toBeInTheDocument();
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps an intentional machine path distinct from an owned snapshot root (${locale})`, async () => {
+  await setLocale(locale);
+  show(<FileFactBody showSource facts={{ ...facts, policy: { kind: 'machine', writable: true, workspace_exclusions: false }, inclusion: null, watch: null }} />);
+  expect(screen.getByText(i18n.t('fileReach.machine'))).toBeVisible();
+  expect(screen.queryByText(i18n.t('fileFacts.ownedWhole'))).not.toBeInTheDocument();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`types native paths, pages completion at one level and chooses an attached root (${locale})`, async () => {
+  await setLocale(locale);
+  pathReads.list.mockReset().mockResolvedValue(page(['needle-one'], { path: '/tmp', next_cursor: 'next-native', truncated: true }));
+  pathReads.stat.mockReset().mockResolvedValue(entry('native', '/tmp', 'dir'));
+  const navigate = vi.fn(), open = vi.fn(), refuse = vi.fn();
+  const environment = { ...detailEnvironment, file_reach: { view: 'machine' as const, manage: 'roots' as const, view_from_terminal: false, manage_from_terminal: false, machine_bound: 'machine' as const },
+    mounts: [{ mount: detailMount, path: '/mnt/data', state: 'attached' as const, reason: null, mode: 'read_only' as const, asked: 'read_only' as const, enforced: true, from: null }] };
+  show(<PathBar door={{ environmentId: environment.id, threadId: null }} environment={environment} path="web" navigate={navigate} openFile={open} refuse={refuse} />);
+  expect(pathReads.list).not.toHaveBeenCalled();
+  const user = userEvent.setup(), input = screen.getByRole('combobox', { name: i18n.t('files.paths.path') });
+  await user.clear(input); await user.type(input, '/tmp/needle');
+  await waitFor(() => expect(pathReads.list).toHaveBeenCalledWith({ environmentId: environment.id, threadId: null }, '/tmp', expect.objectContaining({ prefix: 'needle' })));
+  await user.click(await screen.findByRole('button', { name: i18n.t('files.pages.next') }));
+  await waitFor(() => expect(pathReads.list).toHaveBeenLastCalledWith(expect.anything(), '/tmp', expect.objectContaining({ cursor: 'next-native' })));
+  await user.click(screen.getByRole('button', { name: i18n.t('files.paths.open') }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith('/tmp/needle'));
+  expect(open).not.toHaveBeenCalled(); expect(refuse).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('files.paths.roots') }));
+  await user.click(screen.getByRole('option', { name: detailMount.name }));
+  expect(navigate).toHaveBeenCalledWith('/mnt/data');
+});
+
+it('a path confirmation cannot navigate a replaced reader after its native stat finishes', async () => {
+  pathReads.list.mockReset().mockResolvedValue(page([]));
+  const stat = pending<unknown>(); pathReads.stat.mockReset().mockReturnValue(stat.promise);
+  const navigate = vi.fn(), refuse = vi.fn();
+  show(<PathBar door={{ environmentId: detailEnvironment.id, threadId: null }} environment={detailEnvironment} path="web" navigate={navigate} openFile={vi.fn()} refuse={refuse} />);
+  const user = userEvent.setup(); await user.clear(screen.getByRole('combobox', { name: 'Path' }));
+  await user.type(screen.getByRole('combobox', { name: 'Path' }), '/private');
+  await user.click(screen.getByRole('button', { name: 'Open path' }));
+  client.session.setState((state) => ({ readerVersion: (state.readerVersion ?? 0) + 1 }));
+  stat.resolve(entry('private', '', 'dir'));
+  await waitFor(() => expect(pathReads.stat).toHaveBeenCalledTimes(1));
+  expect(navigate).not.toHaveBeenCalled(); expect(refuse).not.toHaveBeenCalled();
+});

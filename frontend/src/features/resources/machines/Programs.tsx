@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { changeMachinePrograms,machineProgramsKey,machineProgramsQuery } from '@/api/machinePrograms';
 import { machineKey } from '@/api/resources';
-import { machineProgramsProjection } from '@/api/cache';
+import { machineProgramsProjection, record } from '@/api/cache';
 import { ApiError } from '@/api/client';
 import type { Machine,MachineProgram,MachineProgramKind,MachinePrograms,MachineProgramsCommand } from '@/generated/api-types';
 import { TaskGuideLink } from '@/features/help/TaskGuideLink';
@@ -28,6 +28,7 @@ import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { CommandValue, PathValue } from '@/features/resources/TechnicalValue';
+import { ExecutionApproval } from '@/features/resources/ExecutionApproval';
 
 export { machineProgramName };
 
@@ -134,11 +135,11 @@ export function RegisterMachineProgram({machineId,kind,onRegistered,onClose}:{ma
 }
 
 /** This tab alone subscribes to program data; hidden tabs create no query or native request. */
-export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|'roles'|'role_management'> & Partial<Pick<Machine,'installation'|'platform_os'|'access'>>}) {
+export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|'roles'|'role_management'> & Partial<Pick<Machine,'installation'|'platform_os'|'access'|'execution_approvals'>>}) {
   const {t}=useTranslation();
   const client=useQueryClient();
   const held=client.getQueryState<Machine>(machineKey(machine.id));
-  const projected=held?.data===machine?machineProgramsProjection(machine.facts,machine.access):null;
+  const projected=held?.data===machine?machineProgramsProjection(machine.facts,machine.access,machine.execution_approvals):null;
   const query=useQuery({...machineProgramsQuery(machine.id),...(projected===null?{}:{initialData:projected,initialDataUpdatedAt:held?.dataUpdatedAt})});
   const facts=readMachineFacts(machine.facts);
   const harnesses=facts.harnesses;
@@ -148,6 +149,7 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
   const nativeRelevant=nativeReported || nativeRole;
   const harnessTitle=useHarnessTitle(harnesses.length+discovered.length>0);
   const [enrolling,setEnrolling]=useState(false);
+  const [search,setSearch]=useState('');
   const [kind,setKind]=useState<MachineProgramKind>('agent');
   const [adding,setAdding]=useState(false);
   const [removing,setRemoving]=useState<MachineProgram|null>(null);
@@ -169,14 +171,22 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
   const nativeAction=apply.variables?.action==='confirm_harness' || apply.variables?.action==='remove_harness';
   const nativeKept=!(harnessPolicyDelegated(facts)) || (nativeAction && apply.error instanceof ApiError && apply.error.is('policy.not_delegated'));
   const nativeManage=programs.can_manage && nativeRole && !nativeKept;
-  const nativeRows=[...harnesses.map((harness)=>({harness,confirmed:true})),...discovered.map((harness)=>({harness,confirmed:false}))];
+  const allNativeRows=[...harnesses.map((harness)=>({harness,confirmed:true})),...discovered.map((harness)=>({harness,confirmed:false}))];
+  const wanted=search.trim().toLocaleLowerCase();
+  const includes=(values:readonly string[])=>values.some((value)=>value.toLocaleLowerCase().includes(wanted));
+  const nativeRows=allNativeRows.filter(({harness})=>includes([harnessTitle(harness.kind),harness.kind,harness.path,harness.version]));
+  const entries=programs.entries.filter((entry)=>includes([machineProgramName(entry),entry.name,entry.version ?? '',...entry.command]));
   const currentHarnessPolicy=facts.policy?.['agent.harnesses'];
   const actualPolicyCommand=machine.installation?.commands.policy;
   const refresh=programs.can_manage && (kinds.length>0 || nativeRelevant);
   return <div className="flex flex-col gap-4">
+    {record(machine.facts) && record(machine.facts.runtime_platform) &&
+      <Link className="w-fit text-sm text-accent-text hover:underline" to="/resources/machines/$id" params={{ id: machine.id }} search={{ tab: 'policy' }}>{t('machines.policy.reviewSystem')}</Link>}
     <div className="flex flex-wrap items-end gap-2">
       {programs.can_manage && kinds.length>0 && <Select label={t('machinePrograms.contract')} value={selected} onValueChange={setKind}
           options={kinds.map((capability)=>({value:capability.kind,name:t(`machinePrograms.kinds.${capability.kind}.name`),description:t(`machinePrograms.kinds.${capability.kind}.description`)}))}/>}
+      {allNativeRows.length+programs.entries.length>10 && <Input label={t('programList.search')} value={search}
+        onChange={(event)=>setSearch(event.target.value)} className="min-w-40 flex-1"/>}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         {programs.can_manage && kinds.length>0 && <Button onClick={()=>setAdding(true)}>{t('machinePrograms.add')}</Button>}
         {refresh && <Button pending={apply.isPending && apply.variables.action==='reload'} onClick={()=>apply.mutate({action:'reload'})}>{t(nativeReported || kinds.length===0?'machinePrograms.nativeRefresh':'machinePrograms.reload')}</Button>}
@@ -185,13 +195,16 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
     </div>
     {nativeRelevant && <section aria-labelledby="machine-native-harnesses" className="flex flex-col gap-2">
       <h3 id="machine-native-harnesses" className="font-medium">{t('machinePrograms.nativeTitle')}</h3>
-      {nativeRows.length===0?<StateLine compact message={t(facts.searchedHarnessKinds===null?'machinePrograms.nativeNotReported':facts.searchedHarnessKinds.length===0?'machinePrograms.nativeNotSearched':'machinePrograms.nativeEmpty')}/>:
-        <ul className="divide-y divide-border rounded-lg border border-border">{nativeRows.map(({harness,confirmed})=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-start gap-3 px-3 py-2">
+      {nativeRows.length===0?<StateLine compact message={t(allNativeRows.length>0?'machinePrograms.noResults':facts.searchedHarnessKinds===null?'machinePrograms.nativeNotReported':facts.searchedHarnessKinds.length===0?'machinePrograms.nativeNotSearched':'machinePrograms.nativeEmpty')}/>:
+        <ul className="max-h-80 overflow-y-auto divide-y divide-border rounded-lg border border-border">{nativeRows.map(({harness,confirmed})=>{
+          const approval=confirmed?programs.approvals.find((approval)=>approval.subject.kind === 'program' && approval.subject.harness_kind===harness.kind && approval.subject.path===harness.path):undefined;
+          return <li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-start gap-3 px-3 py-2">
           <div className="min-w-0 flex-1"><p className="flex min-h-(--control-sm) flex-wrap items-baseline gap-x-3 gap-y-1"><span className="font-medium">{harnessTitle(harness.kind)}</span>
             <span className="text-sm text-text-muted">{harness.version==='' || harness.version==='unknown'?t('machinePrograms.nativeUnknownVersion'):harness.version}</span>
-            <span className="text-sm text-text-muted">{t(confirmed?'machinePrograms.nativeConfirmed':'machinePrograms.nativeFound')}</span></p><PathValue path={harness.path}/></div>
+            <span className="text-sm text-text-muted">{t(confirmed?'machinePrograms.nativeConfirmed':'machinePrograms.nativeFound')}</span></p><PathValue path={harness.path}/>
+            {approval!==undefined && <ExecutionApproval approval={approval}/>}</div>
           {nativeManage && harness.path!=='' && <Button size="sm" disabled={apply.isPending} onClick={()=>confirmed?setUnconfirming(harness):apply.mutate({action:'confirm_harness',kind:harness.kind,path:harness.path})}>{t(confirmed?'machinePrograms.nativeRemove':'machinePrograms.nativeUse')}</Button>}
-        </li>)}</ul>}
+        </li>;})}</ul>}
       {programs.can_manage && !nativeRole && <p className="text-sm text-text-muted">{t('machinePrograms.nativeRoleNeeded')}</p>}
       {programs.can_manage && nativeKept && <div className="flex flex-col gap-2 text-sm text-text-muted"><p>{t(facts.policy===null?'machinePrograms.nativeCommandNotReported':'machinePrograms.nativeKept')}</p>
         {facts.policy!==null && (actualPolicyCommand!==undefined && Array.isArray(currentHarnessPolicy)?<CommandBox command={policyCommand('agent.harnesses',currentHarnessPolicy,actualPolicyCommand,machine.platform_os==='windows')} label={t('machines.policy.copy')}/>:
@@ -201,8 +214,8 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
     {kinds.length===0 && !nativeRelevant && <EmptyState compact title={t(programs.capabilities.length===0 && !machine.roles.includes('node')?'machinePrograms.notReported':'machinePrograms.roleNeeded')}
       action={programs.can_manage?canChangeRoles?<Button asChild><Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'overview'}}>{t('machineRoles.edit')}</Link></Button>:<Button onClick={()=>setEnrolling(true)}>{t('machinePrograms.addConnector')}</Button>:undefined}/>}
     {programs.entries.length===0?(kinds.length===0?null:<EmptyState compact title={t('machinePrograms.empty')} />):
-      <ul aria-label={t('machinePrograms.title')} className="divide-y divide-border rounded-lg border border-border">
-        {programs.entries.map((entry)=>{
+      entries.length===0?<StateLine compact message={t('machinePrograms.noResults')}/>:<ul aria-label={t('machinePrograms.title')} className="max-h-80 overflow-y-auto divide-y divide-border rounded-lg border border-border">
+        {entries.map((entry)=>{
           const name=machineProgramName(entry);
           const contract=t(`machinePrograms.kinds.${entry.kind}.name`);
           const capability=programs.capabilities.find((capability)=>capability.kind===entry.kind);

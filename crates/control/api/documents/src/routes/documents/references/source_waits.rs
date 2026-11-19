@@ -124,6 +124,7 @@ fn probe(scene: &mut Scene) -> Arc<Probe> {
         build: old.build,
         blobs: crate::blobs::Blobs::new(probe.clone(), probe.inner.uploads_dir()),
         cache: crate::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });

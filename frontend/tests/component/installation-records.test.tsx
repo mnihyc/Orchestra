@@ -6,42 +6,116 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { Installation } from '@/features/admin/Installation';
-import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, ReleaseCheck, ResolvedSetting } from '@/generated/api-types';
+import { Overview } from '@/features/admin/Overview';
+import { OverviewCharts } from '@/features/admin/Charts';
+import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, Meta, MetricSeries, ReleaseCheck, ResolvedSetting, SystemInfo, PublicAddressSnapshot, PublicAddressUpdated, PublicAddressUpdateBody, ServerUpdateView, Job } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+import { meta } from '../doubles/fixtures';
+import { useAppearance } from '@/lib/appearance';
+import { PublicAddressEditor } from '@/features/admin/PublicAddress';
+import { ServerUpdateRow } from '@/features/admin/ServerUpdate';
 
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+// This form verifies commands and drafts; a browser measures its overflow layout.
+skipOverflowFallback();
 
-const { read, settings, check, restore } = vi.hoisted(() => ({
+const { read, settings, check, restore, readSystem, readMetrics, metaRead, serverRead, serverStart } = vi.hoisted(() => ({
   read: vi.fn<() => Promise<InstallationRecords>>(),
   settings: vi.fn<() => Promise<ResolvedSetting[]>>(),
   check: vi.fn<() => Promise<ReleaseCheck>>(),
   restore: vi.fn<() => Promise<BackupRestoreList | null>>(),
+  serverRead: vi.fn<() => Promise<ServerUpdateView>>(),
+  serverStart: vi.fn<(release: string) => Promise<Job>>(),
+  readSystem: vi.fn<() => Promise<SystemInfo>>(),
+  readMetrics: vi.fn<() => Promise<MetricSeries[]>>(),
+  metaRead: vi.fn<() => Promise<Meta>>(),
+}));
+vi.mock('@/api/auth', async (original) => ({ ...await original<object>(),
+  metaQuery: { queryKey: ['meta'], queryFn: metaRead },
 }));
 vi.mock('@/api/admin', async (original) => ({ ...await original<object>(),
   installationRecordsQuery: { queryKey: ['admin', 'installation-records'], queryFn: read },
   systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: settings },
   checkRelease: check,
   backupRestoreListQuery: { queryKey: ['admin', 'backup-restore-list'], queryFn: restore },
+  systemQuery: { queryKey: ['admin', 'system'], queryFn: readSystem },
+  metricsQuery: () => ({ queryKey: ['admin', 'metrics-fixture'], queryFn: readMetrics }),
+}));
+vi.mock('@/features/admin-messages/Sent', () => ({ MessagesSection: () => null }));
+
+vi.mock('@/api/serverUpdate', async (load) => ({ ...await load<object>(),
+  serverUpdateQuery: { queryKey: ['admin', 'server-update'], queryFn: serverRead },
+  startServerUpdate: serverStart,
 }));
 
-afterEach(() => { vi.clearAllMocks(); });
+const appearance = useAppearance.getState();
+afterEach(async () => { vi.clearAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 const BACKUP: DatabaseBackupRecord = { completed_at: '2026-10-12T08:02:00Z', database_at: '2026-10-12T08:00:00Z', release: '0.1.0', schema: '1', dump_name: 'orch-20261012-backup.dump', bytes: 65_536, hash: 'a'.repeat(64), cause: 'pre_update', database_only: true, last_failure: { at: '2026-10-14T08:00:00Z', reason: 'The backup disk is full.' } };
-const RELEASE: ReleaseCheck = { checked_at: '2026-10-12T09:00:00Z', installed_version: '0.1.0', offered_version: '0.2.0', newer: true, source: 'https://releases.example/latest/download/version.json', error: null, command: './update.sh v0.2.0' };
+const RELEASE = { checked_at: '2026-10-12T09:00:00Z', installed_version: '0.1.0', offered_version: '0.2.0', newer: true, source: 'https://releases.example/latest/download/version.json', error: null, command: './update.sh v0.2.0' } satisfies ReleaseCheck;
 const empty = (): InstallationRecords => ({ release: null, backup: null, backup_error: null, backup_warning: true });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps the API serving while naming its unavailable metrics listener in ${locale}/${theme}`, async () => {
+  await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
+  const info = { version: '0.1.3', build: 'fixture', started_at: new Date().toISOString(), machines_online: 0, threads_running: 0, queues: { outbox_pending: 0, commands_open: 0, jobs_running: 0 },
+    components: [{ name: 'api', ok: true, detail: null, issue: 'metrics_listener_unavailable', seen_at: new Date().toISOString() }] } as unknown as SystemInfo;
+  readSystem.mockResolvedValue(info); readMetrics.mockResolvedValue([]); read.mockResolvedValue(empty()); settings.mockResolvedValue([]); restore.mockResolvedValue(null);
+  show(<Overview search={{}} onSearch={vi.fn()} />);
+  const reason = await screen.findByText(locale === 'en' ? 'Metrics listener unavailable' : '指标监听不可用');
+  expect(reason).toBeVisible();
+  const part = reason.closest('[data-part="api"]');
+  expect(part).toHaveAttribute('data-ok', 'true');
+  expect(part).toHaveTextContent(i18n.t('admin.overview.well'));
+  expect(part).not.toHaveTextContent('metrics_listener_unavailable');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const resolution of ['minute', 'hour'] as const) it(`names the delivered ${resolution} metric resolution instead of guessing from the chosen period in ${locale}`, async () => {
+  await setLocale(locale); useAppearance.setState({ locale });
+  readMetrics.mockResolvedValue([{ name: 'threads', labels: { state: 'running' }, resolution, points: [[new Date(Date.now() - 60_000).toISOString(), 1]], peaks: null }]);
+  show(<OverviewCharts span="day" />);
+  const text = resolution === 'hour' ? locale === 'en' ? 'From hourly data' : '按小时数据汇总' : locale === 'en' ? 'From minute data' : '按分钟数据汇总';
+  expect(await screen.findByText(text, { exact: true })).toBeVisible();
+});
+
+it('does not invent a metric resolution when the selected range contains no readings', async () => {
+  readMetrics.mockResolvedValue([]); show(<OverviewCharts span="day" />);
+  expect(await screen.findAllByText('No readings in this range')).not.toHaveLength(0);
+  expect(screen.queryByText('From hourly data')).not.toBeInTheDocument();
+  expect(screen.queryByText('From minute data')).not.toBeInTheDocument();
+});
 
 function setting(key: string, value: number): ResolvedSetting {
   return { key, value, source: { scope: 'default', node: null }, own: null, locked_by: null, writable: true, parts: [] };
 }
 
-function draw() {
+function draw(release: ReleaseCheck | null = null, metadata?: Meta) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  if (metadata !== undefined) client.setQueryData(['meta'], metadata);
   settings.mockResolvedValue([setting('release.check_days', 0), setting('backup.warn_days', 2)]);
   restore.mockResolvedValue(null);
+  serverRead.mockResolvedValue({ ...serverView(), installed_version: release?.installed_version ?? RELEASE.installed_version,
+    offered_version: release?.offered_version ?? null, update_available: release?.newer ?? false,
+    availability: 'no_bundled_node', command: release?.command ?? './update.sh latest' });
   const result = show(<QueryClientProvider client={client}><Installation /></QueryClientProvider>);
   return { client, ...result };
 }
 
 describe('installation records', () => {
+  it.each(['en', 'zh-CN'] as const)('names the certificate-free address from held facts without a new read and clears its exception for HTTPS in %s', async (locale) => {
+    await setLocale(locale);
+    try {
+      read.mockResolvedValue(empty());
+      const { client } = draw(null, meta({ public_url: 'http://edge.example/' }));
+      expect(await screen.findByText('http://edge.example/')).toBeVisible();
+      expect(screen.getByText(locale === 'en' ? 'No certificate at this address · slower over long lines' : '此地址没有证书 · 跨地区访问较慢')).toBeVisible();
+      act(() => { client.setQueryData(['meta'], meta({ public_url: 'https://edge.example/' })); });
+      expect(await screen.findByText('https://edge.example/')).toBeVisible();
+      expect(screen.queryByText(locale === 'en' ? /No certificate at this address/ : /此地址没有证书/)).not.toBeInTheDocument();
+      expect(metaRead).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally { await setLocale('en'); }
+  });
+
   it('keeps checks off until asked and shows an absent backup without a completion claim', async () => {
     read.mockResolvedValue(empty());
     draw();
@@ -85,8 +159,14 @@ describe('installation records', () => {
     await userEvent.click(button);
     expect(check).toHaveBeenCalledTimes(1);
     expect(button).toHaveAttribute('aria-busy', 'true');
-    // The common act registry supplies the new read before a successful act resolves.
-    await act(async () => { client.setQueryData(['admin', 'installation-records'], { ...empty(), release: RELEASE }); pending.resolve?.(RELEASE); await response; });
+    // The mocked act's new reads reach the production query observers with the checked offer.
+    read.mockResolvedValue({ ...empty(), release: RELEASE });
+    serverRead.mockResolvedValue({ ...serverView(), installed_version: RELEASE.installed_version, offered_version: RELEASE.offered_version, update_available: RELEASE.newer, availability: 'no_bundled_node', command: RELEASE.command });
+    await act(async () => {
+      pending.resolve?.(RELEASE); await response;
+      await client.invalidateQueries({ queryKey: ['admin', 'installation-records'] });
+      await client.invalidateQueries({ queryKey: ['admin', 'server-update'] });
+    });
     expect(await screen.findByText('Release 0.2.0 is available')).toBeVisible();
     expect(screen.getByText('./update.sh v0.2.0')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Copy update command' })).toBeVisible();
@@ -96,7 +176,7 @@ describe('installation records', () => {
 
   it('dates a retained successful offer after a fetch failure, rather than claiming a new successful check', async () => {
     read.mockResolvedValue({ ...empty(), release: { ...RELEASE, error: 'The release source did not answer.' } });
-    const { container } = draw();
+    const { container } = draw(RELEASE);
     expect(await screen.findByText('The latest check failed')).toBeVisible();
     expect(screen.getByText('These are the dated facts from the last successful check.')).toBeVisible();
     expect(container.querySelector(`time[datetime="${RELEASE.checked_at}"]`)).toBeVisible();
@@ -121,4 +201,166 @@ describe('installation records', () => {
     expect(await screen.findByText('Coverage not recorded')).toBeVisible();
     expect(screen.queryByText(/^Database only ·/)).not.toBeInTheDocument();
   });
+});
+
+type AddressSave = (body: PublicAddressUpdateBody) => Promise<PublicAddressUpdated>;
+const addressSnapshot = (alternates: string[] = []): PublicAddressSnapshot => ({ public_url: 'https://before.example.test', alternate_urls: alternates, revision: 1, from_file_seed: true, using_example: false });
+const addressReceipt = (primary: string): PublicAddressUpdated => ({ projection: 'receipt', public_url: primary, alternate_urls: [], revision: 2, using_example: false });
+function addressHeld<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+
+it.each(['en', 'zh-CN'] as const)('keeps an address draft and its applied revision when preparation fails in %s', async (locale) => {
+  await setLocale(locale);
+  const held = addressHeld<PublicAddressUpdated>(), save = vi.fn<AddressSave>(() => held.promise), open = vi.fn();
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.preparing') }));
+  expect(save).toHaveBeenCalledTimes(1);
+  await userEvent.type(primary, '/still-typing');
+  await act(async () => { held.reject(new ApiError({ type: 'orch:error:public_address.frontend_not_ready', title: 'Not ready', code: 'public_address.frontend_not_ready', status: 409, detail: 'The workers did not adopt the certificate', request_id: 'address-draft' }, null)); await held.promise.catch(() => undefined); });
+  expect(primary).toHaveValue('https://changed.example.test/still-typing');
+  expect(screen.getByText(i18n.t('publicAddress.appliedRevision', { revision: '1' }))).toBeVisible();
+  expect(open).not.toHaveBeenCalled();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('opens only the acting browser after address publication in %s', async (locale) => {
+  await setLocale(locale);
+  const open = vi.fn(), save = vi.fn<AddressSave>(() => Promise.resolve(addressReceipt('https://changed.example.test')));
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  expect(open).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith('https://changed.example.test'));
+  expect(save).toHaveBeenCalledWith({ expected_revision: 1, public_url: 'https://changed.example.test', alternate_urls: [] });
+});
+
+it('keeps newer typing instead of navigating it away when a held address save succeeds', async () => {
+  const held = addressHeld<PublicAddressUpdated>(), save = vi.fn<AddressSave>(() => held.promise), open = vi.fn();
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://next.example.test');
+  await act(async () => { held.resolve(addressReceipt('https://changed.example.test')); await held.promise; });
+  expect(primary).toHaveValue('https://next.example.test');
+  expect(open).not.toHaveBeenCalled();
+  expect(screen.getByText(i18n.t('publicAddress.appliedRevision', { revision: '2' }))).toBeVisible();
+});
+
+it('finds an alternate in a large editable list without drawing the whole list or dropping unshown addresses', async () => {
+  const user = userEvent.setup();
+  const alternates = Array.from({ length: 1000 }, (_, index) => `https://alternate-${index}.example.test`);
+  const save = vi.fn<AddressSave>(() => Promise.resolve(addressReceipt('https://changed.example.test')));
+  show(<PublicAddressEditor snapshot={addressSnapshot(alternates)} onSave={save} onOpen={vi.fn()} />);
+  expect(screen.getAllByRole('textbox').length).toBeLessThan(100);
+  await user.click(screen.getByRole('searchbox', { name: i18n.t('publicAddress.search') }));
+  await user.paste('alternate-999.');
+  const last = await screen.findByDisplayValue('https://alternate-999.example.test');
+  await user.clear(last); await user.paste('https://edited-last.example.test');
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await user.clear(primary); await user.paste('https://changed.example.test');
+  await user.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0]?.[0]?.alternate_urls).toEqual([...alternates.slice(0, -1), 'https://edited-last.example.test']);
+});
+
+it('retains a stale address draft while adopting the current revision for an explicit retry', async () => {
+  const changed = { ...addressSnapshot(), public_url: 'https://someone-else.example.test', revision: 3 };
+  const stale = new ApiError({ type: 'orch:error:conflict.stale_revision', title: 'Stale', code: 'conflict.stale_revision', status: 409, detail: 'Changed while preparing', request_id: 'stale-address' }, null);
+  const save = vi.fn<AddressSave>().mockRejectedValueOnce(stale).mockResolvedValueOnce({ ...addressReceipt('https://mine.example.test'), revision: 4 });
+  const refresh = vi.fn(() => Promise.resolve(changed)), open = vi.fn();
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onRefresh={refresh} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://mine.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  expect(primary).toHaveValue('https://mine.example.test');
+  expect(open).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith('https://mine.example.test'));
+  expect(save.mock.calls[1]?.[0]?.expected_revision).toBe(3);
+});
+
+
+function serverView(): ServerUpdateView {
+  return { installed_version: '1.2.2', offered_version: '1.2.3', update_available: true, availability: 'ready', command: './update.sh v1.2.3', job: null, observation: null };
+}
+function serverJob(): Job {
+  return { id: 'server-job', kind: 'server_update', state: 'running', node_id: null, environment_id: null, provider_id: null, batch_id: null, result: null, error: null, log: null, created_by: null,
+    created_at: '2026-11-14T23:00:00Z', started_at: '2026-11-14T23:00:01Z', finished_at: null,
+    progress: { phase: 'update', phases: [{ name: 'commit', weight: 0, state: 'done' }, { name: 'update', weight: 100, state: 'running' }], percent: 30,
+      bytes_done: 0, bytes_total: null, files_done: 0, files_total: null, rate_bps: null, eta_seconds: null, message: 'fetching' } };
+}
+
+it.each(['en', 'zh-CN'] as const)('starts a server update only on its explicit press and keeps one pending act in %s', async (locale) => {
+  await setLocale(locale);
+  const held = addressHeld<Job>(), start = vi.fn<() => Promise<Job>>(() => held.promise);
+  show(<ServerUpdateRow view={serverView()} onStart={start} />);
+  expect(screen.getByText('1.2.2')).toBeVisible(); expect(screen.getByText('1.2.3')).toBeVisible();
+  expect(start).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('serverUpdate.update') }));
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('serverUpdate.updating') }));
+  expect(start).toHaveBeenCalledTimes(1);
+  await act(async () => { held.resolve(serverJob()); await held.promise; });
+  expect(document.querySelector('[data-job-state="running"]')).toBeVisible();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it.each(['no_bundled_node', 'node_offline', 'docker_unavailable'] as const)('names %s beside the unchanged server updater command without starting a job', (availability) => {
+  const start = vi.fn<() => Promise<Job>>();
+  show(<ServerUpdateRow view={{ ...serverView(), availability }} onStart={start} />);
+  expect(screen.getByText(i18n.t(`serverUpdate.unavailable.${availability}`))).toBeVisible();
+  expect(screen.getByText('./update.sh v1.2.3', { selector: 'code' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: i18n.t('serverUpdate.update') })).not.toBeInTheDocument();
+  expect(start).not.toHaveBeenCalled();
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the updater job through restart and shows a recorded rollback after a fresh read in %s', async (locale) => {
+  await setLocale(locale);
+  const job = serverJob(), start = vi.fn<() => Promise<Job>>();
+  const view = show(<ServerUpdateRow view={{ ...serverView(), job }} onStart={start} restarting />);
+  expect(screen.getByText(i18n.t('serverUpdate.restarting'))).toBeVisible();
+  expect(document.querySelector('[data-job-state="running"]')).toBeVisible();
+  const finished = { ...job, state: 'failed' as const, finished_at: '2026-11-14T23:02:00Z' };
+  view.rerender(<ServerUpdateRow view={{ ...serverView(), job: finished, observation: { stage: 'rolled_back', reason: 'health_check_failed', from_version: '1.2.2', to_version: '1.2.3' } }} onStart={start} />);
+  expect(screen.getByText(i18n.t('serverUpdate.rolledBack', { version: '1.2.2' }))).toBeVisible();
+  expect(screen.getByText(i18n.t('serverUpdate.reasons.health_check_failed'))).toBeVisible();
+  expect(start).not.toHaveBeenCalled();
+});
+
+it('keeps the newer published address when an older Save and open reply arrives', async () => {
+  const held = addressHeld<PublicAddressUpdated>();
+  const open = vi.fn(), save = vi.fn<AddressSave>(() => held.promise);
+  const page = show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary);
+  await userEvent.type(primary, 'https://mine.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  const newer = { ...addressSnapshot(), public_url: 'https://current.example.test', revision: 3 };
+  page.rerender(<PublicAddressEditor snapshot={newer} onSave={save} onOpen={open} />);
+  await act(async () => { held.resolve(addressReceipt('https://mine.example.test')); await held.promise; });
+  expect(primary).toHaveValue(newer.public_url);
+  expect(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') })).toBeDisabled();
+  expect(open).not.toHaveBeenCalled();
+});
+
+it('shows the new updater job through restart after retrying a rolled-back release', async () => {
+  const job = serverJob();
+  const old = { ...serverView(), job: { ...job, id: 'earlier-job', state: 'failed' as const },
+    observation: { stage: 'rolled_back' as const, reason: 'health_check_failed' as const, from_version: '1.2.2', to_version: '1.2.3' } };
+  const start = vi.fn<() => Promise<Job>>().mockResolvedValue(job);
+  const page = show(<ServerUpdateRow view={old} onStart={start} />);
+  const reason = i18n.t('serverUpdate.reasons.health_check_failed');
+  expect(screen.getByText(reason)).toBeVisible();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('serverUpdate.update') }));
+  await waitFor(() => expect(document.querySelector('[data-job-state="running"]')).toBeVisible());
+  expect(screen.queryByText(reason)).not.toBeInTheDocument();
+  page.rerender(<ServerUpdateRow view={{ ...serverView(), job, observation: {
+    stage: 'starting', reason: null, from_version: '1.2.2', to_version: '1.2.3',
+  } }} onStart={start} />);
+  expect(screen.getByText(i18n.t('serverUpdate.restarting'))).toBeVisible();
+  expect(start).toHaveBeenCalledTimes(1);
 });

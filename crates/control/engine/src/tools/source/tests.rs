@@ -653,6 +653,7 @@ impl Scene {
                 let dir = body.path != "web/out/result.bin";
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: if dir { "web" } else { "result.bin" }.into(),
                             path: body.path.clone(),
@@ -705,6 +706,7 @@ impl Scene {
                 }
                 Ok(CommandResult::FsFetch(
                     orch_link_contract::commands::FsFetchResult {
+                        minimum_reach: orch_link_contract::policy::FileReach::Roots,
                         hash: blob,
                         size,
                         mtime_ns: at.get().timestamp_nanos_opt().ok_or_else(|| {
@@ -734,6 +736,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -1029,9 +1033,19 @@ impl Scene {
     ) {
         // No prepare/open helper: this is the exact already-admitted recorded native stream,
         // including when its turn is terminal and another continuation now runs.
+        let opening = orch_testkit::doubles::sessions::first_turn_opening(
+            world.pool.pool(),
+            source.thread_id,
+            source.segment_id,
+            turn,
+        )
+        .await
+        .expect("the original admitted turn command is readable")
+        .expect("this producer has an actual physical opening");
         world
             .machine
-            .publish(
+            .publish_from(
+                Some(opening),
                 &Stream::Session {
                     thread_id: source.thread_id,
                     segment_id: source.segment_id,
@@ -1459,10 +1473,19 @@ async fn fresh_old_native_calls_refuse_while_completed_answers_replay_and_the_cu
         total_tokens: 999,
         ..Default::default()
     };
+    let original_opening = orch_testkit::doubles::sessions::first_turn_opening(
+        scene.world.pool.pool(),
+        scene.thread,
+        scene.source.segment_id,
+        scene.start.turn_id,
+    )
+    .await?
+    .ok_or("the original report producer is absent")?;
     scene
         .world
         .machine
-        .publish(
+        .publish_from(
+            Some(original_opening),
             &Stream::Session {
                 thread_id: scene.thread,
                 segment_id: scene.source.segment_id,
@@ -1602,24 +1625,20 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
             )
             .await
     );
-    // The common controller supplier retains commands in its owned journal, not SQL.
-    // Reconstruct only the production dispatcher's storage half from that actual issued
-    // command, preserving every field; no synthetic answer or successful effect is invented.
+    // The production-shaped supplier already retained this exact issued answer before its owner was lost.
     let mut conn = scene.world.pool.acquire().await?;
-    assert!(
-        link::insert_command(
-            &mut conn,
-            &link::NewCommand {
-                id: command.id,
-                machine_id: machine,
-                kind: &command.kind,
-                body: &command.body,
-                serial_key: command.key.as_deref(),
-                deadline_at: command.deadline.get()
-            },
-            scene.world.clock.now()
-        )
+    let saved = link::command(&mut conn, command.id)
         .await?
+        .ok_or("the canonical issued answer was not retained")?;
+    assert_eq!(saved.machine_id, machine);
+    assert_eq!(saved.kind, command.kind);
+    assert_eq!(saved.body, command.body);
+    assert_eq!(saved.serial_key(), command.key.as_deref());
+    assert_eq!(saved.deadline_at, command.deadline.get());
+    assert_eq!(
+        orch_db::queries::session_dependencies::command_native_target(&mut conn, command.id)
+            .await?,
+        command.native_target
     );
     drop(conn);
     let before = scene.snapshot().await?;
@@ -1845,6 +1864,7 @@ async fn download_peer(
             })?;
             Ok(CommandResult::FsWrite(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "copied-doc.md".into(),
                         path: body.path.clone(),
@@ -1899,6 +1919,7 @@ async fn download_peer(
             };
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: if is_source {
                             "result.bin"
@@ -1940,6 +1961,69 @@ async fn admitted_download(cancel_live: bool) -> Proof {
     let scene = Scene::new().await?;
     let (native, destination, _export) = download_peer(&scene, cancel_live).await?;
     let environment = scene.world.environment;
+    let observed_source = scene.directory.path().join("out/result.bin");
+    let observed_destination = destination.clone();
+    let expected_source = scene.blob;
+    let thread = scene.thread;
+    let turn = scene.start.turn_id;
+    let sealed = Mutex::new(None::<orch_link_contract::source::WorkspaceObserveResult>);
+    // This peer exposes only the original source and the download destination. Observe their
+    // real unchanged baseline before admission is released, then publish that same sealed fact.
+    scene
+        .world
+        .machine
+        .handler
+        .on(CommandKind::WorkspaceObserve, move |command| {
+            let Command::WorkspaceObserve(body) = command else {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "wrong native observation",
+                ));
+            };
+            if body.environment_id != environment
+                || body.thread_id != thread
+                || body.turn_id != Some(turn)
+                || body.directory != "web"
+            {
+                return Err(CommandError::new(
+                    ErrorCode::NotFound,
+                    "the native observation names another source",
+                ));
+            }
+            let mut sealed = sealed.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(requested) = &body.sealed {
+                if sealed.as_ref() != Some(requested) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the original native observation changed",
+                    ));
+                }
+                return Ok(CommandResult::WorkspaceObserve(requested.clone()));
+            }
+            if let Some(observed) = sealed.as_ref() {
+                return Ok(CommandResult::WorkspaceObserve(observed.clone()));
+            }
+            let bytes = std::fs::read(&observed_source).map_err(|_| {
+                CommandError::new(ErrorCode::NotFound, "the original native source is absent")
+            })?;
+            if Hash::of(&bytes) != expected_source
+                || !std::fs::symlink_metadata(&observed_destination)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native download namespace changed before its original observation",
+                ));
+            }
+            let observed = orch_link_contract::source::WorkspaceObserveResult {
+                end_patch_blob: None,
+                end_manifest_blob: None,
+                changed_paths: Some(Vec::new()),
+                changed_paths_complete: true,
+            };
+            *sealed = Some(observed.clone());
+            Ok(CommandResult::WorkspaceObserve(observed))
+        });
     let call = "durably-admitted-download";
     let canonical = crate::ids::tool_result(scene.thread, call);
     let (admitted, release) = gate(scene.thread, &canonical.to_string(), Point::Native);
@@ -3347,6 +3431,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     let environment = scene.world.environment;
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             environment_id: environment,
             workspace_root: Some(root.display().to_string()),
             resources: None,

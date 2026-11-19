@@ -42,8 +42,13 @@ export function guessOs(agent: string): MachineOs {
   return 'linux';
 }
 
+/** The server's literal argument rules, including every single-quote delimiter PowerShell accepts. */
+function installerWord(value: string, os: MachineOs): string {
+  return "'" + (os === 'windows' ? value.replace(/['\u2018-\u201b]/gu, (quote) => quote + quote) : value.replaceAll("'", "'\\''")) + "'";
+}
+
 /** Commands already contain the exact choices authenticated by their token. */
-export interface InstallOptions {foreground:boolean;instance:string;node:boolean;gateway?:string}
+export interface InstallOptions {foreground:boolean;instance:string;node:boolean;gateway?:string;name?:string}
 export function commandFor(token: EnrollmentToken, os: MachineOs,options?:InstallOptions): string {
   let command=token.commands[os];
   if(options===undefined) return command;
@@ -57,8 +62,13 @@ export function commandFor(token: EnrollmentToken, os: MachineOs,options?:Instal
   if(options.gateway!==undefined) {
     // Catalogue IDs are data even when an operator uses shell metacharacters in one.
     const gateway=/^[a-zA-Z0-9_-]+$/u.test(options.gateway)?options.gateway
-      : "'"+options.gateway.replaceAll("'",os==='windows'?"''":"'\\''")+"'";
+      : installerWord(options.gateway, os);
     command+=(os==='windows'?' -Gateway ':' --gateway ')+gateway;
+  }
+  const name = options.name?.trim() ?? '';
+  if (name !== '') {
+    const quoted = installerWord(name, os);
+    command += (os === 'windows' ? ' -Name ' : ' --name ') + quoted;
   }
   // --no-service remains an install-only switch for scripts. The screen's Foreground choice
   // completes the workflow in this same command, without requiring a second manual step.
@@ -70,11 +80,12 @@ export function commandFor(token: EnrollmentToken, os: MachineOs,options?:Instal
   return command;
 }
 
-type Selection =
+type Selection = { name: string } & (
   | { kind: 'connector'; home: string; roles: ConnectorRole[]; delegate: ConnectorRole[]; dedicated: boolean }
-  | { kind: 'node'; home: string; access:NewResourceAccess; delegate_policy: boolean };
+  | { kind: 'node'; home: string; access:NewResourceAccess; delegate_policy: boolean });
 
 interface Made {
+  name: string;
   kind: Selection['kind'];
   stamp: string;
   token: EnrollmentToken;
@@ -87,6 +98,7 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const queryClient = useQueryClient();
   const opened = useRef(false);
   const now = useNow();
+  const [name, setName] = useState('');
   const [roles, setRoles] = useState<ConnectorRole[]>(['environment', 'agent']);
   const [delegated, setDelegated] = useState<ConnectorRole[]>([]);
   const [node, setNode] = useState(initialKind==='node');
@@ -101,26 +113,31 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const [gateway,setGateway]=useState('automatic');
   const info=useQuery(machineEnrollmentInfoQuery);
   const instanceValid=node || instance==='' || /^[a-zA-Z0-9_-]+$/u.test(instance);
+  const chosenName = name.trim();
   const selection = useMemo<Selection>(() => node
-    ? { kind: 'node', home, access,delegate_policy: nodeDelegated }
-    : { kind: 'connector', home, roles: CONNECTOR_ROLES.filter((role) => roles.includes(role)),
+    ? { kind: 'node', name: chosenName, home, access,delegate_policy: nodeDelegated }
+    : { kind: 'connector', name: chosenName, home, roles: CONNECTOR_ROLES.filter((role) => roles.includes(role)),
         delegate: CONNECTOR_ROLES.filter((role) => roles.includes(role) && delegated.includes(role)), dedicated },
-  [node, home,access, nodeDelegated, roles, delegated, dedicated]);
+  [node, chosenName, home, access, nodeDelegated, roles, delegated, dedicated]);
   const stamp = JSON.stringify(selection);
   const valid = selection.kind === 'node' ? selection.home !== '' : selection.roles.length > 0;
 
   const make = useMutation({
     gcTime:0,
     mutationFn: async (selected: Selection): Promise<Made> => {
+      const requestedName = selected.name === '' ? {} : { name_hint: selected.name };
       const token = selected.kind === 'node'
-        ? await createHostToken({ home_id: selected.home, access:selected.access, delegate_policy: selected.delegate_policy }, newActKey())
-        : await createMachineToken(newActKey(), { roles: selected.roles, delegate: selected.delegate, dedicated: selected.dedicated,
+        ? await createHostToken({ ...requestedName, home_id: selected.home, access:selected.access, delegate_policy: selected.delegate_policy }, newActKey())
+        : await createMachineToken(newActKey(), { ...requestedName, roles: selected.roles, delegate: selected.delegate, dedicated: selected.dedicated,
             ...(selected.home === '' ? {} : { home_id: selected.home }) });
-      return { kind: selected.kind, stamp: JSON.stringify(selected), token };
+      return { kind: selected.kind, name: selected.name, stamp: JSON.stringify(selected), token };
     },
   });
   const { mutate } = make;
-  const made = make.data?.stamp === stamp ? make.data : undefined;
+  // An unnamed token accepts the name reported by the installer. A named token keeps its issued name.
+  const issued = make.data;
+  const commandStamp = issued?.name === '' ? JSON.stringify({ ...selection, name: '' }) : stamp;
+  const made = issued?.stamp === commandStamp ? issued : undefined;
   const receipt = made?.token.receipt ?? undefined;
   const progress = useQuery({ ...enrollmentProgressQuery(receipt ?? ''), enabled: receipt !== undefined });
   const refetchProgress = progress.refetch;
@@ -149,11 +166,13 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
     else if (machine !== undefined) queryClient.setQueryData(machineKey(machine.id), machine);
     toast({ tone: 'success', title: t(host === undefined ? 'machines.add.connected' : 'hosts.add.connected') });
     onClose();
-    void navigate({ to: host === undefined ? '/resources/machines/$id' : '/resources/hosts/$id', params: { id: arrived.id } });
+    if (host !== undefined) void navigate({ to: '/resources/hosts/$id', params: { id: host.id } });
+    else if (machine !== undefined) void navigate({ to: '/resources/machines/$id', params: { id: machine.id },
+      ...(machine.roles.includes('agent') ? { search: { tab: 'programs' } } : {}) });
   }, [arrived, connected, host, machine, navigate, onClose, queryClient, t]);
 
   const mayShow=info.data?.secure===true && !info.isError && valid && instanceValid;
-  const install={foreground,instance,node,gateway};
+  const install={foreground,instance,node,gateway,name};
   const directory=node?'/var/lib/orch-node':os==='windows'?'%LOCALAPPDATA%\\Orch\\connector':os==='macos'?'~/Library/Application Support/Orch/connector':'~/.local/share/orch-connector';
   const data=instance!=='' && !node?`${directory}/instances/${instance}`:directory;
   const bin=os==='windows'?'%LOCALAPPDATA%\\Orch':'~/.local/bin';
@@ -165,6 +184,8 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
       {t('common.close')}
     </Button>{arrived===undefined && (made===undefined || expired) && <Button action="show" variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
     <div className="flex flex-col gap-4 py-2" data-tutorial-target="machine-enrollment">
+      {arrived === undefined && <Input label={t('resources.edit.name')} optional placeholder={t('machines.add.nameDefault')} value={name} disabled={make.isPending}
+        onChange={(event) => setName(event.target.value)} autoComplete="off" />}
       {info.isPending && <SkeletonRows read={info} rows={1}/>}
       {info.isError && <ErrorState compact error={info.error} retrying={info.isRefetching} onRetry={()=>void info.refetch()}/>}
       {progress.isError && <ErrorState compact error={progress.error} retrying={progress.isRefetching} onRetry={()=>void progress.refetch()}/>}

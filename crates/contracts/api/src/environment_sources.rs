@@ -263,6 +263,10 @@ pub const TRUST_SET_FACETS: [FacetSpec; 8] = [
 /// The native enabled-server selection and its independently bounded references.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpSource {
+    /// Readable names of the actual native agent profiles.
+    Profiles,
+    /// The optional actual thread whose native connection observations are requested.
+    NativeThread,
     /// The live Environment whose native whole reading door was selected.
     Environment,
     /// Native enabled servers and stored imports identified beside their discovered origins.
@@ -285,6 +289,18 @@ pub enum McpSource {
 pub const MCP_GET: Declaration<McpSource> = Declaration {
     operation: "EnvironmentMcpGet",
     bindings: &[
+        Binding {
+            source: McpSource::Profiles,
+            target: TargetResolver::ResolvedCollection("environment_mcp_profiles"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: McpSource::NativeThread,
+            target: TargetResolver::ResolvedCollection("environment_mcp_native_thread"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
         Binding {
             source: McpSource::Environment,
             target: TargetResolver::Path("id"),
@@ -337,7 +353,16 @@ pub const MCP_GET: Declaration<McpSource> = Declaration {
 };
 
 /// The native primary context, selected server content and optional context names.
-pub const MCP_GET_FACETS: [FacetSpec; 8] = [
+pub const MCP_GET_FACETS: [FacetSpec; 10] = [
+    FacetSpec::response_content(
+        &[KeyTargetKind::Object(ObjectKind::Agent)],
+        TargetResolver::ResolvedCollection("environment_mcp_profiles"),
+    ),
+    FacetSpec::required(
+        KeyAction::Read,
+        &[KeyTargetKind::Object(ObjectKind::Thread)],
+        TargetResolver::ResolvedCollection("environment_mcp_native_thread"),
+    ),
     FacetSpec::required(
         KeyAction::Read,
         &[KeyTargetKind::Object(ObjectKind::Environment)],
@@ -1058,6 +1083,8 @@ pub const RECIPIENTS_FACETS: [FacetSpec; 1] = [FacetSpec::required(
     KeyAction::Read,
     &[
         KeyTargetKind::Object(ObjectKind::Host),
+        KeyTargetKind::Object(ObjectKind::McpServer),
+        KeyTargetKind::Object(ObjectKind::Mount),
         KeyTargetKind::Object(ObjectKind::Environment),
         KeyTargetKind::Object(ObjectKind::Provider),
         KeyTargetKind::Object(ObjectKind::Machine),

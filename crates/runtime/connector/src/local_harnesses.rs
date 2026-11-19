@@ -884,6 +884,7 @@ mod tests {
             .push(orch_link_contract::policy::PolicyHarness {
                 kind: "codex".into(),
                 path: selected,
+                confirmation: None,
             });
         let machine = |policy| {
             crate::facts::machine_facts(

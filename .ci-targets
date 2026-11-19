@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib --test binding_options --test certificates --test hosts --test installation_records --test kmounts_files --test kmounts_mcp --test kvnc_core --test loss --test machine_again_scopes --test machine_enrollment_home --test machines --test mcp_delete_scopes --test providers --test real_connector --test realtime_diagnostics --test summaries --test terminals_connector --test workspace_connector --features test-support
+test -p orch-engine --lib --test background_wake --test cache_cleanup --test call_recovery --test failures --test foreign_machine_streams --test limits --test notifications -- --skip history_pages::
+test -p orch-connector-core -p orch-link -p orch-gateway-core -p orch-pki --lib --test agent_role --test enrollment --test environment_role --test gateway_choice --test harness_tools --test commands --test handshake --test slow_link --test tls --test access --test ports_walk --test sessions --test enrolment --test large_messages
+test -p orch-envhost --lib --test environment
+test -p orch-agent-contract -p orch-link-contract -p orch-api-contract -p orch-settings-contract -p orch-db -p orch-testkit -p orch-conformance -p orch-adapter-acp -p orch-adapter-claude-code -p orch-adapter-codex -p orch-adapter-fake --lib --test commands_in_line --test largest_messages --test harness_corpus --test suites --test harness --test turns --test sessions --test recorded_failures --test upgrade_notifications
+test -p orch-connector --test program -- platform_observations::a_machine_reviews_its_native_build_before_it_serves_a_shared_directory
+test -p orchctl -p orch-node --test kfix_deploy --test conformance

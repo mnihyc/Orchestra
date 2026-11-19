@@ -27,6 +27,9 @@ pub const LABEL_SYSTEM: &str = "orch.system";
 pub const LABEL_RUNTIME_ID: &str = "orch.runtime_id";
 /// The label that holds the pool: `environment` or `provider`.
 pub const LABEL_KIND: &str = "orch.kind";
+/// An admitted fresh allocation. An existing unit cannot be adopted or rewritten for this birth.
+/// The marker is an allocation condition, never evidence of an existing unit's physical identity.
+pub const LABEL_BIRTH: &str = "orch.birth";
 
 /// How many hexadecimal digits of the runtime's identifier are in the name of its unit.
 pub const NAME_ID_DIGITS: usize = 12;
@@ -207,6 +210,36 @@ impl EnvironmentDataSources {
     }
 }
 
+/// A complete native file number, including all 128 bits on Windows filesystems.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
+pub struct FileNumber([u8; 16]);
+
+impl FileNumber {
+    /// No native number was supplied by the filesystem.
+    pub const ZERO: Self = Self([0; 16]);
+
+    /// The exact native bytes, with no truncation or hash that could merge two identities.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// A Unix inode widened without losing any of its bits.
+    #[must_use]
+    pub const fn from_u64(number: u64) -> Self {
+        Self((number as u128).to_le_bytes())
+    }
+}
+
+impl std::fmt::Display for FileNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:032x}", u128::from_le_bytes(self.0))
+    }
+}
+
 /// A borrowed directory resolved by the keeping machine. Identity is filled by the node, never the API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -218,7 +251,7 @@ pub struct DirectoryBinding {
     pub device: Option<u64>,
     /// Directory identity, so replacement between validation and bind cannot widen the policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inode: Option<u64>,
+    pub inode: Option<FileNumber>,
 }
 
 /// An owned volume, or an explicitly borrowed workspace/home directory on this machine.
@@ -774,7 +807,7 @@ mod tests {
         spec.volumes.get_mut(&VolumeRole::Home).unwrap().directory = Some(DirectoryBinding {
             path: "/srv/harness".into(),
             device: Some(8),
-            inode: Some(90),
+            inode: Some(FileNumber::from_u64(90)),
         });
         assert!(spec.check().is_ok());
         spec.volumes.get_mut(&VolumeRole::State).unwrap().directory =

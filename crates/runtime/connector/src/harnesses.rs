@@ -44,9 +44,9 @@ use orch_agent_contract::facts::{AgentProfile, HarnessState, HarnessStatus};
 use orch_agent_contract::loopback::Loopback as AdapterLoopback;
 use orch_agent_contract::session::ThreadId;
 use orch_link_contract::commands::{
-    AgentStart, CommandError, ErrorCode, Secret as LinkSecret, SecretOrText,
+    AgentStart, CommandError, ErrorCode, SandboxMode, Secret as LinkSecret, SecretOrText,
 };
-use orch_link_contract::events::{Event, RawFrame};
+use orch_link_contract::events::{Event, RawFrame, SessionSandbox};
 use orch_link_contract::session::MachineFactsAdapter;
 use orch_link_contract::streams::Stream;
 use orch_types::{Clock, Field, Id, Json};
@@ -291,6 +291,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // A process
 
 struct OpenSession {
+    opening_id: Id,
+    opening_epoch: i64,
+    native_environment: Option<Id>,
+    directory: String,
+    cwd: String,
     segment_id: Id,
     native_session_ref: String,
     continuation_fenced: bool,
@@ -301,6 +306,25 @@ struct OpenSession {
 }
 
 impl OpenSession {
+    fn configuration_directories(
+        &self,
+        environment: Id,
+        root: &str,
+    ) -> std::collections::BTreeSet<String> {
+        if self.native_environment != Some(environment) {
+            return std::collections::BTreeSet::new();
+        }
+        let mut found =
+            std::collections::BTreeSet::from([self.directory.clone(), self.cwd.clone()]);
+        for directory in Path::new(&self.cwd)
+            .ancestors()
+            .take_while(|directory| directory.starts_with(root))
+        {
+            found.insert(directory.to_string_lossy().into_owned());
+        }
+        found
+    }
+
     fn operation(&self, expected: Option<Id>) -> Result<(), CommandError> {
         if expected.is_some_and(|id| id != self.segment_id)
             || expected.is_none() && self.continuation_fenced
@@ -376,7 +400,8 @@ struct State {
 struct Context {
     services: Arc<Services>,
     ledger: Arc<Ledger>,
-    threads: Mutex<HashMap<ThreadId, Key>>,
+    threads: Mutex<HashMap<ThreadId, (Key, Id)>>,
+    mcp_changed: Arc<tokio::sync::Notify>,
     restarts: u32,
     window: Duration,
 }
@@ -398,6 +423,8 @@ fn death_of(status: &HarnessStatus) -> Option<String> {
     }
 }
 
+type Scratch = HashMap<(Option<Id>, Id), Vec<Id>>;
+
 /// One harness process: an adapter, its home, its sessions.
 pub struct Process {
     /// The provider it serves.
@@ -409,6 +436,7 @@ pub struct Process {
     ctx: Arc<Context>,
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
+    interrupt: Mutex<Option<orch_agent_contract::adapter::Interrupt>>,
     output_directory: Mutex<Option<PathBuf>>,
     adapter_start: AdapterStart,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
@@ -418,7 +446,7 @@ pub struct Process {
     stopping: AtomicBool,
     generation: AtomicU64,
     /// The commands whose files a turn is still using, by the turn.
-    scratch: Mutex<HashMap<Id, Vec<Id>>>,
+    scratch: Mutex<Scratch>,
 }
 
 impl std::fmt::Debug for Process {
@@ -503,8 +531,11 @@ impl Process {
 
     /// Keeps the files that `command` fetched until the turn `turn` ends: the harness reads them while
     /// it works.
-    pub fn keep_for_turn(&self, turn: Id, command: Id) {
-        lock(&self.scratch).entry(turn).or_default().push(command);
+    pub fn keep_for_turn(&self, opening_id: Option<Id>, turn: Id, command: Id) {
+        lock(&self.scratch)
+            .entry((opening_id, turn))
+            .or_default()
+            .push(command);
     }
 
     /// How many sessions are open in it.
@@ -574,24 +605,73 @@ impl Process {
             .map(|session| session.native_session_ref.clone())
     }
 
-    /// Runs one call of the adapter. Calls are one at a time: the adapter is `&mut`.
+    /// Runs one call of the actual process, without borrowing its replacement after waiting for the adapter.
     pub async fn call<R>(
         &self,
         work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
     ) -> Result<R, CommandError> {
-        if self.state().status != HarnessState::Online {
+        self.call_at(self.generation(), work).await
+    }
+
+    fn serves_generation(&self, generation: u64) -> bool {
+        self.generation() == generation
+            && !self.stopping.load(Ordering::SeqCst)
+            && self.state().status == HarnessState::Online
+    }
+
+    /// Executes only on the captured process generation, including after the adapter's queue wait.
+    pub async fn call_at<R>(
+        &self,
+        generation: u64,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        if !self.serves_generation(generation) {
             return Err(unavailable(
-                "the harness process is not running; it is being started again, or gave up",
+                "the native process changed before this call could begin",
             ));
         }
         let mut adapter = self.adapter.lock().await;
-        work(adapter.as_mut())
+        if !self.serves_generation(generation) {
+            return Err(unavailable(
+                "the native process changed while this call was waiting",
+            ));
+        }
+        let result = work(adapter.as_mut()).await;
+        *lock(&self.interrupt) = adapter.interrupt_handle();
+        result.map_err(|error| command_error(&error))
+    }
+
+    /// Stops one exact turn without joining an adapter call that may be exporting or replaying history.
+    pub async fn interrupt(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        thread: ThreadId,
+        turn: Id,
+    ) -> Result<(), CommandError> {
+        let generation = self.generation();
+        let handle = lock(&self.interrupt).clone();
+        if let Some(handle) = handle {
+            self.check_call_target(context, generation, None).await?;
+            return handle(thread, turn)
+                .await
+                .map_err(|error| command_error(&error));
+        }
+        self.call_target(context, |adapter| adapter.interrupt(thread, turn))
             .await
-            .map_err(|error| command_error(&error))
     }
 
     async fn publish(&self, stream: Stream, event: Event) {
-        if let Err(error) = self.ctx.services.publisher.publish(stream, event).await {
+        self.publish_from(None, stream, event).await;
+    }
+
+    async fn publish_from(&self, native_opening_id: Option<Id>, stream: Stream, event: Event) {
+        if let Err(error) = self
+            .ctx
+            .services
+            .publisher
+            .publish_from(native_opening_id, stream, event)
+            .await
+        {
             tracing::warn!(%error, "an event could not be put in the spool");
         }
     }
@@ -714,11 +794,42 @@ impl Process {
         }
     }
 
+    /// The actual process generation a native call is about to use.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// A session opened in the adapter: it is kept, in the process and on disk.
-    pub fn session_opened(&self, binding: &SessionBinding, native_session_ref: &str) {
-        self.state().sessions.insert(
+    pub fn session_opened(
+        &self,
+        binding: &SessionBinding,
+        opening_id: Id,
+        opening_epoch: i64,
+        generation: u64,
+        native_session_ref: &str,
+        directory: &str,
+        cwd: &str,
+        output_capture_bytes: u64,
+        native_environment: Option<Id>,
+    ) -> Result<(), CommandError> {
+        let mut state = self.state();
+        if generation != self.generation()
+            || self.stopping.load(Ordering::SeqCst)
+            || state.status != HarnessState::Online
+        {
+            return Err(unavailable(
+                "the process that opened this session has already ended",
+            ));
+        }
+        state.sessions.insert(
             binding.thread_id,
             OpenSession {
+                opening_id,
+                opening_epoch,
+                native_environment,
+                directory: directory.to_owned(),
+                cwd: cwd.to_owned(),
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
                 continuation_fenced: false,
@@ -728,27 +839,244 @@ impl Process {
                 awaiting_native: false,
             },
         );
-        lock(&self.ctx.threads).insert(binding.thread_id, self.key());
+        if native_environment.is_some() {
+            self.ctx.mcp_changed.notify_one();
+        }
+        lock(&self.ctx.threads).insert(binding.thread_id, (self.key(), opening_id));
         self.ctx.ledger.session_opened(
             self.provider_id,
             self.agent_id,
             HostedSession {
+                opening_id,
                 thread_id: binding.thread_id,
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
+                directory: directory.to_owned(),
+                cwd: cwd.to_owned(),
+                output_capture_bytes,
                 running_turn: None,
+                native_turn_ref: None,
             },
         );
+        Ok(())
+    }
+
+    /// The exact physical slot, captured before an operation waits elsewhere.
+    #[must_use]
+    pub fn session_target(
+        &self,
+        thread: ThreadId,
+    ) -> Option<orch_link_contract::commands::SessionTarget> {
+        self.state().sessions.get(&thread).map(|session| {
+            orch_link_contract::commands::SessionTarget {
+                thread_id: thread,
+                segment_id: Some(session.segment_id),
+                opening_id: Some(session.opening_id),
+                opening_epoch: Some(session.opening_epoch),
+            }
+        })
+    }
+
+    /// Rechecks a physical pin after the adapter queue; an absent or superseded close is a no-op.
+    pub async fn call_session<R>(
+        &self,
+        target: &orch_link_contract::commands::SessionTarget,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<Option<R>, CommandError> {
+        if target.opening_id.is_none() {
+            return Ok(None);
+        }
+        let generation = self.generation();
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation)
+            || self.session_target(target.thread_id).as_ref() != Some(target)
+        {
+            return Ok(None);
+        }
+        work(adapter.as_mut())
+            .await
+            .map(Some)
+            .map_err(|error| command_error(&error))
+    }
+
+    /// Applies a session operation only to its accepted physical slot after the adapter queue.
+    pub async fn call_target<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        self.call_target_checked(context, None, work).await
+    }
+
+    pub async fn call_config<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        action: orch_link_contract::native_target::SessionAction,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        self.call_target_checked(context, Some(action), work).await
+    }
+
+    async fn call_target_checked<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        action: Option<orch_link_contract::native_target::SessionAction>,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        let generation = self.generation();
+        let mut adapter = self.adapter.lock().await;
+        self.check_call_target(context, generation, action).await?;
+        work(adapter.as_mut())
+            .await
+            .map_err(|error| command_error(&error))
+    }
+
+    async fn check_call_target(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        generation: u64,
+        action: Option<orch_link_contract::native_target::SessionAction>,
+    ) -> Result<(), CommandError> {
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            context.native_target.as_ref()
+        else {
+            return Err(unavailable("the command has no captured native session"));
+        };
+        if !self.serves_generation(generation)
+            || self.session_target(target.thread_id).as_ref() != Some(target)
+        {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical session ended while this call was waiting",
+            ));
+        }
+        let fences = context
+            .native_fences
+            .clone()
+            .ok_or_else(|| unavailable("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        let captured = target.clone();
+        let live = tokio::task::spawn_blocking(move || {
+            if !fences.tool_control().1 {
+                return Ok(false);
+            }
+            fences.observe_session(
+                &target,
+                orch_link_contract::native_target::SessionAction::Use,
+            )
+        })
+        .await
+        .map_err(|_| unavailable("the native ordering check failed"))?
+        .map_err(|_| unavailable("the native ordering marker cannot be read"))?;
+        if !live
+            || !self.serves_generation(generation)
+            || self.session_target(captured.thread_id).as_ref() != Some(&captured)
+            || context.cancel.is_cancelled()
+        {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical session was retired while this call was waiting",
+            ));
+        }
+        if let Some(action) = action {
+            let current = self.session_key(captured.thread_id).is_some_and(|key| {
+                context.native_members.as_ref().is_some_and(|members| {
+                    self.ctx
+                        .services
+                        .loopback
+                        .configuration_current(&key, action, members)
+                })
+            });
+            if !current {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the accepted session configuration was superseded",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks an opening's persistent order after queued preparation and before native creation.
+    pub async fn call_opening<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        generation: u64,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation) {
+            return Err(unavailable(
+                "the native process changed while this opening was waiting",
+            ));
+        }
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            context.native_target.as_ref()
+        else {
+            return Err(unavailable("the command has no captured native opening"));
+        };
+        let fences = context
+            .native_fences
+            .clone()
+            .ok_or_else(|| unavailable("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        let live = tokio::task::spawn_blocking(move || {
+            if !fences.tool_control().1 {
+                return Ok(false);
+            }
+            fences.observe_session(
+                &target,
+                orch_link_contract::native_target::SessionAction::Open,
+            )
+        })
+        .await
+        .map_err(|_| unavailable("the native ordering check failed"))?
+        .map_err(|_| unavailable("the native ordering marker cannot be read"))?;
+        if !live || !self.serves_generation(generation) || context.cancel.is_cancelled() {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical opening was retired while waiting",
+            ));
+        }
+        work(adapter.as_mut())
+            .await
+            .map_err(|error| command_error(&error))
     }
 
     /// A session ended: everything kept of it goes.
     pub fn session_closed(&self, thread: ThreadId) {
-        let removed = self.state().sessions.remove(&thread);
-        lock(&self.ctx.threads).remove(&thread);
-        self.ctx.ledger.session_closed(thread);
-        if let Some(session) = removed {
-            self.ctx.services.loopback.unbind(&session.session_key);
+        let opening = self
+            .state()
+            .sessions
+            .get(&thread)
+            .map(|session| session.opening_id);
+        if let Some(opening) = opening {
+            self.session_closed_if(thread, opening);
         }
+    }
+
+    /// Removes only this physical opening, keeping a replacement's slot, ledger and local key intact.
+    pub fn session_closed_if(&self, thread: ThreadId, opening_id: Id) {
+        let mut state = self.state();
+        if !state
+            .sessions
+            .get(&thread)
+            .is_some_and(|session| session.opening_id == opening_id)
+        {
+            return;
+        }
+        let Some(session) = state.sessions.remove(&thread) else {
+            return;
+        };
+        let mut threads = lock(&self.ctx.threads);
+        if threads.get(&thread) == Some(&(self.key(), opening_id)) {
+            threads.remove(&thread);
+        }
+        self.ctx.ledger.session_closed_if(thread, opening_id);
+        if session.native_environment.is_some() {
+            self.ctx.mcp_changed.notify_one();
+        }
+        self.ctx.services.loopback.unbind(&session.session_key);
     }
 
     /// Removes only the matching native history's local slot, preserving a successor or another home.
@@ -764,17 +1092,19 @@ impl Process {
         {
             return;
         }
-        let removed = state.sessions.remove(&source.thread_id);
+        let Some(session) = state.sessions.remove(&source.thread_id) else {
+            return;
+        };
         let mut threads = lock(&self.ctx.threads);
-        if threads.get(&source.thread_id) == Some(&self.key()) {
+        if threads.get(&source.thread_id) == Some(&(self.key(), session.opening_id)) {
             threads.remove(&source.thread_id);
-            self.ctx.ledger.session_closed(source.thread_id);
+            self.ctx
+                .ledger
+                .session_closed_if(source.thread_id, session.opening_id);
         }
         drop(threads);
         drop(state);
-        if let Some(session) = removed {
-            self.ctx.services.loopback.unbind(&session.session_key);
-        }
+        self.ctx.services.loopback.unbind(&session.session_key);
     }
 
     /// Reserves a just-admitted turn before the adapter can return ahead of its TurnStarted event.
@@ -782,7 +1112,9 @@ impl Process {
         let mut state = self.state();
         if let Some(session) = state.sessions.get_mut(&thread) {
             session.running_turn = turn;
-            self.ctx.ledger.turn_running(thread, turn);
+            self.ctx
+                .ledger
+                .turn_running(thread, session.opening_id, turn);
         }
     }
 
@@ -874,6 +1206,7 @@ impl Process {
     /// and given up). Says whether the process is still the one they are of.
     async fn deliver_all(self: &Arc<Self>, events: Vec<AdapterEvent>, generation: u64) -> bool {
         let mut kept = Vec::with_capacity(events.len());
+        let mut observations = Vec::new();
         let mut deaths = Vec::new();
         let mut current = true;
         for event in events {
@@ -894,33 +1227,107 @@ impl Process {
                 }
                 other => other,
             };
-            self.observe(&event);
+            self.observe_before_publication(&event);
             match convert(self.provider_id, self.agent_id, &event) {
                 Ok(converted) => {
-                    if !self.keep_output_blobs(&converted.1, generation).await {
+                    if !self.keep_output_blobs(&converted.event, generation).await {
                         current = false;
                         break;
                     }
+                    if matches!(
+                        &event,
+                        AdapterEvent::Session {
+                            event: SessionEvent::TurnCompleted(_)
+                                | SessionEvent::SessionLost(_)
+                                | SessionEvent::BackgroundTasks(_),
+                            ..
+                        }
+                    ) {
+                        observations.push(event);
+                    }
                     kept.push(converted);
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "an event of the adapter was not given to the link")
+                Err(_) => {
+                    tracing::warn!("an event of the adapter could not be converted for publication")
                 }
             }
             if let Some(reason) = death {
                 deaths.push(reason);
             }
         }
-        for answer in self.ctx.services.publisher.publish_all(kept).await {
-            if let Err(error) = answer {
-                tracing::warn!(%error, "an event could not be put in the spool");
+        let mut warned = false;
+        while !kept.is_empty() {
+            let mut answers = self
+                .ctx
+                .services
+                .publisher
+                .publish_all(kept.clone())
+                .await
+                .into_iter();
+            let mut retry = Vec::new();
+            for event in kept {
+                if !matches!(answers.next(), Some(Ok(()))) {
+                    retry.push(event);
+                }
+            }
+            kept = retry;
+            if !kept.is_empty() {
+                if !warned {
+                    tracing::warn!(
+                        "native output is held until its events can be published durably"
+                    );
+                    warned = true;
+                }
+                tokio::time::sleep(RESTART_FIRST_PAUSE).await;
+            }
+        }
+        if self.generation.load(Ordering::SeqCst) == generation {
+            for observation in observations {
+                self.observe(&observation);
             }
         }
         for reason in deaths {
             let process = Arc::clone(self);
             tokio::spawn(async move { process.died(generation, reason).await });
         }
-        current
+        current && self.generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Native running identity is retained immediately; terminal retirement waits for a durable receipt.
+    fn observe_before_publication(&self, event: &AdapterEvent) {
+        match event {
+            AdapterEvent::Session {
+                native_opening_id,
+                thread_id,
+                segment_id,
+                event: SessionEvent::BackgroundTasks(report),
+                ..
+            } => {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && Some(session.opening_id) == *native_opening_id
+                    && session.segment_id == *segment_id
+                {
+                    for task in &report.tasks {
+                        if task.state
+                            == orch_agent_contract::background::BackgroundTaskState::Running
+                        {
+                            session
+                                .background
+                                .insert(serde_json::json!([task.id, task.run_id]).to_string());
+                        }
+                    }
+                    if report.self_waking && report.tasks.iter().any(|task| task.state.wakes()) {
+                        session.awaiting_native = true;
+                    }
+                }
+            }
+            AdapterEvent::Login(_)
+            | AdapterEvent::Session {
+                event: SessionEvent::TurnStarted(_),
+                ..
+            } => self.observe(event),
+            _ => {}
+        }
     }
 
     fn observe(&self, event: &AdapterEvent) {
@@ -929,6 +1336,7 @@ impl Process {
             return;
         }
         let AdapterEvent::Session {
+            native_opening_id,
             thread_id,
             segment_id,
             event,
@@ -937,10 +1345,14 @@ impl Process {
         else {
             return;
         };
+        let Some(opening_id) = *native_opening_id else {
+            return;
+        };
         match event {
             SessionEvent::BackgroundTasks(report) => {
                 if let Some(session) = self.state().sessions.get_mut(thread_id)
                     && session.segment_id == *segment_id
+                    && session.opening_id == opening_id
                 {
                     for task in &report.tasks {
                         let key = serde_json::json!([task.id, task.run_id]).to_string();
@@ -961,20 +1373,43 @@ impl Process {
                 }
             }
             SessionEvent::TurnStarted(started) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.opening_id == opening_id
+                    && session
+                        .running_turn
+                        .is_none_or(|turn| turn == started.turn_id)
+                {
                     session.running_turn = Some(started.turn_id);
                     session.awaiting_native = false;
+                    self.ctx.ledger.turn_running(
+                        *thread_id,
+                        session.opening_id,
+                        Some(started.turn_id),
+                    );
                 }
-                self.ctx
-                    .ledger
-                    .turn_running(*thread_id, Some(started.turn_id));
+                self.ctx.ledger.turn_native(
+                    *thread_id,
+                    opening_id,
+                    started.turn_id,
+                    &started.native_turn_ref,
+                );
             }
             SessionEvent::TurnCompleted(completed) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.opening_id == opening_id
+                    && session.running_turn == Some(completed.turn_id)
+                {
                     session.running_turn = None;
+                    self.ctx.ledger.turn_running_if(
+                        *thread_id,
+                        session.opening_id,
+                        Some(completed.turn_id),
+                        None,
+                    );
                 }
-                self.ctx.ledger.turn_running(*thread_id, None);
-                let commands = lock(&self.scratch).remove(&completed.turn_id);
+                let commands = lock(&self.scratch).remove(&(Some(opening_id), completed.turn_id));
                 if let Some(commands) = commands {
                     let content = Arc::clone(&self.ctx.services.content);
                     tokio::spawn(async move {
@@ -984,7 +1419,9 @@ impl Process {
                     });
                 }
             }
-            SessionEvent::SessionLost(_) => self.session_closed(*thread_id),
+            SessionEvent::SessionLost(lost) if lost.opening_id == opening_id => {
+                self.session_closed_if(*thread_id, opening_id)
+            }
             _ => {}
         }
     }
@@ -1007,16 +1444,31 @@ impl Process {
             return;
         }
         tracing::warn!(provider = %self.provider_id, agent = %self.agent_id, %reason, "a harness process died");
-        let lost: Vec<(ThreadId, OpenSession)> = self.state().sessions.drain().collect();
+        let lost: Vec<(ThreadId, OpenSession)> = {
+            let mut state = self.state();
+            state.status = HarnessState::Error;
+            state.detail = Some(reason.clone());
+            state.sessions.drain().collect()
+        };
         for (thread, session) in lost {
-            lock(&self.ctx.threads).remove(&thread);
-            self.ctx.ledger.session_closed(thread);
+            {
+                let mut threads = lock(&self.ctx.threads);
+                if threads.get(&thread) == Some(&(self.key(), session.opening_id)) {
+                    threads.remove(&thread);
+                }
+            }
+            self.ctx
+                .ledger
+                .session_closed_if(thread, session.opening_id);
             self.ctx.services.loopback.unbind(&session.session_key);
             let stream = Stream::Session {
                 thread_id: thread,
                 segment_id: session.segment_id,
             };
             let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+                expected: false,
+                opening_id: session.opening_id,
+                uncertain: false,
                 reason: format!("the harness process died: {reason}"),
             });
             if let Ok(body) = serde_json::to_value(&event)
@@ -1025,7 +1477,8 @@ impl Process {
                     body.get("body").cloned().unwrap_or(Json::Null),
                 )
             {
-                self.publish(stream, converted).await;
+                self.publish_from(Some(session.opening_id), stream, converted)
+                    .await;
             }
         }
         self.state().status = HarnessState::Error;
@@ -1095,6 +1548,7 @@ impl Process {
             .await
             .map_err(|error| command_error(&error))?;
         let output_directory = adapter.output_directory();
+        *lock(&self.interrupt) = adapter.interrupt_handle();
         drop(adapter);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.output_directory) = output_directory;
@@ -1116,8 +1570,11 @@ impl Process {
         self.stopping.store(true, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
         let sessions: Vec<(ThreadId, OpenSession)> = self.state().sessions.drain().collect();
-        for (thread, _) in &sessions {
-            lock(&self.ctx.threads).remove(thread);
+        for (thread, session) in &sessions {
+            let mut threads = lock(&self.ctx.threads);
+            if threads.get(thread) == Some(&(self.key(), session.opening_id)) {
+                threads.remove(thread);
+            }
         }
         self.ctx.services.loopback.revoke(self.grant.id);
         {
@@ -1170,6 +1627,7 @@ impl Hosting {
                 services,
                 ledger,
                 threads: Mutex::new(HashMap::new()),
+                mcp_changed: Arc::new(tokio::sync::Notify::new()),
                 restarts,
                 window,
             }),
@@ -1218,11 +1676,38 @@ impl Hosting {
     pub fn process_of(&self, thread: ThreadId) -> Result<Arc<Process>, CommandError> {
         let key = lock(&self.ctx.threads).get(&thread).copied();
         match key {
-            Some((provider, agent)) => self.process(provider, agent),
+            Some(((provider, agent), _)) => self.process(provider, agent),
             None => Err(CommandError::new(
                 ErrorCode::SessionNotFound,
                 "no session of that thread is open on this machine",
             )),
+        }
+    }
+
+    /// Finds only the captured physical owner, including an older process awaiting its actual close.
+    pub fn process_for_target(
+        &self,
+        target: &orch_link_contract::commands::SessionTarget,
+    ) -> Option<Arc<Process>> {
+        lock(&self.processes)
+            .values()
+            .find(|process| process.session_target(target.thread_id).as_ref() == Some(target))
+            .cloned()
+    }
+
+    /// A newer admitted opening retires older local keys before its preparation can wait.
+    pub fn retire_older_session_keys(&self, target: &orch_link_contract::commands::SessionTarget) {
+        let Some(epoch) = target.opening_epoch else {
+            return;
+        };
+        let processes = lock(&self.processes).values().cloned().collect::<Vec<_>>();
+        for process in processes {
+            let state = process.state();
+            if let Some(session) = state.sessions.get(&target.thread_id)
+                && session.opening_epoch < epoch
+            {
+                self.ctx.services.loopback.unbind(&session.session_key);
+            }
         }
     }
 
@@ -1303,6 +1788,11 @@ impl Hosting {
         if let Some(orch_agent_contract::facts::EnvironmentDataSource::ExistingDirectory { path }) =
             &source
         {
+            if !orch_envhost::RUNTIME_VERIFIED {
+                return Err(unavailable(
+                    "this native harness cannot retain a borrowed home through process retirement on this system; it can use its own home",
+                ));
+            }
             let policy=services.policy.policy().ok_or_else(||unavailable("an existing harness home needs a checked runtime binding; apply the provider runtime update"))?;
             let directory = crate::policy::inspect_environment_directory(&policy, Path::new(path))?;
             let path = PathBuf::from(directory.path);
@@ -1561,6 +2051,7 @@ impl Hosting {
             }
         };
         let output_directory = adapter.output_directory();
+        let interrupt = adapter.interrupt_handle();
         let process = Arc::new(Process {
             provider_id: request.provider_id,
             agent_id: request.agent_id,
@@ -1568,6 +2059,7 @@ impl Hosting {
             ctx: Arc::clone(&self.ctx),
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
+            interrupt: Mutex::new(interrupt),
             output_directory: Mutex::new(output_directory),
             adapter_start,
             resource_group,
@@ -1681,12 +2173,67 @@ impl Hosting {
         self.ctx.ledger.hosted()
     }
 
-    /// Reports that a clamp of the machine's ceilings lowered what a session was asked to be, as a
-    /// diagnostic of the session's stream.
-    pub async fn report_clamps(&self, thread: ThreadId, segment: Id, clamps: &[Clamp]) {
+    /// Keeps the applied sandbox with its native command before returning its successful result.
+    pub async fn report_sandbox(
+        &self,
+        session: (ThreadId, Id),
+        turn: Option<Id>,
+        command: Id,
+        applied: SandboxMode,
+        native_opening_id: Option<Id>,
+        clamps: &[Clamp],
+    ) -> Result<(), CommandError> {
+        // Managed runtimes bypass this gate; their template's selection is not a machine-policy fact.
+        if self.ctx.services.policy.policy().is_none() {
+            return Ok(());
+        }
+        let (thread, segment) = session;
+        let mode = |value: &str| {
+            serde_json::from_value(Json::String(value.to_owned())).map_err(|_| {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "The applied sandbox could not be recorded.",
+                )
+            })
+        };
+        let requested = clamps
+            .iter()
+            .find(|clamp| clamp.key == "agent.max_sandbox")
+            .map_or(applied.as_str(), |clamp| clamp.asked.as_str());
+        let resolution = orch_api_contract::threads::SandboxResolution {
+            requested: mode(requested)?,
+            applied: mode(applied.as_str())?,
+            governing_policy: orch_api_contract::environment::SandboxLimitSource::MachinePolicy,
+            command_id: command,
+            at: self.ctx.services.clock.time(),
+        };
+        self.ctx
+            .services
+            .publisher
+            .publish_from(
+                native_opening_id,
+                Stream::Session {
+                    thread_id: thread,
+                    segment_id: segment,
+                },
+                Event::SessionSandbox(SessionSandbox {
+                    turn_id: turn,
+                    resolution,
+                }),
+            )
+            .await
+            .map_err(|_| {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "The applied sandbox is waiting for durable publication.",
+                )
+                .retryable()
+            })?;
         for clamp in clamps {
             tracing::warn!(key = clamp.key, asked = %clamp.asked, used = %clamp.used, "a request was lowered to the machine's ceiling");
             let frame = Event::RawFrame(RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 0,
                 direction: "connector".to_owned(),
                 payload: serde_json::json!({
@@ -1697,7 +2244,8 @@ impl Hosting {
                 .ctx
                 .services
                 .publisher
-                .publish(
+                .publish_from(
+                    native_opening_id,
                     Stream::Session {
                         thread_id: thread,
                         segment_id: segment,
@@ -1709,17 +2257,19 @@ impl Hosting {
                 tracing::warn!(%error, "a diagnostic could not be put in the spool");
             }
         }
+        Ok(())
     }
 
     /// The segment a thread's session serves, if it is open here.
     #[must_use]
     pub fn segment_of(&self, thread: ThreadId) -> Option<Id> {
-        let key = lock(&self.ctx.threads).get(&thread).copied()?;
+        let (key, opening) = lock(&self.ctx.threads).get(&thread).copied()?;
         let process = lock(&self.processes).get(&key).cloned()?;
         let state = process.state();
         state
             .sessions
             .get(&thread)
+            .filter(|session| session.opening_id == opening)
             .map(|session| session.segment_id)
     }
 
@@ -1727,18 +2277,20 @@ impl Hosting {
     pub fn bind(
         &self,
         process: &Process,
-        thread: ThreadId,
-        segment: Id,
+        target: &orch_link_contract::native_target::SessionTarget,
         tickets: Tickets,
-    ) -> Arc<SessionBinding> {
-        self.ctx.services.loopback.bind(
-            process.grant.id,
-            thread,
-            segment,
-            process.provider_id,
-            process.agent_id,
-            tickets,
-        )
+    ) -> Result<Arc<SessionBinding>, CommandError> {
+        self.ctx
+            .services
+            .loopback
+            .bind_native(
+                process.grant.id,
+                process.provider_id,
+                process.agent_id,
+                target,
+                tickets,
+            )
+            .ok_or_else(|| unavailable("the native binding has no physical target"))
     }
 
     /// Registers a process that was started again by [`crate::reconciliation`], with the record it had.
@@ -1840,30 +2392,48 @@ impl Process {
         ))
     }
 
-    /// Lists the sessions the adapter holds, by their native references.
-    pub async fn native_refs(&self) -> Option<Vec<String>> {
-        let capable = self
-            .state()
-            .descriptor
-            .as_ref()
-            .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
-        if !capable {
-            return None;
-        }
-        self.call(|adapter| Box::pin(async move { adapter.discover_sessions().await }))
-            .await
-            .ok()
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .map(|session| session.native_session_ref)
-                    .collect()
+    /// Inspects only the exact admitted native turn; no model input, resume or interruption is submitted.
+    pub async fn recover_recorded_turn(
+        &self,
+        session: &HostedSession,
+    ) -> Result<bool, CommandError> {
+        let Some(turn) = session.running_turn else {
+            let native = session.native_session_ref.clone();
+            self.call(move |adapter| {
+                Box::pin(async move { adapter.read_session(&native, false).await })
             })
+            .await?;
+            return Ok(true);
+        };
+        let source = orch_agent_contract::history::NativePrefixSource {
+            thread_id: session.thread_id,
+            segment_id: session.segment_id,
+            native_session_ref: session.native_session_ref.clone(),
+        };
+        let source = orch_agent_contract::history::RecoverySource {
+            session: source,
+            opening_id: session.opening_id,
+        };
+        let native = session.native_turn_ref.clone();
+        let directory = session.directory.clone();
+        let cwd = session.cwd.clone();
+        let capture = session.output_capture_bytes;
+        self.call(move |adapter| {
+            Box::pin(async move {
+                adapter
+                    .recover_turn(source, turn, native, directory, cwd, capture)
+                    .await
+            })
+        })
+        .await
     }
 
     /// Reports a session of this process as lost, to the stream of its session.
-    pub async fn report_lost(&self, thread: ThreadId, segment: Id, reason: &str) {
+    pub async fn report_lost(&self, thread: ThreadId, segment: Id, opening_id: Id, reason: &str) {
         let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+            expected: false,
+            opening_id,
+            uncertain: false,
             reason: reason.to_owned(),
         });
         if let Ok(body) = serde_json::to_value(&event)
@@ -1872,7 +2442,8 @@ impl Process {
                 body.get("body").cloned().unwrap_or(Json::Null),
             )
         {
-            self.publish(
+            self.publish_from(
+                Some(opening_id),
                 Stream::Session {
                     thread_id: thread,
                     segment_id: segment,
@@ -1890,6 +2461,30 @@ impl Process {
 }
 
 impl Hosting {
+    /// Session changes wake native discovery without waiting for its periodic file check.
+    #[must_use]
+    pub fn mcp_changes(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.ctx.mcp_changed)
+    }
+
+    /// Only directories of local sessions actually attached to this environment are inspected here.
+    #[must_use]
+    pub fn mcp_directories(&self, environment: Id, root: &str) -> Vec<String> {
+        lock(&self.processes)
+            .values()
+            .flat_map(|process| {
+                process
+                    .state()
+                    .sessions
+                    .values()
+                    .flat_map(|session| session.configuration_directories(environment, root))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// The harness processes that are online and whose adapters can say which tool servers their harness
     /// has configured, in the order of their identifiers.
     #[must_use]
@@ -1917,6 +2512,11 @@ mod tests {
 
     fn idle_lane() -> OpenSession {
         OpenSession {
+            opening_id: orch_types::new_id(),
+            opening_epoch: 1,
+            native_environment: None,
+            directory: String::new(),
+            cwd: String::new(),
             segment_id: orch_types::new_id(),
             native_session_ref: "synthetic-native-source".into(),
             continuation_fenced: true,
@@ -1925,6 +2525,40 @@ mod tests {
             background: std::collections::HashSet::new(),
             awaiting_native: false,
         }
+    }
+
+    #[test]
+    fn a_local_session_discovers_its_directory_chain_only_in_its_actual_environment() {
+        let environment = orch_types::new_id();
+        let mut lane = idle_lane();
+        assert!(
+            lane.configuration_directories(environment, "/workspace")
+                .is_empty()
+        );
+        lane.native_environment = Some(environment);
+        lane.directory = "/workspace/project".into();
+        lane.cwd = "/workspace/project/api/src".into();
+        assert_eq!(
+            lane.configuration_directories(environment, "/workspace")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [
+                "/workspace",
+                "/workspace/project",
+                "/workspace/project/api",
+                "/workspace/project/api/src"
+            ]
+        );
+        assert!(
+            lane.configuration_directories(orch_types::new_id(), "/workspace")
+                .is_empty()
+        );
+        lane.native_environment = None;
+        assert!(
+            lane.configuration_directories(environment, "/workspace")
+                .is_empty(),
+            "a remote executor's directory is never inspected on the program's machine"
+        );
     }
 
     #[test]
