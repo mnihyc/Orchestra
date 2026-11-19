@@ -23,8 +23,8 @@ vi.mock('@/api/client', async (load) => {
   } } };
 });
 vi.mock('@/api/settings', async (load) => ({ ...await load<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const HERE = id(121, 1), target = { kind: 'node' as const, id: HERE };
 const local = { scope: 'org' as const, node: { id: HERE, kind: 'org' as const, name: 'Department', redacted: false } };

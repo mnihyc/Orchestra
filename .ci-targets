@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test ask
+test -p orch-api-core --test resource_summaries --test summaries
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --test goals -- helper_limits::
+test -p orch-engine --lib -- ask::
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
+test -p orch-summarizer-model --lib --test capabilities --test prompts

@@ -372,6 +372,8 @@ async fn raw_protocol_requires_its_actual_owning_history_instead_of_leaking_an_e
         .say(
             thread,
             orch_link_contract::events::Event::RawFrame(orch_link_contract::events::RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 0,
                 direction: "out".into(),
                 payload: json!({"synthetic":"whole session including the excluded suffix"}),

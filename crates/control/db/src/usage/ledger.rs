@@ -41,7 +41,7 @@ pub mod origin {
 /// What a row measures: the words of the `scope` column.
 pub mod scope {
     /// A turn's total.
-    pub const TURN: &str = "turn";
+    pub const TURN: &str = orch_access_contract::permissions::UsagePurpose::Turn.as_str();
     /// One model request.
     pub const REQUEST: &str = "request";
 }
@@ -61,15 +61,16 @@ pub mod rate_source {
 /// What the purpose of a use was: the words of the `purpose` column.
 pub mod purpose {
     /// A turn of a thread.
-    pub const TURN: &str = "turn";
+    pub const TURN: &str = orch_access_contract::permissions::UsagePurpose::Turn.as_str();
     /// A summary Orch asked a model for itself.
-    pub const SUMMARY: &str = "summary";
+    pub const SUMMARY: &str = orch_access_contract::permissions::UsagePurpose::Summary.as_str();
     /// A harness permission review, reported apart from its ordinary turn totals.
-    pub const REVIEW: &str = "review";
+    pub const REVIEW: &str = orch_access_contract::permissions::UsagePurpose::Review.as_str();
     /// Vectors Orch asked a model for itself, of an org's text or of a query, for search by meaning.
-    pub const EMBEDDINGS: &str = "embeddings";
+    pub const EMBEDDINGS: &str =
+        orch_access_contract::permissions::UsagePurpose::Embeddings.as_str();
     /// A personal read-only question, attributed to the person asking.
-    pub const ASK: &str = "ask";
+    pub const ASK: &str = orch_access_contract::permissions::UsagePurpose::Ask.as_str();
 }
 
 /// Tokens by kind. Cached tokens and tokens written to a cache are parts of the input, reasoning tokens are
@@ -142,12 +143,13 @@ pub async fn attribution_of_lease(
         "SELECT topic.org_id AS org_id, topic.parent_id AS project_id, th.topic_id AS topic_id,
                 l.thread_id AS thread_id, t.segment_id AS segment_id, t.id AS turn_id,
                 l.provider_id AS provider_id, l.entry_id AS entry_id,
-                CASE WHEN t.background_overlap THEN t.background_charge_to ELSE i.author_id END AS user_id,
+                CASE WHEN work.node_id IS NOT NULL THEN work.person_id WHEN t.background_overlap THEN t.background_charge_to ELSE i.author_id END AS user_id,
                 s.agent_id AS agent_id, a.harness_kind AS harness_kind,
                 s.environment_id AS environment_id, e.placement AS environment_kind,
                 s.arrangement AS arrangement, t.model AS turn_model, t.effort AS effort, t.params AS params
            FROM leases l
            JOIN turns t ON t.id = l.turn_id
+           LEFT JOIN LATERAL usage_work_scope(t.input_id) work ON true
            JOIN segments s ON s.id = t.segment_id
            JOIN threads th ON th.node_id = l.thread_id
            JOIN nodes topic ON topic.id = th.topic_id
@@ -171,9 +173,9 @@ pub async fn attribution_of_turn(
     Ok(sqlx::query_as(
         "SELECT topic.org_id AS org_id,topic.parent_id AS project_id,th.topic_id AS topic_id,
           t.thread_id,t.segment_id,t.id AS turn_id,s.provider_id,NULL::uuid AS entry_id,
-          t.audit_for_user_id AS user_id,s.agent_id,a.harness_kind,s.environment_id,
+          CASE WHEN work.node_id IS NOT NULL THEN work.person_id ELSE t.audit_for_user_id END AS user_id,s.agent_id,a.harness_kind,s.environment_id,
           e.placement AS environment_kind,s.arrangement,t.model AS turn_model,t.effort,t.params
-         FROM turns t JOIN segments s ON s.id=t.segment_id JOIN threads th ON th.node_id=t.thread_id
+         FROM turns t LEFT JOIN LATERAL usage_work_scope(t.input_id) work ON true JOIN segments s ON s.id=t.segment_id JOIN threads th ON th.node_id=t.thread_id
          JOIN nodes topic ON topic.id=th.topic_id LEFT JOIN agents a ON a.id=s.agent_id
          LEFT JOIN environments e ON e.id=s.environment_id WHERE t.id=$1 FOR SHARE OF topic",
     )
@@ -476,7 +478,7 @@ async fn record_as(
     .bind(attribution.turn_id)
     .bind(attribution.provider_id)
     .bind(attribution.entry_id)
-    .bind(attribution.user_id)
+    .bind(work.as_ref().map_or(attribution.user_id,|work|work.person))
     .bind(attribution.agent_id)
     .bind(attribution.harness_kind.as_deref())
     .bind(attribution.environment_id)
@@ -492,7 +494,7 @@ async fn record_as(
     .bind(event.tokens.reasoning)
     .bind(event.tokens.total)
     .bind(event.context_tokens)
-    .bind(event.request_ref)
+    .bind(event.request_ref.map(orch_types::storable::encode_key))
     .bind(event.rate)
     .bind(event.rate_source)
     .bind(event.credits)
@@ -501,13 +503,13 @@ async fn record_as(
     .bind(timing.and_then(|t| t.request_ms.value()).copied().filter(|n| *n >= 0))
     .bind(timing.and_then(|t| t.outcome.value()).map(String::as_str))
     .bind(program)
-    .bind(states)
+    .bind(orch_types::storable::encode_exact(&states))
     .bind(timing.and_then(|t| t.streamed_tokens.value()).copied())
     .bind(timing.and_then(|t| t.speed_milli.value()).copied())
-    .bind(measured.error_reason.as_deref())
+    .bind(measured.error_reason.as_deref().map(|text|text.replace('\0',"�")))
     .bind(measured.upstream_status)
     .bind(measured.attempt.unwrap_or(1).max(1))
-    .bind(measured.provider_request_id.as_deref())
+    .bind(measured.provider_request_id.as_deref().map(orch_types::storable::encode_key))
     .bind(work.as_ref().map(|work| work.node))
     .execute(&mut *conn)
     .await?;
@@ -515,7 +517,7 @@ async fn record_as(
     if !running {
         if let Some(lease) = lease {
             sqlx::query("DELETE FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND measurement_states->>'_lease_id'=$3 AND provider_request_id=$4")
-                .bind(attribution.turn_id).bind(attribution.provider_id).bind(lease.to_string()).bind(measured.provider_request_id.as_deref()).execute(&mut *conn).await?;
+                .bind(attribution.turn_id).bind(attribution.provider_id).bind(lease.to_string()).bind(measured.provider_request_id.as_deref().map(orch_types::storable::encode_key)).execute(&mut *conn).await?;
         }
         sqlx::query("DELETE FROM usage_running WHERE id=$1")
             .bind(event.id)
@@ -700,7 +702,7 @@ async fn record_own_with_groups(
     .bind(call.tokens.reasoning)
     .bind(call.tokens.total)
     .bind(call.context_tokens)
-    .bind(call.request_ref)
+    .bind(call.request_ref.map(orch_types::storable::encode_key))
     .bind(call.rate)
     .bind(call.rate_source)
     .bind(call.credits)
@@ -708,13 +710,13 @@ async fn record_own_with_groups(
     .bind(timing.and_then(|t| t.generation_ms.value()).copied())
     .bind(timing.and_then(|t| t.request_ms.value()).copied())
     .bind(timing.and_then(|t| t.outcome.value()).map(String::as_str))
-    .bind(states)
+    .bind(orch_types::storable::encode_exact(&states))
     .bind(timing.and_then(|t| t.streamed_tokens.value()).copied())
     .bind(timing.and_then(|t| t.speed_milli.value()).copied())
-    .bind(timing.and_then(|t| t.error_reason.as_deref()))
+    .bind(timing.and_then(|t| t.error_reason.as_deref()).map(|text|text.replace('\0',"�")))
     .bind(timing.and_then(|t| t.upstream_status))
     .bind(timing.and_then(|t| t.attempt))
-    .bind(timing.and_then(|t| t.provider_request_id.as_deref()))
+    .bind(timing.and_then(|t| t.provider_request_id.as_deref()).map(orch_types::storable::encode_key))
     .bind(context.map(|(turn,_)|turn))
     .bind(context.map(|(_,segment)|segment))
     .execute(&mut *conn)
@@ -740,6 +742,7 @@ pub struct EventRow {
     /// One-based request attempt within its model step.
     pub attempt: i64,
     /// Upstream identity distinct from the adapter reference.
+    #[sqlx(try_from = "crate::storage::OptionalText")]
     pub provider_request_id: Option<String>,
     /// Thread owner as captured when the request was written.
     pub thread_owner_id: Option<Id>,
@@ -763,6 +766,7 @@ pub struct EventRow {
     /// Access programme selected for the request.
     pub access_program: Option<String>,
     /// Four-state declarations and safe error words.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub measurement_states: Json,
     /// Its identifier.
     pub id: Id,
@@ -825,6 +829,7 @@ pub struct EventRow {
     /// How large the prompt was.
     pub context_tokens: Option<i64>,
     /// The upstream's name for the request.
+    #[sqlx(try_from = "crate::storage::OptionalText")]
     pub request_ref: Option<String>,
     /// The rate it was counted at.
     pub rate: Option<Json>,
@@ -1098,7 +1103,7 @@ pub async fn attempt_after(
     predecessor: &str,
 ) -> Result<Option<i64>, DbError> {
     let attempt:Option<i64>=sqlx::query_scalar("SELECT max(attempt) FROM (SELECT attempt FROM usage_events WHERE turn_id=$1 AND provider_id=$2 AND scope='request' AND (request_ref=$3 OR measurement_states->>'_adapter_request_ref'=$3) UNION ALL SELECT attempt FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND scope='request' AND (request_ref=$3 OR measurement_states->>'_adapter_request_ref'=$3)) prior")
-        .bind(turn).bind(provider).bind(predecessor).fetch_one(conn).await?;
+        .bind(turn).bind(provider).bind(orch_types::storable::encode_key(predecessor)).fetch_one(conn).await?;
     Ok(attempt.map(|attempt| attempt.saturating_add(1)))
 }
 
@@ -1110,9 +1115,9 @@ pub async fn supersede_observation(
     previous: &str,
 ) -> Result<(), DbError> {
     sqlx::query("DELETE FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND origin='harness' AND scope='request' AND request_ref=$3 AND provider_request_id IS NULL")
-        .bind(turn).bind(provider).bind(previous).execute(&mut *conn).await?;
+        .bind(turn).bind(provider).bind(orch_types::storable::encode_key(previous)).execute(&mut *conn).await?;
     let repaired:Vec<Id>=sqlx::query_scalar("SELECT id FROM usage_events WHERE turn_id=$1 AND provider_id=$2 AND origin='harness' AND scope='request' AND request_ref=$3 AND provider_request_id IS NULL AND measurement_states @> '{\"_closed_from_turn\":true}'::jsonb FOR UPDATE")
-        .bind(turn).bind(provider).bind(previous).fetch_all(&mut *conn).await?;
+        .bind(turn).bind(provider).bind(orch_types::storable::encode_key(previous)).fetch_all(&mut *conn).await?;
     for id in repaired {
         rollup::unfold_event(conn, id).await?;
         sqlx::query("DELETE FROM usage_events WHERE id=$1")
@@ -1406,8 +1411,8 @@ pub async fn finish_running(
         sqlx::query("UPDATE usage_running SET outcome=$2,measurement_states=$3,error_reason=$4,upstream_status=$5 WHERE id=$1")
             .bind(row.id)
             .bind(outcome)
-            .bind(&states)
-            .bind(timing.error_reason.as_deref())
+            .bind(orch_types::storable::encode_exact(&states))
+            .bind(timing.error_reason.as_deref().map(|text|text.replace('\0',"�")))
             .bind(timing.upstream_status)
             .execute(&mut *conn)
             .await?;
@@ -1524,7 +1529,7 @@ pub struct ThreadCredits {
 
 /// One read supplies both live cost items without a query for each turn or browser tick. The thread's figures are
 /// the sums of its daily rollup rows, which hold the same counted rows' sums, so a thread view costs its days and
-/// not every request it ever made; the turn's are read from its own rows.
+/// not every request it ever made; the turn uses the same hourly projection as native turn counts.
 pub async fn status_credits(
     conn: &mut Conn,
     thread: Id,
@@ -1537,13 +1542,59 @@ pub async fn status_credits(
                   COALESCE(sum(unrated_tokens),0)::bigint AS unrated_tokens
              FROM usage_daily WHERE thread_id=$1),
          turn AS (
-           SELECT sum(credits) AS credits,
-                  COALESCE(sum(credits) FILTER (WHERE rate_source='catalogue'),0) AS estimated_credits,
-                  COALESCE(sum(total_tokens) FILTER (WHERE credits IS NULL),0)::bigint AS unrated_tokens
-             FROM usage_events WHERE turn_id=$2 AND thread_id=$1 AND counted)
+           SELECT CASE WHEN sum(rated_rows)>0 THEN sum(credits) END AS credits,
+                  COALESCE(sum(estimated_credits),0) AS estimated_credits,
+                  COALESCE(sum(unrated_tokens),0)::bigint AS unrated_tokens
+             FROM usage_turn_daily WHERE turn_id=$2 AND thread_id=$1)
          SELECT days.credits::text AS credits, days.estimated_credits::text AS estimated_credits,
                 days.unrated_tokens, turn.credits::text AS turn_credits,
                 turn.estimated_credits::text AS turn_estimated_credits, turn.unrated_tokens AS turn_unrated_tokens
            FROM days, turn",
     ).bind(thread).bind(turn).fetch_one(conn).await?)
+}
+
+/// The same live costs for one page, without repeating daily and current-turn
+/// queries for every thread. Each requested thread names its actual current turn.
+pub async fn status_credits_many(
+    conn: &mut Conn,
+    requested: &[(Id, Option<Id>)],
+) -> Result<std::collections::BTreeMap<Id, ThreadCredits>, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct Entry {
+        thread_id: Id,
+        #[sqlx(flatten)]
+        value: ThreadCredits,
+    }
+    let requested = requested
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if requested.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let wanted = Json::Array(
+        requested
+            .iter()
+            .map(|(thread, turn)| serde_json::json!({"thread_id":thread,"turn_id":turn}))
+            .collect(),
+    );
+    let rows:Vec<Entry>=sqlx::query_as(
+        "WITH wanted AS MATERIALIZED (
+            SELECT * FROM jsonb_to_recordset($1) AS w(thread_id uuid,turn_id uuid)
+         ), days AS (
+            SELECT w.thread_id,CASE WHEN sum(d.rated_rows)>0 THEN sum(d.credits) END AS credits,
+              COALESCE(sum(d.estimated_credits),0) AS estimated_credits,COALESCE(sum(d.unrated_tokens),0)::bigint AS unrated_tokens
+            FROM wanted w LEFT JOIN usage_daily d ON d.thread_id=w.thread_id GROUP BY w.thread_id
+         ), current_turn AS (
+            SELECT w.thread_id,CASE WHEN sum(t.rated_rows)>0 THEN sum(t.credits) END AS credits,
+              COALESCE(sum(t.estimated_credits),0) AS estimated_credits,COALESCE(sum(t.unrated_tokens),0)::bigint AS unrated_tokens
+            FROM wanted w LEFT JOIN usage_turn_daily t ON t.thread_id=w.thread_id AND t.turn_id=w.turn_id GROUP BY w.thread_id
+         ) SELECT d.thread_id,d.credits::text AS credits,d.estimated_credits::text AS estimated_credits,d.unrated_tokens,
+             t.credits::text AS turn_credits,t.estimated_credits::text AS turn_estimated_credits,t.unrated_tokens AS turn_unrated_tokens
+           FROM days d JOIN current_turn t USING(thread_id)")
+        .bind(wanted).fetch_all(conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.thread_id, row.value))
+        .collect())
 }

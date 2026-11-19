@@ -308,6 +308,7 @@ async fn start_api(
     link.set_applier(applier.clone());
     link.start().await.unwrap();
     let app: App = Arc::new(AppState {
+        metrics_listener_failed: Default::default(),
         host_ports: Default::default(),
         builtin_sources: Default::default(),
         db: db.clone(),
@@ -620,7 +621,7 @@ impl World {
                 arch: Arch::X86_64,
             },
             connector_version: "0.1.0".to_owned(),
-            protocol_versions: vec![1],
+            protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
             roles: vec![Role::Agent, Role::Environment],
         };
         let tls = pinned_client_config(

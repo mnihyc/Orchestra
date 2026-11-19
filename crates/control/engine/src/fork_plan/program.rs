@@ -36,7 +36,12 @@ pub(crate) async fn execution(
             .model
             .map(serde_json::from_value::<orch_api_contract::ask::AskModel>)
             .transpose()?
-            .map(|model| (model.provider_id, model.model)),
+            .and_then(|model| {
+                model
+                    .backend
+                    .offering
+                    .map(|offering| (offering.provider, offering.offering))
+            }),
     };
     let (provider, model) = selected.ok_or_else(|| {
         PlanError::invalid(
@@ -308,6 +313,7 @@ async fn model(
         .provider_use(
             conn,
             &ProviderUse {
+                purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                 person: input.principal.user(),
                 node: place,
                 provider: id,
@@ -697,7 +703,24 @@ async fn history(
         HistoryMethod::FileHandoff
     };
     let report = crate::fork_history::report_counts(method, &counts, None);
+    let window = resources::model(conn, prepared.target.provider.id, &prepared.target.model)
+        .await?
+        .and_then(|model| crate::fork_history::model_window(&model.parameters));
+    let allowance =
+        crate::fork_history::carry_allowance(conn, source.thread.node_id, window).await?;
     Ok(ForkPlanHistory {
+        selected_range: range
+            .filter(|(from, through)| through >= from)
+            .map(
+                |(from, through)| orch_api_contract::forks::HistoryTurnRange {
+                    from: i64::from(from),
+                    through: i64::from(through),
+                },
+            ),
+        context_allowance: Some(crate::fork_history::allowance_for_method(
+            allowance.fact,
+            method,
+        )),
         mode,
         turns: counts.turns,
         method,

@@ -198,6 +198,13 @@ impl Made<'_> {
         trigger: InputTrigger::Person,
     };
 
+    /// An admitted execution artifact retains its actor without claiming a new person's gesture.
+    pub(crate) const PROGRAM: Made<'static> = Made {
+        source: "user",
+        goal: None,
+        trigger: InputTrigger::Automatic,
+    };
+
     /// A managed occurrence retains its author without claiming a fresh person's gesture.
     pub(crate) const AGENT_SCHEDULE: Made<'static> = Made {
         source: "user",
@@ -366,11 +373,24 @@ impl TakenRow {
 
 /// An input that was taken inside a unit of work, with what is left for after its commit.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Taken {
+pub struct Taken {
     /// The input as it stands.
     pub submitted: Submitted,
     /// The turn the input interrupted, whose interrupt is driven once the transaction has committed.
     pub interrupt: Option<Id>,
+}
+
+impl Taken {
+    /// Takes up this input's ordinary delivery effects only after its owning transaction commits.
+    pub async fn after_commit(self, engine: &Engine) -> Result<(), EngineError> {
+        engine.kick();
+        if self.interrupt.is_some() {
+            engine
+                .drive_interrupt(self.submitted.input.thread_id)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 /// Why an input could not be taken.
@@ -525,7 +545,8 @@ fn validate_request(
     Ok(())
 }
 
-fn delivery_word(delivery: Delivery) -> &'static str {
+/// The canonical stored spelling of an authored input delivery choice.
+pub fn delivery_word(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Queue => "queue",
         Delivery::Steer => "steer",
@@ -607,6 +628,48 @@ pub(crate) fn saved_authority(raw: Option<&Json>) -> Result<Option<InputAuthorit
     authority::saved(raw)
 }
 
+/// Rebind an Ask input's own accepted credential with its still-current HTTP identity.
+pub(crate) async fn ask_message_boundary(
+    conn: &mut orch_db::Conn,
+    input: &InputRow,
+    raw: &Caller,
+    clock: &dyn Clock,
+) -> Result<Option<Caller>, EngineError> {
+    let Some(authority) = saved_authority(input.submission_authority.as_ref())? else {
+        return Ok(None);
+    };
+    let Some(restored) = authority.restore_current(conn, raw.user(), clock).await? else {
+        return Ok(None);
+    };
+    let [origin] = restored.origins.as_slice() else {
+        return Ok(None);
+    };
+    if origin
+        .operation
+        .as_deref()
+        .is_some_and(|name| name != "AskMessageCreate")
+    {
+        return Ok(None);
+    }
+    Ok(raw.intersect_restrictions(&origin.caller).ok())
+}
+
+/// Current ordinary settings plus the choices owned by this exact accepted input.
+pub(crate) async fn settings_for(
+    conn: &mut orch_db::Conn,
+    input: &InputRow,
+    settings: &crate::resolved::Resolved,
+) -> Result<crate::resolved::Resolved, EngineError> {
+    let mut actual = crate::background_wake::settings_for(conn, input, settings).await?;
+    if let Some(parent) = saved_authority(input.submission_authority.as_ref())?
+        .as_ref()
+        .and_then(InputAuthority::capability_parent)
+    {
+        parent.apply_input_options(conn, input, &mut actual).await?;
+    }
+    Ok(actual)
+}
+
 pub(crate) fn narrowed_input_authority(
     raw: Option<&Json>,
     caller: &Caller,
@@ -623,7 +686,10 @@ pub(crate) async fn input_authority_callers(
     authority: &InputAuthority,
     clock: &dyn Clock,
 ) -> Result<Option<InputCallers>, EngineError> {
-    authority_work::for_input(unit, thread, input, actor, authority, clock).await
+    crate::summaries::with_program_source_checks(authority_work::for_input(
+        unit, thread, input, actor, authority, clock,
+    ))
+    .await
 }
 
 pub(crate) async fn input_authority_for_request(
@@ -635,7 +701,10 @@ pub(crate) async fn input_authority_for_request(
     authority: &InputAuthority,
     clock: &dyn Clock,
 ) -> Result<Option<InputCallers>, EngineError> {
-    authority_work::for_request(unit, thread, request, selection, actor, authority, clock).await
+    crate::summaries::with_program_source_checks(authority_work::for_request(
+        unit, thread, request, selection, actor, authority, clock,
+    ))
+    .await
 }
 
 /// Scope preparation only for preflight's ordinary current-person assessment. Execution callers
@@ -648,7 +717,10 @@ pub(crate) async fn input_preparation_callers(
     authority: &InputAuthority,
     clock: &dyn Clock,
 ) -> Result<Option<Vec<Caller>>, EngineError> {
-    authority_work::for_preflight(unit, thread, input, actor, authority, clock).await
+    crate::summaries::with_program_source_checks(authority_work::for_preflight(
+        unit, thread, input, actor, authority, clock,
+    ))
+    .await
 }
 
 /// The recorded execution actor; an explicit approver never replaces the author's original provenance.
@@ -705,6 +777,27 @@ pub(crate) async fn check_sender_for_turn(
     need_provider: bool,
     turn: Option<&TurnRow>,
     access: &dyn crate::access::ResourceAccess,
+) -> Result<(), InputError> {
+    check_sender_for_purpose(
+        unit,
+        caller,
+        thread,
+        need_provider,
+        turn,
+        access,
+        orch_access_contract::permissions::UsagePurpose::Turn,
+    )
+    .await
+}
+
+pub(crate) async fn check_sender_for_purpose(
+    unit: &mut Unit<'_>,
+    caller: &Caller,
+    thread: &ThreadRow,
+    need_provider: bool,
+    turn: Option<&TurnRow>,
+    access: &dyn crate::access::ResourceAccess,
+    purpose: orch_access_contract::permissions::UsagePurpose,
 ) -> Result<(), InputError> {
     let now = Time::new(unit.now());
     let principal = Principal::load(&mut *unit.conn, caller.clone(), now).await?;
@@ -766,6 +859,7 @@ pub(crate) async fn check_sender_for_turn(
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    purpose,
                     person: caller.user(),
                     node: thread.node_id,
                     provider,
@@ -836,9 +930,15 @@ impl Engine {
             thread.queue_held || crate::locks::held_by(conn, thread.node_id).await?.is_some();
         let turn = steered_input_turn(active.as_ref(), queue_locked, delivery, plan);
         let mut unit = Unit::new(conn, self.inner.clock.now());
-        self.check_author_for_turn(&mut unit, caller, thread, turn)
-            .await
-            .map(|_| ())
+        self.check_author_for_turn(
+            &mut unit,
+            caller,
+            thread,
+            turn,
+            orch_access_contract::permissions::UsagePurpose::Turn,
+        )
+        .await
+        .map(|_| ())
     }
 
     pub(crate) async fn check_content(
@@ -902,7 +1002,14 @@ impl Engine {
         caller: &Caller,
         thread: &ThreadRow,
     ) -> Result<Serving, InputError> {
-        self.check_author_for_turn(unit, caller, thread, None).await
+        self.check_author_for_turn(
+            unit,
+            caller,
+            thread,
+            None,
+            orch_access_contract::permissions::UsagePurpose::Turn,
+        )
+        .await
     }
 
     async fn check_author_for_turn(
@@ -911,10 +1018,18 @@ impl Engine {
         caller: &Caller,
         thread: &ThreadRow,
         turn: Option<&TurnRow>,
+        purpose: orch_access_contract::permissions::UsagePurpose,
     ) -> Result<Serving, InputError> {
-        let refusal = match self
-            .check_sender_for_turn(unit, caller, thread, true, turn)
-            .await
+        let refusal = match check_sender_for_purpose(
+            unit,
+            caller,
+            thread,
+            true,
+            turn,
+            self.inner.access.as_ref(),
+            purpose,
+        )
+        .await
         {
             Ok(()) => return Ok(Serving::Own),
             Err(InputError::Denied(refusal)) => refusal,
@@ -950,7 +1065,13 @@ impl Engine {
         let mut result = Serving::Own;
         for caller in callers.callers() {
             if let Serving::WithoutModel { held } = self
-                .check_author_for_turn(unit, caller, thread, turn)
+                .check_author_for_turn(
+                    unit,
+                    caller,
+                    thread,
+                    turn,
+                    orch_access_contract::permissions::UsagePurpose::Turn,
+                )
                 .await?
             {
                 result = Serving::WithoutModel {
@@ -1115,8 +1236,8 @@ impl Engine {
         .await
     }
 
-    /// Queues ordinary authored work inside the transaction which also owns its schedule occurrence.
-    /// The caller commits the transaction and kicks the engine afterwards; no prior held queue is resumed.
+    /// Accepts authored work inside the transaction which also owns its schedule occurrence.
+    /// The caller commits, then takes up its delivery effects; no prior held queue is resumed.
     pub async fn submit_scheduled_input(
         &self,
         tx: &mut orch_db::Conn,
@@ -1124,12 +1245,12 @@ impl Engine {
         thread: Id,
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Submitted, InputError> {
+    ) -> Result<Taken, InputError> {
         self.submit_selected_scheduled_input(tx, caller, thread, request, now, None)
             .await
     }
 
-    /// A scheduled selection remains one ordinary queued input under the author's current authority.
+    /// A scheduled selection retains its ordinary authored modes under the author's current authority.
     pub async fn submit_selected_scheduled_input(
         &self,
         tx: &mut orch_db::Conn,
@@ -1138,12 +1259,7 @@ impl Engine {
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
-    ) -> Result<Submitted, InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "a scheduled input uses the ordinary queue",
-            ));
-        }
+    ) -> Result<Taken, InputError> {
         let mut unit = Unit::new(tx, now);
         let mut taken = self
             .submit_selected_in(&mut unit, caller, thread, request, selection)
@@ -1156,7 +1272,7 @@ impl Engine {
                 .copied()
                 .unwrap_or(taken.submitted.seq);
         }
-        Ok(taken.submitted)
+        Ok(taken)
     }
 
     /// Accept a real scheduled occurrence using every captured author-definition origin. The
@@ -1175,12 +1291,7 @@ impl Engine {
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
-    ) -> Result<Submitted, InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "a scheduled input uses the ordinary queue",
-            ));
-        }
+    ) -> Result<Taken, InputError> {
         let authority = InputAuthority::for_schedule(author, origins, reference)?;
         let mut unit = Unit::new(conn, now);
         let schedule =
@@ -1238,7 +1349,7 @@ impl Engine {
                 .copied()
                 .unwrap_or(taken.submitted.seq);
         }
-        Ok(taken.submitted)
+        Ok(taken)
     }
 
     async fn submit_input_with(
@@ -1684,10 +1795,20 @@ impl Engine {
         let thread_id = thread.node_id;
         // Boxed: a message is taken deep in a request's stack. A steer uses
         // the running turn's recorded provider, model and effort.
+        let purpose = match execution {
+            InputExecution::Origins(origins) => {
+                origins
+                    .captured()
+                    .provider_purpose(unit.conn, thread_id)
+                    .await?
+            }
+            InputExecution::Direct(_) => orch_access_contract::permissions::UsagePurpose::Turn,
+        };
         let mut serving = Serving::Own;
         for caller in execution.callers() {
             if let Serving::WithoutModel { held } =
-                Box::pin(self.check_author_for_turn(unit, caller, thread, steered_turn)).await?
+                Box::pin(self.check_author_for_turn(unit, caller, thread, steered_turn, purpose))
+                    .await?
             {
                 serving = Serving::WithoutModel {
                     held: held || matches!(serving, Serving::WithoutModel { held: true }),
@@ -1697,15 +1818,41 @@ impl Engine {
         if request.plan && !Box::pin(self.agent_plans(unit, thread)).await? {
             return Err(InputError::PlanUnsupported);
         }
+        let frozen_images = match execution {
+            InputExecution::Origins(callers)
+                if request
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::Image { .. })) =>
+            {
+                match callers.captured().capability_parent() {
+                    Some(parent) => {
+                        parent
+                            .accepts_frozen_images(
+                                self,
+                                unit.conn,
+                                thread_id,
+                                callers.user(),
+                                &request.content,
+                            )
+                            .await?
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
         let mut verified = None;
         for caller in execution.callers() {
-            self.check_content_from(
-                unit,
-                caller,
-                &request.content,
-                operands.map(|prepared| prepared.blobs.as_slice()),
-            )
-            .await?;
+            if !frozen_images {
+                self.check_content_from(
+                    unit,
+                    caller,
+                    &request.content,
+                    operands.map(|prepared| prepared.blobs.as_slice()),
+                )
+                .await?;
+            }
             if let Some(selection) = selection {
                 verified = Some(
                     crate::native_actions::validate_selected(
@@ -1761,10 +1908,13 @@ impl Engine {
             }
         }
         let mut prepared = self
-            .prepare_pastes(unit.conn, thread, &request.content)
-            .await?;
-        self.prepare_attachment_names(unit.conn, thread_id, &mut prepared)
-            .await?;
+            .prepare_pastes(unit.conn, thread, &crate::paste::incoming(&request.content))
+            .await?
+            .content;
+        if !frozen_images {
+            self.prepare_attachment_names(unit.conn, thread_id, &mut prepared)
+                .await?;
+        }
         Ok(PreparedInputWork {
             serving,
             verified,
@@ -1789,11 +1939,6 @@ impl Engine {
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
         operands: Option<&InputSourceOperands>,
     ) -> Result<(), InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "a scheduled input uses the ordinary queue",
-            ));
-        }
         validate_request(request, selection)?;
         let mut unit = Unit::new(conn, now);
         let thread = threads::lock(unit.conn, thread)
@@ -1845,6 +1990,9 @@ impl Engine {
         if thread.archived_at.is_some() {
             return Err(InputError::Archived);
         }
+        // A Stop that is open was asked before this message reached the row. It is carried out first, so that the
+        // message is held with what the Stop holds and steers into nothing.
+        self.apply_open_stops_in(unit, thread_id).await?;
         // A repeat returns what stands, before anything is asked again.
         if let Some(found) = threads::input_by_client(
             &mut *unit.conn,
@@ -1976,6 +2124,11 @@ impl Engine {
                 EngineError::unreadable("an input that was not there could not be made").into(),
             );
         };
+        if let InputExecution::Origins(callers) = &execution
+            && let Some(parent) = callers.captured().capability_parent()
+        {
+            parent.bind_input(unit.conn, &row).await?;
+        }
         if let Some((goal, facts)) = made.goal {
             orch_db::queries::goals::tie_input(&mut *unit.conn, row.id, goal, facts).await?;
         }
@@ -1987,8 +2140,8 @@ impl Engine {
                 "UPDATE thread_inputs SET native_action=$2,native_action_info=$3 WHERE id=$1",
             )
             .bind(row.id)
-            .bind(&raw)
-            .bind(info)
+            .bind(orch_types::storable::encode_exact(&raw))
+            .bind(orch_types::storable::encode_exact(&info))
             .execute(&mut *unit.conn)
             .await
             .map_err(orch_db::DbError::from)?;
@@ -2066,9 +2219,8 @@ impl Engine {
         if made.trigger == InputTrigger::Person {
             crate::calls::supersede_for_input(&mut *unit.conn, thread_id).await?;
         }
-        // A turn might start: the checks run in this transaction.
-        if !row.queue_held
-            && active.is_none()
+        // Admission and its checked queue facts belong to the accepted input's transaction.
+        if active.is_none()
             && matches!(
                 thread.state.as_str(),
                 thread_state::IDLE | thread_state::BLOCKED
@@ -2113,6 +2265,17 @@ impl Engine {
             let thread = threads::lock(&mut *unit.conn, thread_id)
                 .await?
                 .ok_or_else(|| EngineError::unreadable("there is no such thread"))?;
+            let thread = if self
+                .apply_open_stops_in(&mut unit, thread_id)
+                .await?
+                .carried_out
+            {
+                threads::thread(&mut *unit.conn, thread_id)
+                    .await?
+                    .ok_or_else(|| EngineError::unreadable("there is no such thread"))?
+            } else {
+                thread
+            };
             let seq = unit.stamp(thread_id).await?;
             let content = serde_json::to_value(content)?;
             let row = threads::insert_input(
@@ -2139,14 +2302,12 @@ impl Engine {
             )
             .await?
             .ok_or_else(|| EngineError::unreadable("an input could not be queued"))?;
-            if !row.queue_held
-                && matches!(
-                    thread.state.as_str(),
-                    thread_state::IDLE | thread_state::BLOCKED
-                )
-                && threads::active_turn(&mut *unit.conn, thread_id)
-                    .await?
-                    .is_none()
+            if matches!(
+                thread.state.as_str(),
+                thread_state::IDLE | thread_state::BLOCKED
+            ) && threads::active_turn(&mut *unit.conn, thread_id)
+                .await?
+                .is_none()
                 && let Err(error) = self.preflight_in(&mut unit, thread_id).await
             {
                 if matches!(error, EngineError::Db(_)) {
@@ -2624,14 +2785,17 @@ impl Engine {
                     .map_err(EngineError::from)?;
                 let seq = unit.stamp(thread_id).await?;
                 sqlx::query("UPDATE thread_inputs SET native_action=$2,native_action_info=$3,seq_updated=$4,state_detail=CASE WHEN state_detail LIKE 'native_action.%' THEN NULL ELSE state_detail END WHERE id=$1")
-                    .bind(input_id).bind(raw).bind(info).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                    .bind(input_id).bind(raw.as_ref().map(orch_types::storable::encode_exact)).bind(info.as_ref().map(orch_types::storable::encode_exact)).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
                 threads::touch_queue(&mut *unit.conn, thread_id, seq).await?;
                 unit.wake(thread_id);
             }
             let mut released_files = false;
             if let Some(content) = content {
                 self.check_content(&mut unit, caller, &content).await?;
-                let content = self.prepare_pastes(unit.conn, &thread, &content).await?;
+                let content = self
+                    .prepare_pastes(unit.conn, &thread, &crate::paste::incoming(&content))
+                    .await?
+                    .content;
                 let seq = unit.stamp(thread_id).await?;
                 let stored = serde_json::to_value(&content).map_err(EngineError::from)?;
                 threads::update_input_content(&mut *unit.conn, input_id, &stored, seq).await?;
@@ -2928,6 +3092,14 @@ impl Engine {
             )
             .await?;
             if moved {
+                let cancellation =
+                    serde_json::to_value(orch_api_contract::threads::InputCancellation {
+                        cause: orch_api_contract::threads::InputCancellationCause::Person,
+                        at: orch_types::Time::new(now),
+                        by: None,
+                    })
+                    .map_err(EngineError::from)?;
+                threads::record_input_cancellation(unit.conn, input_id, &cancellation).await?;
                 Box::pin(self.cancel_source_request(
                     &mut unit,
                     orch_db::queries::notifications::inbox::RequestSource::Input(input_id),
@@ -3705,8 +3877,10 @@ impl Engine {
         files: &[ContentPart],
         arrival: Arrival,
         posting: Option<(&Caller, Id, &threads::tools::AnnouncementRow)>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let now = unit.now();
+        // A Stop that is open is carried out first, so that the announcement is held with what it holds.
+        self.apply_open_stops_in(unit, thread_id).await?;
         // What a message to one thread carries goes with it as file parts, which the courier writes before the
         // turn begins or the steer is sent.
         let mut parts = vec![ContentPart::Text {
@@ -3744,7 +3918,7 @@ impl Engine {
         )
         .await?;
         let Some(made) = made else {
-            return Ok(());
+            return Ok(false);
         };
         if let Some((caller, place, announcement)) = posting {
             let provenance = crate::tools::announce::AnnouncementProvenance::input(
@@ -3781,7 +3955,7 @@ impl Engine {
             tracing::warn!(%error, %thread_id, "pre-flight could not decide; the input waits");
         }
         unit.wake(thread_id);
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -3866,6 +4040,18 @@ impl Engine {
             if thread.archived_at.is_some() {
                 return Err(InputError::Archived);
             }
+            // A Stop that is open is carried out first: the queue is resumed as it stands after it.
+            let thread = if self
+                .apply_open_stops_in(&mut unit, thread_id)
+                .await?
+                .carried_out
+            {
+                threads::thread(&mut *unit.conn, thread_id)
+                    .await?
+                    .ok_or(InputError::NotFound)?
+            } else {
+                thread
+            };
             self.check_sender(&mut unit, caller, &thread, false).await?;
             if thread.queue_revision != revision {
                 return Err(InputError::StaleQueue {
@@ -3904,7 +4090,7 @@ impl Engine {
             let row = threads::thread(&mut *unit.conn, thread_id)
                 .await?
                 .ok_or(InputError::NotFound)?;
-            let queue = views::queue_of(&mut *unit.conn, &row).await?;
+            let queue = views::queue_of(&mut *unit.conn, &row, Time::new(now)).await?;
             (unit.finish().await?, queue)
         };
         self.commit(tx, finished).await?;
