@@ -1524,7 +1524,7 @@ pub struct ThreadCredits {
 
 /// One read supplies both live cost items without a query for each turn or browser tick. The thread's figures are
 /// the sums of its daily rollup rows, which hold the same counted rows' sums, so a thread view costs its days and
-/// not every request it ever made; the turn's are read from its own rows.
+/// not every request it ever made; the turn uses the same hourly projection as native turn counts.
 pub async fn status_credits(
     conn: &mut Conn,
     thread: Id,
@@ -1537,13 +1537,59 @@ pub async fn status_credits(
                   COALESCE(sum(unrated_tokens),0)::bigint AS unrated_tokens
              FROM usage_daily WHERE thread_id=$1),
          turn AS (
-           SELECT sum(credits) AS credits,
-                  COALESCE(sum(credits) FILTER (WHERE rate_source='catalogue'),0) AS estimated_credits,
-                  COALESCE(sum(total_tokens) FILTER (WHERE credits IS NULL),0)::bigint AS unrated_tokens
-             FROM usage_events WHERE turn_id=$2 AND thread_id=$1 AND counted)
+           SELECT CASE WHEN sum(rated_rows)>0 THEN sum(credits) END AS credits,
+                  COALESCE(sum(estimated_credits),0) AS estimated_credits,
+                  COALESCE(sum(unrated_tokens),0)::bigint AS unrated_tokens
+             FROM usage_turn_daily WHERE turn_id=$2 AND thread_id=$1)
          SELECT days.credits::text AS credits, days.estimated_credits::text AS estimated_credits,
                 days.unrated_tokens, turn.credits::text AS turn_credits,
                 turn.estimated_credits::text AS turn_estimated_credits, turn.unrated_tokens AS turn_unrated_tokens
            FROM days, turn",
     ).bind(thread).bind(turn).fetch_one(conn).await?)
+}
+
+/// The same live costs for one page, without repeating daily and current-turn
+/// queries for every thread. Each requested thread names its actual current turn.
+pub async fn status_credits_many(
+    conn: &mut Conn,
+    requested: &[(Id, Option<Id>)],
+) -> Result<std::collections::BTreeMap<Id, ThreadCredits>, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct Entry {
+        thread_id: Id,
+        #[sqlx(flatten)]
+        value: ThreadCredits,
+    }
+    let requested = requested
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if requested.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let wanted = Json::Array(
+        requested
+            .iter()
+            .map(|(thread, turn)| serde_json::json!({"thread_id":thread,"turn_id":turn}))
+            .collect(),
+    );
+    let rows:Vec<Entry>=sqlx::query_as(
+        "WITH wanted AS MATERIALIZED (
+            SELECT * FROM jsonb_to_recordset($1) AS w(thread_id uuid,turn_id uuid)
+         ), days AS (
+            SELECT w.thread_id,CASE WHEN sum(d.rated_rows)>0 THEN sum(d.credits) END AS credits,
+              COALESCE(sum(d.estimated_credits),0) AS estimated_credits,COALESCE(sum(d.unrated_tokens),0)::bigint AS unrated_tokens
+            FROM wanted w LEFT JOIN usage_daily d ON d.thread_id=w.thread_id GROUP BY w.thread_id
+         ), current_turn AS (
+            SELECT w.thread_id,CASE WHEN sum(t.rated_rows)>0 THEN sum(t.credits) END AS credits,
+              COALESCE(sum(t.estimated_credits),0) AS estimated_credits,COALESCE(sum(t.unrated_tokens),0)::bigint AS unrated_tokens
+            FROM wanted w LEFT JOIN usage_turn_daily t ON t.thread_id=w.thread_id AND t.turn_id=w.turn_id GROUP BY w.thread_id
+         ) SELECT d.thread_id,d.credits::text AS credits,d.estimated_credits::text AS estimated_credits,d.unrated_tokens,
+             t.credits::text AS turn_credits,t.estimated_credits::text AS turn_estimated_credits,t.unrated_tokens AS turn_unrated_tokens
+           FROM days d JOIN current_turn t USING(thread_id)")
+        .bind(wanted).fetch_all(conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.thread_id, row.value))
+        .collect())
 }

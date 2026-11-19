@@ -23,6 +23,8 @@ use std::time::Duration;
 enum Cause {
     /// Statements that break and mend it.
     Sql(&'static str, &'static str),
+    /// The bound runtime reports a narrower list than the agent profile.
+    RuntimeList(&'static str, &'static [&'static str]),
     /// The thread has no model.
     NoModel,
     /// The thread asks for an effort the model does not list.
@@ -40,9 +42,6 @@ struct Case {
     reason: &'static str,
     cause: Cause,
 }
-
-const ALL_MODES: &str = r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{approval_modes}', '["ask","on_request","bypass"]')"#;
-const ALL_ARRANGEMENTS: &str = r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{arrangements}', '[{"type":"together"},{"type":"separated","executor":"orch-exec","executor_version":"*","tool_sets":["plain"]}]')"#;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_profile_pin_excludes_a_different_running_build_before_another_turn_opens() {
@@ -241,10 +240,7 @@ const CASES: &[Case] = &[
     Case {
         name: "the agent lacks the approval mode",
         reason: "binding_invalid",
-        cause: Cause::Sql(
-            r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{approval_modes}', '["bypass"]')"#,
-            ALL_MODES,
-        ),
+        cause: Cause::RuntimeList("approval_modes", &["bypass"]),
     },
     Case {
         name: "the environment failed",
@@ -265,10 +261,7 @@ const CASES: &[Case] = &[
     Case {
         name: "the adapter offers no arrangement",
         reason: "binding_invalid",
-        cause: Cause::Sql(
-            r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{arrangements}', '[]')"#,
-            ALL_ARRANGEMENTS,
-        ),
+        cause: Cause::RuntimeList("arrangements", &[]),
     },
     Case {
         name: "the machine does not take the role of an agent",
@@ -285,9 +278,31 @@ const CASES: &[Case] = &[
     },
 ];
 
+/// An empty queue may never have started the harness. Give the selected runtime its report
+/// in either case, preserving the status of any process already running there.
+async fn report_runtime(world: &World, descriptor: serde_json::Value) {
+    sqlx::query(
+        "INSERT INTO harnesses (provider_id, agent_id, machine_id, descriptor)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (provider_id, agent_id, machine_id) DO UPDATE SET descriptor = EXCLUDED.descriptor",
+    )
+    .bind(world.provider)
+    .bind(world.agent)
+    .bind(world.machine_id)
+    .bind(descriptor)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+}
+
 async fn break_it(world: &World, thread: Id, cause: Cause) {
     match cause {
         Cause::Sql(broken, _) => world.exec(broken).await,
+        Cause::RuntimeList(field, values) => {
+            let mut descriptor = common::descriptor();
+            descriptor[field] = json!(values);
+            report_runtime(world, descriptor).await;
+        }
         Cause::NoModel => world.unset(thread, keys::AGENT_MODEL).await,
         Cause::UnlistedEffort => world.set(thread, keys::AGENT_EFFORT, json!("ultra")).await,
         Cause::ModelsNarrowed => {
@@ -309,6 +324,7 @@ async fn break_it(world: &World, thread: Id, cause: Cause) {
 async fn mend_it(world: &World, thread: Id, cause: Cause) {
     match cause {
         Cause::Sql(_, mended) => world.exec(mended).await,
+        Cause::RuntimeList(..) => report_runtime(world, common::descriptor()).await,
         Cause::NoModel => {
             world
                 .set(thread, keys::AGENT_MODEL, json!(common::MODEL))
@@ -323,7 +339,7 @@ async fn mend_it(world: &World, thread: Id, cause: Cause) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_check_blocks_the_thread_with_its_reason_and_lets_it_through_when_its_cause_clears() {
-    let world = World::new().await;
+    let world = World::observed().await;
     let thread = world.thread("Checks").await;
     let ada = Caller::session(world.ada);
     for (n, case) in CASES.iter().enumerate() {
@@ -950,7 +966,7 @@ async fn when_a_question_cannot_be_answered_nothing_is_let_through_and_nothing_i
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cause_of_the_thread_stays_in_view_when_its_queue_empties_and_the_thread_is_idle_once_it_is_mended()
  {
-    let world = World::new().await;
+    let world = World::observed().await;
     let thread = world.thread("Kept in view").await;
     let ada = Caller::session(world.ada);
     // Every cause but a reached cap is the thread's own: what it is bound to and where it runs.
@@ -1235,6 +1251,8 @@ async fn automatic_derived_work_keeps_its_origins_token_and_approver_instead_of_
         .unwrap();
     world.run_turn(thread, 0, "The first turn ended.").await;
     world.wait_state(thread, "idle").await;
+    // Idle precedes terminal follow-up; admission assigns authority holds after that barrier.
+    world.wait_followed_up(thread).await;
     let original = stored_input(&world, sent.input.id).await;
     sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact'] WHERE id=$1")
         .bind(runner_id)
@@ -1794,4 +1812,36 @@ async fn a_declaration_that_cannot_be_read_or_is_of_another_version_declares_not
         let start = world.turn_start(thread, 0).await;
         assert_eq!(common::words_after_where(&start.text), "Go", "{declaration}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_thread_whose_environment_is_still_being_made_is_not_refused_for_the_executors_it_has_not_reported()
+ {
+    let world = World::observed().await;
+    let thread = world.thread("Environment being made").await;
+    world
+        .exec("UPDATE threads SET arrangement = 'separated'")
+        .await;
+    // The unit is not up: it reports no executors yet, and what its template promises is what is judged.
+    world
+        .exec(
+            r#"UPDATE environments SET status = 'provisioning',
+                   facts = '{"environment_descriptor":{"lifecycle":"unit"}}'::jsonb,
+                   config = '{"exec.offers":["plain"]}'::jsonb"#,
+        )
+        .await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Hello"))
+        .await
+        .unwrap();
+    eventually("the thread is looked at", || async {
+        world.state(thread).await.0 != "idle"
+    })
+    .await;
+    let (state, reason, step) = world.state(thread).await;
+    assert!(
+        !(state == "blocked" && reason.as_deref() == Some("binding_invalid")),
+        "it stands {state} (reason {reason:?}, step {step:?})"
+    );
 }

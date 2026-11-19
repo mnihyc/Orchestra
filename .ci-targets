@@ -1,0 +1,3 @@
+fmt
+test -p orch-engine --test preflight -- every_check_blocks_the_thread_with_its_reason_and_lets_it_through_when_its_cause_clears --exact
+test -p orch-engine --test preflight -- a_cause_of_the_thread_stays_in_view_when_its_queue_empties_and_the_thread_is_idle_once_it_is_mended --exact

@@ -22,21 +22,23 @@ A new thread uses its place's approval mode when the selected program offers it.
 Otherwise it starts with the program's default, such as **Ask** for DeepSeek Harness.
 The place's allowed modes and the environment's boundaries still apply.
 
-**Auto** uses the agent program's own reviewer. A program offers it when it has a trial
-of its model, permissions and behavior for that program and provider, and a build of the
-program keeps it until a check of that exact build runs the trial and the trial fails. An
-allowed action runs; a denied one does not, and the reported review shows its
-model and outcome in the thread. Auto is never the default. Its reviewer may
-use another model and consume provider use. Separately reported review usage
-belongs to the thread. When it is not reported separately, displayed totals are
-those reported by the agent program; they do not establish the reviewer's usage.
+**Auto** uses the agent program's own reviewer. The selected build must pass its
+Auto approval check on this machine. If the check is missing or has failed, the
+approval picker shows the reason. A system administrator can choose **Check** there
+when the build has a check available. The thread shows the model and outcome of
+each reported review. Auto is never the default.
 
-Codex offers Auto for every build, checked or not, unless a check of its installed build ran
-Auto's trial and it failed, and when your provider access permits the selected reviewer model. For a forwarded
-session, the admitted catalogue contains the thread's model, so Codex reviews with
-that model. A native sign-in keeps its declared preferred reviewer. The thread shows
-the selected model; a name supplied by Codex is marked as reported. An action that
-needs no approval runs without an extra review. Claude Code's Auto remains unavailable.
+Claude Code uses its native Auto permission mode. Its check verifies that the
+classifier lets an allowed action run, stops a denied action, and leaves the action
+undone if the reviewer is unavailable. Your provider access and the place's
+approval policy still apply after the check passes.
+
+For a forwarded session, Codex reviews with the thread's model. A native sign-in
+keeps its declared preferred reviewer. The thread shows the selected model and
+marks a name supplied by Codex as reported. The reviewer can use provider quota.
+Separately reported review usage belongs to the thread. Otherwise the totals are
+those reported by the agent program. An action that needs no approval runs without
+an extra review.
 
 **Bypass** lets the agent do anything in its environment without asking; whoever chooses it answers for it.
 It requires another boundary that confines the agent and a program running without
@@ -99,7 +101,7 @@ is confirmed. If an answer is refused, its reason appears beside the choices;
 reload the request before trying an option that is no longer offered.
 
 Agent action requests last while the program waits. Agent boundary requests use
-`requests.expiry_hours`, initially 24 hours and bounded to 1–168; the shortest
+`requests.expiry_hours`, initially 24 hours; the shortest
 setting above the place wins. A link may lapse sooner. A person's access
 request initially lasts 14 days. Repeating the same denied agent boundary
 request within an hour returns its first denial and note rather than another
