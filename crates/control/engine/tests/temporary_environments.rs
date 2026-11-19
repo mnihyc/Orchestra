@@ -382,6 +382,8 @@ async fn recovery_after_the_original_deadline_replays_original_and_busy_child_su
             commands
                 .issue(Outgoing {
                     authority: None,
+                    input_facts: None,
+                    session_offer: None,
                     id: child,
                     ..command
                 })

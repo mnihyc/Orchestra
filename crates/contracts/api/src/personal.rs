@@ -373,6 +373,8 @@ pub enum PersonalStateKey {
     /// How a conversation is shown to them: how much of the agent's work opens on its own, and
     /// whether a difference is drawn in one column or in two.
     Timeline,
+    /// How this person's interface retains views and indicates reading progress.
+    Interface,
     /// Which sidebar sections are folded and whether its tree shows documents, the place last in,
     /// and the order of each org's tree.
     Sidebar,
@@ -384,6 +386,27 @@ pub enum PersonalStateKey {
     Reactions,
     /// How the Inbox groups its rows.
     Inbox,
+    /// The person's last successful, currently revalidated new-thread setup.
+    ThreadSetup,
+}
+
+/// A model identity deliberately selected by this person, without another reader's names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRecent {
+    /// The provider distinguishes equal routing names at different sources.
+    pub provider_id: Id,
+    /// The exact model routing name, never a display name.
+    pub model_name: String,
+}
+
+/// Private model history and the configured size of its short Recent group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRecents {
+    /// Distinct provider/model identities, ordered by the server's accepted selections.
+    pub recent: Vec<ModelRecent>,
+    /// How many matching choices to place in Recent; zero hides the group, retaining history.
+    pub recent_count: i64,
 }
 
 /// Where to put a favorite.
@@ -551,6 +574,12 @@ crate::endpoints! {
     /// Replaces the whole value of one key of that state.
     MeStateSet: PUT "/me/state/{key}", User, none, json Json, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Reads only this person's selected models, shared across their devices.
+    MeModelRecentList: GET "/me/model-recents", User, none, none, json ModelRecents, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Records one deliberate choice without replacing another device's history.
+    MeModelRecentCreate: POST "/me/model-recents", User, none, json ModelRecent, none, 204,
+        operation Op::receipt(&Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount));
     /// Keeps the caller's last view of one project, beside those of the others.
     MeProjectViewSet: PUT "/me/state/project_views/{project_id}", Rule("the caller, who may view the project"), none, json ProjectView, none, 204,
         operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
@@ -665,13 +694,14 @@ mod tests {
     }
 
     #[test]
-    fn the_interface_state_is_kept_under_nine_keys() {
+    fn the_interface_state_keeps_reading_choices_under_their_own_key() {
         assert_eq!(
             serde_json::to_value([
                 PersonalStateKey::Help,
                 PersonalStateKey::Layouts,
                 PersonalStateKey::Viewers,
                 PersonalStateKey::Timeline,
+                serde_json::from_value::<PersonalStateKey>(json!("interface")).unwrap(),
                 PersonalStateKey::Sidebar,
                 PersonalStateKey::ProjectViews,
                 PersonalStateKey::Keys,
@@ -684,6 +714,7 @@ mod tests {
                 "layouts",
                 "viewers",
                 "timeline",
+                "interface",
                 "sidebar",
                 "project_views",
                 "keys",
