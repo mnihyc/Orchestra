@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --test measurement_jobs
+test -p orch-api-core --test standalone_creation --test call_recovery

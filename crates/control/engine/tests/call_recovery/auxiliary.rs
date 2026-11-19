@@ -245,7 +245,7 @@ async fn a_candidate_is_skipped_when_the_input_author_loses_use_even_if_the_rule
     let author = world.person("input_author").await;
     world.give(author, "developer").await;
     let thread = world.thread_by(author, "Own authority").await;
-    world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":common::MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":common::MODEL},"config":{}}}},"params":{}}},{"type":"wait","until":"person"}]}])).await;
     world
         .engine()
         .submit_input(&Caller::session(author), thread, queued("Start work"))
@@ -275,7 +275,7 @@ async fn a_candidate_is_used_only_where_the_authors_entry_lets_work_run() {
         let author = world.person("placed_author").await;
         world.give(author, "developer").await;
         let thread = world.thread_by(author, "Placed authority").await;
-        world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":common::MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+        world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":common::MODEL},"config":{}}}},"params":{}}},{"type":"wait","until":"person"}]}])).await;
         // The entry names the environment the thread runs in, so the first turn is allowed; later it is
         // narrowed to another place or kept.
         world.access.use_only_in(author, &[world.environment]);
@@ -333,7 +333,7 @@ async fn an_automatic_failed_summary_uses_its_configured_candidate_without_attri
             json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
         )
         .await;
-    world.set(world.topic,"calls.rules",json!([{"id":"summary-fallback","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","params":{}}},{"type":"wait","until":"person"}]}])).await;
+    world.set(world.topic,"calls.rules",json!([{"id":"summary-fallback","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":"fallback-model"},"config":{}}}},"params":{}}},{"type":"wait","until":"person"}]}])).await;
     sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
         .bind(thread)
         .execute(world.pool.pool())
@@ -417,7 +417,7 @@ async fn an_explicit_access_program_is_sent_only_when_the_profile_feature_and_mo
                 json!({"synthetic.program":enabled}),
             )
             .await;
-        world.set(world.topic,"calls.rules",json!([{"id":"access-fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":common::MODEL,"params":{"access_program":"blue"}}},{"type":"wait","until":"person"}]}])).await;
+        world.set(world.topic,"calls.rules",json!([{"id":"access-fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":common::MODEL},"config":{}}}},"params":{"access_program":"blue"}}},{"type":"wait","until":"person"}]}])).await;
         let thread = world.thread("Authorised program recovery").await;
         world
             .engine()
@@ -492,7 +492,7 @@ async fn replacing_a_rules_steps_while_an_attempt_runs_starts_the_new_chain() {
     world.say(thread, turn_began(second.turn_id)).await;
     sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by) SELECT $1,provider_id,'fallback-model','Fallback',parameters,true,'manual',created_by FROM provider_models WHERE provider_id=$2 AND model_name=$3")
         .bind(orch_types::new_id()).bind(world.provider).bind(common::MODEL).execute(world.pool.pool()).await.unwrap();
-    world.set(world.topic,"calls.rules",json!([{"id":"retry","when":{"kind":"provider_busy"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","params":{}}},{"type":"wait","until":"person"}]}])).await;
+    world.set(world.topic,"calls.rules",json!([{"id":"retry","when":{"kind":"provider_busy"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":"fallback-model"},"config":{}}}},"params":{}}},{"type":"wait","until":"person"}]}])).await;
     failed(&world, thread, second.turn_id, "provider_busy").await;
     let third = world.turn_start(thread, 2).await;
     assert_eq!(third.model, "fallback-model");
@@ -505,7 +505,7 @@ async fn structural_model_unavailability_keeps_the_candidate_until_configuration
     let thread = world.thread("Wait for the original model").await;
     sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by) SELECT $1,provider_id,'fallback-model','Fallback',parameters,true,'manual',created_by FROM provider_models WHERE provider_id=$2 AND model_name=$3")
         .bind(orch_types::new_id()).bind(world.provider).bind(common::MODEL).execute(world.pool.pool()).await.unwrap();
-    world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_unavailable"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","params":{}}}]}])).await;
+    world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_unavailable"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":"fallback-model"},"config":{}}}},"params":{}}}]}])).await;
     world
         .engine()
         .submit_input(&Caller::session(world.ada), thread, queued("Start work"))
@@ -1160,7 +1160,7 @@ async fn skipping_a_candidate_does_not_start_the_same_vendor_wait_again() {
     let world = World::new().await;
     world.engine().stop();
     let thread = world.thread("One vendor deadline").await;
-    world.set(world.topic,"calls.rules",json!([{"id":"clock","when":{"kind":"provider_busy"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":common::MODEL,"params":{}}},{"type":"retry","delay_secs":60,"times":1,"backoff":1},{"type":"wait","until":"person"}]}])).await;
+    world.set(world.topic,"calls.rules",json!([{"id":"clock","when":{"kind":"provider_busy"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":common::MODEL},"config":{}}}},"params":{}}},{"type":"retry","delay_secs":60,"times":1,"backoff":1},{"type":"wait","until":"person"}]}])).await;
     let root = orch_types::new_id();
     let workflow = orch_types::new_id();
     let call = service(&world, thread, root, workflow, "clock");
@@ -1281,7 +1281,7 @@ async fn an_auxiliary_candidate_cannot_send_an_effort_the_target_model_does_not_
             json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
         )
         .await;
-    world.set(world.topic, "calls.rules", json!([{"id":"effort","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"limited-effort","params":{"effort":"high"}}},{"type":"wait","until":"person"}]}])).await;
+    world.set(world.topic, "calls.rules", json!([{"id":"effort","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":"limited-effort"},"config":{}}}},"params":{"effort":"high"}}},{"type":"wait","until":"person"}]}])).await;
     sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
         .bind(thread)
         .execute(world.pool.pool())
