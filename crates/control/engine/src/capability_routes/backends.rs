@@ -114,6 +114,9 @@ async fn allowed(
             // One entry has to allow the model and the effort together, and an entry that names
             // efforts needs one to be asked for.
             let wanted = orch_authz::options::Wanted {
+                purpose: orch_access_contract::permissions::UsagePurpose::for_capability(
+                    capability.0,
+                ),
                 model: Some((&reference.offering, groups)),
                 effort,
                 at: at.as_ref(),
@@ -128,6 +131,9 @@ async fn allowed(
             }
         } else {
             let wanted = orch_authz::options::Wanted {
+                purpose: orch_access_contract::permissions::UsagePurpose::for_capability(
+                    capability.0,
+                ),
                 service: Some((&reference.offering, groups)),
                 at: at.as_ref(),
                 ..orch_authz::options::Wanted::default()
@@ -218,6 +224,10 @@ impl Engine {
             return Ok(());
         };
         let declarations = sources.capabilities().declarations();
+        snapshot.context.executor_support.insert(
+            "program-session".into(),
+            capability_service::delegation::execution_support(),
+        );
         let work = sqlx::query_scalar::<_,Id>("SELECT t.input_id FROM threads h JOIN turns t ON t.id=h.current_turn_id WHERE h.node_id=$1")
             .bind(reader.place).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
         if let Some(input) = work
@@ -257,12 +267,11 @@ impl Engine {
                     .context
                     .backends
                     .insert(id.clone(), selected.reference.clone());
-                let native_state = capability_service::delegation::native_state(
+                let native_state = capability_service::delegation::backend_state(
                     conn,
                     &sources,
-                    reference.provider,
-                    &reference.offering,
                     id,
+                    &selected.reference,
                 )
                 .await?;
                 let native_available = native_state.is_ok();
@@ -537,6 +546,30 @@ impl Engine {
 }
 
 impl Engine {
+    /// Installed consumer declarations share the ordinary paged backend supplier.
+    pub fn capability_backend_declarations(&self) -> Result<cap::Declarations, EngineError> {
+        let sources = self
+            .inner
+            .capability_services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                EngineError::unreadable("The capability executors are not installed.")
+            })?;
+        let mut registry = Registry::default();
+        registry
+            .register("installed", sources.capabilities().declarations().clone())
+            .map_err(EngineError::unreadable)?;
+        registry
+            .register(
+                "model-producer",
+                orch_summarizer_model::capabilities::declarations(),
+            )
+            .map_err(EngineError::unreadable)?;
+        Ok(registry.declarations().clone())
+    }
+
     /// Preview one explicit backend through the same installed loader, current Use, lists and cap supplier.
     /// This is backend metadata for a picker, never another thread resolver or execution admission.
     pub async fn review_capability_backend(
@@ -547,6 +580,71 @@ impl Engine {
         capability: &str,
         reference: cap::BackendRef,
     ) -> Result<Availability, EngineError> {
+        self.review_capability_backend_at(conn, principal, Some(place), capability, reference)
+            .await
+    }
+
+    /// Inspect summary defaults without inventing a source. Actual work always
+    /// supplies its source and repeats every source policy, authority and cap check.
+    pub async fn review_capability_backend_at(
+        &self,
+        conn: &mut Conn,
+        principal: &orch_authz::Principal,
+        place: Option<Id>,
+        capability: &str,
+        reference: cap::BackendRef,
+    ) -> Result<Availability, EngineError> {
+        if capability == "ask" {
+            return crate::ask::model::inspect_backend(conn, principal, place, &reference).await;
+        }
+        if capability == "summary" {
+            let config = orch_summarizer_model::descriptor::Config::read(
+                &serde_json::json!({"backend":reference}),
+            )
+            .map_err(EngineError::unreadable)?;
+            let resolution = crate::summaries::resource::resolve_backend_choice(
+                conn,
+                principal,
+                place,
+                &config,
+                vec![
+                    orch_summarizer_model::capabilities::EXECUTOR.into(),
+                    "program-session".into(),
+                ],
+            )
+            .await?;
+            let offering = config.offering().map_err(EngineError::unreadable)?;
+            let room = if let Some(place) = place {
+                crate::caps::own_room(
+                    conn,
+                    &crate::caps::OwnCapAsk {
+                        place,
+                        provider: offering.provider,
+                        model: &offering.offering,
+                        tier: None,
+                        purpose: "summary",
+                        person: Some(principal.user()),
+                    },
+                    self.inner.clock.now(),
+                )
+                .await?
+            } else {
+                true
+            };
+            let allowed = resolution.route.is_some() && room;
+            return Ok(Availability {
+                allowed,
+                reason: if !room {
+                    Some("current_authority_refused".into())
+                } else {
+                    resolution.reason
+                },
+                ..Default::default()
+            });
+        }
+        let place = place.ok_or_else(|| {
+            EngineError::unreadable("The capability needs its actual governing node.")
+        })?;
         let sources = self
             .inner
             .capability_services

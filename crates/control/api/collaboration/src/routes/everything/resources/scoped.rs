@@ -30,12 +30,57 @@ pub(in crate::routes::everything) struct Prepared(projection::Prepared);
 
 pub(in crate::routes::everything) struct Selection<'a> {
     pub kind: &'a str,
+    pub thin: bool,
     pub rows: &'a [Row],
     pub grants: &'a [Grant],
     pub projection: &'a Projection,
 }
 
 impl Prepared {
+    pub(in crate::routes::everything) async fn render_rows(
+        &self,
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> ApiResult<HashMap<String, orch_api_contract::resource_rows::ResourceListRow>> {
+        if let projection::View::Provider(prepared) = &self.0.view {
+            return Ok(
+                providers::show_list_rows_prepared(ctx, conn, principal, prepared)
+                    .await?
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.base.id.to_string(),
+                            orch_api_contract::resource_rows::ResourceListRow::Provider(Box::new(
+                                row,
+                            )),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        if let projection::View::Environment(prepared) = &self.0.view {
+            return Ok(crate::routes::environments::show_inventory_rows_prepared(
+                ctx, conn, principal, prepared,
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.base.id.to_string(),
+                    orch_api_contract::resource_rows::ResourceListRow::Environment(Box::new(row)),
+                )
+            })
+            .collect());
+        }
+        Ok(self
+            .render(ctx, conn, principal)
+            .await?
+            .into_iter()
+            .map(|(id, view)| (id, super::list_row(&view)))
+            .collect())
+    }
+
     pub(in crate::routes::everything) fn name_sources(&self) -> &NameSources {
         self.0.name_sources()
     }
@@ -70,6 +115,7 @@ impl Prepared {
             Rendered::Machine(rows) => inventory!(rows, Machine),
             Rendered::Mount(rows) => inventory!(rows, Mount),
             Rendered::Skill(rows) => inventory!(rows, Skill),
+            Rendered::Pool(rows) => inventory!(rows, Pool),
             Rendered::Host(rows) => inventory!(rows, Host),
             Rendered::Environment(rows) => inventory!(rows, Environment),
             Rendered::Mcp(rows) => inventory!(rows, McpServer),
@@ -107,6 +153,14 @@ pub(in crate::routes::everything) async fn prepare(
         .kind
         .parse()
         .map_err(|_| ApiError::invalid("kinds", "Choose one resource kind."))?;
+    if selection.thin && kind == ResourceKind::Environment {
+        let prepared =
+            crate::routes::environments::prepare_inventory_rows(ctx, conn, principal, &seen)
+                .await?;
+        return projection::Prepared::from_view(conn, projection::View::Environment(prepared))
+            .await
+            .map(|prepared| Some(Prepared(prepared)));
+    }
     projection::prepare(
         ctx,
         conn,

@@ -34,6 +34,7 @@ fn validate(body: &CreateThread) -> ApiResult<()> {
         (body.directory.is_some(), "directory"),
         (body.worktree.is_some(), "worktree"),
         (body.prepare_source.is_some(), "prepare_source"),
+        (!body.workspace_edits.is_empty(), "workspace_edits"),
         (body.cwd.is_some(), "cwd"),
         (body.model.is_some(), "model"),
         (body.effort.is_some(), "effort"),
@@ -119,11 +120,10 @@ pub async fn prepare(
     }
     if let Some(model) = &program.model {
         let choices = crate::routes::threads::binding::ask_models(conn, &principal, root).await?;
-        if !choices.iter().any(|choice| {
-            choice.selection.provider_id == model.provider_id
-                && choice.selection.model == model.model
-                && choice.allowed
-        }) {
+        if !choices
+            .iter()
+            .any(|choice| choice.selection.backend == model.backend && choice.allowed)
+        {
             return Err(ApiError::invalid(
                 "program.model",
                 "Choose an allowed API model in this organization",

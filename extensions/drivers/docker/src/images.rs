@@ -360,7 +360,14 @@ impl DockerDriver {
         if let Some(kept) = self.kept_source(spec).await? {
             return Ok(kept);
         }
-        match &docker.source {
+        self.image_for_source(&docker.source)
+            .await
+            .inspect(|image| tracing::debug!(unit = %spec.name, %image, "the image of a unit"))
+    }
+
+    /// A capability starts from the prepared original source, never a kept personal filesystem.
+    pub(crate) async fn image_for_source(&self, source: &Source) -> Result<String, DriverError> {
+        match source {
             Source::Image { reference, digest } => {
                 if reference.starts_with("orch-keep-") {
                     return Err(DriverError::InvalidSpec(
@@ -374,7 +381,9 @@ impl DockerDriver {
                     Ok(selected)
                 } else {
                     if self.config.offline_images.contains_key(&original) {
-                        return Err(DriverError::Image(format!("carried-in image {reference} is missing; load its verified archive on this daemon")));
+                        return Err(DriverError::Image(format!(
+                            "carried-in image {reference} is missing; load its verified archive on this daemon"
+                        )));
                     }
                     self.pull_image(reference, digest.as_deref(), &crate::progress::Silent)
                         .await?;
@@ -392,7 +401,6 @@ impl DockerDriver {
                 Ok(alias)
             }
         }
-        .inspect(|image| tracing::debug!(unit = %spec.name, %image, "the image of a unit"))
     }
 
     async fn require_made(&self, alias: &str, how: &str) -> Result<(), DriverError> {

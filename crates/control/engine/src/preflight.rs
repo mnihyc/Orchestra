@@ -249,12 +249,45 @@ impl Engine {
     }
 
     /// Pre-flight inside the transaction of a caller, which commits.
-    pub(crate) async fn preflight_in(
+    #[inline(never)]
+    pub(crate) fn preflight_in<'a, 'unit>(
+        &'a self,
+        unit: &'a mut Unit<'unit>,
+        thread_id: Id,
+    ) -> impl std::future::Future<Output = Result<Outcome, EngineError>> + Send + 'a {
+        // Input and tool writers retain one pointer while the checked queue facts are captured.
+        Box::pin(self.preflight_with_observation(unit, thread_id))
+    }
+
+    async fn preflight_with_observation(
         &self,
         unit: &mut Unit<'_>,
         thread_id: Id,
     ) -> Result<Outcome, EngineError> {
-        let outcome = Box::pin(self.preflight_inner(unit, thread_id)).await?;
+        crate::summaries::with_program_source_checks(|| self.preflight_in_scope(unit, thread_id))
+            .await
+    }
+
+    async fn preflight_in_scope(
+        &self,
+        unit: &mut Unit<'_>,
+        thread_id: Id,
+    ) -> Result<Outcome, EngineError> {
+        let now = unit.now();
+        let before = if threads::thread(unit.conn, thread_id)
+            .await?
+            .is_some_and(|row| {
+                matches!(
+                    row.state.as_str(),
+                    thread_state::IDLE | thread_state::BLOCKED
+                )
+            }) {
+            threads::eligibility::basis(unit.conn, thread_id, now).await?
+        } else {
+            None
+        };
+        let mut eligibility = crate::queue_eligibility::Choice::Unreported;
+        let outcome = Box::pin(self.preflight_inner(unit, thread_id, &mut eligibility)).await?;
         // Preparation has not refused the parked native continuation. Its decision follows
         // when the retained input material is ready, before the adapter releases output.
         if !matches!(
@@ -268,6 +301,8 @@ impl Engine {
                 }
             }
         }
+        self.keep_queue_eligibility(unit, thread_id, before, eligibility, &outcome)
+            .await?;
         Ok(outcome)
     }
 
@@ -275,12 +310,28 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         thread_id: Id,
+        eligibility: &mut crate::queue_eligibility::Choice,
     ) -> Result<Outcome, EngineError> {
         let Some(thread) =
             Self::preflight_phase(|| threads::lock(&mut *unit.conn, thread_id)).await?
         else {
             return Ok(Outcome::Gone);
         };
+        // A Stop that is open is carried out before anything else: no turn is made behind its back.
+        let thread = if Self::preflight_phase(|| self.apply_open_stops_in(unit, thread_id))
+            .await?
+            .carried_out
+        {
+            match threads::thread(unit.conn, thread_id).await? {
+                Some(thread) => thread,
+                None => return Ok(Outcome::Gone),
+            }
+        } else {
+            thread
+        };
+        if Self::preflight_phase(|| threads::stop_work_pending(unit.conn, thread_id)).await? {
+            return Ok(Outcome::Busy);
+        }
         if Self::preflight_phase(|| orch_db::queries::ask::get(unit.conn, thread_id, false))
             .await?
             .is_some()
@@ -480,10 +531,9 @@ impl Engine {
         for input in
             Self::preflight_phase(|| threads::pending_inputs(&mut *unit.conn, thread_id)).await?
         {
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                Self::preflight_phase(|| crate::inputs::settings_for(unit.conn, &input, &settings))
+                    .await?;
             let settings = &actual_settings;
             let background = crate::background_wake::is_wake(&input);
             if background && !settings.background_wake {
@@ -645,7 +695,7 @@ impl Engine {
                         detail: Some(AUTHOR_LOST_ACCESS),
                         ..InputChange::default()
                     };
-                    Self::preflight_phase(|| {
+                    let changed = Self::preflight_phase(|| {
                         threads::change_input(
                             &mut *unit.conn,
                             input.id,
@@ -655,6 +705,17 @@ impl Engine {
                         )
                     })
                     .await?;
+                    if changed {
+                        let cancellation = serde_json::to_value(orch_api_contract::threads::InputCancellation {
+                            cause: orch_api_contract::threads::InputCancellationCause::AccessChanged,
+                            at: orch_types::Time::new(unit.now()),
+                            by: None,
+                        })?;
+                        Self::preflight_phase(|| {
+                            threads::record_input_cancellation(unit.conn, input.id, &cancellation)
+                        })
+                        .await?;
+                    }
                 }
             }
         }
@@ -676,6 +737,11 @@ impl Engine {
         let mut held_for: Option<String> = None;
         loop {
             let Some(mut input) = pending.iter().find(|input| !input.is_held()).cloned() else {
+                *eligibility = if pending.is_empty() {
+                    crate::queue_eligibility::Choice::Unreported
+                } else {
+                    crate::queue_eligibility::Choice::None
+                };
                 // What waits for a person (what a Stop held, files that cannot reach the agent) holds nobody
                 // else up and is not the thread's block; what waits for room in a cap, or for the owner, is.
                 let waiting: Vec<&InputRow> = pending
@@ -748,10 +814,9 @@ impl Engine {
                 return Ok(Outcome::Blocked(blocked));
             };
 
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                Self::preflight_phase(|| crate::inputs::settings_for(unit.conn, &input, &settings))
+                    .await?;
             let settings = &actual_settings;
             if Self::preflight_phase(|| {
                 crate::native_actions::hold_invalid(
@@ -810,7 +875,8 @@ impl Engine {
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
-                let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
+                let blocked =
+                    Blocked::new("source_failed", crate::preparation::SOURCE_FAILED_DETAIL);
                 Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
@@ -832,6 +898,11 @@ impl Engine {
             let check = Self::preflight_phase(|| self.check_caps(unit, &input, &ask)).await?;
             match &check.verdict {
                 Verdict::Clear => {
+                    *eligibility = crate::queue_eligibility::Choice::Selected {
+                        input: input.id,
+                        author: input.author_id,
+                        authority: ask.person.or(Some(thread.owner_id)),
+                    };
                     // Files are written before anything opens for the turn, with the thread starting and no turn yet.
                     match Self::preflight_phase(|| self.files_gate(unit, &thread, &mut input))
                         .await?
@@ -887,6 +958,11 @@ impl Engine {
                     ));
                 }
                 Verdict::Blocked(detail) => {
+                    *eligibility = crate::queue_eligibility::Choice::Selected {
+                        input: input.id,
+                        author: input.author_id,
+                        authority: ask.person.or(Some(thread.owner_id)),
+                    };
                     if let Some(cap) = check.blocked_by {
                         self.note_waiting_for(thread_id, cap);
                     }
@@ -1041,8 +1117,18 @@ impl Engine {
         {
             return Ok(Person::Lost);
         }
+        let purpose = match authority {
+            Some(authority) => {
+                authority
+                    .provider_purpose(unit.conn, thread.node_id)
+                    .await?
+            }
+            None => orch_access_contract::permissions::UsagePurpose::Turn,
+        };
         let now = Time::new(unit.now());
         let ask = |person: Id| ProviderUse {
+            pool: None,
+            purpose,
             person,
             node: thread.node_id,
             provider: thread.provider_id.unwrap_or_else(Id::nil),
@@ -1056,10 +1142,21 @@ impl Engine {
             if thread.provider_id.is_none() {
                 return Ok(Person::Fine);
             }
+            let caller = Caller::session(thread.owner_id).with_admin_mode(false);
+            let pool = crate::calls::current_recovery_pool(
+                unit.conn,
+                thread,
+                thread.provider_id.unwrap_or_else(Id::nil),
+                settings.model.as_deref(),
+                &caller,
+            )
+            .await?;
+            let mut request = ask(thread.owner_id);
+            request.pool = pool.as_ref();
             let answer = self
                 .inner
                 .access
-                .provider_use(&mut *unit.conn, &ask(thread.owner_id))
+                .provider_use(&mut *unit.conn, &request)
                 .await?;
             return Ok(if answer.is_allowed() {
                 Person::Fine
@@ -1133,20 +1230,49 @@ impl Engine {
         // A native selection's complete scope and ordinary command permission are checked by
         // hold_invalid before execution. A missing Manage facet holds its words/arguments for
         // correction; it must not become an unrelated loss-of-authorship cancellation here.
-        if authority.is_none()
-            || callers
-                .iter()
-                .any(|caller| !caller.permits(Permission::ProviderUse))
-        {
+        if authority.is_none() {
             return Ok(Person::NeedsModel);
         }
         if thread.provider_id.is_none() {
             return Ok(Person::Fine);
         }
+        let mut pooled = false;
+        for caller in &callers {
+            let pool = crate::calls::current_recovery_pool(
+                unit.conn,
+                thread,
+                thread.provider_id.unwrap_or_else(Id::nil),
+                settings.model.as_deref(),
+                caller,
+            )
+            .await?;
+            if !(caller.permits(Permission::ProviderUse)
+                || pool.is_some() && caller.permits(Permission::PoolUse))
+            {
+                return Ok(Person::NeedsModel);
+            }
+            if pool.is_some() {
+                pooled = true;
+                let mut request = ask(caller.user());
+                request.pool = pool.as_ref();
+                if !self
+                    .inner
+                    .access
+                    .provider_use(unit.conn, &request)
+                    .await?
+                    .is_allowed()
+                {
+                    return Ok(Person::NeedsModel);
+                }
+            }
+        }
+        if pooled {
+            return Ok(Person::Fine);
+        }
         let answer = self
             .inner
             .access
-            .provider_use(&mut *unit.conn, &ask(author))
+            .provider_use(unit.conn, &ask(author))
             .await?;
         Ok(if answer.is_allowed() {
             Person::Fine
@@ -1470,7 +1596,7 @@ impl Engine {
         // A previous vendor family/spending refusal describes that failed turn;
         // it cannot decide whether the vendor admits this new request.
         // 8, 9, 10, 11 need the environment and the descriptor.
-        let descriptor = harnesses::descriptor_of(&agent)?;
+        let descriptor = harnesses::descriptor_for_thread(conn, &agent, &provider, thread).await?;
         if descriptor
             .as_ref()
             .is_some_and(|descriptor| descriptor.capabilities.prompt_cache_ttl)
@@ -1493,7 +1619,10 @@ impl Engine {
             if !descriptor.approval_modes.contains(&settings.approval_mode) {
                 return Ok(Err(Blocked::new(
                     "binding_invalid",
-                    crate::sessions::unsupported_approval_detail(settings.approval_mode),
+                    crate::sessions::unavailable_approval_detail(
+                        settings.approval_mode,
+                        descriptor,
+                    ),
                 )));
             }
         }
@@ -1590,13 +1719,7 @@ impl Engine {
             offers,
             settings,
             entry: self
-                .entry_arrangements(
-                    unit,
-                    thread,
-                    input.and_then(InputRow::answers),
-                    &provider,
-                    settings,
-                )
+                .entry_arrangements(unit, thread, input, &provider, settings)
                 .await?,
             colocated,
             runtime,
@@ -1607,7 +1730,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.
@@ -1663,10 +1789,9 @@ impl Engine {
                     settings,
                 )
                 .await?;
-            let declared = crate::harnesses::descriptor_of(&agent)?;
             if let Err(why) = crate::approval_review::reviewer_allowed_for(
                 settings.approval_mode,
-                declared.as_ref(),
+                Some(&descriptor),
                 &models,
                 path,
                 &model,
@@ -1753,6 +1878,20 @@ impl Engine {
             // Options the agent's setup gives that the model's admitted constraints refuse: the setup needs attention.
             Err(reason) => return Ok(Err(Blocked::new("binding_invalid", reason))),
         };
+        if let Some(input) = input
+            && let Some(parent) =
+                crate::inputs::saved_authority(input.submission_authority.as_ref())?
+                    .as_ref()
+                    .and_then(crate::inputs::InputAuthority::capability_parent)
+            && !parent
+                .input_options_match(conn, input, &params, effort.as_deref())
+                .await?
+        {
+            return Ok(Err(Blocked::new(
+                "binding_invalid",
+                "The selected program cannot apply the requested model options.",
+            )));
+        }
         let metering = metering(path, descriptor.capabilities.usage_tokens);
         let tier = crate::providers::service_tier(&descriptor.parameters, &params);
         Ok(Ok(Plan {
@@ -1779,17 +1918,38 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
-        author: Option<Id>,
+        input: Option<&InputRow>,
         provider: &ProviderRow,
         settings: &Resolved,
     ) -> Result<Option<Vec<ArrangementType>>, EngineError> {
-        let person = author.unwrap_or(thread.owner_id);
+        let person = input.and_then(InputRow::answers).unwrap_or(thread.owner_id);
+        let purpose = match crate::inputs::saved_authority(
+            input.and_then(|row| row.submission_authority.as_ref()),
+        )? {
+            Some(authority) => {
+                authority
+                    .provider_purpose(unit.conn, thread.node_id)
+                    .await?
+            }
+            None => orch_access_contract::permissions::UsagePurpose::Turn,
+        };
+        let caller = Caller::session(person).with_admin_mode(false);
+        let pool = crate::calls::current_recovery_pool(
+            unit.conn,
+            thread,
+            provider.id,
+            settings.model.as_deref(),
+            &caller,
+        )
+        .await?;
         let answer = self
             .inner
             .access
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    pool: pool.as_ref(),
+                    purpose,
                     person,
                     node: thread.node_id,
                     provider: provider.id,
@@ -2201,6 +2361,7 @@ pub(crate) fn sessions_params(
     use orch_agent_contract::descriptor::Placement;
     use orch_agent_contract::parameters::{Eligibility, sendable};
     let _ = arrangement;
+    let features = descriptor.feature_values(&settings.features);
     // The options of the profile that hold back the end of a turn must fit under the time an unanswered interrupt is
     // given: the program declares which they are, and the engine knows the time.
     if let Some(delays) = declared_turn_end_delays(descriptor) {
@@ -2228,7 +2389,7 @@ pub(crate) fn sessions_params(
     let sent = sendable(
         &descriptor.parameters,
         &context,
-        &settings.features,
+        &features,
         &settings.params,
     );
     let params = Json::Object(sent.values.into_iter().collect());
@@ -2242,7 +2403,7 @@ pub(crate) fn sessions_params(
         bindings.validate(
             agent.profile.get("config").unwrap_or(&Json::Null),
             parameters,
-            &settings.features,
+            &features,
         )?
     } else {
         std::collections::BTreeMap::new()
@@ -2259,7 +2420,7 @@ pub(crate) fn sessions_params(
         object.remove(orch_agent_contract::parameters::MODEL_WINDOW_KEY);
         for def in &descriptor.parameters {
             if def.chooses_none()
-                && def.is_shown(&context, &settings.features)
+                && def.is_shown(&context, &features)
                 && !object.contains_key(&def.key)
             {
                 object.insert(def.key.clone(), Json::Null);
@@ -2300,6 +2461,7 @@ mod tests {
 
     fn environment(status: &str) -> EnvironmentRow {
         EnvironmentRow {
+            revision: 1,
             id: new_id(),
             name: "env".into(),
             owner_id: new_id(),
@@ -2410,6 +2572,7 @@ mod tests {
             sources: serde_json::json!({}),
             facts: Json::Null,
             revision: 1,
+            observation_revision: 0,
             deleted_at: None,
         }
     }

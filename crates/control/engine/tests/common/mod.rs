@@ -14,6 +14,7 @@
 
 pub mod background;
 mod paid_commands;
+pub mod program_node;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -72,11 +73,18 @@ pub const MODEL: &str = "fake-1";
 
 /// Runs one real case on default stacks even when the enclosing proof enlarges its own stacks.
 pub fn on_default_stack(case: &str) {
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    let executable = std::env::current_exe().unwrap();
+    let result = std::process::Command::new(&executable)
         .args([case, "--exact", "--test-threads=1"])
         .env_remove("RUST_MIN_STACK")
         .output()
         .unwrap();
+    #[cfg(target_os = "linux")]
+    if std::os::unix::process::ExitStatusExt::signal(&result.status).is_some()
+        && String::from_utf8_lossy(&result.stderr).contains("overflowed its stack")
+    {
+        report_overflow_frames(&executable, case);
+    }
     let one_case_ran = String::from_utf8_lossy(&result.stdout)
         .contains("test result: ok. 1 passed; 0 failed; 0 ignored;");
     assert!(
@@ -86,6 +94,73 @@ pub fn on_default_stack(case: &str) {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+/// The original child decides the test. A diagnostic replay reports function names
+/// from the executable even where the runner has no debugger or disables tracing.
+#[cfg(target_os = "linux")]
+fn report_overflow_frames(executable: &std::path::Path, case: &str) {
+    let Ok(runtime) = std::process::Command::new("cc")
+        .arg("-print-file-name=libasan.so")
+        .output()
+    else {
+        eprintln!("Native stack trace unavailable: the compiler driver is missing.");
+        return;
+    };
+    let path = String::from_utf8_lossy(&runtime.stdout);
+    let library = std::path::Path::new(path.trim());
+    if !runtime.status.success() || !library.is_absolute() || !library.is_file() {
+        eprintln!("Native stack trace unavailable: the sanitizer runtime is missing.");
+        return;
+    }
+    let Ok(trace) = std::process::Command::new("timeout")
+        .args(["120s", "env"])
+        .arg(format!("LD_PRELOAD={}", library.display()))
+        .arg("ASAN_OPTIONS=detect_leaks=0:handle_segv=2:handle_abort=2:use_sigaltstack=1:symbolize=1:allow_addr2line=1:stack_trace_format='native-frame|%n|%m|%o|%f'")
+        .arg(executable)
+        .args([case, "--exact", "--test-threads=1"])
+        .env_remove("RUST_MIN_STACK")
+        .env_remove("DEBUGINFOD_URLS")
+        .output()
+    else {
+        eprintln!("Native stack trace unavailable: the diagnostic child did not start.");
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&trace.stderr);
+    let mut offsets = Vec::new();
+    for line in stderr.lines() {
+        let Some(frame) = line.trim().strip_prefix("native-frame|") else {
+            continue;
+        };
+        let mut fields = frame.splitn(4, '|');
+        let (Some(depth), Some(module), Some(offset), Some(function)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if std::path::Path::new(module) == executable && offset.starts_with("0x") {
+            eprintln!("Native frame {depth} {offset} {function}");
+            offsets.push(offset);
+        }
+    }
+    if offsets.is_empty() {
+        eprintln!(
+            "The diagnostic child returned {} without executable frames.",
+            trace.status
+        );
+    } else if let Ok(names) = std::process::Command::new("addr2line")
+        .args(["-f", "-C", "-e"])
+        .arg(executable)
+        .args(offsets)
+        .env_remove("DEBUGINFOD_URLS")
+        .output()
+        && names.status.success()
+    {
+        eprintln!(
+            "Native functions and source locations:\n{}",
+            String::from_utf8_lossy(&names.stdout)
+        );
+    }
 }
 
 /// Waits until `check` holds, looking again every few milliseconds.
@@ -251,6 +326,7 @@ impl ResourceAccess for TestAccess {
             None => None,
         };
         let wanted = orch_authz::options::Wanted {
+            purpose: ask.purpose,
             model: ask.model.map(|model| (model, &[][..])),
             effort: ask.effort,
             at: place.as_ref(),
@@ -426,6 +502,7 @@ impl LiveSink for Recorder {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     cmd: Cmd,
     machine: Id,
     handle: CommandHandle,
@@ -669,7 +746,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -690,6 +767,14 @@ impl Commands for Process {
         Ok(lock(&self.commands.issued)
             .get(&id)
             .map(|issued| issued.cmd.body.clone()))
+    }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.commands.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
     }
     async fn retained_command(
         &self,
@@ -726,6 +811,59 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        let first_start = matches!(
+            command.kind,
+            CommandKind::TurnStart | CommandKind::TurnStartFenced
+        ) && !lock(&self.commands.issued).contains_key(&command.id);
+        let before = if command.input_facts.is_some() || first_start {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            if let Some(facts) = command.input_facts.as_deref() {
+                orch_engine::commands::retain_input_facts(
+                    &mut tx,
+                    facts,
+                    command.id,
+                    &command.body,
+                )
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            }
+            if first_start
+                && let Some(row) = link_queries::lock_command(&mut tx, command.id)
+                    .await
+                    .map_err(|error| CommandsError::Body(error.to_string()))?
+            {
+                if row.machine_id != command.machine
+                    || row.kind != command.kind.as_str()
+                    || row.serial_key() != command.key.wire().as_deref()
+                    || row.body != command.body
+                {
+                    return Err(CommandsError::AuthorityMismatch);
+                }
+                // The engine persisted this exact start. The first wire transaction records
+                // its native model admission before the scripted machine can observe it.
+                Box::pin(orch_engine::inputs::native_delivery::mark_model_admitted(
+                    &mut tx,
+                    &row,
+                    self.commands.clock.time(),
+                ))
+                .await
+                .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            None
+        } else {
+            before
+        };
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -755,6 +893,7 @@ impl Commands for Process {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 cmd,
                 machine: command.machine,
                 handle,
@@ -1193,6 +1332,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1531,6 +1671,18 @@ impl World {
         change(&mut lock(&self.config));
     }
 
+    /// An independent worker shares durable rows and the real command supplier, with its own engine state.
+    pub fn recovery_worker(&self) -> Engine {
+        build_engine(
+            &self.pool,
+            &self.clock,
+            &lock(&self.config),
+            &self.commands,
+            &self.access,
+            &self.live,
+        )
+    }
+
     /// The API restarts: the engine is built anew on the same database, the machine's link is made anew
     /// from the cursors the database holds, and the commands that did not end are handed to it.
     pub async fn restart_api(&self) {
@@ -1542,6 +1694,15 @@ impl World {
     pub async fn restart_api_using(
         &self,
         wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+    ) {
+        self.restart_api_configured(wrap, |_| {}).await;
+    }
+
+    /// Restore the deployment's installed services before the new supervisor can pick up work.
+    pub async fn restart_api_configured(
+        &self,
+        wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+        configure: impl FnOnce(&Engine),
     ) {
         let before = self.hub.session_of(self.machine_id);
         self.engine().stop();
@@ -1578,6 +1739,7 @@ impl World {
         engine.attach_capability_services(Arc::new(
             orch_provider_contract::builtins::BuiltinSources::default(),
         ));
+        configure(&engine);
         engine.start();
         *lock(&self.engine) = Some(engine);
         self.spawn_applier(link, notices);
@@ -1738,6 +1900,7 @@ impl World {
                         descriptor: serde_json::from_value(lock(&declared).clone()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1746,6 +1909,13 @@ impl World {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: if matches!(
                                 open.session.mode,
                                 SessionMode::Resume | SessionMode::Adopt
@@ -2069,6 +2239,20 @@ impl World {
             .fetch_one(self.pool.pool())
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error}"))
+    }
+
+    /// The persisted decision when a summary retry did not reach its expected executor.
+    pub async fn summary_recovery_decision(&self, node: Id) -> Json {
+        self.scalar(
+            "SELECT jsonb_build_object(
+                'summary_reason', (SELECT reason_code FROM node_summary_state WHERE node_id=$1),
+                'recovery', (SELECT jsonb_build_object('state',state,'detail',context->>'detail','skipped',context->>'skipped')
+                    FROM model_call_recovery WHERE node_id=$1 AND purpose='summary' ORDER BY updated_at DESC LIMIT 1),
+                'choice', (SELECT jsonb_build_object('state',state,'reason',reason)
+                    FROM pool_choices WHERE source->>'node'=$1::uuid::text AND source->>'purpose'='summary'
+                    ORDER BY created_at DESC LIMIT 1))",
+            node,
+        ).await
     }
 
     /// Counts rows, with one identifier bound to `$1`.

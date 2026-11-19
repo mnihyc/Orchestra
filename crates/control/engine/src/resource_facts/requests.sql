@@ -12,8 +12,10 @@ WITH open_requests AS (
       LEFT JOIN commands c ON c.id=accepted.id
       LEFT JOIN threads t ON t.node_id=accepted.thread_id
       LEFT JOIN segments s ON s.id=t.current_segment_id
-    WHERE accepted.cancel_reason IS NULL AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
+    WHERE accepted.cancel_reason IS NULL AND accepted.delegated_result IS NULL AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
 )
 SELECT DISTINCT id FROM open_requests
-WHERE (($1='provider' AND provider_id=$2) OR ($1='agent' AND agent_id=$2) OR ($1='environment' AND environment_id=$2))
+WHERE (($1='provider' AND provider_id=$2) OR ($1='agent' AND agent_id=$2) OR ($1='environment' AND environment_id=$2)
+    OR ($1='pool' AND EXISTS(SELECT 1 FROM pool_attempt_scopes a JOIN pool_choices choice ON choice.id=a.choice_id
+        WHERE a.attempt_id=open_requests.id AND choice.path @> jsonb_build_array(jsonb_build_object('pool_id',$2::uuid)))))
   AND ($3::uuid IS NULL OR model_name=(SELECT model_name FROM provider_models WHERE id=$3 AND provider_id=$2))
