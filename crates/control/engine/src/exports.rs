@@ -1098,6 +1098,7 @@ impl Engine {
             .unwrap_or(DEFAULT_KEEP_HOURS);
         Ok(ExportLimits {
             max_bytes,
+            max_file_bytes: self.inner.config.export_file_max_bytes,
             max_items,
             keep_hours,
         })

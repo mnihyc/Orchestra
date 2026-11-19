@@ -25,6 +25,8 @@ export { workspaceBinding } from '@/api/workspaceBinding';
 export interface EnvironmentWorkspaceAccess {
   door: Door;
   thread: Thread | null;
+  /** Current metadata reader for this exact workspace door. */
+  read?: ThreadReadTarget;
   environment: EnvironmentRef;
   /** The thread's directory, from the workspace root: where the tree opens. */
   directory: string;
@@ -74,6 +76,7 @@ export function useThreadDoor(threadId: string | null, read?: ThreadReadTarget):
     access: {
       door: { environmentId: thread.environment.id, threadId },
       thread,
+      read: read ?? threadId,
       environment: thread.environment,
       directory: thread.directory,
       mayView: thread.environment_permissions.includes('files.view'),

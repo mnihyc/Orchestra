@@ -52,6 +52,17 @@ pub const SESSION_DELETE: Declaration<Source> = Declaration {
     }],
 };
 
+/// Resumption reads only this unfinished session and its stored owner.
+pub const SESSION_GET: Declaration<Source> = Declaration {
+    operation: "UploadSessionGet",
+    bindings: &[Binding {
+        source: Source::Session,
+        target: TargetResolver::Path("upload_id"),
+        usage: FacetUsage::Required,
+        cardinality: Cardinality::One,
+    }],
+};
+
 /// Appending newly supplied bytes acts on this exact unfinished session's identity.
 pub const SESSION_PUT: Declaration<Source> = Declaration {
     operation: "UploadSessionPut",
