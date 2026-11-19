@@ -45,12 +45,24 @@ pub fn composed_model_parameters(
     layers: &orch_types::Json,
     protocol: Option<&str>,
 ) -> Result<ModelParameters, serde_json::Error> {
+    composed_model_with_purpose(parameters, groups, layers, protocol)
+        .map(|(parameters, _)| parameters)
+}
+
+/// Read-only purpose facts stay separate from the model's own editable parameters.
+pub fn composed_model_with_purpose(
+    parameters: &orch_types::Json,
+    groups: &[String],
+    layers: &orch_types::Json,
+    protocol: Option<&str>,
+) -> Result<(ModelParameters, ModelPurposeInfo), serde_json::Error> {
     let model: ModelParameters = serde_json::from_value(parameters.clone())?;
     let layers: ModelOptionLayers = if layers.is_null() {
         ModelOptionLayers::default()
     } else {
         serde_json::from_value(layers.clone())?
     };
+    let purpose = model.purpose_info(layers.endpoints.keys().map(String::as_str));
     // An unbound catalogue can show each interface's own wire schema. Native program options
     // of an endpoint apply only when the existing arrangement selected that endpoint.
     let mut endpoint = layers
@@ -74,7 +86,10 @@ pub fn composed_model_parameters(
         .iter()
         .filter_map(|group| layers.groups.get(group))
         .filter_map(|group| group.request_options.as_ref());
-    Ok(compose_request_options(&model, Some(&endpoint), selected))
+    Ok((
+        compose_request_options(&model, Some(&endpoint), selected),
+        purpose,
+    ))
 }
 
 /// Compose option declarations without changing the model's offered or enabled capabilities.
@@ -120,9 +135,55 @@ pub struct ServiceTier {
     pub label: String,
 }
 
+/// The work a model declares it can do, independent of access and enabled options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPurpose {
+    /// Generate conversational text, including an agent's turns and summaries.
+    Generation,
+    /// Turn text into vectors for retrieval.
+    Embedding,
+    /// Generate an image.
+    ImageGeneration,
+    /// Turn speech into text.
+    Transcription,
+    /// Generate speech from text.
+    SpeechGeneration,
+    /// Rank existing retrieval candidates.
+    Rerank,
+    /// Choose among a supplied set of structured decisions.
+    Decision,
+}
+
+/// Current model declaration and the work reachable through this provider's actual endpoints.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelPurposeInfo {
+    /// A manager's replacement, otherwise the catalogue or exclusive endpoint kind; absent is unknown.
+    pub declared: Option<Vec<ModelPurpose>>,
+    /// Protocol-owned endpoint kinds; absent when an interface has not declared its kind.
+    pub reachable: Option<Vec<ModelPurpose>>,
+}
+
+impl ModelPurposeInfo {
+    /// A purpose declaration never creates a missing endpoint; unknown evidence imposes no refusal.
+    #[must_use]
+    pub fn supports_purpose(&self, purpose: ModelPurpose) -> bool {
+        self.declared
+            .as_ref()
+            .is_none_or(|declared| declared.contains(&purpose))
+            && self
+                .reachable
+                .as_ref()
+                .is_none_or(|reachable| reachable.contains(&purpose))
+    }
+}
+
 /// What a harness or an endpoint last said a model offers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelOffered {
+    /// Work explicitly reported by the model's discovery source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ModelPurpose>>,
     /// Additional prompt-cache lifetimes observed without enabling them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_lifetimes: Option<Vec<String>>,
@@ -244,6 +305,9 @@ pub struct Rate {
 /// *does* run with is the thread's own setting, chosen within what is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelParameters {
+    /// A provider manager's replacement for the reported purposes; absent follows discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ModelPurpose>>,
     /// Additional cache lifetimes enabled by a manager. Ordinary five-minute caching stays available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_lifetimes: Option<Vec<String>>,
@@ -321,6 +385,73 @@ pub struct ModelParameters {
 }
 
 impl ModelParameters {
+    /// Unknown work remains possible; a provider's explicit declaration replaces discovery.
+    #[must_use]
+    pub fn supports_purpose(&self, purpose: ModelPurpose) -> bool {
+        self.purposes
+            .as_ref()
+            .or_else(|| {
+                self.offered
+                    .as_ref()
+                    .and_then(|offered| offered.purposes.as_ref())
+            })
+            .is_none_or(|purposes| purposes.contains(&purpose))
+    }
+
+    /// A shared catalogue may mix embedding and chat models. Only an exclusively
+    /// non-generation endpoint supplies a purpose when the model itself reported none.
+    pub fn purpose_info<'a>(
+        &self,
+        protocols: impl IntoIterator<Item = &'a str>,
+    ) -> ModelPurposeInfo {
+        let declared = self.purposes.clone().or_else(|| {
+            self.offered
+                .as_ref()
+                .and_then(|offer| offer.purposes.clone())
+        });
+        static DECLARATIONS: std::sync::OnceLock<orch_types::Json> = std::sync::OnceLock::new();
+        let declarations = DECLARATIONS.get_or_init(|| {
+            serde_json::from_str(include_str!("../../../../shared/protocol-options.json"))
+                .unwrap_or(orch_types::Json::Null)
+        });
+        let mut purposes = Vec::new();
+        for protocol in protocols {
+            let kind = declarations
+                .get("protocols")
+                .and_then(|all| all.get(protocol))
+                .and_then(|entry| entry.get("kind"))
+                .and_then(orch_types::Json::as_str);
+            let purpose = match kind {
+                Some("generation") => ModelPurpose::Generation,
+                Some("embedding") => ModelPurpose::Embedding,
+                Some("image_generation") => ModelPurpose::ImageGeneration,
+                Some("transcription") => ModelPurpose::Transcription,
+                Some("speech_generation") => ModelPurpose::SpeechGeneration,
+                Some("rerank") => ModelPurpose::Rerank,
+                Some("decision") => ModelPurpose::Decision,
+                // A generation interface's list can contain models it cannot generate with.
+                // Unknown interfaces likewise supply no evidence about individual models.
+                _ => {
+                    return ModelPurposeInfo {
+                        declared,
+                        reachable: None,
+                    };
+                }
+            };
+            if !purposes.contains(&purpose) {
+                purposes.push(purpose);
+            }
+        }
+        let declared = declared.or_else(|| {
+            (!purposes.is_empty() && !purposes.contains(&ModelPurpose::Generation))
+                .then(|| purposes.clone())
+        });
+        ModelPurposeInfo {
+            declared,
+            reachable: (!purposes.is_empty()).then_some(purposes),
+        }
+    }
+
     /// Cache lifetimes are explicit; a discovered offer never enables one-hour writes.
     #[must_use]
     pub fn cache_lifetime_enabled(&self, lifetime: &str) -> bool {
@@ -458,6 +589,27 @@ impl ModelParameters {
             .as_deref()
             .filter(|start| self.reasoning_modes().iter().any(|mode| mode == *start))
     }
+    /// Whether the model reasons before it answers, as its parameters say: it takes efforts, or a
+    /// reasoning mode starts on. What reasons spends part of the output allowance before any text.
+    #[must_use]
+    pub fn reasons(&self) -> bool {
+        !self.efforts().is_empty() || self.reasoning_mode_start().is_some()
+    }
+    /// Output planning does not infer a lack of reasoning from disabled or unrecorded tuning.
+    /// Reserve room unless the upstream explicitly reports no thinking support; enabled
+    /// reasoning controls still take precedence over a contradictory discovery observation.
+    #[must_use]
+    pub fn needs_reasoning_room(&self) -> bool {
+        self.reasons()
+            || self
+                .offered
+                .as_ref()
+                .and_then(|offered| offered.report.as_ref())
+                .and_then(|report| report.capabilities.get("thinking"))
+                .and_then(|thinking| thinking.get("supported"))
+                .and_then(orch_types::Json::as_bool)
+                != Some(false)
+    }
     /// Service tiers explicitly enabled by a manager.
     #[must_use]
     pub fn service_tiers(&self) -> &[ServiceTier] {
@@ -594,5 +746,49 @@ impl ModelSuggestion {
             listed: true,
             origins: BTreeMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod purpose_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a failed fixture fails the case")]
+    fn an_embedding_only_endpoint_is_not_a_chat_model_and_a_managers_declaration_stands() {
+        let layers = json!({"endpoints":{"openai-embeddings":{}}});
+        let (parameters, from_endpoint) =
+            composed_model_with_purpose(&json!({}), &[], &layers, None).unwrap();
+        assert_eq!(
+            parameters,
+            ModelParameters::default(),
+            "endpoint projections never rewrite editable parameters"
+        );
+        assert!(from_endpoint.supports_purpose(ModelPurpose::Embedding));
+        assert!(!from_endpoint.supports_purpose(ModelPurpose::Generation));
+        let (parameters, declared) = composed_model_with_purpose(
+            &json!({"purposes":["generation"],"offered":{"purposes":["embedding"]}}),
+            &[],
+            &json!({"endpoints":{"openai-chat":{},"openai-embeddings":{}}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(parameters).unwrap()["purposes"],
+            json!(["generation"])
+        );
+        assert!(declared.supports_purpose(ModelPurpose::Generation));
+        assert!(!declared.supports_purpose(ModelPurpose::Embedding));
+        let (_, unknown) = composed_model_with_purpose(
+            &json!({}),
+            &[],
+            &json!({"endpoints":{"openai-chat":{}}}),
+            None,
+        )
+        .unwrap();
+        assert!(unknown.declared.is_none());
+        assert!(unknown.supports_purpose(ModelPurpose::Generation));
+        assert!(!unknown.supports_purpose(ModelPurpose::Embedding));
     }
 }

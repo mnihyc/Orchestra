@@ -1,13 +1,9 @@
 //! Browser and machine uploads in chunks sized to the link, which go on where they stopped.
 //!
-//! A person's browser sends an image whole, or a file in pieces of any size up to four mebibytes: it
-//! begins an upload (a row, with the size it is to have and a day to finish in), sends each piece at
-//! the offset where the last one ended, and ends it, when the system hashes what arrived and puts it
-//! in the store. A piece that begins anywhere else is refused with the number of bytes that have
-//! arrived, which is how a client whose answer was lost finds out where to go on, and why it may
-//! send pieces as small as its line carries well. The pieces of a machine's upload are taken by the
-//! routes of the internal listener ([`crate::content`]); both leave their bytes in files of the
-//! uploads directory ([`crate::blobs`]) until the whole is there.
+//! Browser sessions capture a transfer policy, accept pieces at any in-bounds offset and acknowledge
+//! only synced byte intervals. Identical retries are safe; conflicting overlap cannot replace bytes.
+//! Completion requires complete coverage, then hashes the whole file before registration. The
+//! machine receiver uses the same file writer and range ledger under its command authority.
 
 use crate::blobs::Blobs;
 
@@ -34,8 +30,6 @@ use chrono::Duration;
 use chrono::Utc;
 
 use orch_api_contract::common::ErrorCode;
-
-use orch_api_contract::common::UPLOAD_CHUNK_BYTES;
 
 use orch_api_contract::threads::UploadSessionCreateBody;
 
@@ -69,7 +63,7 @@ pub fn creation_binding()
             Ok(orch_db::idempotency::creation::Created {
                 kind: "upload_session".into(),
                 id: value.upload_id,
-                data: serde_json::json!({"chunk":value.chunk_bytes,"expires":value.expires_at}),
+                data: serde_json::json!({"chunk":value.chunk_bytes,"policy":value.policy,"expires":value.expires_at}),
             })
         },
     }
@@ -90,6 +84,7 @@ fn creation_replay(
         let reply = UploadSessionCreateReply {
             upload_id: created.id,
             chunk_bytes: serde_json::from_value(get("chunk")?).map_err(ApiError::internal)?,
+            policy: serde_json::from_value(get("policy")?).map_err(ApiError::internal)?,
             expires_at: serde_json::from_value(get("expires")?).map_err(ApiError::internal)?,
         };
         crate::key_operations::publication::receipt(&ctx, &reply)?;
@@ -107,10 +102,51 @@ pub const NAME_MAX_CHARS: usize = 255;
 /// The longest media type that is taken as written: what a header may hold of one.
 const MEDIA_TYPE_MAX_CHARS: usize = 127;
 
-/// The size of a piece, as the contract states it.
-#[must_use]
-pub fn chunk_bytes() -> i64 {
-    i64::try_from(UPLOAD_CHUNK_BYTES).unwrap_or(i64::MAX)
+/// Resolves sizing once; incomplete uploads retain the accepted policy across changes.
+pub async fn transfer_policy(
+    conn: &mut orch_db::Conn,
+) -> ApiResult<orch_settings_contract::transfers::TransferPolicy> {
+    use orch_settings_contract::transfers::TransferPolicy;
+    let mut values = std::collections::HashMap::new();
+    for key in [
+        "storage.transfer_initial_piece_bytes",
+        "storage.transfer_initial_requests",
+        "storage.transfer_min_piece_bytes",
+        "storage.transfer_max_piece_bytes",
+        "storage.transfer_target_window_ms",
+        "storage.transfer_window_rtts",
+        "storage.transfer_max_window_bytes",
+        "storage.transfer_requests",
+    ] {
+        let view = orch_settings::resolve(conn, Place::System, key)
+            .await
+            .map_err(ApiError::internal)?;
+        let value = view
+            .value()
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| ApiError::internal("the transfer setting is not an integer"))?;
+        values.insert(key, value);
+    }
+    let policy = TransferPolicy::from_values(|key| values.get(key).copied().unwrap_or(0));
+    if !policy.valid() {
+        return Err(ApiError::invalid(
+            "storage",
+            "transfer sizes must fit the window and byte counters",
+        ));
+    }
+    Ok(policy)
+}
+
+/// The immutable sizing facts of this still-owned session, before reading a request body.
+pub async fn piece_limit(ctx: &Ctx, id: Id) -> ApiResult<i64> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let row = storage::session(&mut conn, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    check_session(&row, ctx.user()?.id(), ctx.app.clock.now())?;
+    Ok(storage::session_policy(&mut conn, id)
+        .await?
+        .max_piece_bytes)
 }
 
 /// The most bytes the system stores in one file: the setting of the system, or what it ships with.
@@ -143,11 +179,11 @@ pub fn clean_name(path: &str, name: &str) -> ApiResult<String> {
     Ok(name.to_owned())
 }
 
-/// The answer to a piece that does not begin where the last one ended.
+/// The answer to a conflicting retry or an invalid offset.
 fn out_of_place(received: i64) -> ApiError {
     ApiError::new(
         ErrorCode::UploadOffset,
-        "the piece does not begin where the last one ended",
+        "the piece conflicts with acknowledged bytes or has an invalid offset",
     )
     .with("received", received)
 }
@@ -212,14 +248,18 @@ pub async fn begin(
         created_at: now,
         updated_at: now,
         expires_at: now + SESSION_LIFE,
+        completion: None,
     };
+    let policy = transfer_policy(&mut tx).await?;
     storage::begin_session(&mut tx, &session).await?;
+    storage::set_session_policy(&mut tx, session.id, policy).await?;
     orch_db::idempotency::creation::observe_with(&mut tx,Some(session.user_id),"upload_session",session.id,
-        serde_json::json!({"chunk":chunk_bytes(),"expires":orch_types::Time::new(session.expires_at)})).await?;
+        serde_json::json!({"chunk":policy.max_piece_bytes,"policy":policy,"expires":orch_types::Time::new(session.expires_at)})).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(UploadSessionCreateReply {
         upload_id: session.id,
-        chunk_bytes: chunk_bytes(),
+        chunk_bytes: policy.max_piece_bytes,
+        policy,
         expires_at: orch_types::Time::new(session.expires_at),
     })
 }
@@ -276,7 +316,15 @@ fn check_locked_session(
     if crate::key_operations::native::modern(guard.principal().caller()) {
         let ready =
             guard.operation_data::<crate::key_operations::native::Prepared<SessionRow>>()?;
-        if ready.value != *locked {
+        let prepared = &ready.value;
+        // Concurrent progress or completion can change; admitted native identity and content cannot.
+        if prepared.id != locked.id
+            || prepared.user_id != locked.user_id
+            || prepared.created_at != locked.created_at
+            || prepared.size != locked.size
+            || prepared.name != locked.name
+            || prepared.media_type != locked.media_type
+        {
             return Err(ApiError::internal(
                 "the locked upload session changed its prepared source",
             ));
@@ -307,7 +355,7 @@ pub async fn cancel(ctx: &Ctx, id: Id) -> ApiResult<()> {
     Ok(())
 }
 
-/// Takes the next piece of an upload.
+/// Takes a piece at its announced offset, preserving acknowledged suffixes.
 pub async fn put_piece(
     ctx: &Ctx,
     id: Id,
@@ -315,18 +363,21 @@ pub async fn put_piece(
     piece: &[u8],
 ) -> ApiResult<UploadSessionPutReply> {
     let len = i64::try_from(piece.len()).unwrap_or(i64::MAX);
-    if len > chunk_bytes() {
-        return Err(too_large(chunk_bytes()));
-    }
     let app = ctx.app.clone();
     let (mut tx, initial) = transaction_guard::begin(ctx).await?;
     let session = own_session(&mut tx, id, initial.user().id(), initial.now().get()).await?;
     let (current, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
     check_locked_session(&current, &guard, &session)?;
-    if offset != session.received {
+    let policy = storage::session_policy(&mut tx, id).await?;
+    if len > policy.max_piece_bytes {
+        return Err(too_large(policy.max_piece_bytes));
+    }
+    if offset < 0 {
         return Err(out_of_place(session.received));
     }
-    let end = session.received.saturating_add(len);
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| ApiError::invalid("offset", "the piece offset overflows"))?;
     if end > session.size {
         return Err(ApiError::invalid(
             "",
@@ -337,16 +388,26 @@ pub async fn put_piece(
         .make_uploads_dir()
         .await
         .map_err(ApiError::internal)?;
-    let file = prepare_piece(&app.blobs.part_of_session(id), session.received)
+    let ranges = storage::session_ranges(&mut tx, id).await?;
+    let file = prepare_piece(&app.blobs.part_of_session(id), offset)
         .await
         .map_err(ApiError::internal)?;
     // Opening the file may wait, but it has not truncated the existing prefix or written a new byte.
     let (current, guard) = transaction_guard::after_wait(&current, &mut tx).await?;
     check_locked_session(&current, &guard, &session)?;
-    file.write(piece).await.map_err(ApiError::internal)?;
-    storage::advance_session(&mut tx, id, end, current.app.clock.now()).await?;
+    file.write_unreceived(piece, &ranges)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                out_of_place(session.received)
+            } else {
+                ApiError::internal(error)
+            }
+        })?;
+    let received =
+        storage::cover_session(&mut tx, id, offset, end, current.app.clock.now()).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(UploadSessionPutReply { received: end })
+    Ok(UploadSessionPutReply { received })
 }
 
 /// Ends an upload in pieces: the whole is hashed, put in the store and recorded, and the upload is
@@ -354,10 +415,21 @@ pub async fn put_piece(
 pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
     let app = ctx.app.clone();
     let (mut tx, initial) = transaction_guard::begin(ctx).await?;
-    let session = own_session(&mut tx, id, initial.user().id(), initial.now().get()).await?;
+    let session = storage::session_with_receipt(&mut tx, id, true)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    check_session(&session, initial.user().id(), initial.now().get())?;
     let (ctx, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
     check_locked_session(&ctx, &guard, &session)?;
-    if session.received != session.size {
+    if let Some(reply) = completion(&session)? {
+        // Repetition returns the stored result under this request's current owner, scope and lifetime.
+        tx.commit().await.map_err(DbError::from)?;
+        return Ok(reply);
+    }
+    let ranges = storage::session_ranges(&mut tx, id).await?;
+    let covered = session.size == 0
+        || ranges.len() == 1 && ranges[0].start == 0 && ranges[0].len == session.size;
+    if session.received != session.size || !covered {
         return Err(out_of_place(session.received));
     }
     let part = app.blobs.part_of_session(id);
@@ -405,26 +477,29 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
         now,
     )
     .await?;
-    // A closed session keeps only a short-lived progress receipt, never upload authority or partial bytes.
-    sqlx::query("UPDATE upload_sessions SET completed_at=$2,expires_at=$3 WHERE id=$1")
-        .bind(id)
-        .bind(now)
-        .bind(now + SESSION_LIFE)
-        .execute(&mut *tx)
-        .await
-        .map_err(DbError::from)?;
-    tx.commit().await.map_err(DbError::from)?;
-    discard(&part).await;
-    let media_type = session
-        .media_type
-        .clone()
-        .unwrap_or_else(|| crate::media::media_type(&session.name, &[]).to_owned());
-    Ok(UploadedBlob {
+    let reply = UploadedBlob {
         blob: hash,
         size,
-        media_type,
-        name: session.name,
-    })
+        name: session.name.clone(),
+        media_type: session
+            .media_type
+            .clone()
+            .unwrap_or_else(|| crate::media::media_type(&session.name, &[]).to_owned()),
+    };
+    // Keep the completed receipt briefly; this grants no further piece-writing authority.
+    sqlx::query(
+        "UPDATE upload_sessions SET completed_at=$2,expires_at=$3,completion=$4 WHERE id=$1",
+    )
+    .bind(id)
+    .bind(now)
+    .bind(now + SESSION_LIFE)
+    .bind(serde_json::to_value(&reply).map_err(ApiError::internal)?)
+    .execute(&mut *tx)
+    .await
+    .map_err(DbError::from)?;
+    tx.commit().await.map_err(DbError::from)?;
+    discard(&part).await;
+    Ok(reply)
 }
 
 /// Retains a whole upload and its uploader's authority in one guarded action.
@@ -473,3 +548,13 @@ pub async fn register_named(
 
 #[path = "uploads/session_operation.rs"]
 pub mod session_operation;
+
+/// A finite historical receipt, independent of whether its temporary part file still exists.
+pub(crate) fn completion(session: &SessionRow) -> ApiResult<Option<UploadedBlob>> {
+    session
+        .completion
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(ApiError::internal)
+}

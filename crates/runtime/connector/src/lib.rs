@@ -41,6 +41,7 @@ pub mod console;
 pub mod content;
 pub mod credentials;
 mod data_inventory;
+mod directory_listing;
 pub mod dispatch;
 pub mod display_tunnel;
 pub mod doctor;

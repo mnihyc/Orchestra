@@ -200,6 +200,7 @@ impl Engine {
             reader.machine,
             SerialKey::None,
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: reader.environment,
                 mount: None,
                 path: relative.to_owned(),
@@ -225,6 +226,7 @@ impl Engine {
             reader.machine,
             SerialKey::None,
             &FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: reader.environment,
                 mount: None,
                 path: relative.to_owned(),
@@ -317,6 +319,7 @@ impl Engine {
             machine,
             SerialKey::None,
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: within(&thread.workspace_dir, path),
@@ -345,6 +348,8 @@ impl Engine {
             machine,
             SerialKey::None,
             &orch_link_contract::commands::FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: within(&thread.workspace_dir, path),

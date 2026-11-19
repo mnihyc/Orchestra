@@ -84,3 +84,30 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await info.attach('chat title options after reload', { body: await row.screenshot(), contentType: 'image/png' });
   });
 }
+
+
+for (const width of [1440, 400]) {
+  test(`summary targets use the settings row's width and show complete numbers at ${width}`, async ({ page }) => {
+    await scenario(); await page.setViewportSize({ width, height: 900 }); await signIn(page);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=summary.targets`);
+    const row = page.locator('[data-setting="summary.targets"]');
+    await row.locator('[data-setting-editor-trigger]').click();
+    const thread = row.locator('[data-summary-target="thread"]');
+    await expect(thread.getByText('32,000', { exact: true })).toBeVisible();
+    const here = row.getByRole('radio', { name: 'Here', exact: true });
+    if (await here.count()) await here.click();
+    await thread.getByRole('switch').click();
+    const input = thread.getByRole('spinbutton', { name: english.settingsEditors.targets.context_tokens });
+    await expect(input).toHaveAttribute('placeholder', '32,000');
+    expect(await input.evaluate((el) => {
+      if (!(el instanceof HTMLInputElement)) return false;
+      const css = getComputedStyle(el);
+      const ctx = document.createElement('canvas').getContext('2d')!;
+      ctx.font = css.font;
+      return el.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight) >= ctx.measureText(el.placeholder).width;
+    })).toBe(true);
+    const bounds = await thread.boundingBox(), room = await row.boundingBox();
+    expect(bounds!.width).toBeGreaterThan(room!.width * 0.8);
+    expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+  });
+}

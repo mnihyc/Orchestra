@@ -334,6 +334,7 @@ impl Engine {
                 machine,
                 SerialKey::Environment(snap.environment.id),
                 &FsMaterialize {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     work: None,
                     environment_id: snap.environment.id,
                     job_id: None,
@@ -544,6 +545,7 @@ impl Engine {
             machine,
             SerialKey::Environment(environment),
             &FsRemove {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 path: within(&row.workspace_dir, relative),
                 recursive: true,
@@ -608,6 +610,7 @@ impl Engine {
             machine,
             SerialKey::Environment(environment.id),
             &FsWrite {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: environment.id,
                 path: target.clone(),
@@ -661,6 +664,7 @@ impl Engine {
             machine,
             SerialKey::None,
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: target.to_owned(),
