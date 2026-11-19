@@ -40,6 +40,9 @@ use sha2::Sha256;
 
 use std::sync::Arc;
 
+#[path = "authentication/opening_sessions.rs"]
+pub(crate) mod opening_sessions;
+
 pub use native_read::NativeReadIdentity;
 /// What an access token begins with.
 pub const ACCESS_TOKEN_PREFIX: &str = orch_api_contract::surface::BROWSER_TOKEN_PREFIX;
