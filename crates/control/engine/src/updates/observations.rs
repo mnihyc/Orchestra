@@ -80,6 +80,19 @@ struct Profile {
 
 type ToolKey = (String, String, Vec<HarnessRequest>);
 
+/// The desired resource fingerprints use the same resolver as the ordinary update observation.
+#[derive(Default)]
+pub(crate) struct RuntimeResourceObservation {
+    /// The ordinary pending-update presentation.
+    pub updates: Vec<PendingUpdate>,
+    /// The template currently selected by the existing unit's settings.
+    pub template_id: Option<Id>,
+    /// The desired logical recipe, excluding observational image facts.
+    pub template_fingerprint: Option<String>,
+    /// Desired attachments keyed by their stable resource identity.
+    pub mount_fingerprints: Option<Json>,
+}
+
 impl Engine {
     /// Pending changes for exact units, including kept units, with shared rows read in batches.
     /// Catalogue resolution and mount author checks are reused for each distinct platform and
@@ -89,13 +102,31 @@ impl Engine {
         conn: &mut Conn,
         ids: &[Id],
     ) -> Result<HashMap<Id, Vec<PendingUpdate>>, EngineError> {
-        let mut result: HashMap<_, _> = ids.iter().map(|id| (*id, Vec::new())).collect();
+        if self.host_services().is_none() {
+            return Ok(ids.iter().map(|id| (*id, Vec::new())).collect());
+        }
+        Ok(self
+            .runtime_resource_observations(conn, ids)
+            .await?
+            .into_iter()
+            .map(|(id, observation)| (id, observation.updates))
+            .collect())
+    }
+
+    /// Read-only resource comparison needs no release lookup, lifecycle hold or replacement permission.
+    pub(crate) async fn runtime_resource_observations(
+        &self,
+        conn: &mut Conn,
+        ids: &[Id],
+    ) -> Result<HashMap<Id, RuntimeResourceObservation>, EngineError> {
+        let mut result: HashMap<_, _> = ids
+            .iter()
+            .map(|id| (*id, RuntimeResourceObservation::default()))
+            .collect();
         if ids.is_empty() {
             return Ok(result);
         }
-        let Some(services) = self.host_services() else {
-            return Ok(result);
-        };
+        let services = self.host_services();
         let runtimes = environments::runtimes_by(conn, ids).await?;
         if !runtimes.is_empty() && runtimes.iter().all(|runtime| runtime.state == "creating") {
             // No installed definition exists yet, as in the per-runtime exclusion below.
@@ -286,24 +317,22 @@ impl Engine {
             let Some(old) = runtimes.iter().find(|runtime| runtime.id == input.runtime) else {
                 continue;
             };
-            // An unfinished unit has no installed definition to compare. An active replacement
-            // or accepted removal already owns the lifecycle, so it is not another pending update.
-            if old.state == "creating"
-                || input.removing
-                || input.changing
-                || input.provider_kind.is_none()
+            // An unfinished unit has no installed definition. A busy existing unit still has
+            // comparable resource inputs, while its lifecycle withholds a second Update act.
+            if old.state == "creating" {
+                continue;
+            }
+            let can_update = !input.removing
+                && !input.changing
+                && !(input.provider_kind.is_none()
                     && matches!(
                         input.status.as_str(),
                         "provisioning" | "recreating" | "moving"
-                    )
-            {
-                continue;
-            }
-            let Some(template) = templates.iter().find(|template| {
-                Some(&template.id) == desired.get(&old.id)
-                    && template.enabled
-                    && template.deleted_at.is_none()
-            }) else {
+                    ));
+            let Some(template) = templates
+                .iter()
+                .find(|template| Some(&template.id) == desired.get(&old.id))
+            else {
                 continue;
             };
             let Some(host) = hosts.iter().find(|host| host.id == old.host_id) else {
@@ -311,6 +340,12 @@ impl Engine {
             };
             let environment = input.provider_kind.is_none();
             let mut definition = template.spec.clone();
+            if environment {
+                let runtime = settings
+                    .get::<String>(keys::ENV_RUNTIME)?
+                    .filter(|runtime| !runtime.is_empty());
+                crate::isolation::apply_choice(&mut definition, runtime.as_deref());
+            }
             if !environment {
                 let mut env = definition
                     .get("env")
@@ -423,7 +458,8 @@ impl Engine {
                 // has been observed by lifecycle work, retain the recorded tool facts; absence
                 // of a new observation is not evidence that a tool was removed or changed.
                 let tools = services
-                    .observed_tools(&key.0, &key.1, &key.2)
+                    .as_ref()
+                    .and_then(|services| services.observed_tools(&key.0, &key.1, &key.2))
                     .unwrap_or_else(|| held.get(&old.id).cloned().unwrap_or_default());
                 tools_cache.insert(key.clone(), Ok(tools));
             }
@@ -440,6 +476,13 @@ impl Engine {
                 held.get(&old.id).map_or(&[], Vec::as_slice),
                 tools,
             );
+            let template_fingerprint = Some(
+                crate::resource_facts::applications::inputs::template_fingerprint(
+                    &template.driver,
+                    &definition,
+                ),
+            );
+            let mut mount_fingerprints = Some(json!({}));
             if !environment {
                 if settings
                     .get::<Id>(keys::RUNTIME_HOST_ID)?
@@ -559,8 +602,22 @@ impl Engine {
                         to: Some(mounts.to_string()),
                     });
                 }
+                mount_fingerprints =
+                    crate::resource_facts::applications::inputs::mount_fingerprints(&mounts);
             }
-            result.insert(old.id, updates);
+            result.insert(
+                old.id,
+                RuntimeResourceObservation {
+                    updates: if can_update && template.enabled && template.deleted_at.is_none() {
+                        updates
+                    } else {
+                        Vec::new()
+                    },
+                    template_id: Some(template.id),
+                    template_fingerprint,
+                    mount_fingerprints,
+                },
+            );
         }
         Ok(result)
     }

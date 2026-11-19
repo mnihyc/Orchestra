@@ -93,3 +93,38 @@ async fn database_names_stay_out_of_conflict_and_value_refusal_messages() {
         assert!(problem.status == 409 || problem.status == 422);
     }
 }
+
+#[tokio::test]
+async fn native_field_words_are_kept_only_for_the_unchanged_authorized_refusal() {
+    let detail = "environment.roots: /srv/team_workspace/notes.v2 is outside the selected root";
+    let native = body(ApiError::native_invalid("path", detail)).await;
+    assert_eq!(native.code, ErrorCode::RequestInvalid);
+    assert_eq!(
+        native.extra["errors"],
+        serde_json::json!([{"path":"path","message":detail}])
+    );
+    plain(&native.title);
+    plain(&native.detail);
+
+    let mut changed_code = ApiError::native_invalid("path", detail);
+    changed_code.problem.code = ErrorCode::AuthzDenied;
+    for error in [
+        ApiError::native_invalid("path", detail).without_content(),
+        ApiError::native_invalid("path", detail).with(
+            "errors",
+            [FieldFault {
+                path: "another_field".into(),
+                message: detail.into(),
+            }],
+        ),
+        changed_code,
+        // A wire problem carries no server-side authority to publish native content.
+        ApiError::from(native),
+    ] {
+        let problem = body(error).await;
+        let wire =
+            serde_json::to_string(&problem).unwrap_or_else(|error| panic!("problem JSON: {error}"));
+        assert!(!wire.contains("team_workspace"), "{wire}");
+        assert!(!wire.contains("environment.roots"), "{wire}");
+    }
+}
