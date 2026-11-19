@@ -8,6 +8,7 @@ import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as EnvironmentApi from '@/api/environments';
+import { collectionQuery } from '@/api/collection';
 import { environmentKey } from '@/api/environments';
 import { ApiError } from '@/api/client';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
@@ -21,6 +22,10 @@ const calls = vi.hoisted(() => ({ available: vi.fn<() => Promise<ResourceRows<Mc
 vi.mock('@/api/environments', async (load) => {
   const actual = await load<typeof EnvironmentApi>();
   return { ...actual, environmentQuery: (id: string) => ({ queryKey: actual.environmentKey(id), queryFn: calls.read, staleTime: Infinity }),
+    environmentMcpPageQuery: (id:string, collection:'servers'|'found', q:string) => collectionQuery([...actual.environmentMcpKey(id),collection], q, async () => {
+      const value = await calls.mcp();
+      return { ...value,items:value[collection] };
+    }),
     environmentMcpQuery: (id: string) => ({ queryKey: actual.environmentMcpKey(id), queryFn: calls.mcp, staleTime: Infinity }), updateEnvironment: calls.write };
 });
 vi.mock('@/api/resource-tools', async (load) => {
@@ -32,7 +37,7 @@ vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefin
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), keepAwake: () => null, dialogs: null }) }));
 vi.mock('@/features/resources/environments/AgentReach', () => ({ AgentReach: () => null }));
 vi.mock('@/features/resources/agents/ProgramBuild', () => ({ EnvironmentPrograms: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>, PageHeader: ({ title }: { title: ReactNode }) => <header><h1>{title}</h1></header> }));
 
@@ -50,7 +55,7 @@ function draw(initial: EnvironmentTab = 'tools') {
   function Scene() { const [tab, setTab] = useState<EnvironmentTab>(initial); return <EnvironmentScreen environmentId={detailEnvironment.id} tab={tab} onTab={setTab} />; }
   return { cache, ...show(<QueryClientProvider client={cache}><Scene /></QueryClientProvider>) };
 }
-beforeEach(() => { vi.clearAllMocks(); calls.available.mockResolvedValue(resourceRows<McpServer>([])); calls.read.mockResolvedValue(row()); calls.mcp.mockResolvedValue({ applies: 'next_turn', found: [], import: { allowed: false, reason: 'policy' }, servers: [] }); });
+beforeEach(() => { vi.clearAllMocks(); calls.available.mockResolvedValue(resourceRows<McpServer>([])); calls.read.mockResolvedValue(row()); calls.mcp.mockResolvedValue({ next_cursor: null, applies: 'next_turn', found: [], import: { allowed: false, reason: 'policy' }, servers: [] }); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {

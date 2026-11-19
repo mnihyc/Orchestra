@@ -21,7 +21,9 @@ class Peer implements SocketLike {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
-  send() { /* A scripted peer; the component only consumes the real socket's state. */ }
+  sent: { op: string; n?: number }[] = [];
+  send(data: string) { this.sent.push(JSON.parse(data) as { op: string; n?: number }); }
+  pong() { const n = this.sent.findLast((frame) => frame.op === 'ping')?.n; this.onmessage?.({ data: JSON.stringify({ op: 'pong', n }) }); }
   close(code = 1000) { this.readyState = 3; this.onclose?.({ code }); }
   open() { this.readyState = 1; this.onopen?.(); }
   ready() { this.onmessage?.({ data: JSON.stringify({ op: 'ready', connection_id: 'test', user_id: 'reader', build: 'test-build', heartbeat_secs: 25, server_time: new Date().toISOString(), access_expires_at: null }) }); }
@@ -38,6 +40,30 @@ afterEach(async () => {
   useAppearance.setState({ locale: 'en' }); await setLocale('en');
 });
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`measures the live link without calling authentication work a slow connection in ${locale}`, async () => {
+    useAppearance.setState({ locale }); await setLocale(locale);
+    state.socket!.start();
+    show(<ConnectionPart />);
+    act(() => peers[0]!.open());
+    act(() => { vi.advanceTimersByTime(259); peers[0]!.ready(); });
+    expect(state.socket!.status.getState().roundTripMs).toBeNull();
+    expect(screen.getByText(i18n.t('workbench.status.connected'))).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(25_000); });
+    act(() => { vi.advanceTimersByTime(80); peers[0]!.pong(); });
+    expect(state.socket!.status.getState().roundTripMs).toBe(80);
+    expect(screen.getByText(i18n.t('workbench.status.connected'))).toBeInTheDocument();
+    let previous = 80;
+    for (const delay of [80, 80, 80, 80, 80, 320, 320]) {
+      act(() => { vi.advanceTimersByTime(25_000 - previous); });
+      act(() => { vi.advanceTimersByTime(delay); peers[0]!.pong(); });
+      previous = delay;
+    }
+    expect(state.socket!.status.getState().roundTripMs).toBe(320);
+    expect(screen.getByText(i18n.t('workbench.status.slow', { ms: '320' }))).toBeInTheDocument();
+    act(() => { peers[0]!.close(1006); state.socket!.wake(); peers.at(-1)!.open(); peers.at(-1)!.ready(); });
+    expect(state.socket!.status.getState().roundTripMs).toBeNull();
+    expect(screen.getByText(i18n.t('workbench.status.connected'))).toBeInTheDocument();
+  });
   it(`distinguishes first connection, real loss and a new session in ${locale}`, async () => {
     useAppearance.setState({ locale }); await setLocale(locale);
     state.socket!.start();
@@ -53,11 +79,24 @@ for (const locale of ['en', 'zh-CN'] as const) {
     act(() => { vi.advanceTimersByTime(RECONNECT_ELAPSED_AFTER_MS - 1_000); });
     expect(screen.getByText(i18n.t('workbench.status.reconnecting'))).toBeInTheDocument();
     act(() => { vi.advanceTimersByTime(1_000); });
-    expect(screen.getByText(i18n.t('workbench.status.reconnectingSince', { time: formatSpan(RECONNECT_ELAPSED_AFTER_MS, { locale }, 'short') }))).toBeInTheDocument();
+    expect(screen.getByText(i18n.t('workbench.status.noLive', { time: formatSpan(RECONNECT_ELAPSED_AFTER_MS, { locale }, 'short') }))).toBeInTheDocument();
     act(() => { peers.at(-1)!.open(); peers.at(-1)!.ready(); });
     expect(screen.getByText(i18n.t('workbench.status.connected'))).toBeInTheDocument();
     act(() => { state.socket!.stop(); state.socket!.start(); });
     expect(screen.getByText(i18n.t('workbench.status.connecting'))).toBeInTheDocument();
+  });
+}
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`says that live updates never came up once the connection has been refused for ten seconds in ${locale}`, async () => {
+    useAppearance.setState({ locale }); await setLocale(locale);
+    state.socket!.start();
+    show(<ConnectionPart />);
+    act(() => peers[0]!.close(1006));
+    act(() => { vi.advanceTimersByTime(RECONNECT_ELAPSED_AFTER_MS - 1_000); });
+    expect(screen.getByText(i18n.t('workbench.status.connecting'))).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getByText(i18n.t('workbench.status.noLive', { time: formatSpan(RECONNECT_ELAPSED_AFTER_MS, { locale }, 'short') }))).toBeInTheDocument();
+    expect(screen.queryByText(i18n.t('workbench.status.connecting'))).not.toBeInTheDocument();
   });
 }
 it('leaves an idle socket unlabelled', () => {

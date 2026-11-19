@@ -496,7 +496,7 @@ async fn create_refreshes_its_exact_key_after_the_native_environment_and_publish
                 pid,
                 &pending,
                 if publisher {
-                    "%SELECT id FROM machines%FOR NO KEY UPDATE%"
+                    "%SELECT id FROM machines%FOR KEY SHARE%"
                 } else {
                     "%SELECT id FROM environments%FOR UPDATE%"
                 },

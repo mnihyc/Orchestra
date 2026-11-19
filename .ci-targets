@@ -1,0 +1,14 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test kmounts_mcp --test hosted_environments --test machine_leaf_reader_scopes --test semantic_admin --test provider_models
+test -p orch-api-core --test notifications_inbox --test me --test personal --test personal_state_scope --test search_names --test threads_raw --test realtime_raw_sources --test thread_history_pages --test history_native_scopes --test activity_depth
+test -p orch-db --test released_migrations
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/resource-details.spec.ts tests/e2e/usage.spec.ts tests/e2e/usage-axis.spec.ts --grep "resource tabs start in the top quarter|a usage record aligns|the credit axis paints" --project=chromium

@@ -108,6 +108,28 @@ async fn large_upload_finish_keeps_one_small_summary_and_pages_all_indexed_file_
     assert!(upload.files_paged);
     assert_eq!(upload.files.len(), 2);
     all_files(&site, line, usize::try_from(count).unwrap(), 37).await;
+    let searched = site
+        .app()
+        .call(HistoryList, &[&"environments", &site.environment])
+        .token(&site.ada.token)
+        .query(&HistoryListQuery {
+            upload: Some(line),
+            q: Some("file-1.txt".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let files = searched
+        .items
+        .iter()
+        .flat_map(|row| row.upload.as_ref().unwrap().files.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "file-1.txt");
+    assert_eq!(searched.next_cursor, None);
+
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM audit_log WHERE environment_id=$1 AND history AND details ? 'upload'")
         .bind(site.environment).fetch_one(&site.world.db.pool).await.unwrap(), 1);
     assert_eq!(
@@ -159,6 +181,42 @@ async fn legacy_grouped_upload_is_projected_and_paged_without_loading_or_rewriti
     assert_eq!(preview.file_count, Some(i64::try_from(count).unwrap()));
     assert!(preview.files_paged);
     all_files(&site, line, count, 23).await;
+    let searched = site
+        .app()
+        .call(HistoryList, &[&"environments", &site.environment])
+        .token(&site.ada.token)
+        .query(&HistoryListQuery {
+            upload: Some(line),
+            q: Some("legacy-50".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        searched.items[0].upload.as_ref().unwrap().files[0].name,
+        "legacy-50.txt"
+    );
+    let next = site
+        .app()
+        .call(HistoryList, &[&"environments", &site.environment])
+        .token(&site.ada.token)
+        .query(&HistoryListQuery {
+            upload: Some(line),
+            q: Some("legacy-50".into()),
+            limit: Some(1),
+            cursor: searched.next_cursor,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        next.items[0].upload.as_ref().unwrap().files[0].name,
+        "legacy-500.txt"
+    );
+
     let stored: i64 = sqlx::query_scalar(
         "SELECT jsonb_array_length(details #> '{upload,files}')::bigint FROM audit_log WHERE id=$1",
     )
@@ -178,6 +236,7 @@ async fn legacy_grouped_upload_is_projected_and_paged_without_loading_or_rewriti
         None,
         None,
         24,
+        &[],
     )
     .await;
     assert!(

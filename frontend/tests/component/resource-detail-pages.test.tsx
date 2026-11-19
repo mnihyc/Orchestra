@@ -12,6 +12,7 @@ import { environmentKey } from '@/api/environments';
 import type * as ToolsApi from '@/api/resource-tools';
 import { mcpKey } from '@/api/resource-tools';
 import { AgentScreen, type AgentTab } from '@/features/resources/agents/Profile';
+import { useChangeHost } from '@/features/change/target';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { HostScreen, type HostTab } from '@/features/resources/hosts/Host';
 import { Machine, type MachineTab } from '@/features/resources/machines/Machine';
@@ -58,7 +59,7 @@ vi.mock('@/api/resource-tools', async (load) => {
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, to, params, className }: { children: ReactNode; to: string; params?: Record<string, string>; className?: string }) => <a className={className} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
@@ -102,6 +103,18 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.agent = detailAgent;
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
+
+for(const locale of ['en','zh-CN'] as const) it(`names the idle reconnect beside automatic certificate renewal only for a valid identity (${locale})`,async()=>{
+  await setLocale(locale);
+  const renewal=locale==='en'?'Automatic · reconnects when idle':'自动续期 · 空闲时重新连接';
+  const view=draw(<Machine machineId={detailMachine.id} tab="certificate" onTab={vi.fn()} />);
+  expect(await screen.findByText(renewal)).toBeVisible();
+  expect(screen.getByText(i18n.t('machines.certificate.ends'))).toBeVisible();
+  act(()=>{view.client.setQueryData(machineKey(detailMachine.id),{...detailMachine,status:'revoked'});});
+  await waitFor(()=>expect(screen.queryByText(renewal)).not.toBeInTheDocument());
+  const certificate=screen.getByLabelText(i18n.t('machines.certificate.title'),{selector:'dl'});
+  expect(within(certificate).getByText(i18n.t('machines.certificate.revoked'))).toBeVisible();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
@@ -175,6 +188,28 @@ it('keeps an environment terminal address inside Tools and does not mount its MC
   await screen.findByRole('heading', { name: detailEnvironment.name });
   expect(screen.getByRole('tab', { name: i18n.t('resourceDetails.layout.tools') })).toHaveAttribute('aria-selected', 'true');
   expect(await screen.findByText('door-reader')).toBeVisible(); expect(calls.hidden).toHaveBeenCalledExactlyOnceWith('door-reader');
+});
+
+it('shows an environment operation once and opens its current job from the header', async () => {
+  const user = userEvent.setup();
+  const view = draw(<EnvironmentScreen environmentId={detailEnvironment.id} tab="overview" onTab={vi.fn()} />);
+  const heading = await screen.findByRole('heading', { name: detailEnvironment.name, level: 1 });
+  const header = within(heading.closest('header')!);
+  const progress = i18n.t('change.banner.progress');
+  const job = { id: 'move-workspace', kind: 'environment_move', state: 'running', phase: 'transfer', percent: 40 } as const;
+  act(() => { view.client.setQueryData<Environment>(environmentKey(detailEnvironment.id), { ...detailEnvironment, job }); });
+  expect(await screen.findByText(i18n.t('environments.status.moving'), { exact: true })).toBeVisible();
+  try {
+    await user.click(header.getByRole('button', { name: progress }));
+    expect(useChangeHost.getState().current).toMatchObject({
+      target: { kind: 'environment', id: detailEnvironment.id }, options: { kind: 'progress', job: job.id },
+    });
+  } finally {
+    useChangeHost.setState({ current: null, open: false });
+  }
+  act(() => { view.client.setQueryData(environmentKey(detailEnvironment.id), detailEnvironment); });
+  expect(await header.findByText(i18n.t('environments.status.running'), { exact: true })).toBeVisible();
+  expect(header.queryByRole('button', { name: progress })).toBeNull();
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {

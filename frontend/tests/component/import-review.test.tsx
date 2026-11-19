@@ -3,15 +3,20 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ImportReview } from '@/features/people/ImportReview';
-import type { ImportPlan, ImportRequest } from '@/generated/api-types';
+import type { ImportPlan, ImportRequest, UserRef } from '@/generated/api-types';
 import { setLocale } from '@/i18n';
 import { me, memberAccess, org, userRef } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
 
-const calls = vi.hoisted(() => ({ preview: vi.fn(), people: vi.fn() }));
+skipOverflowFallback();
+
+const calls = vi.hoisted(() => ({ preview: vi.fn(), people: vi.fn<(q:string) => Promise<UserRef[]>>().mockResolvedValue([]) }));
 vi.mock('@/api/imports', async (original) => ({ ...await original<object>(), previewImport: calls.preview }));
-vi.mock('@/api/chats', async (original) => ({ ...await original<object>(), peopleQuery: (_org: string | null, q: string) => ({ queryKey: ['import-people', q], queryFn: () => calls.people(q) as Promise<unknown>, retry: false }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/api/access', async (original) => ({ ...await original<object>(), personPickerQuery: (q:string) => ({
+  queryKey: ['import-people',q], initialPageParam:null as string|null, getNextPageParam:()=>undefined,
+  queryFn:async () => ({items:await calls.people(q),next_cursor:null}),retry:false,
+}) }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const person = userRef(me(1, 'ada', 'Ada Lovelace'));
 const node = org('place', 'acme', 'Acme', person, { access: { ...memberAccess, administers: true } });
@@ -32,7 +37,7 @@ const setup = (override: Partial<Parameters<typeof ImportReview>[0]> = {}) => {
   return handlers;
 };
 
-afterEach(async () => { calls.preview.mockReset(); calls.people.mockReset(); await setLocale('en'); });
+afterEach(async () => { calls.preview.mockReset(); calls.people.mockReset().mockResolvedValue([]); await setLocale('en'); });
 
 it('shows the limits and server-approved item actions before starting', async () => {
   const user = userEvent.setup();
@@ -125,7 +130,7 @@ it('keeps every source person available when a package names many people', async
   expect(screen.getByText('Person 0')).toBeVisible();
 });
 
-it('keeps an unmatched person as a label without searching for an account', async () => {
+it('keeps an unmatched person as a label without choosing an account', async () => {
   const user = userEvent.setup();
   const handlers = setup({ plan: { ...plan, people: [{ principal: 'source-person', username: 'original', display_name: 'Original author', matched: 'none', user: null, objects: 1 }] } });
   await user.click(screen.getByRole('tab', { name: 'People' }));
@@ -133,7 +138,7 @@ it('keeps an unmatched person as a label without searching for an account', asyn
   await user.click(screen.getByRole('combobox', { name: 'Choose a person for Original author' }));
   await user.click(screen.getByRole('option', { name: 'Imported person' }));
   expect(handlers.onPerson).toHaveBeenCalledExactlyOnceWith('source-person', null);
-  expect(calls.people).not.toHaveBeenCalled();
+  expect(calls.people).toHaveBeenCalledExactlyOnceWith('');
 });
 
 it('lets a source person be matched to a visible account', async () => {
@@ -145,20 +150,17 @@ it('lets a source person be matched to a visible account', async () => {
   const input = screen.getByRole('combobox', { name: 'Choose a person for Original author' });
   await user.click(input);
   expect(screen.getByRole('option', { name: 'Imported person' })).toBeVisible();
-  expect(calls.people).not.toHaveBeenCalled();
+  await waitFor(() => expect(calls.people).toHaveBeenCalledWith(''));
   await user.type(input, 'A');
-  expect(screen.getByText('Type at least two characters')).toBeVisible();
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  expect(calls.people).not.toHaveBeenCalled();
-  await user.type(input, 'd');
+  await waitFor(() => expect(calls.people).toHaveBeenCalledWith('A'));
   const account = await screen.findByRole('option', { name: /Ada Lovelace/ });
   await user.click(account);
   expect(handlers.onPerson).toHaveBeenCalledExactlyOnceWith('source-person', person.id);
-  expect(calls.people).toHaveBeenCalledExactlyOnceWith('Ad');
+  expect(calls.people.mock.calls.map(([text]) => text)).toEqual(['', 'A']);
 });
 
 it('clears a failed account search when the person returns to the imported label', async () => {
-  calls.people.mockRejectedValue(new Error('Search failed'));
+  calls.people.mockImplementation((q) => q === '' ? Promise.resolve([]) : Promise.reject(new Error('Search failed')));
   const user = userEvent.setup();
   setup({ plan: { ...plan, people: [{ principal: 'source-person', username: 'original', display_name: 'Original author', matched: 'none', user: null, objects: 1 }] } });
   await user.click(screen.getByRole('tab', { name: 'People' }));
