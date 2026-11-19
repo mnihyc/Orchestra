@@ -562,7 +562,7 @@ pub fn entry_of(row: &EntryRow) -> Result<Entry, Error> {
 }
 
 /// The rows and entries that are stored for some pages.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Store {
     rows: HashMap<(PageRef, Profile, Permission), Row>,
     /// The keys of `rows` by page: a page's rows are found without reading every page's, so a list of thousands of
@@ -580,6 +580,9 @@ impl Store {
         pages: &[PageRef],
         permissions: &[Permission],
     ) -> Result<Self, Error> {
+        if let Some(store) = crate::read_facts::stored(conn, pages, permissions) {
+            return Ok(store);
+        }
         let keys: Vec<PageKey> = pages.iter().map(|page| page.key()).collect();
         let words: Vec<String> = permissions
             .iter()
@@ -592,7 +595,34 @@ impl Store {
         for entry in access::entries(conn, &keys, &words).await? {
             store.put_entry(&entry)?;
         }
+        crate::read_facts::remember_stored(conn, pages, permissions, &store);
         Ok(store)
+    }
+
+    /// A read's shared store supplies only the exact page/permission cells this frame requested.
+    pub(crate) fn selected(&self, pages: &[PageRef], permissions: &[Permission]) -> Self {
+        let permissions: HashSet<_> = permissions.iter().copied().collect();
+        let mut selected = Self::default();
+        for page in pages {
+            if selected.pages.contains_key(page) {
+                continue;
+            }
+            for (profile, permission) in self.pages.get(page).into_iter().flatten() {
+                if permissions.contains(permission)
+                    && let Some(row) = self.rows.get(&(*page, *profile, *permission))
+                {
+                    selected
+                        .rows
+                        .insert((*page, *profile, *permission), row.clone());
+                    selected
+                        .pages
+                        .entry(*page)
+                        .or_default()
+                        .push((*profile, *permission));
+                }
+            }
+        }
+        selected
     }
 
     fn page_of(kind: &str, id: Id, page: &str) -> Result<PageRef, Error> {
@@ -689,10 +719,15 @@ impl Store {
         chain
     }
 
-    fn extend(&mut self, more: Self) {
+    pub(crate) fn extend(&mut self, more: Self) {
         self.rows.extend(more.rows);
         for (page, keys) in more.pages {
-            self.pages.entry(page).or_default().extend(keys);
+            let current = self.pages.entry(page).or_default();
+            for key in keys {
+                if !current.contains(&key) {
+                    current.push(key);
+                }
+            }
         }
     }
 }
