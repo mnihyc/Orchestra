@@ -61,10 +61,29 @@ pub(super) struct Prepared {
 /// Native saved-plan polymorphism, not an HTTP endpoint or permission selector.
 fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
     Ok(match record.kind.as_str() {
+        "resource_stop" => vec![
+            serde_json::from_value(
+                record
+                    .plan
+                    .get("governor")
+                    .cloned()
+                    .ok_or_else(|| ApiError::internal("the resource review has no subject"))?,
+            )
+            .map_err(ApiError::internal)?,
+        ],
         "loss" => {
             vec![orch_engine::loss::recipient_subject(&record.plan).map_err(ApiError::engine)?]
         }
         "host_delete" => vec![resources::host_delete::recipient_subject(&record.plan)?],
+        "mount_copy" => {
+            let review: orch_engine::mount_copies::location::Review =
+                serde_json::from_value(record.plan["review"].clone())
+                    .map_err(ApiError::internal)?;
+            vec![ObjectRef {
+                kind: ObjectKind::Mount,
+                id: review.source().mount,
+            }]
+        }
         "provider_update" => vec![resources::provider_recovery::recipient_subject(
             &record.plan,
         )?],
@@ -76,6 +95,15 @@ fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
         }],
         "move_batch" => environments::moves::recipient_subjects(&record.plan)?,
         "recover_batch" => environments::recovery::recipient_subjects(&record.plan)?,
+        forks::PLAN_KIND => {
+            let native: orch_engine::fork_plan::StoredPlan =
+                serde_json::from_value(record.plan.clone()).map_err(ApiError::internal)?;
+            vec![
+                native
+                    .move_recipient_subject()
+                    .ok_or_else(ApiError::not_found)?,
+            ]
+        }
         forks::BATCH_PLAN_KIND => {
             let native: orch_engine::fork_plan::StoredBatch =
                 serde_json::from_value(record.plan.clone()).map_err(ApiError::internal)?;
@@ -87,6 +115,77 @@ fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
             ));
         }
     })
+}
+
+/// A profile may be public while the work associating its owner with this review is private.
+async fn resource_names(
+    conn: &mut Conn,
+    principal: &Principal,
+    plan: &crate::registry::OperationPlan,
+    record: &PreflightRow,
+    names: &mut Vec<Id>,
+) -> ApiResult<()> {
+    use orch_api_contract::resource_facts::FactTarget;
+    use orch_engine::resource_facts;
+    if record.kind != "resource_stop" || names.is_empty() {
+        return Ok(());
+    }
+    let object: ObjectRef =
+        serde_json::from_value(record.plan["object"].clone()).map_err(ApiError::internal)?;
+    let model_id =
+        serde_json::from_value(record.plan["model_id"].clone()).map_err(ApiError::internal)?;
+    let admitted: BTreeSet<Id> =
+        serde_json::from_value(record.plan["nameable"].clone()).map_err(ApiError::internal)?;
+    let people: Vec<orch_engine::notifications::OperationRecipient> =
+        serde_json::from_value(record.plan["audience"].clone()).map_err(ApiError::internal)?;
+    let raw = [resource_facts::target_dependents(
+        conn,
+        &FactTarget { object, model_id },
+        principal.now(),
+    )
+    .await
+    .map_err(ApiError::engine)?];
+    let mut visibility =
+        resource_facts::prepare_projection(conn, principal, Default::default(), &raw)
+            .await
+            .map_err(ApiError::engine)?;
+    if native::modern(principal.caller()) {
+        let mut allowed = std::collections::HashSet::new();
+        for (object, target) in
+            Sources::from_objects(visibility.sources().filter(|object| {
+                matches!(object.kind, ObjectKind::Thread | ObjectKind::Environment)
+            }))
+            .identity_targets(conn)
+            .await?
+        {
+            if native::permits(
+                plan,
+                &RECIPIENTS,
+                principal.caller(),
+                &Source::Subjects,
+                KeyTargetKind::Object(object.kind),
+                &target,
+            )? {
+                allowed.insert((object.kind, object.id));
+            }
+        }
+        visibility.restrict_to(&allowed);
+    }
+    let dependencies: BTreeSet<_> = visibility
+        .named_edges(&raw)
+        .filter_map(|(_, edge)| edge.object.map(|object| object.id))
+        .collect();
+    let current: BTreeSet<_> = people
+        .iter()
+        .filter(|person| {
+            !person.threads.is_disjoint(&dependencies)
+                || object.kind == ObjectKind::Mount
+                    && !person.environments.is_disjoint(&dependencies)
+        })
+        .map(|person| person.user)
+        .collect();
+    names.retain(|id| admitted.contains(id) && current.contains(id));
+    Ok(())
 }
 
 impl native::Selected for Recipients {
@@ -137,7 +236,8 @@ impl native::Selected for Recipients {
             let plan = native::bind_known(ctx, Self::DECLARATION, &facts)?;
             let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
             let ids = operations::receivers(conn, &ids, &kind).await?;
-            let visible = operations::visible_names(conn, principal.user(), &ids).await?;
+            let mut visible = operations::visible_names(conn, principal.user(), &ids).await?;
+            resource_names(conn, &principal, &plan, &record, &mut visible).await?;
             let after = query
                 .cursor
                 .as_deref()
@@ -184,12 +284,25 @@ impl native::Selected for Recipients {
             if ctx.user()?.id() != principal.user() {
                 return Err(ApiError::not_found());
             }
-            forks::preflight(conn, ctx.id("id")?)
+            let record = forks::preflight(conn, ctx.id("id")?)
                 .await?
                 .filter(|row| {
                     row.created_by == principal.user() && row.expires_at > ctx.app.clock.now()
                 })
                 .ok_or_else(ApiError::not_found)?;
+            if record.kind == forks::PLAN_KIND {
+                for subject in subjects(&record)? {
+                    crate::middleware::authorization::require(
+                        conn,
+                        principal,
+                        subject.id,
+                        crate::middleware::authorization::VIEW,
+                        orch_authz::Act::Use,
+                        orch_authz::Policy::default(),
+                    )
+                    .await?;
+                }
+            }
             Ok(())
         })
     }

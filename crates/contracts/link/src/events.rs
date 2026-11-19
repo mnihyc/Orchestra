@@ -45,6 +45,17 @@ pub struct MachineUpdateFailed {
     pub detail: String,
 }
 
+/// A durable report from the exact bundled node that owns this update job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeServerUpdate {
+    /// The exact native command whose prepared helper supplied this observation.
+    pub command_id: Id,
+    /// The admitted job, independent of a connector or API process lifetime.
+    pub job_id: Id,
+    /// The existing updater's safe factual phase and outcome.
+    pub observation: orch_api_contract::admin::ServerUpdateObservation,
+}
+
 // ---------------------------------------------------------------- catalogue
 
 /// Whether an event is kept until the system has taken it in.
@@ -102,8 +113,12 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
+    /// Current output storage health, which must pass even when the authoritative spool is full.
+    SpoolStatus = "spool.status", Ephemeral, [Machine];
     /// A session is open in its harness.
     SessionOpened = "session.opened", Durable, [Session];
+    /// The connector confirmed the sandbox applied to an exact native command.
+    SessionSandbox = "session.sandbox", Durable, [Session];
     /// Instruction source metadata refreshed by the harness, without a model request.
     InstructionSources = "session.instructions", Durable, [Session];
     /// The harness gave the conversation a title.
@@ -174,7 +189,7 @@ event_kinds! {
     /// A new list of an environment's whole tree.
     EnvManifest = "env.manifest", Durable, [Env];
     /// How far a job is.
-    JobProgress = "job.progress", Durable, [Env, Node];
+    JobProgress = "job.progress", Durable, [Env, Node, Machine];
     /// A known browser changed its state or tab count.
     BrowserState = "browser.state", Durable, [Env];
     /// A known display changed its lifecycle state.
@@ -187,6 +202,8 @@ event_kinds! {
     NodeNetwork = "node.network", Durable, [Node];
     /// What a host has and can make.
     NodeFacts = "node.facts", Durable, [Node];
+    /// Progress of the one release updater on the bundled server node.
+    NodeServerUpdate = "node.server.update", Durable, [Node];
     /// The owned kept-image inventory at one node-local epoch, including archived files.
     NodeKeptImages = "node.kept-images", Durable, [Node];
     /// What a host uses.
@@ -266,6 +283,8 @@ payloads! {
     Event {
         /// A session is open in its harness.
         SessionOpened(SessionOpened) = "session.opened";
+        /// The connector's captured sandbox decision, independent of diagnostic capture.
+        SessionSandbox(SessionSandbox) = "session.sandbox";
         /// Instruction files reported by the harness after opening.
         InstructionSources(orch_agent_contract::events::InstructionSources) = "session.instructions";
         /// The harness gave the conversation a title.
@@ -349,6 +368,7 @@ payloads! {
         NodeNetwork(NodeNetwork) = "node.network";
         /// What a host has and can make.
         NodeFacts(NodeFacts) = "node.facts";
+        NodeServerUpdate(NodeServerUpdate) = "node.server.update";
         /// Owned images and the epoch of the complete inventory.
         NodeKeptImages(NodeKeptImages) = "node.kept-images";
         /// What a host uses.
@@ -375,6 +395,8 @@ payloads! {
     /// A measurement that is worthless when it is late: its kind with
     /// its body.
     Report {
+        /// Authoritative output storage health, independent of its durable event queue.
+        SpoolStatus(orch_api_contract::resources::SpoolStatus) = "spool.status";
         /// What an environment used at one moment.
         StatsSample(foreign::ResourceSample) = "stats.sample";
         /// The processes of an environment at one moment.
@@ -408,6 +430,7 @@ impl Ev {
         event: &Event,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self {
+            native_opening_id: None,
             stream: stream.to_string(),
             seq,
             at,
@@ -446,10 +469,23 @@ impl Eph {
 /// The body of `session.opened`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpened {
+    /// The physical opening that produced this report.
+    pub opening_id: Id,
     /// The harness's own name for the conversation.
+    #[schemars(extend("x-native-reference" = true))]
     pub native_session_ref: String,
     /// Whether it is a conversation the harness already held.
     pub resumed: bool,
+}
+
+/// A sandbox decision carried on the authenticated session that applied it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionSandbox {
+    /// The turn; absent when the command opened its session.
+    pub turn_id: Option<Id>,
+    /// The actual command-bound selection, never reconstructed from later policy.
+    #[serde(flatten)]
+    pub resolution: orch_api_contract::threads::SandboxResolution,
 }
 
 /// The body of `session.title`.
@@ -462,6 +498,12 @@ pub struct SessionTitle {
 /// The body of `session.lost`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// A planned idle retirement keeps the conversation without recording an error.
+    pub expected: bool,
+    /// The physical opening that produced this report.
+    pub opening_id: Id,
+    /// The native outcome is unavailable, rather than confirmed lost. Preserve admitted work without retry.
+    pub uncertain: bool,
     /// Why.
     pub reason: String,
 }
@@ -472,6 +514,7 @@ pub struct TurnStarted {
     /// The turn.
     pub turn_id: Id,
     /// The harness's own name for it; `null` where it has none.
+    #[schemars(extend("x-native-reference" = true))]
     pub native_turn_ref: Option<String>,
 }
 
@@ -598,8 +641,7 @@ pub struct ItemCompleted {
     pub status: foreign::ItemStatus,
     /// What it holds for good.
     pub payload: foreign::ItemPayload,
-    /// The whole output of a command, where it is too long for the
-    /// payload.
+    /// Retained command output bytes; the payload declares their original interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_blob: Option<BlobRef>,
 }
@@ -621,6 +663,7 @@ pub struct ApprovalRequested {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalClosed {
     /// The request the harness withdrew.
+    #[schemars(extend("x-native-reference" = true))]
     pub request_ref: String,
 }
 
@@ -860,6 +903,12 @@ pub struct CredentialNeeded {
 /// The body of `raw.frame`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RawFrame {
+    /// Incremental text continuity declared by the native protocol adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text: Vec<orch_agent_contract::events::NativeTraceText>,
+    /// Whether the remaining text is complete, rather than an unclassified fragment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_complete: bool,
     /// The positive number assigned to this captured frame in its segment, unchanged on replay.
     #[serde(default)]
     pub n: i64,
@@ -925,6 +974,7 @@ pub struct LeaseUsage {
     /// What it used.
     pub usage: foreign::TokenUsage,
     /// The model service's own name for the request, where it gave one.
+    #[schemars(extend("x-native-reference" = true))]
     pub request_ref: Option<String>,
     /// Actual upstream request/report facts, where the forwarder records them. Absent is legacy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1013,6 +1063,9 @@ pub struct EnvironmentFactsExecutor {
 /// it was found, and never how it is started or reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentFactsMcp {
+    /// The actual program process whose native home was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<orch_agent_contract::discovery::McpProfile>,
     /// The server's name there.
     pub name: String,
     /// The harness kind whose configuration names it.
@@ -1062,6 +1115,8 @@ pub enum IndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// One hosted server's state, without its definition or any credentials.
@@ -1131,6 +1186,16 @@ pub struct EnvironmentFacts {
     /// The actual exceeded entry limit, reported only for that Live reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_entry_limit: Option<u64>,
+    /// While the machine looks at the whole tree to bring what it keeps of it up to date: how far it
+    /// has come. Omitted when it is not doing so, which is nearly always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingProgress>,
+    /// The root directory's current whole-recording coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingCoverage>,
+    /// An exclusion rule that prevents safe workspace coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_problem: Option<ExclusionProblem>,
     /// What became of the mounts it was to have.
     pub mounts: Vec<EnvironmentFactsMount>,
     /// Whether a mount can be attached with changes of the environment's
@@ -1142,6 +1207,35 @@ pub struct EnvironmentFacts {
     pub git: bool,
     /// How many times it was made anew.
     pub generation: i64,
+}
+
+/// A safe diagnostic for rules that could not be applied, without exposing their contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExclusionProblem {
+    /// Workspace-relative file or configured setting key.
+    pub path: String,
+    /// One-based source line, when known.
+    pub line: Option<u64>,
+    /// Unreadable, linked, too large, invalid text/pattern or changed while read.
+    pub reason: String,
+}
+
+/// Whether a whole recording is ready, or why per-file restore is used instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordingCoverage {
+    /// Complete or unavailable; unavailable never promises partial whole coverage.
+    pub state: crate::source::RecordState,
+    /// The reason when whole recording is unavailable.
+    pub reason: Option<String>,
+}
+
+/// How far a machine is in looking at a whole tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexingProgress {
+    /// The files it has looked at.
+    pub done: u64,
+    /// The files it has to look at.
+    pub total: u64,
 }
 
 /// The body of `env.status`.
@@ -1157,8 +1251,17 @@ pub struct EnvStatus {
 }
 
 /// The body of `env.manifest`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvManifest {
+    /// An announcement or interruption of this exact transfer; absent means completed publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_state: Option<orch_api_contract::workspace::FileTransferState>,
+    /// Native source facts captured with this manifest, not current defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_facts: Option<orch_api_contract::workspace::FileSourceFacts>,
+    /// The exact attached generation that produced these facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
     /// The list of the tree, which the system now holds.
     pub manifest_blob: Hash,
     /// How many files it names.
@@ -1209,6 +1312,9 @@ pub struct ProcsSnapshot {
 /// The body of `fs.changed`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FsChanged {
+    /// Captured facts of this source observation, absent when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<orch_api_contract::workspace::FileSourceFacts>,
     /// The watch that noticed.
     pub watch_id: Id,
     /// The exact installation that observed these changes; absent for a legacy caller.
@@ -1268,6 +1374,8 @@ pub struct NodeStorage {
 pub struct NodeRuntime {
     /// The runtime.
     pub runtime_id: Id,
+    /// Immutable producing native identity, captured before inspection or other native waits.
+    pub source: crate::native_target::RuntimeSource,
     /// The state its driver finds the unit in.
     pub state: String,
     /// What there is to say about it; `null` when nothing.
@@ -1531,12 +1639,12 @@ mod tests {
     fn what_a_session_does_reads_and_writes_as_the_catalogue_has_it() {
         event(
             "session.opened",
-            json!({ "native_session_ref": "sess_1", "resumed": false }),
+            json!({ "opening_id":A,"native_session_ref": "sess_1", "resumed": false }),
         );
         event("session.title", json!({ "title": "Fix the login" }));
         event(
             "session.lost",
-            json!({ "reason": "the harness was restarted" }),
+            json!({ "uncertain":false, "expected":false,"opening_id":A,"reason": "the harness was restarted" }),
         );
         event(
             "turn.started",
@@ -1755,7 +1863,7 @@ mod tests {
     fn what_hosts_report_reads_and_writes_as_the_catalogue_has_it() {
         event(
             "node.runtime",
-            json!({ "runtime_id": A, "state": "running", "detail": null }),
+            json!({ "runtime_id": A, "source": {"incarnation": B}, "state": "running", "detail": null }),
         );
         event(
             "node.facts",
@@ -1879,6 +1987,11 @@ mod tests {
     }
 
     #[test]
+    fn standalone_machine_file_work_can_report_its_job_without_a_host_or_an_attached_environment() {
+        assert!(EventKind::JobProgress.travels_on(&Stream::Machine));
+    }
+
+    #[test]
     fn each_kind_travels_on_the_streams_of_what_it_reports_about() {
         let session = Stream::Session {
             thread_id: id(A),
@@ -1891,7 +2004,7 @@ mod tests {
         assert!(!EventKind::ItemDelta.travels_on(&environment));
         assert!(EventKind::JobProgress.travels_on(&environment));
         assert!(EventKind::JobProgress.travels_on(&Stream::Node));
-        assert!(!EventKind::JobProgress.travels_on(&Stream::Machine));
+        assert!(EventKind::JobProgress.travels_on(&Stream::Machine));
         assert!(EventKind::ProviderFound.travels_on(&Stream::Machine));
         assert!(EventKind::PtyExited.travels_on(&environment));
     }

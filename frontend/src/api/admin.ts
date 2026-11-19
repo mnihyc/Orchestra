@@ -8,6 +8,7 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
+import { READ_AGAIN_DOWN_MS } from '@/api/readAgain';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { resourceRows } from '@/api/listed';
 import type {
@@ -24,6 +25,7 @@ import type {
   AuditEntryPage,
   AuditExportFormat,
   BackupRestoreList,
+  BundledNodeEnrollment,
   CapabilityDef,
   HarnessBuild,
   HarnessChannelsStatus,
@@ -78,7 +80,6 @@ export const backupRestoreListQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: ['admin', 'backup-restore-list'] as const,
   queryFn: ({ signal }): Promise<BackupRestoreList | null> => ok(api.GET('/admin/backup-restore-list', { signal })),
-  staleTime: 0,
   refetchOnMount: 'always',
 });
 
@@ -280,6 +281,17 @@ export function nameOwner(orgId: string, userId: string): Promise<Node> {
 
 // ---------------------------------------------------------------- hosts and runtimes
 
+export const bundledNodeQuery = queryOptions({
+  ...ADMIN_QUERY,
+  queryKey: ['admin', 'bundled-node-enrollment'] as const,
+  queryFn: ({signal}): Promise<BundledNodeEnrollment | null> => ok(api.GET('/admin/bundled-node/enrollment', {signal})),
+  refetchInterval: (query) => query.state.data ? READ_AGAIN_DOWN_MS : false,
+});
+
+export function retryBundledNode(): Promise<void> {
+  return done(api.POST('/admin/bundled-node/enrollment/retry'));
+}
+
 export const hostsKey = ['admin', 'hosts'] as const;
 
 /** Every host on the system, the system's own and those members added for their orgs. */
@@ -330,7 +342,6 @@ export const harnessChannelsKey = [...harnessBuildsKey, 'channels'] as const;
 /** Local channel read metadata and the reason for its current schedule; this contacts no vendor. */
 export const harnessChannelsQuery = queryOptions({
   ...ADMIN_QUERY,
-  staleTime: 0,
   queryKey: harnessChannelsKey,
   queryFn: ({ signal }): Promise<HarnessChannelsStatus> => ok(api.GET('/admin/harnesses/channels', { signal })),
 });
@@ -361,7 +372,7 @@ export function readHarnessChannels(): Promise<HarnessBuild[]> {
 }
 
 /** Checks a kept build again, in the background, and answers every build, that one marked as being checked. */
-export function checkHarnessBuild(build: HarnessBuild): Promise<HarnessBuild[]> {
+export function checkHarnessBuild(build: Pick<HarnessBuild, 'kind' | 'version'>): Promise<HarnessBuild[]> {
   return ok(api.POST('/admin/harnesses/{kind}/{version}/check', { params: { path: { kind: build.kind, version: build.version } } }));
 }
 

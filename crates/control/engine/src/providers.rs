@@ -593,20 +593,17 @@ pub(crate) fn refreshed_transition(
     }
 }
 
-/// A refused provider's waiting threads name the provider and its recorded reason.
+/// What a refused provider's waiting threads say of it: the reason its manager recorded. The thread already names
+/// the provider, and an identifier is no part of what a person reads.
 pub(crate) fn unavailable_detail(provider: &ProviderRow) -> String {
-    if provider.status == "error" {
-        format!(
-            "Provider {} ({}): {}",
-            provider.name,
-            provider.id,
-            provider
-                .status_detail
-                .as_deref()
-                .unwrap_or("its credential was refused")
-        )
+    unavailable_words(&provider.status, provider.status_detail.as_deref())
+}
+
+fn unavailable_words(status: &str, recorded: Option<&str>) -> String {
+    if status == "error" {
+        recorded.unwrap_or("its credential was refused").to_owned()
     } else {
-        provider.status.clone()
+        status.to_owned()
     }
 }
 
@@ -709,8 +706,11 @@ impl Engine {
         for delivered in events {
             let event = match Event::decode(&delivered.kind, delivered.body.clone()) {
                 Ok(event) => event,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %delivered.kind, "an event of a provider does not read");
+                Err(_) => {
+                    tracing::warn!(
+                        sequence = delivered.seq,
+                        "an event of a provider does not read"
+                    );
                     continue;
                 }
             };
@@ -804,7 +804,10 @@ impl Engine {
                     }
                 }
                 _ => {
-                    tracing::debug!(kind = %delivered.kind, "an event of a provider the engine has nothing to do with");
+                    tracing::debug!(
+                        sequence = delivered.seq,
+                        "an event of a provider the engine has nothing to do with"
+                    );
                 }
             }
         }
@@ -2482,6 +2485,17 @@ mod tests {
     use chrono::Utc;
     use orch_types::new_id;
     use serde_json::json;
+
+    #[test]
+    fn a_refused_provider_keeps_its_recorded_reason_or_uses_a_plain_fallback() {
+        let said = unavailable_words("error", Some("the key was revoked"));
+        assert_eq!(said, "the key was revoked");
+        assert_eq!(
+            unavailable_words("error", None),
+            "its credential was refused"
+        );
+        assert_eq!(unavailable_words("offline", Some("ignored")), "offline");
+    }
 
     fn row(key_machine: Option<Id>, machine: Option<Id>) -> StartRow {
         StartRow {

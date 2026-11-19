@@ -16,6 +16,7 @@ async fn a_machine_bound_subscription_copy_keeps_native_profile_use_but_never_it
         agent_harnesses: vec![orch_link_contract::policy::PolicyHarness {
             kind: "fake".into(),
             path: "/test/fake".into(),
+            confirmation: None,
         }],
         environment_roots: vec!["/native".into()],
         ..Default::default()

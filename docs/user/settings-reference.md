@@ -15,6 +15,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 
 | Reference | Meaning |
 | --- | --- |
+| `setting:mount.copy_review_secs` | **Copy review time** — A positive number of seconds at the system or organization, 900 (15 minutes) by default. This is an editable review lifetime with no fixed maximum beyond the clock representation. Accepted jobs keep their original review. |
+| `setting:mount.delete_data_fate` | **Mount data on deletion** — Keep as shipped, or preselect Purge now where permitted. Each deletion shows its real choices; destroying owned data still requires the mount name. Existing folders are kept. |
+| `setting:server.update_prepare_timeout_secs` | **Server update preparation** — 60 seconds by default for the bundled node to prepare its fixed host updater. Positive, with no fixed maximum beyond the native clock. Release download, health and rollback remain governed by update.sh. |
+| `setting:public_address.prepare_timeout_secs` | **Address preparation wait** — 60 seconds by default for the managed certificate/worker proof and every candidate origin. Positive, with no fixed maximum beyond the clock representation; failure preserves the effective revision. |
+| `setting:public_address.probe_interval_ms` | **Address probe interval** — 250 milliseconds by default between fresh browser-facing attempts while a certificate generation is loading; positive with no fixed maximum. |
+| `setting:gateways.primary_change_timeout_secs` | **Gateway change wait** — Time for a saved primary choice and its durable native reply, including reconnecting; 30 seconds by default, positive with no hard upper limit beyond the clock representation. |
 | `setting:calls.rules` | **Call recovery** — Ordered rules for retrying, continuing, failing over or waiting after a model call fails. |
 | `setting:calls.repeat_limit` | **Repeat limit** — Automatic recoveries of one failure kind within the repeat window; zero stops automatic recovery. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:calls.repeat_window` | **Repeat window** — The rolling time window used to stop repeated recovery. |
@@ -23,7 +29,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:agent.model` | **Model** — The model these threads use. Enter the model ID supplied by its provider. |
 | `setting:agent.effort` | **Effort** — The reasoning effort asked of the model, one of those the model lists. |
 | `setting:agent.params` | **Agent parameters** — Values for the parameters that the agent's adapter declares, by parameter. |
-| `setting:agent.features` | **Agent features** — Which optional features of agents are switched on, by feature. |
+| `setting:agent.features` | **Agent features** — Explicit choices laid over each program’s declared shipped feature states; false switches a feature off. The shared default is empty, and the switches show the program default and override source. |
 | `setting:agent.instructions` | **Instructions** — Standing instructions given to the agent with every session; each scope adds its own under those above it. |
 | `setting:agent.memory` | **Agent notes** — Whether an agent keeps notes between sessions: through any available method, through its own program, or not at all. |
 | `setting:agents.harness_versions` | **Agent program versions** — The build each agent program uses in new or updated units, inherited through the project and overridden by the environment. An exact agent profile pin wins; changing this does not replace a running unit. |
@@ -36,6 +42,9 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:agents.harness_trust_mirror` | **Trust mirror checksums** — Allow the release mirror to publish executable checksums of its own. These builds are labelled as mirror checksums, not vendor checksums. |
 | `setting:agents.harness_mirror` | **Release mirror** — A server that serves the vendors' release files where this server cannot reach them. |
 | `setting:agents.prompt_cache_ttl` | **Prompt cache lifetime** — An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it. |
+| `setting:agents.web_action_wait_secs` | **Web action wait** — Close a native Codex web row that has not reported its end, with a missing-end explanation. The default is 120 seconds, inherited through the place settings without an upper cap. The turn continues and a later native end can update the row. Applies when the session opens again. |
+| `setting:agents.native_result_wait_ms` | **Native result wait** — System default of 2000 milliseconds for programs that declare a retained-evidence read wait. A profile can choose its own wait within the engine's interrupt window. An expired read keeps the reported action result and leaves unproved usage unknown; other sessions continue. Applies when the program starts again. |
+| `setting:agents.native_result_buffer_bytes` | **Native result buffer** — System default of 8 MiB for later native input retained in order while a session reads optional evidence. A profile may choose another size, including zero. When full, only the optional read ends as unverified; all input is processed. Applies when the program starts again. |
 | `setting:agents.subagents_at_once` | **Sub-agents at once** — How many sub-agents the agent program may run at once. The smallest value at this place or above applies. An unsupported control says why it does not apply. |
 | `setting:agents.subagent_depth` | **Sub-agent depth** — How many layers of sub-agents may start; 1 allows no nesting. The smallest value at this place or above applies. An unsupported control says why it does not apply. |
 | `setting:agents.skills` | **Skills** — Which skills the agents of threads here are given, by skill: off, the latest version or a pinned version; a lower place may change or switch off an inherited one. |
@@ -51,6 +60,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:thread.read_turn_bytes` | **Turn read size** — The most the messages of one turn may take, written out in full, for Orch to read that turn into a summary of the conversation or a goal check; a larger turn is named and left out, and nothing of it is read. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:thread.plan_first` | **Plan first** — Whether the composer's Plan switch starts on for a thread's first message. The approval mode stays as it is. |
 | `setting:thread.plan_answered_by` | **Who answers plans** — Who may proceed with a plan an agent proposes, or keep it planning. A lower scope can only choose a stricter option. Strictness order: `writers` → `managers` (strictest last). |
+| `setting:thread.silent_after_secs` | **Silence notice** — How many seconds nothing may arrive from a running agent, with no tool running, before the status line says how long nothing came. |
 | `setting:thread.goal.max_turns` | **Goal turns** — The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise an ancestor limit. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:thread.goal.max_minutes` | **Goal minutes** — The most minutes a goal may be active here; 0 is no limit. It is looked at between turns: a running turn is not cut short. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:thread.goal.max_credits` | **Goal credits** — The most credits a goal may use here, written as a decimal number; 0 is no limit. Usage caps hold as always. A lower scope can only reduce this limit; it cannot remove a limit set above. |
@@ -61,6 +71,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:models.allowed` | **Allowed models** — Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list. |
 | `setting:services.allowed` | **Allowed services** — Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service. |
 | `setting:providers.allowed` | **Allowed providers** — Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here. |
+| `setting:models.add_switches_on` | **Switched on when added** — Context, speeds and access (`all`) enables the reported context sizes, speeds and access programs; Efforts and context (`basic`) enables context sizes; Only what it states (`nothing`) keeps the model's own window and efforts. Web search, cache lifetimes, reasoning modes, capacity tiers and request options are configured separately. Larger contexts remain a per-thread choice. |
 | `setting:collab.attribution` | **Attribution** — Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers. |
 | `setting:collab.default_delivery` | **Default delivery** — What an input does when a turn is running, unless its sender says otherwise: wait for the next turn, or steer the running one. |
 | `setting:composer.paste_inline_context_share` | **Pasted text in the message** — The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste. |
@@ -72,11 +83,11 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:env.runtime` | **Runtime** — Choose a runtime the host offers. Leave unset to use the template's default. |
 | `setting:environments.runtimes` | **Runtimes** — Allow, forbid or require runtimes by name. Use * for every runtime not named. |
 | `setting:env.storage` | **Storage** — Named machine storages for new workspace, home and connector state data. Existing data keeps its recorded location. |
-| `option:env.storage.workspace` | Working files storage. |
+| `option:env.storage.workspace` | Storage for workspace files. |
 | `option:env.storage.home` | Agent home storage. |
 | `option:env.storage.state` | Recorded file-state storage. |
 | `setting:env.data_sources` | **Workspace and home** — Where each data root lives: made by Orch or an existing directory allowed by this machine's environment.roots. Existing directories keep their owner and mode, have no volume size limit and are never removed by a purge. |
-| `option:env.data_sources.workspace` | Working files storage. |
+| `option:env.data_sources.workspace` | Source of workspace files. |
 | `option:env.data_sources.workspace.kind` | The declared source or content kind. |
 | `option:env.data_sources.workspace.path` | The path on the machine that owns this setting. |
 | `option:env.data_sources.home` | Agent home storage. |
@@ -112,10 +123,22 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:orch_tools.enabled` | **Orch tools** — Which of Orch's own tools an agent is offered. |
 | `setting:orch_tools.owner_reads` | **Personal read tools** — Off as shipped. Let the thread use its owner’s current read access, including when shared. Its audience banner shows who can see or act and warns that personal reads are visible to them. Sharing earlier results still requires informed confirmation. |
 | `setting:orch_tools.calls_per_minute` | **Tool calls a minute** — How many calls of Orch's tools one thread's agent may make in a minute. A lower scope can only reduce this limit; it cannot remove a limit set above. |
+| `setting:orch_tools.read_bytes` | **Shared read bytes** — Default UTF-8 bytes in a shared read or tool answer; explicit positive byte windows can differ. |
+| `setting:orch_tools.list_depth` | **Shared listing depth** — Default levels in a shared listing; continuation retains the remaining entries. |
+| `setting:orch_tools.list_rows` | **Shared listing rows** — Default rows in a shared listing page; explicit positive windows can differ. |
 | `setting:orch_tools.search_query_chars` | **Shared search query budget** — The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries. |
 | `setting:orch_tools.search_results` | **Shared search result budget** — The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation. |
 | `setting:orch_tools.search_context` | **Shared search context budget** — The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context. |
+| `setting:threads.opening_items` | **Thread opening items** — Positive number of timeline items read when a thread first opens. Defaults to 40; an explicit request can choose another window, and older items remain available by cursor. |
 | `setting:threads.offline_deadline` | **Offline turn deadline** — End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with. |
+| `setting:threads.start_acceptance_seconds` | **Start acceptance wait** — Seconds an admitted start waits for native acceptance. Zero expires immediately; each admission keeps its own deadline. Defaults to 60 seconds; there is no additional upper cap. |
+| `setting:threads.start_confirmation_seconds` | **Native start wait** — Seconds after the latest possible acceptance to wait for the native start event. Zero adds no wait. Changes apply to later admissions. Defaults to 60 seconds; there is no additional upper cap. |
+| `setting:threads.start_event_grace_seconds` | **Start event ingestion grace** — Extra seconds while this session’s native events are still being ingested. Zero adds no grace; each admission keeps this allowance. Defaults to 600 seconds; there is no additional upper cap. |
+| `setting:threads.output_capture_bytes` | **Retained command output** — Bytes retained for each native text output, including its inline tail; default 67108864 (64 MiB). Larger outputs keep the exact last bytes and disclose the missing original interval. Applies to the next native session. |
+| `setting:threads.background_snapshot_seconds` | **Roster retention** — Idle seconds for native snapshots and reviewed End identities; default 30. Page reads renew retention; expired reads restart before confirmation. |
+| `setting:threads.background_page_items` | **Native roster page** — Preferred commands per native page; default 200. Every page transfers, without a complete-list row cap. |
+| `setting:threads.background_page_bytes` | **Native roster page bytes** — Preferred bytes per native page; default 131072. One complete command may exceed the target; negotiated transport limits still apply. |
+| `setting:threads.background_preview_bytes` | **Roster command preview** — Preview bytes per command; default 4096. Longer previews are explicitly marked truncated; every identity remains available. |
 | `setting:threads.background_wake` | **Background wake** — Wake when background tasks or subagents finish. Off keeps Codex results for the next input. Claude Code background tasks are not offered and commands run in the foreground. Changes apply to the next session. |
 | `setting:threads.agent_access` | **Agent access** — The initial reach and area levels shown when creating a thread. The creator confirms what they may give. Applies to new threads, without rewriting existing grants. |
 | `option:threads.agent_access.where` | The area to which the agent contribution applies. |
@@ -125,7 +148,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:threads.agent_access.parts.timeline` | Rights on thread history. |
 | `option:threads.agent_access.parts.thread_fork` | Rights to fork threads. |
 | `option:threads.agent_access.parts.thread_archive` | Rights to archive threads. |
-| `setting:threads.let_viewers_in` | **Let thread viewers in** — The initial choice to let a new thread’s viewers use its environment. Confirmed when the thread is created; changing this default grants no access by itself. |
+| `setting:threads.let_viewers_in` | **Viewers can open the environment** — The initial choice to let a new thread’s viewers look at its files, terminal and screens, without Use or permission to change them. Confirmed when the thread is created; changing this default grants no access by itself. |
 | `setting:broadcast.chat_messages_per_hour` | **Agent chat messages per hour** — Successful posts across all chats from one origin in a rolling hour; zero forbids posting. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:sharing.snapshot_max_bytes` | **Largest copy** — The largest copy that may be shared with an agent in one request, in bytes. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:export.max_bytes` | **Largest archive** — The largest archive one export of what lies here may come to, in bytes; one that would pass it is not begun, and says so with its size. A lower scope can only reduce this limit; it cannot remove a limit set above. |
@@ -133,13 +156,28 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:export.keep_hours` | **Archives are kept** — For how many hours a finished archive is kept for its person to fetch before it is removed. |
 | `setting:import.max_bytes` | **Import size limit** — The expanded bytes allowed in one import. When unset, the place's export size limit applies. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:import.max_items` | **Import item limit** — The objects allowed in one import. When unset, the place's export item limit applies. A lower scope can only reduce this limit; it cannot remove a limit set above. |
-| `setting:workspace.ignore` | **Ignored paths** — Patterns, written as in a gitignore file, for what the index of a workspace leaves out. |
-| `setting:workspace.index` | **Index** — Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. |
+| `setting:workspace.ignore` | **Ignored paths** — Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list. |
+| `setting:workspace.index` | **Index** — Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree. |
+| `setting:workspace.index_entries` | **Cached file entries** — Path metadata kept in the incremental working set; larger directories remain browsable and searchable live. |
+| `setting:workspace.index_scan_secs` | **Indexing slice** — Seconds of initial indexing before retaining incremental coverage and continuing with live reads. |
+| `setting:workspace.ignore_max_bytes` | **Exclusion parsing** — Bytes allowed when parsing one local exclusion file; a file that cannot be applied reports its source and never exposes an unknown scope. |
+| `setting:workspace.ignore_cache_bytes` | **Cached exclusion rules** — Source bytes and record metadata retained for parsed exclusion rules; older parses are read again when needed. |
+| `setting:workspace.directory_idle_secs` | **Folder continuation idle time** — Seconds an unused folder observation is kept before transparent renewal when the folder is unchanged. |
+| `setting:workspace.directory_slots` | **Folder observations** — Folder observations retained on one machine; unused observations are evicted before admitting another reader. |
+| `setting:workspace.directory_cache_bytes` | **File read cache** — Shared working bytes for directory metadata and live file-read continuation buffers; existing work stays charged until it ends. |
+| `setting:workspace.directory_builds` | **Folder metadata reads** — Concurrent folder metadata builds on one machine; waiting readers retain their place. |
+| `setting:workspace.directory_page_bytes` | **Folder page bytes** — Default metadata bytes in one folder page; continuation retains all remaining entries. |
+| `setting:workspace.directory_entries` | **Folder rows** — Default rows in one page; an explicit window can differ and continuation keeps the rest. |
+| `setting:workspace.search_results` | **File search rows** — Default rows in one page; an explicit window can differ and continuation keeps the rest. |
+| `setting:workspace.archive_results` | **Archive rows** — Default rows in one page; an explicit window can differ and continuation keeps the rest. |
+| `setting:workspace.search_slice_secs` | **File search slice** — Seconds of work in one file-search page; continuation resumes the remaining search. |
+| `setting:workspace.git_diff_bytes` | **Diff bytes** — Default bytes in one diff read; continuation retains the rest of the selected diff. |
 | `setting:source.repository_url` | **Repository** — The repository prepared only when the thread's directory is missing; an existing directory keeps its own files. |
 | `setting:source.branch` | **Source branch** — The branch to prepare; unset, use the repository's advertised default branch. |
 | `setting:source.secret_name` | **Source secret** — The name of an existing HTTPS Git reading secret; its value is sealed only to the preparation command. |
 | `setting:workspace.record_days` | **Keep turn files** — Days to keep complete turn and restore undo files in the environment; zero disables recording. |
 | `setting:workspace.record_max_bytes` | **Largest recorded directory** — The included file and link bytes eligible for whole-state recording; larger directories use per-file undo. |
+| `setting:workspace.record_wait_secs` | **Wait for turn files** — Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready. |
 | `setting:broadcast.delivery` | **Announcement delivery** — How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn. |
 | `setting:broadcast.fallback` | **When steering is impossible** — What is done instead when an announcement is to steer an agent that cannot be steered. |
 | `setting:broadcast.wake_idle` | **Allow waking idle threads** — Whether a send may wake an idle thread here; on as shipped. Each announcement or thread message chooses wake explicitly, false when omitted. |
@@ -153,7 +191,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:ports.enabled` | **Ports** — Whether current door holders may use owned TCP and UDP ports through Orch. A lower scope can switch this off; it cannot undo a refusal set above. |
 | `setting:ports.max_open` | **Wider ports** — The distinct port numbers with wider or pending audiences; zero leaves own use available. |
 | `setting:ports.link_max_secs` | **Link lifetime** — The longest link lifetime from creation, including later expiry changes. |
-| `setting:requests.expiry_hours` | **Pending agent requests** — The longest pending boundary decision an agent requests; an earlier requested port-link lapse also ends it. |
+| `setting:requests.expiry_minutes` | **Pending agent requests** — The longest pending boundary decision an agent requests; an earlier requested port-link lapse also ends it. |
 | `setting:browser.preset` | **Browser preset** — How a browser is started where nobody says: headless, with no window and no display, or with a window on a display that Orch opens for it. |
 | `setting:browser.args` | **Browser arguments** — Arguments added to those a browser is started with; the ones Orch gives itself, the profile's directory and the address it is driven at, cannot be set here. |
 | `setting:browser.viewport` | **Browser window size** — The size of a new browser's window, written width x height, from 320x240 to 3840x2160. |
@@ -181,7 +219,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:runtime.resources.pids` | Maximum process count. |
 | `option:runtime.resources.disk_gb` | Disk allowance in GiB. |
 | `setting:runtime.storage` | **Storage** — Named machine storages for new provider home and connector state data. Existing data keeps its recorded location. Provider runtimes have no workspace. |
-| `option:runtime.storage.workspace` | Working files storage. |
+| `option:runtime.storage.workspace` | Storage for workspace files. |
 | `option:runtime.storage.home` | Agent home storage. |
 | `option:runtime.storage.state` | Recorded file-state storage. |
 | `setting:runtime.home` | **Agent home** — A home made by Orch or an existing directory allowed by this machine. Leave unset to keep the profile’s choice or the agent program’s default and its existing sign-in. Existing directories keep their owner, permissions and files; deleting the runtime never deletes them. |
@@ -221,11 +259,11 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:skills.max_files` | **Skill files** — The most files one version of a skill holds. |
 | `setting:notify.subagents` | **Sub-agent notices** — Whether the people who follow a thread are told when one of its sub-agents finishes, fails or is stopped, as they are told when a turn ends. |
 | `setting:message.body_max_chars` | **Message length** — How many characters an administrator message may contain; the default can be changed at the system or organization. A lower scope can only reduce this limit; it cannot remove a limit set above. |
-| `setting:notify.operations` | **Operation notices** — Whether Notify starts ticked in an operation: when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices. |
+| `setting:notify.operations` | **Operation notices** — Whether Notify starts ticked in an operation (Never by default): when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices. |
 | `setting:broadcast.rate_per_hour` | **Announcements an hour** — How many announcements one thread's agent may send in a rolling hour; default 12, 0 allows none. Individual thread messages count separately. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:broadcast.thread_messages_per_hour` | **Thread messages an hour** — How many individual thread messages one sending thread's agent may send in a rolling hour; default 60, 0 allows none. System, organization, project or topic may replace the inherited value, subject to a lock. Announcements count separately. |
 | `setting:capability.recreate_grace_secs` | **Recreate grace** — How many seconds running turns may finish before a recreate interrupts them; 0 interrupts them immediately. |
-| `setting:access.request_expiry_days` | **Access request expiry** — After how many days a request for access that nobody decided lapses. |
+| `setting:access.request_expiry_minutes` | **Access request expiry** — After how many minutes a request for access that nobody decided lapses. |
 | `setting:access.max_pending_requests` | **Pending requests** — How many requests for access one person may have waiting. |
 | `setting:access.quick_grant_durations` | **Quick access durations** — Durations offered for giving access in one click: a positive number of days followed by d, or always. A lower scope may remove allowed choices; it cannot add one excluded above. |
 | `setting:nodes.new_color` | **New node colour** — Whether a new place starts with its kind's icon colour or one of the twelve picked at random. |
@@ -251,8 +289,17 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:auto.title` | **Titles** — How automatic titles are written: no title, the first input, the agent’s title, or a summary. |
 | `setting:auto.tags` | **Tags** — Whether the summarizer sets a place's tags. |
 | `setting:summary.handoff_input_share` | **Summary input share** — How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends: the newest turns first, older ones as their one-line index. A lower scope can only reduce this limit; it cannot remove a limit set above. |
-| `setting:auto.summarizer` | **Summarizer** — Which summarizer is used, and its configuration. |
+| `setting:auto.summarizer` | **Summarizer** — Summarizer and model token allowances. Target character counts are separate. |
 | `option:auto.summarizer.kind` | The declared source or content kind. |
+| `option:auto.summarizer.provider_id` | For the model summarizer, the API provider used for summaries. Its current Use permission and usage caps still apply. |
+| `option:auto.summarizer.model_name` | For the model summarizer, the selected provider's enabled model name. |
+| `option:auto.summarizer.params` | For the model summarizer, provider request options. Explicit effort choices are preserved within the current model and permission limits. |
+| `option:auto.summarizer.answer_max_output_tokens` | For the model summarizer, answer tokens for paragraphs, descriptions, tags and handoffs; defaults to 1,024, separate from target characters and added reasoning room. |
+| `option:auto.summarizer.title_max_output_tokens` | For the model summarizer, title answer tokens; defaults to 120, separate from the 80-character title target and added reasoning room. |
+| `option:auto.summarizer.goal_max_output_tokens` | For the model summarizer, answer tokens for a goal verdict and its reason; defaults to 512. Any positive choice is kept without an extra minimum. |
+| `option:auto.summarizer.reasoning_tokens` | For the model summarizer, extra output room for known or unrecorded upstream reasoning; defaults to 2,000 tokens. Zero adds no room. Only an explicit nonreasoning model fact removes this reserve. |
+| `option:auto.summarizer.context_tokens` | For the model summarizer, input tokens including instructions and framing; defaults to 32,000 within the model's window after the actual field's complete output reserve. |
+| `option:auto.summarizer.prompts` | For the model summarizer, replacement instructions by field. An omitted or null instruction keeps that field's shipped prompt. |
 | `setting:auto.triggers` | **Triggers** — When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most. |
 | `option:auto.triggers.on` | Events that trigger this automation. |
 | `option:auto.triggers.min_interval_secs` | Minimum gap between automatic runs in seconds. |
@@ -262,7 +309,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:capability.policy.*.approver_scope` | Which area supplies the approvers. |
 | `setting:sharing.allow_external` | **Owners share outside** — Whether the owners of a thing here may themselves name somebody from outside its root org on its page. A lower scope can switch this off; it cannot undo a refusal set above. |
 | `setting:sharing.allow_copy_out` | **Copies to other orgs** — Whether things here may be duplicated or moved into another org. On by default. A lower scope can switch this off; it cannot undo a refusal set above. Exporting and creating at the destination still need their own permissions. |
-| `setting:sharing.external_max_days` | **Outside entries end** — The longest an entry that names somebody from outside may last after it is written or renewed. |
+| `setting:sharing.external_max_minutes` | **Outside entries end** — The longest an entry that names somebody from outside may last after it is written or renewed. |
 | `setting:sharing.allow_holders` | **Holders share** — Whether somebody who holds a thing here without owning it or managing its page may share it, at most at their own level: name others on its page, give a role in a place, share it with agents. When off, sharing is with a thing's owners and whoever manages its page. A lower scope can switch this off; it cannot undo a refusal set above. |
 | `setting:sharing.on_link` | **Share viewing on send** — The default viewing-share choice for links sent here. A person can switch this off for themselves. |
 | `setting:usage.rates` | **Rate card** — Model prices in credits, matched by model ID. |
@@ -317,7 +364,9 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:documents.links.mentions_counted` | **Mentions counted** — Mentions of the document counted in one source before its count reads “or more”. |
 | `setting:documents.links.access_checks` | **Links access checks** — Sources whose reading access is checked for one page of Referenced by. A very popular document continues with a cursor. |
 | `setting:documents.links.graph_nodes` | **Graph nodes** — The most nodes the Links graph draws. |
+| `setting:documents.readme_blocks` | **README preview** — Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page. |
 | `setting:chat.attachment_max_bytes` | **Attachment size** — The largest file attached to a chat message, in bytes. A lower scope can only reduce this limit; it cannot remove a limit set above. |
+| `setting:search.text_chars` | **Conversation search text** — Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded. |
 | `setting:search.word_recent_candidates` | **Recent word sample** — Recent rows sampled before probing the text index. |
 | `setting:search.word_candidates` | **Word candidates** — Candidates per indexed field before exact access and ranking. |
 | `setting:search.word_probe_candidates` | **Word index probe** — Indexed matches sampled before switching to a recency scan. |
@@ -330,6 +379,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:search.word_tuning.tiers.heading` | Heading text or its ranking weight. |
 | `option:search.word_tuning.tiers.body` | Body text or its ranking weight. |
 | `setting:search.page_size` | **Page size** — Results shown before Show more. |
+| `setting:navigation.tree_page_size` | **Hierarchy page size** — Default rows in a hierarchy branch page, initially 50. A caller may request a larger page; this is a default, not a cap. |
 | `setting:search.reorder_window_secs` | **Reorder window** — How long new results may reorder the first screen. |
 | `setting:search.meaning_pause_ms` | **Typing pause** — How long typing pauses before an embeddings request, in milliseconds. |
 | `setting:search.cursor_entries` | **Saved searches** — Continuations kept for each reader. |
@@ -379,6 +429,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:redaction.patterns.*.name` | A readable name for the declared item. |
 | `option:redaction.patterns.*.regex` | Regular expression used by the rule. |
 | `setting:diagnostics.retention_days` | **Diagnostics kept** — For how many days diagnostics are kept. |
+| `setting:diagnostics.frame_bytes` | **Whole protocol frames** — Masked protocol bytes kept whole per frame; defaults to 65536. Larger frames retain a size note and the configured prefix; 0 keeps no complete frames. Applied capture limits stay with their recorded decision. |
+| `setting:diagnostics.frame_head_bytes` | **Protocol frame prefix** — Masked bytes retained from an oversized frame's start; defaults to 4096. 0 keeps its size note only. |
+| `setting:diagnostics.frames_per_segment` | **Protocol frames kept** — Newest captured frames retained per native session; defaults to 20000. 0 switches capture off. Omission counts and reasons survive body cleanup; missing older facts stay Not reported. |
+| `setting:database.retry_attempts` | **Database repeats** — Transient repeats per recovery burst, default 8; 0 skips immediate repeats. Data and program-limit refusals are never repeated. |
+| `setting:database.retry_initial_ms` | **Database repeat pause** — Initial transient retry pause in milliseconds, default 100. It doubles within the bounded burst. |
+| `setting:database.recovery_secs` | **Database recovery interval** — Cooldown after a burst and interval for counted failure summaries, default 60 seconds. Pending work remains retained; transactions are released before waiting. |
 | `setting:orgs.personal_enabled` | **Create personal organizations** — Give new accounts a personal organization. Disabling this keeps existing organizations; people can still join teams and receive document shares. |
 | `setting:orgs.personal_closed` | **Personal orgs closed** — Whether a person's own org is created taking no member but its person. |
 | `setting:orgs.personal_flat` | **Personal orgs flat** — Whether a person's own org is created holding no org inside it. |
@@ -389,14 +445,39 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:registration.mode` | **Registration** — Who may register: nobody, only somebody with an invitation, or anybody who reaches the system. |
 | `setting:org.terms` | **Terms for people who join** — Markdown terms for joining this org or accepting a guest invitation to its places or chats. Root terms come first, followed by each nearer org’s terms. Empty text adds no terms; existing members are not asked to accept later edits. |
 | `setting:invitations.forms` | **Invitation forms** — The forms of invitation that may be made for an org of this tree: a link to share, a personal link for one address, or both. A lower scope may remove allowed choices; it cannot add one excluded above. |
-| `setting:invitations.default_hours` | **Invitation life** — For how many hours an invitation is good when its inviter says nothing. |
-| `setting:invitations.max_hours` | **Longest invitation** — The most hours an invitation may be good for. A lower scope can only reduce this limit; it cannot remove a limit set above. |
+| `setting:invitations.default_minutes` | **Invitation life** — For how many minutes an invitation is good when its inviter says nothing. |
+| `setting:invitations.max_minutes` | **Longest invitation** — The most minutes an invitation may be good for. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:invitations.max_uses` | **Uses of a shared link** — How many people one shared link may bring in at most. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:mail.shared` | **Shared mail server** — Whether a root org that has no mail server of its own sends its mail through the system's. |
 | `setting:api.idempotency_window` | **Creation replay window** — How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased. |
+| `setting:api.read_repeats` | **Repeated reads** — How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat. |
+| `setting:interface.kept_closed_tabs` | **Recently closed tabs** — Ten recently closed views, their Reopen history and presentation keep local state by default; open views always keep theirs. Zero keeps one Reopen locator but no closed body or presentation. Choose another count in Interface. |
+| `setting:interface.recent_models` | **Recent model choices** — Five suitable choices appear in each person's Recent model group by default. Set any nonnegative count; zero hides the group while retaining private server history. Unavailable and differently purposed entries never consume a Recent place. |
+| `setting:interface.progress_delay_ms` | **Loading indication delay** — A read shows its spinner after 200 milliseconds by default. Zero shows it immediately. Pending controls prevent a duplicate act throughout the wait. |
+| `setting:interface.catch_up_above_items` | **Automatic catch-up threshold** — Show the automatic card above 20 unread items by default. Choose another nonnegative count in Interface; zero includes any unread range. The New divider’s Details shows the current value and its source. Explicit catch-up stays available below the threshold, and opening Details sends no summary request. |
+| `setting:interface.read_freshness_ms` | **Read freshness** — Returning readers reuse directory answers for 60000 ms, lookups for 15000 ms, reports for 60000 ms and status for 5000 ms by default. Zero revalidates on every return. Release catalogues remain for the page. |
+| `option:interface.read_freshness_ms.directory` | Freshness in milliseconds for directory contents and shared-path listings. |
+| `option:interface.read_freshness_ms.lookup` | Freshness in milliseconds for repeated name and people searches. |
+| `option:interface.read_freshness_ms.report` | Freshness in milliseconds for reports and public installation facts. |
+| `option:interface.read_freshness_ms.status` | Freshness in milliseconds for live health and usage status. |
+| `setting:edge.transport` | **HTTPS transport** — Built-in HTTPS edge defaults; committed changes reload gracefully. External TLS fronts keep their own settings. |
+| `option:edge.transport.session_cache_mib` | Shared TLS session cache in MiB, default 16; 0 turns the cache off. Positive whole MiB values satisfy nginx’s shared-memory representation. No upper cap. |
+| `option:edge.transport.session_timeout_secs` | Positive resumption lifetime in seconds, default 86400. Applies to both cached sessions and tickets. |
+| `option:edge.transport.session_tickets` | TLS session tickets, on by default. With its shared cache enabled, nginx rotates ticket keys across workers; no private ticket key is exposed through settings. |
+| `option:edge.transport.early_data` | TLS early data, on by default for safe reads. Every early write receives 425 before authentication or business effects and can be repeated after the handshake. |
+| `option:edge.transport.http2` | HTTP/2 negotiation on the built-in TLS address, on by default. |
+| `option:edge.transport.http3` | HTTP/3 over QUIC beside HTTP/2, on by default. The HTTPS overlay publishes TCP and UDP at the same port; an external firewall must also pass UDP. |
+| `option:edge.transport.alt_svc_secs` | HTTP/3 advertisement lifetime in seconds, default 86400; 0 expires immediately. Disabling HTTP/3 clears a previous advertisement. |
+| `option:edge.transport.reload_secs` | Positive interval between local certificate/policy file checks and retrying a failed publisher, default 1 second. Idle checks read no database and make no network request. |
+| `setting:interface.connection_quality` | **Connection warning** — Compare this person’s recent median with their preceding usual median. Defaults: 3 recent replies, 20 usual replies, a 100% increase and 200 ms extra. Warn only when both margins are exceeded; a stable 700 ms line is normal. Windows and thresholds have no fixed upper cap. |
+| `option:interface.connection_quality.recent_samples` | Positive count of recent ping replies used for the current median. Authentication time is never a ping sample. |
+| `option:interface.connection_quality.usual_samples` | Positive count of preceding replies used for this person’s usual. A sustained route change gradually becomes the new usual; a replacement reader starts fresh. |
+| `option:interface.connection_quality.slow_increase_percent` | Required percentage increase above the usual, zero or more. Zero removes the relative margin; the extra-time margin still applies. |
+| `option:interface.connection_quality.slow_extra_ms` | Required extra milliseconds above the usual, zero or more. Zero removes the noise margin; the percentage margin still applies. |
 | `setting:release.check_days` | **Look for a release** — Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing. |
 | `setting:cleanup.release_keep_count` | **Keep unused releases** — Unused releases kept per payload after an update; 0 keeps all. Current and previous releases are always kept. |
 | `setting:cleanup.unused_keep_days` | **Clean unused caches** — Days to keep images and tool versions that nothing uses; 0 switches automatic cleanup off. Data follows its own retention dates. |
+| `setting:tunnels.control_timeout_ms` | **Tool admission wait** — 5000 milliseconds by default for each Open or Resume to confirm the current physical session and tool member. Positive, with no fixed maximum beyond the native clock; timeout refuses the channel. |
 | `setting:backup.warn_days` | **Database backup warning** — Warn when the last successful database-only backup is older than this many days. A failed attempt does not make it newer. |
 | `setting:registration.email_verification` | **Email verification** — Whether a person has to confirm their address before they sign in. |
 | `setting:auth.local_login` | **Password sign-in** — Whether people other than system admins may sign in with a password or a mailed code. |
@@ -408,7 +489,16 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:system.banner.level` | The requested access level. |
 | `option:system.banner.until` | When the rule ceases to apply. |
 | `setting:outbound.allowed_private_hosts` | **Private hosts** — The hosts on private addresses that a channel or a destination of an org or a person may reach. |
+| `setting:storage.transfer_initial_piece_bytes` | **First transfer piece** — Bytes in each small initial bandwidth probe, before the line rate is known. |
+| `setting:storage.transfer_initial_requests` | **Transfer probes** — Small concurrent probes used to measure bandwidth without counting connection setup as data time, within the shared request and byte ceilings. |
+| `setting:storage.transfer_min_piece_bytes` | **Smallest transfer piece** — Smallest ordinary file piece; a final piece may be smaller. |
+| `setting:storage.transfer_max_piece_bytes` | **Largest transfer piece** — Maximum bytes in one file piece. Each unfinished upload keeps its accepted policy. |
+| `setting:storage.transfer_target_window_ms` | **Transfer data duration** — Target data duration of the shared window, before adding measured round-trip headroom. |
+| `setting:storage.transfer_window_rtts` | **Transfer round trips ahead** — Round trips of data kept in flight ahead of acknowledgements, within the byte ceiling. |
+| `setting:storage.transfer_max_window_bytes` | **Transfer window** — Maximum in-flight file bytes shared by simultaneous files from one sender. |
+| `setting:storage.transfer_requests` | **Transfer requests** — Simultaneous piece requests shared by files. Five leaves one HTTP/1.1 connection for other work. |
 | `setting:storage.max_blob_bytes` | **Largest file** — The largest single file that Orch stores, in bytes. |
+| `setting:storage.machine_upload_idle_secs` | **Machine transfer retention** — How long an unfinished machine transfer may receive no piece before cleanup is eligible. Each transfer keeps the allowance accepted at its first piece. |
 | `setting:storage.env_cache_quota_bytes` | **File cache** — How many bytes of cached file contents are kept for one environment. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:agents.page_fetch` | **Page fetch** — Unset keeps the program default. Off disables the capability; Native uses a declared page reader; Service uses the explicitly selected fetch backend. It is independent of Web search. |
 | `setting:agents.image_generation` | **Image generation** — Unset keeps Program default. Native uses a supported native image tool, Off disables it, and Service uses the explicitly selected backend with native generation off. A default is not a lock; no paid service is selected implicitly. |
@@ -444,7 +534,11 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:threads.agent_schedule_runs` | **Agent schedule runs** — Default occurrence count for recurring agent schedules. The agent may choose another positive count; this is a default, not a cap. |
 | `setting:summary.targets` | **Summary targets** — Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries. |
 | `setting:summary.follow_interval_secs` | **Summary follow interval** — Free reads while a summary is eligible or running; future work waits until its due time. Defaults to 5 seconds. |
+| `setting:summary.read_repeats` | **Summary read repeats** — Unpaid source rereads and prompt rebuilds before the first model call, default 3 in each loop; 0 makes no repeat. Source movement after a model call never starts a paid retry. |
 | `setting:summary.read_batch_size` | **Summary read batch** — Distinct source targets in one stored search-summary window; further targets continue. Defaults to 100. |
+| `setting:summary.retry_ceiling_secs` | **Summary retry ceiling** — The longest backoff after failed automatic title or tag attempts. Call rules still decide whether another model call is allowed. Defaults to 3600; a positive value. |
+| `setting:summary.goal_turn_items` | **Goal helper turn items** — The most items of the reported turn read for an independent goal check. A larger turn is omitted whole; the condition and evidence remain. Defaults to 2000; a positive value. |
+| `setting:summary.goal_reason_chars` | **Goal helper reason characters** — The most characters kept from the independent helper’s explanation, separate from the model’s output token allowance. Defaults to 600; a positive value. |
 | `option:agents.web_search_backend.kind` | Choose a model-backed or API-service-backed search backend. |
 | `option:agents.web_search_backend.provider_id` | The enabled provider whose search offering is selected. |
 | `option:agents.web_search_backend.model_name` | The native-search model on the selected provider, for a model backend. |
@@ -488,10 +582,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:ask.retention_min_days` | **Shortest Ask retention** — The minimum history retention chosen by administrators of the conversation's root organization. A lower scope can only raise this minimum. |
 | `setting:ask.retention_max_days` | **Longest Ask retention** — The maximum history retention allowed by administrators of the conversation's root organization. |
 | `setting:ask.max_steps` | **Ask steps per turn** — The model steps allowed for one question before it asks the person to continue. |
-| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies. |
-| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies. |
+| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies. |
+| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies. |
 | `setting:ask.max_tools` | **Ask tools per turn** — The read operations allowed for one question before it asks the person to narrow the question. |
-| `setting:ask.tool_bytes` | **Ask source size** — The most bytes from one read result supplied to the model, with a canonical link to the full source. |
-| `setting:ask.turn_tool_bytes` | **Ask sources per turn** — The total read-result bytes supplied while answering one question. |
+| `setting:ask.docs_hits` | **Ask guide pages per search** — The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match. |
+| `setting:ask.docs_excerpt_tokens` | **Ask guide excerpt size** — The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it. |
+| `setting:ask.max_operations` | **Ask operations per search** — The most read operations one Ask search of the read catalogue returns. |
+| `setting:ask.max_links` | **Ask links per source** — The most canonical source links Ask keeps from one read. |
 | `setting:providers.model_groups_max` | **Model groups** — The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept. |
 | `option:usage.rates.*.web_fetch_per_call` | Credits per successful page-fetch call. |

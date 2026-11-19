@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cancelJob, readJob } from '@/api/exports';
 import { planCleanup, startCleanup } from '@/api/storage';
+import { ApiError } from '@/api/client';
+import { deleteMount, planMountDeletion } from '@/api/resource-tools';
 import { Frame } from '@/features/change/Frame';
 import { JobProgress } from '@/features/change/Progress';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
@@ -21,12 +23,16 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { Table } from '@/ui/Table';
 import { PeopleCount } from '@/ui/PeopleList';
+import { CopyId } from '@/ui/CopyId';
 import { CommandBox } from '@/features/resources/Facts';
-import { Dependents, RecordName } from './Storage';
+import { Dependents, RecordName, Where, recordLabel } from './Storage';
+import { MountEffects } from './Impact';
+import { AdminActNotice, type AdminActSpec } from '@/ui/AdminAct';
+import { CopyMountDataLoader } from '@/features/resources/mounts/Copy';
 
 const over = (job: Job) => job.state === 'succeeded' || job.state === 'failed' || job.state === 'cancelled' || job.state === 'lost';
 
-export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }: { request: CleanupRequest; onClose: () => void; onAccepted?: (job: Job) => void; onFinished?: (job: Job) => void; onRefused?: () => void }) {
+export function Cleanup({ request, intent = 'cleanup', admin, onClose, onAccepted, onFinished, onRefused }: { request: CleanupRequest; intent?: 'cleanup' | 'delete-mount'; admin?: AdminActSpec; onClose: () => void; onAccepted?: (job: Job) => void; onFinished?: (job: Job) => void; onRefused?: () => void }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const client = useQueryClient();
@@ -35,16 +41,31 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
   const [choices, setChoices] = useState<ReadonlyMap<string, CleanupChoice>>(new Map());
   const [typed, setTyped] = useState('');
   const [notify, setNotify] = useState<boolean | null>(null);
-  const preview = useQuery({ queryKey: ['cleanup-plan', request], queryFn: () => planCleanup(request), staleTime: 0, refetchOnWindowFocus: false, retry: false });
+  const [copying, setCopying] = useState(false);
+  const deleting = intent === 'delete-mount';
+  const mount = request.resource?.kind === 'mount' ? request.resource.id : null;
+  const title = deleting ? t('resourceDetails.remove') : t('storage.clean');
+  const preview = useQuery({ queryKey: ['cleanup-plan', intent, request], queryFn: () => deleting ? mount === null ? Promise.reject(new Error(t('resourceDetails.mount.deleteUnavailable'))) : planMountDeletion(mount) : planCleanup(request), refetchOnWindowFocus: false, retry: false });
   const plan = preview.data;
+  const switchesOff = deleting && plan?.effects?.dependents.some((group) => group.relation === 'explicit_giving' && group.count > 0) === true;
+  const cascadeBlocked = (plan?.mount_switch_off_blocked?.count ?? 0) > 0;
   const choice = (item: CleanupItem) => choices.get(item.record.id) ?? item.selected;
   const erases = plan?.items.some((item) => choice(item) === 'purge' || choice(item) === 'stop_and_remove') ?? false;
-  const actionable = plan?.items.some((item) => choice(item) !== 'keep' && item.record.blocker === null) ?? false;
+  const actionable = deleting || (plan?.items.some((item) => choice(item) !== 'keep' && item.record.blocker === null) ?? false);
   const operatorOnly = !actionable && (plan?.items.some((item) => typeof item.record.operator_command === 'string') ?? false);
   const fate = (item: CleanupItem) => item.choices.length < 2
     ? <span className="text-sm text-text-muted">{t(`storage.cleanup.choices.${choice(item)}`)}</span>
-    : <Select size="sm" hideLabel label={t('storage.cleanup.fateFor', { name: item.record.name })} value={choice(item)} options={item.choices.map((value) => ({ value, name: t(`storage.cleanup.choices.${value}`) }))} disabled={start.isPending} onValueChange={(value) => setChoices((before) => new Map(before).set(item.record.id, value))} />;
-  const start = useMutation({ mutationFn: (plan: CleanupPlan) => startCleanup({ plan_id: plan.id, choices: plan.items.map((item) => ({ id: item.record.id, choice: choice(item) })), confirmation_name: erases ? typed : null, notify: notify ?? plan.notify }), onSuccess: (job) => { setJobId(job.id); onAccepted?.(job); }, onError: () => onRefused?.() });
+    : <Select size="sm" hideLabel label={t('storage.cleanup.fateFor', { name: recordLabel(item.record,t) })} value={choice(item)} options={item.choices.map((value) => ({ value, name: t(`storage.cleanup.choices.${value}`) }))} disabled={start.isPending} onValueChange={(value) => setChoices((before) => new Map(before).set(item.record.id, value))} />;
+  const start = useMutation({ mutationFn: (plan: CleanupPlan) => {
+    const body = { plan_id: plan.id, choices: plan.items.map((item) => ({ id: item.record.id, choice: choice(item) })), confirmation_name: erases ? typed : null, notify: notify ?? plan.notify };
+    return deleting ? mount === null ? Promise.reject(new Error(t('resourceDetails.mount.deleteUnavailable'))) : deleteMount(mount, body) : startCleanup(body);
+  }, onSuccess: (job) => { setJobId(job.id); onAccepted?.(job); }, onError: (error) => {
+    onRefused?.();
+    if (deleting && error instanceof ApiError && (error.is('authz.denied') || error.is('preflight.expired'))) {
+      setChoices(new Map()); setTyped(''); setNotify(null);
+      void preview.refetch();
+    }
+  } });
   const progress = useQuery({ queryKey: ['cleanup-job', jobId], queryFn: ({ signal }) => readJob(jobId ?? '', signal), enabled: jobId !== null, refetchInterval: (query) => query.state.data === undefined || !over(query.state.data) ? DEFAULT_CLEANUP_POLL_MS : false });
   const stop = useMutation({ mutationFn: () => cancelJob(jobId ?? ''), onSuccess: () => void progress.refetch() });
   const job = progress.data;
@@ -68,15 +89,18 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
   const results = outcomes(job?.result);
   const records = new Map(plan?.items.map((item) => [item.record.id, item.record]));
   const at = jobId === null ? 'plan' : ended ? 'done' : 'progress';
-  return <Frame open onClose={onClose} title={t('storage.clean')} at={at} steps={!operatorOnly} dismissible={!start.isPending} failed={job?.state === 'failed'} footer={<>
+  return <>{copying && mount !== null && <CopyMountDataLoader mountId={mount} onClose={() => { setCopying(false); void preview.refetch(); }} />}<Frame open={!copying} onClose={onClose} title={deleting && plan !== undefined ? t('resourceDetails.removeTitle', { name: plan.confirmation_name }) : title} at={at} steps={!operatorOnly} dismissible={!start.isPending} failed={job?.state === 'failed'} footer={<>
     <div className="mr-auto min-w-0">{jobId === null && plan !== undefined && plan.people.length + plan.other_people > 0 && <Checkbox label={<PeopleCount users={plan.people} total={plan.people.length + plan.other_people} label={t('storage.cleanup.notify', { number: formatNumber(plan.people.length + plan.other_people, locale) })} />} checked={notify ?? plan.notify} onCheckedChange={setNotify} />}</div>
     <Button disabled={start.isPending} onClick={onClose}>{t(jobId === null ? operatorOnly ? 'common.close' : 'common.cancel' : ended ? 'common.close' : 'change.progress.hide')}</Button>
-    {jobId === null ? !operatorOnly && <Button variant={erases ? 'danger' : 'primary'} pending={start.isPending} disabled={plan === undefined || !actionable || erases && typed !== plan.confirmation_name} onClick={() => { if (plan !== undefined) start.mutate(plan); }}>{t('storage.clean')}</Button> : !ended && <Button pending={stop.isPending} onClick={() => stop.mutate()}>{t('storage.cleanup.cancelRemaining')}</Button>}
+    {jobId === null ? !operatorOnly && <Button variant={erases || deleting ? 'danger' : 'primary'} pending={start.isPending} disabled={plan === undefined || deleting && (preview.isFetching || preview.isError) || cascadeBlocked || !actionable || erases && typed !== plan.confirmation_name} onClick={() => { if (plan !== undefined) start.mutate(plan); }}>{switchesOff ? t('resourceDetails.mount.switchOffDelete') : title}</Button> : !ended && <Button pending={stop.isPending} onClick={() => stop.mutate()}>{t('storage.cleanup.cancelRemaining')}</Button>}
   </>}>
     {jobId === null ? preview.isPending ? <SkeletonRows read={preview} rows={4} /> : preview.isError ? <ErrorState compact error={preview.error} onRetry={() => void preview.refetch()} /> : plan !== undefined && <>
       <div className="flex items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('storage.cleanup.count', { count: plan.items.length, number: formatNumber(plan.items.length, locale) })}</span><ArticleGuideLink article="storage-cleanup" heading={operatorOnly ? 'server-files' : 'clean-up-kept-items'} title={t('storage.guide')} /></div>
+      {deleting && plan.effects !== undefined && plan.effects !== null && <MountEffects facts={plan.effects} blocked={plan.mount_switch_off_blocked} />}
+      {deleting && mount !== null && <Button className="self-start" size="sm" variant="ghost" disabled={start.isPending} onClick={() => setCopying(true)}>{t('mountCopy.copy')}</Button>}
+      <AdminActNotice spec={admin} />
       <Table label={t('storage.cleanup.plan')} boundedIdentity rows={plan.items} rowKey={(item) => item.record.id} columns={[
-        { id: 'name', header: t('storage.name'), grow: true, cell: (item, shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={item.record} /><span className="text-sm text-text-muted">{t(`storage.whys.${item.record.why}`)}{item.record.bytes !== null && ` · ${formatBytes(item.record.bytes, locale)}`}</span>{item.record.until !== null && <RelativeTime at={item.record.until} className="text-sm text-text-muted" />}{item.record.blocker !== null && <span className="text-sm text-text-muted">{t(`storage.blockers.${item.record.blocker}`, { defaultValue: item.record.blocker })}</span>}{!shown.has('dependents') && <Dependents row={item.record} />}{typeof item.record.operator_command === 'string' ? <CommandBox command={item.record.operator_command} label={t('storage.cleanup.copyOperatorCommand')} /> : !shown.has('fate') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-text-muted">{t('storage.cleanup.fate')}</span>{fate(item)}</div>}</div> },
+        { id: 'name', header: t('storage.name'), grow: true, cell: (item, shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={item.record} />{deleting && (item.record.host !== null || item.record.machine !== null) && <Where row={item.record} />}<span className="text-sm text-text-muted">{t(`storage.whys.${item.record.why}`)}{item.record.bytes !== null && ` · ${formatBytes(item.record.bytes, locale)}`}</span>{item.record.until !== null && <RelativeTime at={item.record.until} className="text-sm text-text-muted" />}{item.record.blocker !== null && <span className="text-sm text-text-muted">{t(`storage.blockers.${item.record.blocker}`, { defaultValue: item.record.blocker })}</span>}{!shown.has('dependents') && <Dependents row={item.record} />}{typeof item.record.operator_command === 'string' ? <CommandBox command={item.record.operator_command} label={t('storage.cleanup.copyOperatorCommand')} /> : !shown.has('fate') && <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-text-muted">{t('storage.cleanup.fate')}</span>{fate(item)}</div>}</div> },
         ...(!operatorOnly ? [{ id: 'fate', header: t('storage.cleanup.fate'), from: 'sm' as const, cell: (item: CleanupItem) => typeof item.record.operator_command === 'string' ? null : fate(item) }] : []),
         { id: 'dependents', header: t('storage.keptBy'), from: 'md', cell: (item) => <Dependents row={item.record} /> },
       ]} />
@@ -87,12 +111,12 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
       <JobProgress job={job} heading={t('storage.cleanup.running')} reconnecting={progress.isError} />
       {ended && <StateLine title={t(`source.job.${job.state}`)} tone={job.state === 'failed' ? 'warning' : 'neutral'} message={job.error?.message} />}
       {results.length > 0 && <Table label={t('storage.cleanup.results')} boundedIdentity rows={results} rowKey={(row) => row.id} columns={[
-        { id: 'name', header: t('storage.name'), cell: (row) => { const record = records.get(row.id); return record === undefined ? <span className="truncate" title={row.id}>{row.id}</span> : <RecordName row={record} />; } },
+        { id: 'name', header: t('storage.name'), cell: (row) => { const record = records.get(row.id); return record === undefined ? <span className="flex items-center gap-1"><span className="truncate">{t('storage.cleanup.itemUnknown')}</span><CopyId value={row.id} /></span> : <RecordName row={record} />; } },
         { id: 'outcome', header: t('storage.cleanup.outcome'), cell: (row) => <div><span>{t(`storage.cleanup.outcomes.${row.outcome}`,{defaultValue:row.outcome})}</span>{row.reason !== null && <p className="text-sm text-text-muted">{t(`storage.blockers.${row.reason}`, { defaultValue: row.reason })}</p>}</div> },
       ]} />}
       {stop.error !== null && <ErrorAlert error={stop.error} />}
     </>}
-  </Frame>;
+  </Frame></>;
 }
 
 function outcomes(value: unknown): CleanupOutcome[] {

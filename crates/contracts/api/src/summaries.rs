@@ -450,7 +450,7 @@ pub struct SummaryProducerView {
     pub title: String,
     /// Only when current Read permits this provider's identity.
     pub provider: Option<ProviderView>,
-    /// Only when current Read permits this offering's identity.
+    /// The model admitted for this result; account/configuration Read remains separate.
     pub offering: Option<String>,
 }
 
@@ -505,6 +505,15 @@ pub struct SummarySnapshot {
     pub producer: Option<SummaryProducerView>,
     /// Coverage of currently readable stored input, without provider/configuration details.
     pub input: Option<orch_plugin_contract::refs::SummaryInputFacts>,
+    /// Captured output facts of this readable paragraph, never reconstructed from later defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_facts: Option<crate::summary_facts::SummaryResultFacts>,
+    /// Retained actual latest attempt, separate from the paragraph it may have left unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt: Option<crate::summary_facts::SummaryAttemptFacts>,
+    /// Effect-free current manual proposal; choosing it never enables automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_proposal: Option<crate::summary_facts::SummaryRefreshProposal>,
     /// Manual availability; never enables or writes an automatic producer setting.
     pub manual_problem: Option<SummaryManualProblem>,
     /// Actual reason and eligibility time of accepted pending work.

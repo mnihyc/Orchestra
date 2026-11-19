@@ -35,23 +35,14 @@ environment or provider runtime does not replace itself.
 
 ## When local policy refuses
 
-The person at the machine keeps the last word. A local `update.auto = false`
-refuses a web request; the refusal names that key and gives the local command:
+The person at the machine controls automatic updates with `update.auto`. Explicit Update remains available while Auto is off and does not enable automatic updates. The operator can also request the same verified update locally:
 
 ```sh
 orch-connector update
 orch-node update
 ```
 
-Use the command for the program on that machine. It is explicit local consent
-to install the verified build even when automatic updates are off. It does
-not change the saved `update.auto` value. An offline machine must reconnect
-before Orch can send it a command. Below the server's accepted minimum build,
-an update is required before normal work can resume. A node can obtain that
-update while its ordinary connection is refused, after the server has waited
-for every hosted turn to end. It never assumes that an empty local harness
-list means its units are idle. If the programs no longer speak a common link
-protocol, the operator uses `orch-node update` on the host.
+Use the command for the program on that machine. It leaves the saved `update.auto` value unchanged. Below the server's accepted minimum build, an authenticated program can obtain an idle update grant without a normal connection. The server first holds new turns and waits for all work using that machine, including every hosted unit. A machine disconnected for another reason must be able to reach its server again. An empty local program list is not proof that the hosted units are idle. If the programs no longer speak a common link protocol, the operator runs the local update command on that machine.
 
 ## Environments and provider runtimes
 
@@ -80,11 +71,19 @@ hour, including failed lookups. Scheduled notices remain controlled by
 `release.check_days`; opening System reads the same hourly cache. If a lookup
 fails, its reason is shown beside any previously successful, dated result.
 
-The server has no web button that installs its own update. Such a button would
-need authority over the host's files or Docker socket. The operator runs the
-transactional `update.sh` command on that host; it verifies the release, takes
-the database backup and rolls back if the new services fail readiness. The
-operator's upgrades and recovery guide covers backups and rollback.
+A system administrator can choose **Update now** in **Management → System**.
+The server files are updated by a job on the node bundled with this installation,
+using the release’s existing `update.sh` fetch, verification, backup, restart,
+health check and rollback. A second press joins the same running job. The page
+keeps looking during the restart and shows the retained updated or rolled-back
+outcome when the API returns, including after a page reload. Automatic checks
+and notices never install a server release by themselves.
+
+If the bundled node is missing, offline, or has no access to the host’s local
+Docker, the row names that condition and keeps the operator command above.
+The shell command remains the same updater and recovery path; `./update.sh recover`
+resumes an interrupted journal. The API accepts no host command, executable path
+or Docker socket and never replaces its own container.
 
 The web edge stays available while the API updates its database. An open page
 shows the active migration, completed steps, any row counts the database can
