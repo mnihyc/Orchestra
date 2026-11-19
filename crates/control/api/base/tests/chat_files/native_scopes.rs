@@ -332,6 +332,7 @@ fn gate_open(room: &mut Room, hash: Hash) -> Arc<OpenGate> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(gate.clone(), gate.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
@@ -453,6 +454,9 @@ async fn read_upload(room: &Room, token: &str, hash: Hash, name: &str) -> RawRep
         .call(UploadBlobGet, &[&hash])
         .token(token)
         .query(&UploadBlobGetQuery {
+            cursor: None,
+            q: None,
+            limit: None,
             name: name.to_owned(),
             archive: None,
             inside: None,
@@ -529,6 +533,9 @@ async fn upload_blob_read_binds_actual_account_custody_and_preserves_native_rang
         .call(UploadBlobGet, &[&stored.blob])
         .token(&token)
         .query(&UploadBlobGetQuery {
+            cursor: None,
+            q: None,
+            limit: None,
             name: stored.name.clone(),
             archive: None,
             inside: None,
@@ -751,6 +758,9 @@ async fn upload_blob_preview_and_archive_forms_keep_the_same_native_source_read(
         .await
         .ok();
     let preview = UploadBlobGetQuery {
+        cursor: None,
+        q: None,
+        limit: None,
         name: stored.name.clone(),
         archive: None,
         inside: None,
@@ -794,6 +804,9 @@ async fn upload_blob_preview_and_archive_forms_keep_the_same_native_source_read(
         .ok();
     for entry in [None, Some("doc.txt".to_owned())] {
         let archive = UploadBlobGetQuery {
+            cursor: None,
+            q: None,
+            limit: None,
             name: stored.name.clone(),
             archive: Some(true),
             inside: None,

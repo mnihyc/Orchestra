@@ -47,6 +47,10 @@ orch_api_base::__api_bind_51c3f443d6!();
 /// The job as it waits: queued, with nothing done.
 fn queued(job: &RecreateJob, by: Option<orch_api_contract::users::UserRef>) -> Job {
     Job {
+        memory_outcome: None,
+        measurement_timing: None,
+        history_coverage: None,
+        lifecycle_wait: None,
         call_recovery: None,
         id: job.id,
         kind: "environment_recreate".to_owned(),

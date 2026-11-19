@@ -267,7 +267,7 @@ async fn summary_counts_only_exact_current_resource_read_without_hydrating_or_co
     );
     assert_eq!(
         bounded,
-        json!({"providers":0,"agents":0,"machines":0,"environments":0,"templates":1,"hosts":0,"mcp":0,"mounts":0,"skills":0})
+        json!({"providers":0,"agents":0,"machines":0,"environments":0,"templates":1,"hosts":0,"mcp":0,"mounts":0,"skills":0,"pools":0})
     );
 }
 

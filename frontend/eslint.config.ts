@@ -132,4 +132,10 @@ export default defineConfig([
       '@typescript-eslint/no-non-null-assertion': 'off',
     },
   },
+  {
+    // This classic HTML program is read verbatim, without a TypeScript module or bundler runtime.
+    files: ['src/shell/startup.inline.js'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: { globals: globals.browser },
+  },
 ]);

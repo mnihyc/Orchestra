@@ -169,6 +169,7 @@ pub struct ContinuationActiveTurn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadPromptVersionCreateBody {
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     pub source_continuation_id: Id,
     pub content: Vec<ContentPart>,
@@ -183,6 +184,7 @@ pub struct ThreadPromptVersionCreateBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadContinuationActivateBody {
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     pub expected_active_continuation_id: Id,
     pub expected_execution_revision: i64,

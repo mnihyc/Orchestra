@@ -8,6 +8,8 @@
 //!
 //! The requests are bound by kind of resource, each in a module of its own below.
 
+mod provider_trials;
+
 use crate::middleware::authorization;
 
 use crate::middleware::authorization::refusals;
@@ -64,6 +66,7 @@ pub(super) const fn view_permission(kind: ResourceKind) -> Permission {
         ResourceKind::McpServer => Permission::McpView,
         ResourceKind::Mount => Permission::MountView,
         ResourceKind::Skill => Permission::SkillView,
+        ResourceKind::Pool => Permission::PoolView,
     }
 }
 
@@ -145,6 +148,7 @@ orch_api_base::__api_bind_b76d4af877!();
 /// Binds the requests of every kind of resource that has a handler.
 pub fn mount(registry: &mut Registry) {
     library::mount(registry);
+    pools::mount(registry);
     impact::mount(registry);
     machines::mount(registry);
     agents::mount(registry);
@@ -295,6 +299,9 @@ pub mod host_storage;
 #[path = "resources/hosts.rs"]
 pub mod hosts;
 
+#[path = "resources/lifecycle_notifications.rs"]
+pub mod lifecycle_notifications;
+
 #[path = "resources/impact.rs"]
 pub mod impact;
 
@@ -390,3 +397,7 @@ pub mod validation;
 
 #[path = "resources/view.rs"]
 pub mod view;
+
+/// Configured resource pools and their guarded native writers.
+#[path = "resources/pools.rs"]
+pub mod pools;
