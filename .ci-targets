@@ -1,0 +1,14 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract -p orch-api-contract -p orch-settings-contract -p orch-link-contract -p orch-config -p orch-link -p orch-connector-core -p orch-envhost -p orch-types -p orch-provider-contract --lib
+test -p orch-link-contract --test largest_messages
+test -p orch-link --test large_messages --test handshake --test streams --test spool --test refusals_are_told --test raw_spool_restart --test commands
+test -p orch-gateway-core --test large_messages --test sessions
+test -p orch-connector-core --test provider_role --test agent_role --test direct_machine_programs --test harness_tools --test real_harnesses
+test -p orch-envhost --test environment
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models --test ask --test binding_options --test binding_readiness --test org_overview --test native_actions --test provider_credit_schema --test admin_places --test me --test service_accounts --test key_activity --test api_surfaces --test kadmin_tokens
+web typecheck
+web lint
+web test
+web build

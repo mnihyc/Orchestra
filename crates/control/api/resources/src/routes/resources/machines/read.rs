@@ -510,7 +510,7 @@ async fn check(ctx: &Ctx, conn: &mut Conn, reader: &Principal, frozen: &Frozen) 
 }
 
 pub(super) async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Machine>> {
-    let value = native::selected_read::<Machines>(ctx, (), ()).await?;
+    let value = native::selected_value::<Machines>(ctx, (), ()).await?;
     let (mut tx, guard) = transaction_guard::begin(&value.ctx).await?;
     check(&value.ctx, &mut tx, guard.principal(), &value.frozen).await?;
     guard.check_deadline(&value.ctx)?;

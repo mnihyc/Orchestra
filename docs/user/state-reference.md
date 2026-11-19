@@ -15,6 +15,21 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 
 | Reference | Meaning |
 | --- | --- |
+| `state:SideReading.acting` | The side session can use the tools allowed in the parent workspace. |
+| `state:NativeHistoryState.retained` | The last successful native inventory retained this cache identity; readable conversation retention is separate. |
+| `state:NativeHistoryState.removed` | The adapter positively confirmed physical removal or absence; this never means the conversation was erased. |
+| `state:NativeHistoryState.unreported` | No successful physical observation was captured. An in-memory open hint does not determine loss. |
+| `state:NoticeDecisionState.eligible` | The own Inbox record proves that this notice was eligible at the recorded decision. |
+| `state:NoticeDecisionState.suppressed` | A captured native predicate deliberately withheld the notice. |
+| `state:NoticeDecisionState.not_evaluated` | An explicit recorded decision says this own notice was not evaluated. |
+| `state:ChannelAcceptanceState.pending` | No final channel-acceptance outcome is recorded yet. |
+| `state:ChannelAcceptanceState.accepted` | A durable notifier acknowledgement exists; device display is not proven. |
+| `state:ChannelAcceptanceState.unknown` | An abandoned or explicitly unconfirmed attempt may have reached the channel; neither loss nor receipt is established. |
+| `state:NoticeSuppressionReason.interrupted` | The turn was interrupted. |
+| `state:NoticeSuppressionReason.did_not_start` | The failure happened before the turn started. |
+| `state:NoticeSuppressionReason.automatic_recovery` | The failure was assigned to automatic recovery. |
+| `state:NoticeSuppressionReason.already_watching` | This eligible author was already watching. |
+| `state:NoticeSuppressionReason.subagent_notices_off` | Subagent notices were off at the captured decision. |
 | `state:ThreadDisplayState.waiting_approval` | A request or held input waits for a person. |
 | `state:ThreadDisplayState.blocked` | The thread cannot continue. |
 | `state:ThreadDisplayState.failed` | The last turn failed without a later accepted input. |
@@ -24,6 +39,34 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:ThreadDisplayState.finished` | A completed turn has not been seen by this reader. |
 | `state:ThreadDisplayState.idle` | No work or unseen result needs an icon. |
 | `state:ThreadDisplayState.archived` | The thread or a place above it is archived. |
+
+### StopState
+
+| Reference | Meaning |
+| --- | --- |
+| `state:StopState.stopping` | Stop was accepted. The program or the thread's current change has not finished stopping yet. |
+| `state:StopState.stopped` | The named turn has ended, or preparation without a turn was withdrawn. The final outcome stays in the thread. |
+
+### BlockedReason
+
+| Reference | Meaning |
+| --- | --- |
+| `state:BlockedReason.source_failed` | Source preparation failed. The source panel gives the recorded cause and Prepare again; the waiting message is kept. |
+
+### SessionReopenReason
+
+| Reference | Meaning |
+| --- | --- |
+| `state:SessionReopenReason.unknown` | The session was no longer known to be open, for example after the server or program restarted. |
+| `state:SessionReopenReason.instructions` | The standing instructions or a native instruction file changed before this turn. |
+| `state:SessionReopenReason.limits` | The session's sub-agent limits changed. |
+| `state:SessionReopenReason.configuration` | Its working directory or another choice applied at session opening changed. |
+| `state:SessionReopenReason.mcp` | The MCP servers offered to the session changed. |
+| `state:SessionReopenReason.tools` | The Orch tools offered to the session changed. |
+| `state:SessionReopenReason.skills` | The skills supplied to the session changed. |
+| `state:SessionReopenReason.program_reloads` | The program reloads its own context at session opening, and this turn required that opening. |
+| `state:SessionReopenReason.side_history` | The side thread needed to read its parent's history again. |
+| `state:MarkerKind.session_reopened` | A timeline line records a necessary session opening and its reason before a turn. |
 
 ### PageState
 
@@ -54,7 +97,7 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:EnvironmentStatus.offline` | Its machine is not reachable. |
 | `state:EnvironmentStatus.lost` | Explicitly declared permanently unreachable. |
 | `state:EnvironmentStatus.disabled` | Switched off. |
-| `state:EnvironmentStatus.removed` | Its unit was removed and owned files follow the recorded removal lifecycle. |
+| `state:EnvironmentStatus.removed` | Its container was removed and owned files follow the recorded removal lifecycle. |
 
 ### TopicStatus
 
@@ -128,8 +171,8 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | Reference | Meaning |
 | --- | --- |
 | `state:GoalStatus.active` | Orch keeps the thread working on it. |
-| `state:GoalStatus.paused` | Held: a person paused it, or the agent said it is blocked. |
-| `state:GoalStatus.met` | The condition holds. |
+| `state:GoalStatus.paused` | Held by a person, a blocked report, or an unchecked completion report that needs a person's decision. |
+| `state:GoalStatus.met` | An independent check found the condition met, or a person explicitly accepted its evidence. |
 | `state:GoalStatus.stopped` | It ended without the condition: a limit was reached, or nobody may go on. |
 | `state:GoalStatus.cleared` | A person took it away. |
 
@@ -138,8 +181,36 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | Reference | Meaning |
 | --- | --- |
 | `state:GoalReportStatus.working` | It is working on it. |
-| `state:GoalReportStatus.met` | The condition holds. |
+| `state:GoalReportStatus.met` | The agent reports that the condition holds; this alone never marks the goal met. |
 | `state:GoalReportStatus.blocked` | Only a person can go on. |
+
+### GoalReason
+
+| Reference | Meaning |
+| --- | --- |
+| `state:GoalReason.unchecked` | A completion report has no usable independent check. The paused goal waits for Mark met or Keep working. |
+
+### GoalOutcome
+
+| Reference | Meaning |
+| --- | --- |
+| `state:GoalOutcome.unchecked` | The report and its evidence are retained without a completion decision. A helper being absent or unavailable never turns this into Met automatically. |
+
+### GoalCheckedBy
+
+| Reference | Meaning |
+| --- | --- |
+| `state:GoalCheckedBy.person` | A person explicitly accepted an unchecked completion report. The actual actor is recorded in the audit. Continuing work does not set this value. |
+
+### MarkerHarnessChanged
+
+These values identify the observation's `change` field, not the outcome of a turn.
+
+| Reference | Meaning |
+| --- | --- |
+| `state:MarkerHarnessChanged.warning` | Native warning words, kept for each occurrence and shown in ordinary conversation outside folded work. A warning alone does not fail a turn. |
+| `state:MarkerHarnessChanged.turn_diff` | The native turn's latest reported net file changes. Its snapshot replaces that stream's component edits; an empty snapshot clears its net changes. |
+| `state:MarkerHarnessChanged.turn_diff_unavailable` | Orch could not read a native diff update. Earlier valid changed files are kept, with a visible explanation rather than an invented replacement. |
 
 ### FirstStepsState
 
@@ -483,6 +554,15 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:PluginState.restarting` | It is being started again. |
 | `state:PluginState.failed` | It failed. |
 
+### RawCaptureOmissionCause
+
+| Reference | Meaning |
+| --- | --- |
+| `state:RawCaptureOmissionCause.capture_off` | Capture was off when these frames arrived. Only a recorded decision supplies the count. |
+| `state:RawCaptureOmissionCause.masking_unavailable` | Masking inputs could not be opened, so the frame bodies were safely omitted. |
+| `state:RawCaptureOmissionCause.capture_allowance` | Newer frames replaced these retained frames under the applied capture allowance. |
+| `state:RawCaptureOmissionCause.retention_elapsed` | Actual cleanup removed these frames after retention. This is distinct from current policy and an empty page. |
+
 ### SemanticState
 
 | Reference | Meaning |
@@ -494,6 +574,14 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:SemanticState.indexing` | Pieces are being cut or made into vectors. |
 | `state:SemanticState.paused` | Indexing waits for what its reason names: the disk share, the provider, its machine, a cap or access. |
 | `state:SemanticState.waiting` | A new model waits for an admin's choice: the disk share cannot hold both generations. |
+
+### SemanticRetryNext
+
+| Reference | Meaning |
+| --- | --- |
+| `state:SemanticRetryNext.immediate` | A smaller retry was eligible immediately at the captured instant; admission is checked again before the request. |
+| `state:SemanticRetryNext.indexer_pass` | Work waits for another indexer pass. The shared polling interval is not a per-provider scheduled deadline. |
+| `state:SemanticRetryNext.finished` | The retried request finished; this record promises no further retry. |
 
 ### ProgramChannelState
 
@@ -570,3 +658,48 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:UploadInventoryState.complete` | Verified immutable bytes are in the catalogue. |
 | `state:UploadInventoryState.partial` | The upload is unfinished; this does not claim that a sender is active now. |
 | `state:UploadInventoryState.expired` | The upload session’s completion deadline passed. |
+
+### FetchUnavailable
+
+| Reference | Meaning |
+| --- | --- |
+| `state:FetchUnavailable.offline` | A relayed file needs its environment online. An independently owned copy with the same hash does not supply an offline workspace file. |
+
+### UploadSessionCompletion
+
+| Reference | Meaning |
+| --- | --- |
+| `state:UploadSessionCompletion.ready` | The receiving destination verified the complete content; its file receipt names the actual carrier. |
+| `state:UploadSessionCompletion.verifying` | The whole file is still being checked; ask again without resending its accepted pieces. |
+
+### UploadPhase
+
+| Reference | Meaning |
+| --- | --- |
+| `state:UploadPhase.verifying` | The receiving carrier is checking the complete file. Its accepted bytes are retained while verification runs. |
+### File preparation
+
+| Reference | Meaning |
+| --- | --- |
+| `state:EnvironmentIndexReason.unreadable` | Some metadata or exclusion rules could not be read; safe live file reads retain their correction path. |
+| `state:CommandKeyPhase.queued` | Accepted and waiting for its place; it does not yet hold the serial line. |
+| `state:CommandKeyPhase.running` | The command is using its serial line now. |
+| `state:CommandKeyPhase.released` | Capture released its line; upload can continue while later work starts. |
+
+| `state:NodeRetentionHold.active_work` | Active work defers automatic archiving. |
+| `state:NodeRetentionHold.already_archived` | The node is already archived. |
+| `state:NodeRetentionHold.ancestor_archived` | An archived parent prevents automatic archiving here. |
+| `state:NodeRetentionHold.not_archived` | Automatic deletion applies only after archival. |
+
+### Native approval checks
+
+| Reference | Meaning |
+| --- | --- |
+| `state:AutoApprovalState.not_proven` | This build has not passed its Auto case on the selected machine yet. |
+| `state:AutoApprovalState.failed` | This build failed its Auto check; other native modes remain available. |
+| `state:AutoApprovalState.passed` | This build passed its declared Auto case; policy, reviewer Use and confinement still apply. |
+| `state:AutoApprovalState.unavailable` | The program offers no provable Auto mode or no Auto case. |
+| `state:ApprovalChoiceReason.auto_not_proven` | Auto has not been proved for the selected build on this machine. |
+| `state:ApprovalChoiceReason.auto_check_failed` | The selected build failed its Auto check. |
+| `state:ApprovalChoiceReason.auto_check_unavailable` | This program has no available Auto check. |
+| `state:ApprovalChoiceRequirement.auto_check` | Pass the existing Auto conformance case for the selected build. |

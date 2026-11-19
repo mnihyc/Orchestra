@@ -1,3 +1,4 @@
+import { ListSharing } from './SharingSummary';
 /** Common resource search, status and add controls.
  *
  * Every list of resources is laid out alike, so that they read as one product, from the outside to the
@@ -8,6 +9,7 @@
  * loading it is drawn as rows, when it could not be loaded it says so with a way to try again, and when
  * it is empty it says why and offers the one act that fills it.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { linkTo } from '@/lib/links';
 import { copyText } from '@/ui/clipboard';
 import { useListChoice } from '@/lib/listState';
@@ -16,7 +18,7 @@ import { LibraryCounts } from './Library';
 import { ResourceGroupControl, ResourceGroupHeader } from './GroupHeader';
 import { groupResourceRows, RESOURCE_GROUP_MODES, resourceGroupMeta, type ResourceGroupMeta, type ResourceGroupMode } from './groups';
 import { useFormatContext } from '@/lib/appearance';
-import { MachineLink } from './machines/MachineLink';
+import { MachineOrigin } from './machines/MachineOrigin';
 import { Hint } from '@/features/help/Hint';
 import { useResourceCleanup } from '@/features/storage/acts';
 import { holds } from '@/lib/permissions';
@@ -28,11 +30,14 @@ import { createContext, type ReactNode, useContext, useEffect, useRef, useState 
 import { useTranslation } from 'react-i18next';
 
 import { meQuery } from '@/api/auth';
-import { everythingQuery, type EverythingFilter, type ResourceFilter } from '@/api/everything';
-import type { EverythingResource, EverythingScope, EverythingSort, ProviderListScope, ResourceFacts } from '@/generated/api-types';
+import { useReadRecovery } from '@/api/reads';
+import { useViewShown } from '@/features/workbench/viewOpening';
+import { type EverythingFilter, type ResourceFilter } from '@/api/everything';
+import type { ResourceListRow, EverythingScope, EverythingSort, ProviderListScope, ResourceFacts } from '@/generated/api-types';
+import { inventoryQuery } from '@/features/resources/inventoryRead';
 import { INVENTORY_KINDS } from '@/features/resources/inventory';
 
-import { AllBox, BulkBar, type ListActs, type RowActs, RowBox, RowMenuCell, RowPrimaryCell, useSelection, adminRow, secondaryEntries } from '@/features/resources/acts';
+import { AllBox, BulkBar, type ListActs, type RowActs, RowBox, RowMenuCell, RowPrimaryCell, useSelection, adminRow, rowMenuEntries } from '@/features/resources/acts';
 import { ResourceNav } from '@/features/resources/ResourceNav';
 import { ResourceListControls } from '@/features/resources/ListControls';
 import { ResourceOwner, type ResourceOwnership } from '@/features/resources/ResourceOwner';
@@ -43,6 +48,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
 import { adminSpec } from '@/ui/AdminAct';
 import { ErrorState } from '@/ui/ErrorState';
+import { ReadFeedback } from '@/ui/ReadFeedback';
 import { Input } from '@/ui/Input';
 import { FilterBar } from '@/ui/FilterBar';
 import { Button } from '@/ui/Button';
@@ -56,6 +62,7 @@ export interface ListLoad {
   isError: boolean;
   error: unknown;
   isRefetching: boolean;
+  isFetchNextPageError?: boolean;
   refetch: () => unknown;
 }
 
@@ -128,7 +135,7 @@ export interface ResourceListFrameProps<Row extends ResourceRow> {
 
 export interface ResourceListProps<Row extends ResourceRow> extends Omit<ResourceListFrameProps<Row>, 'load' | 'all' | 'rows' | 'columns' | 'participating' | 'onParticipation' | 'hasFilters' | 'filtersActive' | 'sorting' | 'hasSorting' | 'pagination'> {
   /** The existing kind-specific DTO, selected from this page's tagged resource view. */
-  readRow: (resource: EverythingResource) => Row | null;
+  readRow: (resource: ResourceListRow) => Row | null;
   filter?: ResourceFilter;
   columns: readonly Column<Row>[] | ((rows: readonly Row[]) => readonly Column<Row>[]);
   poll?: { interval: number; while: (row: Row) => boolean };
@@ -150,29 +157,26 @@ export function ResourceList<Row extends ResourceRow>({ readRow, filter: resourc
   const [keptView, chooseView] = useListChoice<ProviderListScope>(`resources.${props.kind}`, 'view', resource?.view ?? defaultView);
   const offered: ProviderListScope[] = ['mine', 'managed', 'usable', 'viewable', ...(viewed?.access.administers === true ? ['all' as const] : [])];
   const view = offered.includes(keptView) ? keptView : defaultView;
-  useEffect(()=>{
-    if(keptView!==view&&(keptView!=='all'||orgLoad.isSuccess))chooseView(view);
-    if(keptSort!==sort)setSort(sort);
-    if(keptDirection!==direction)setDirection(direction);
-  },[keptView,view,orgLoad.isSuccess,chooseView,keptSort,sort,setSort,keptDirection,direction,setDirection]);
   const wider = offered.slice(offered.indexOf(view)+1).find((value):value is Exclude<ProviderListScope,'mine'>=>value!=='mine');
   const text = useDebounced(props.text.trim());
-  const filter: EverythingFilter = { scope, kinds: [INVENTORY_KINDS[props.kind]], q: text,
-    owner: null, createdFrom: '', createdTo: '', sort, direction, participating,
-    resource: { ...resource, view, ...(view === 'all' && viewed !== null ? {home:viewed.id} : {}), details: true } };
-  const options = everythingQuery(me.data?.id ?? '', 'resources', filter, props.kind === 'mcp' ? 'mcp-servers' : props.kind);
+  const options = inventoryQuery(me.data?.id ?? '', props.kind, { scope, q: text, sort, direction, participating },
+    { ...resource, view, ...(view === 'all' && viewed !== null ? {home:viewed.id} : {}) });
   const load = useInfiniteQuery({ ...options, enabled: me.data !== undefined && (keptView!=='all'||orgLoad.isSuccess) });
+  const shown = useViewShown();
+  useReadRecovery(load, shown && me.data !== undefined && (keptView !== 'all' || orgLoad.isSuccess), options.queryKey);
   const rows = (load.data?.pages.flatMap((page) => page.items) ?? []).flatMap((item) => {
-    if (item.resource === undefined || item.resource === null) return [];
-    const row = readRow(item.resource);
+    if (item.resource_row === undefined || item.resource_row === null) return [];
+    const row = readRow(item.resource_row);
     return row === null ? [] : [row];
   });
   const hasFilters = props.text.trim() !== '' || participating || resource?.state !== undefined || resource?.kind !== undefined || resource?.harness !== undefined;
   const filtersActive = hasFilters || view !== defaultView;
   const hasSorting = sort !== 'name' || direction !== 'asc';
   const library = new Map((load.data?.pages.flatMap((page) => page.items) ?? []).flatMap((row) => row.library === null || row.library === undefined ? [] : [[row.id, {facts:row.library,threads:row.library_threads}] as const]));
-  const grouping = new Map((load.data?.pages.flatMap((page) => page.items) ?? []).map((item) => [item.id, resourceGroupMeta(item, item.resource?.value)]));
-  return <ResourceListFrame {...props} library={library} grouping={grouping}
+  const grouping = new Map((load.data?.pages.flatMap((page) => page.items) ?? []).map((item) => [item.id, resourceGroupMeta(item, item.resource_row?.value)]));
+  const sharingFailed = load.isError && !load.isFetchNextPageError;
+  const homes = new Map((sharingFailed ? [] : load.data?.pages.flatMap((page) => page.items) ?? []).flatMap((row) => (row.sharing === null || row.sharing === undefined) ? [] : [[row.sharing.home_id, row.sharing] as const]));
+  return <ListSharing value={{ homes, read: { ...load, isError: sharingFailed }, identity: options.queryKey, retry: (retry) => load.refetch(retry) }}><ResourceListFrame {...props} library={library} grouping={grouping}
     emptyView={t(`library.empty.${view}`)} widerView={wider === undefined ? undefined : t(`library.widen.${wider}`)} widen={wider === undefined ? undefined : () => chooseView(wider)}
     viewControl={<Select size="sm" hideLabel label={t('library.show')} value={view} onValueChange={chooseView}
       fieldClassName="min-w-0 max-w-[45%] shrink-0" className="max-w-full"
@@ -182,12 +186,12 @@ export function ResourceList<Row extends ResourceRow>({ readRow, filter: resourc
     all={rows} rows={rows} load={me.isError ? me : keptView==='all'&&orgLoad.isError?orgLoad:load} participating={participating} onParticipation={setParticipating} hasFilters={hasFilters}
     filtersActive={filtersActive}
     filters={props.filters} hasSorting={hasSorting}
-    sorting={<><Select size="sm" label={t('everything.sortBy')} value={sort} onValueChange={(value) => { if (sorting.some((one) => one === value)) { setSort(value); if (value === 'use' && sort !== 'use') setDirection('desc'); } }}
+    sorting={<><Select size="sm" label={t('everything.sortBy')} value={sort} onValueChange={carryDeviceChoice((value: EverythingSort) => { if (sorting.some((one) => one === value)) { setSort(value); if (value === 'use' && sort !== 'use') setDirection('desc'); } }, setSort)}
       options={sorting.map((value) => ({ value, name: t(`inventoryChoices.everything.columns.${value}.name`), description: t(`inventoryChoices.everything.columns.${value}.description`) }))} />
       <Select size="sm" label={t('everything.direction')} value={direction} onValueChange={setDirection} options={(['asc', 'desc'] as const).map((value) => ({ value,
         name: t(`inventoryChoices.everything.directions.${value}.name`), description: t(`inventoryChoices.everything.directions.${value}.description`) }))} /></>}
     pagination={<>{load.isFetchNextPageError && <ErrorState compact error={load.error} retrying={load.isFetchingNextPage} onRetry={() => void load.fetchNextPage()} />}
-      {load.hasNextPage && <Button pending={load.isFetchingNextPage} onClick={() => void load.fetchNextPage()}>{t('everything.more')}</Button>}</>} />;
+      {load.hasNextPage && <Button pending={load.isFetchingNextPage} onClick={() => void load.fetchNextPage()}>{t('everything.more')}</Button>}</>} /></ListSharing>;
 }
 
 export function ResourceListFrame<Row extends ResourceRow>({
@@ -254,12 +258,13 @@ export function ResourceListFrame<Row extends ResourceRow>({
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1"><div data-resource-name className="min-w-0 flex-1 basis-[min(100%,12rem)]">{column.cell(row, shown)}</div><AsAdminMark of={adminAccessOf(row)?.place} responsive /></div>
       {showOwner && <ResourceOwner {...row} />}
       {origin !== null && origin !== undefined && <span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted">
-        <span>{t('resourceGroups.from')}</span><MachineLink machine={origin} />
+        <MachineOrigin machine={origin} />
       </span>}
       {entry !== undefined && <LibraryCounts facts={entry.facts} threads={entry.threads} />}
     </div>; } });
   const participating = suppliedParticipation ?? false;
   const setParticipating = (value: boolean) => onParticipation?.(value);
+  if (onParticipation !== undefined) carryDeviceChoice(setParticipating, onParticipation);
   const rows = matches;
   const permission = kind === 'machines' ? ['machine.manage', 'host.manage'] : `${kind === 'mcp' ? 'mcp' : ({ providers: 'provider', agents: 'agent', environments: 'environment', templates: 'template', hosts: 'host', mounts: 'mount', skills: 'skill' } as const)[kind]}.manage`;
   const cleanup = useResourceCleanup();
@@ -339,6 +344,9 @@ export function ResourceListFrame<Row extends ResourceRow>({
       </FilterBar>
       {ticking && selection.selected.length > 0 && <BulkBar rows={selection.selected} acts={bulk} onClear={selection.clear} permission={permission} />}
       {notice}
+      {load.isError && all.length > 0 && load.isFetchNextPageError !== true
+        && (mode === 'none' || !groups.some((group) => group.home !== undefined && group.home.kind !== 'thread'))
+        && <ReadFeedback read={{ ...load, isFetching: load.isRefetching }} />}
       {load.isPending ? (
         <SkeletonRows read={load} rows={4} />
       ) : load.isError && all.length === 0 ? (
@@ -351,6 +359,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
         <EmptyState compact icon={<Search aria-hidden />} title={noMatch} />
       ) : (
         <Table
+          virtual
           boundedIdentity
           label={label}
           columns={shown}
@@ -360,7 +369,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
             rows:collapsed.includes(group.id) ? [] : group.rows}))}
           rowKey={rowKey}
           {...(rowClassName === undefined ? {} : { rowClassName })}
-          {...(acts === undefined ? {} : { rowMenu: { label: (row: Row) => t('resources.act.menuOf', { name: acts.menuName?.(row) ?? acts.name(row) }), entries: (row: Row) => secondaryEntries(actsOf(row) ?? acts.of(row)), keys: (row: Row) => acts.of(row).keys } })}
+          {...(acts === undefined ? {} : { rowMenu: { label: (row: Row) => t('resources.act.menuOf', { name: acts.menuName?.(row) ?? acts.name(row) }), entries: (row: Row) => rowMenuEntries(actsOf(row) ?? acts.of(row)), keys: (row: Row) => acts.of(row).keys } })}
         />
       )}
       {pagination}
